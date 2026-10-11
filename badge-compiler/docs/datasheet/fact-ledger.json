@@ -1,0 +1,314 @@
+{
+  "schema": 1,
+  "scope": "Bounded RP2350 Arm target knowledge, not an exhaustive ISA database, executable cost model or hardware timing qualification.",
+  "facts": [
+    {
+      "id": "RP2350-CONFIG-001", "topic": "instruction-semantics", "status": "documented", "confidence": "high",
+      "claim": "RP2350 implements Armv8-M Main, Security and DSP extensions, single-precision FP arithmetic and double-precision FP load/store, with normal execution in halfword-aligned 16/32-bit Thumb instructions.",
+      "conditions": ["Use RP2350 configuration, not the superset of instructions described by the architecture manual."],
+      "references": [{"source": "rp2350", "section": "3.7.4.2", "pages": [{"pdf": 123, "printed": "122"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "badge-compiler/src/badge_asm.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-CONFIG-002", "topic": "instruction-semantics", "status": "documented", "confidence": "high",
+      "claim": "The chip configuration has DSP and single-precision FPU support, but explicitly has no MTB and does not use CDE modules.",
+      "conditions": ["Generic optional core features and v8.1-M manual coverage do not establish device support."],
+      "references": [{"source": "rp2350", "section": "3.7.2", "pages": [{"pdf": 117, "printed": "116"}, {"pdf": 118, "printed": "117"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "THUMB-ADD-001", "topic": "instruction-semantics", "status": "visually_verified", "confidence": "high",
+      "claim": "ADD immediate T1 is 16-bit with low-register Rd/Rn and unsigned imm3; T2 is 16-bit, destructive low-register Rdn with unsigned imm8. Both select flag updates outside an IT block.",
+      "conditions": ["T1 immediate 0..7; T2 immediate 0..255.", "Flag liveness and IT context must be preserved; the encodings are not generic non-flag-setting three-address ADD replacements."],
+      "references": [{"source": "armv8m", "section": "C2.4.5", "pages": [{"pdf": 537, "printed": "537"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c", "badge-compiler/src/badge_asm.c"], "experiment_refs": []
+    },
+    {
+      "id": "THUMB-ADD-002", "topic": "instruction-semantics", "status": "visually_verified", "confidence": "high",
+      "claim": "ADD immediate T3 is a 32-bit modified-immediate form with an S bit; T4/ADDW uses an unsigned 12-bit plain immediate and does not update flags.",
+      "conditions": ["T4 immediate 0..4095.", "Ordinary-data use excludes SP/PC and their related encodings; retain the documented register restrictions.", "Width suffix and flag behavior are separate properties."],
+      "references": [{"source": "armv8m", "section": "C2.4.5", "pages": [{"pdf": 537, "printed": "537"}, {"pdf": 538, "printed": "538"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c", "badge-compiler/src/thumb_immediate.h"], "experiment_refs": []
+    },
+    {
+      "id": "THUMB-ADD-003", "topic": "instruction-semantics", "status": "visually_verified", "confidence": "high",
+      "claim": "ADD register T1 is a 16-bit low-register three-address form with IT-dependent flag updates; T2 is a 16-bit destructive form with extended register fields and no flag updates.",
+      "conditions": ["T2 destination also supplies the first operand.", "Use ordinary R0-R12 only here; SP/PC alias and control-flow restrictions are outside this starter rule."],
+      "references": [{"source": "armv8m", "section": "C2.4.7", "pages": [{"pdf": 542, "printed": "542"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c"], "experiment_refs": []
+    },
+    {
+      "id": "THUMB-MOV-001", "topic": "instruction-semantics", "status": "visually_verified", "confidence": "high",
+      "claim": "MOV immediate T1 is 16-bit with low Rd and imm8, selecting flag updates outside IT; wide T2 has an independent S bit and modified immediate.",
+      "conditions": ["T1 immediate 0..255.", "Do not replace a non-flag-setting constant construction if live condition flags would change.", "Do not assume the carry behavior of every modified immediate is identical."],
+      "references": [{"source": "armv8m", "section": "C2.4.119", "pages": [{"pdf": 741, "printed": "741"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_thumb.c", "badge-compiler/src/thumb_immediate.h"], "experiment_refs": []
+    },
+    {
+      "id": "THUMB-MOV-002", "topic": "instruction-semantics", "status": "visually_verified", "confidence": "high",
+      "claim": "MOV register T1 has 16-bit extended register fields and does not update flags; not all compact instructions require low registers.",
+      "conditions": ["Ordinary-data copy rule excludes SP/PC and related restrictions.", "Do not substitute the distinct shifted/flag-setting T2 encoding indiscriminately."],
+      "references": [{"source": "armv8m", "section": "C2.4.120", "pages": [{"pdf": 743, "printed": "743"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_register.c", "badge-compiler/src/codegen_thumb.c"], "experiment_refs": []
+    },
+    {
+      "id": "THUMB-LITERAL-001", "topic": "branches-and-layout", "status": "visually_verified", "confidence": "high",
+      "claim": "LDR literal T1 uses low Rt and a positive imm8 scaled by four, reaching 0..1020 bytes from Align(PC,4); T2 is wide and reaches -4095..4095 bytes from that architectural base.",
+      "conditions": ["Restrict this rule to ordinary register loads; PC destinations introduce control-flow and alignment rules.", "Check final addresses, architectural PC interpretation and encoding size, not source-text distance."],
+      "references": [{"source": "armv8m", "section": "C2.4.79", "pages": [{"pdf": 671, "printed": "671"}, {"pdf": 672, "printed": "672"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_thumb.c", "badge-compiler/src/badge_asm.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-ALIGN-001", "topic": "instruction-semantics", "status": "documented", "confidence": "high-conditional",
+      "claim": "Supported single unaligned accesses in Normal memory split into aligned bus transactions; Device-memory unaligned accesses fault, and double/multiple accesses require word alignment.",
+      "conditions": ["CCR.UNALIGN_TRP can make otherwise supported unaligned accesses fault.", "Cross-memory-map-boundary unaligned accesses are not a safe optimization.", "Do not infer permission to widen volatile/MMIO accesses."],
+      "references": [{"source": "rp2350", "section": "3.7.4.3.2", "pages": [{"pdf": 125, "printed": "124"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_thumb.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-BASE-001", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional",
+      "claim": "The datasheet execution timings describe a limited, non-exceptional measured sample with one running core, no cache misses and no active DMA, not universal per-opcode guarantees.",
+      "conditions": ["Instruction fetch, memory waits, exceptions, other-core and DMA contention can change observed costs."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9", "pages": [{"pdf": 128, "printed": "127"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-ALU-001", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional", "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Most simple ALU operations execute in one cycle; non-simple shifted operands and certain expanded immediates can add a result-use penalty. Complex flag-setting forms incur the penalty even with an independent following instruction.",
+      "conditions": ["Simple shifted-operand cases are LSL #0..3.", "Do not generalize this classification to every opcode or ignore S/implicit flag effects."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.2", "pages": [{"pdf": 129, "printed": "128"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-ALU-002", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional", "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Plain imm12 ADD/SUB, immediate MOV/MOVS, UBFX/SBFX/BFI and simple standalone shifts are documented exceptions without the complex-ALU result-use penalty.",
+      "conditions": ["Preserve exact legal instruction form and operand semantics.", "The absence of this dependency penalty does not exclude fetch or memory stalls."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.2", "pages": [{"pdf": 129, "printed": "128"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c", "badge-compiler/src/codegen_thumb.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-MUL-001", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional", "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Multiply/multiply-accumulate issue in one cycle but have a one-cycle result delay. Multiplier operands are required at cycle n, the accumulate operand at n+1 and the result at n+2.",
+      "conditions": ["Different consumer operand positions can have different dependency costs.", "A one-cycle issue rate is not one-cycle availability for arbitrary consumers."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.3", "pages": [{"pdf": 129, "printed": "128"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-FWD-001", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional", "timing_context": "M33-TIMING-BASE-001",
+      "claim": "The multiply result can feed a following multiply-accumulate's accumulate input without the ordinary result-use bubble in the documented cases.",
+      "conditions": ["The destination wording and alternating-destination examples must not be reduced to a destination-equality heuristic.", "Verify exact MLA/long-multiply forms and operand positions in D02."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.3", "pages": [{"pdf": 129, "printed": "128"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-DIV-001", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional", "timing_context": "M33-TIMING-BASE-001",
+      "claim": "For documented ordinary divisions, n is the difference in highest-set-bit positions of operand magnitudes: n<0 takes two cycles; otherwise 4+floor(n/4), with a one-cycle immediate result-use penalty.",
+      "conditions": ["Use defined cases with nonzero dividend and divisor; highest-one position is undefined for zero. This formula does not establish divide-by-zero/trap behavior.", "Signed magnitude, overflow edge cases and exceptional inputs need their own architectural/IR rules."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.4", "pages": [{"pdf": 130, "printed": "129"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c", "badge-compiler/src/ir_constant_fold.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-LOAD-001", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional", "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Loads take a cycle per loaded register plus possible delay; LDR's result and the last LDM/POP register have a result-use delay, except the PC case which has branch costs.",
+      "conditions": ["Address-generation registers are early source operands.", "Other loaded registers do not inherit the last-register delay indiscriminately.", "Memory can stall independently of the pipeline delay."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.5", "tables": ["122"], "pages": [{"pdf": 130, "printed": "129"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_thumb.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-TIMING-STORE-001", "topic": "instruction-timing", "status": "visually_verified", "confidence": "high-conditional", "timing_context": "M33-TIMING-BASE-001",
+      "claim": "For the documented store result-use model, address-generation registers, including SP for PUSH, count as early sources; store data is not in that source class.",
+      "conditions": ["This is a scheduling distinction, not permission to ignore a store's data dependency.", "The one-cycle store statement is not a general STM/PUSH register-count or bus-throughput model."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.6", "tables": ["123"], "pages": [{"pdf": 130, "printed": "129"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_thumb.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-BRANCH-001", "topic": "branches-and-layout", "status": "visually_verified", "confidence": "high-conditional", "core_timing": true, "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Documented branch timing is basic+2+L+U-(K&F) when taken and basic+1-F when not taken, with distinct loaded-PC, target-alignment and folding conditions.",
+      "conditions": ["Basic cost comes from the branch-producing instruction, including any load.", "L/U/F/K are Boolean predicates defined in the topic note, not arbitrary fitted constants.", "Final widths, addresses and dynamic folding history are needed."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.7", "pages": [{"pdf": 131, "printed": "130"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen.c", "badge-compiler/src/badge_asm.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-FOLD-001", "topic": "branches-and-layout", "status": "visually_verified", "confidence": "high-conditional", "core_timing": true, "timing_context": "M33-TIMING-BASE-001",
+      "claim": "The documented zero-cycle NOP folding uses opcode 0xBF00, not 0x46C0; a following 16-bit opcode can fold IT overhead, while condition-failed instructions inside IT still cost a cycle.",
+      "conditions": ["Previous-instruction folding requires its width, entry/alignment and not-already-folded predicates.", "At most one cycle overlaps when two multi-cycle instructions fold.", "NOP insertion is not automatically free in every path."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.9", "pages": [{"pdf": 132, "printed": "131"}]}, {"source": "rp2350", "section": "3.7.4.9.8", "pages": [{"pdf": 132, "printed": "131"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen.c", "badge-compiler/src/badge_asm.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-FETCH-001", "topic": "memory-system", "status": "visually_verified", "confidence": "high-conditional", "core_timing": true, "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Core fetch bandwidth is 32 bits per cycle, but fetch and data access to the same downstream SRAM bank can contend; the nearby-literal example has a possible, not guaranteed, extra cycle.",
+      "conditions": ["Do not turn the example's modulo-16 distance into a universal fixed literal-load penalty.", "Code location, prefetch position, bank mapping and other bus managers matter."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.12", "pages": [{"pdf": 133, "printed": "132"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_thumb.c", "badge-compiler/src/badge_link.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-APSR-001", "topic": "registers-and-abi", "status": "documented", "confidence": "high",
+      "claim": "APSR N/Z/C/V are bits 31/30/29/28; Q is sticky saturation/overflow bit 27; GE bits 19..16 carry parallel arithmetic state consumed by SEL.",
+      "conditions": ["Q and GE availability depends on Main/DSP features.", "Flag definitions and uses are instruction-specific; shifts, carry arithmetic and comparisons are not all identical.", "APSR is not banked between security states; do not infer it is preserved on arbitrary transitions."],
+      "references": [{"source": "armv8m", "section": "D1.2.4", "pages": [{"pdf": 1463, "printed": "1463"}, {"pdf": 1464, "printed": "1464"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c", "badge-compiler/src/codegen.c"], "experiment_refs": []
+    },
+    {
+      "id": "AAPCS-CORE-001", "topic": "registers-and-abi", "status": "visually_verified", "confidence": "high",
+      "claim": "Base PCS uses r0-r3 for initial argument/result/scratch roles; r12 is scratch and may also be clobbered by a linker veneer.",
+      "conditions": ["Values and condition flags cannot be assumed live across arbitrary public calls.", "This is not a claim that every composite/result fits those four registers."],
+      "references": [{"source": "aapcs32", "section": "6.1.1", "pages": [{"pdf": 18, "printed": "18"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_frame.c", "badge-compiler/src/codegen_register.c"], "experiment_refs": []
+    },
+    {
+      "id": "AAPCS-SAVED-001", "topic": "registers-and-abi", "status": "visually_verified", "confidence": "high",
+      "claim": "Callees preserve r4-r8, r10, r11 and SP; r9's role is platform-specific and preservation depends on the PCS variant.",
+      "conditions": ["ABI-preserved does not mean available to allocation: retain frame, PHI, scratch and platform reservations."],
+      "references": [{"source": "aapcs32", "section": "6.1.1", "pages": [{"pdf": 18, "printed": "18"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_register.c", "badge-compiler/src/codegen_frame.c"], "experiment_refs": []
+    },
+    {
+      "id": "AAPCS-FLAGS-001", "topic": "registers-and-abi", "status": "visually_verified", "confidence": "high",
+      "claim": "N/Z/C/V/Q and GE condition/status bits are not preserved by the public interface contract; Q/GE modification also requires the feature to exist.",
+      "conditions": ["AAPCS's cross-architecture CPSR wording must not import unsupported A32 state/control bits into M33 APSR handling."],
+      "references": [{"source": "aapcs32", "section": "6.1.1", "pages": [{"pdf": 18, "printed": "18"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c", "badge-compiler/src/codegen.c"], "experiment_refs": []
+    },
+    {
+      "id": "AAPCS-STACK-001", "topic": "registers-and-abi", "status": "visually_verified", "confidence": "high",
+      "claim": "The stack is full-descending; SP stays within stack limits and word-aligned, and public interfaces additionally require SP modulo 8 to be zero.",
+      "conditions": ["Do not use an unallocated area below SP as an assumed red zone.", "Saved registers, locals, outgoing arguments and interrupt frames are separate stack contributors."],
+      "references": [{"source": "aapcs32", "section": "6.2.1", "pages": [{"pdf": 20, "printed": "20"}, {"pdf": 21, "printed": "21"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_frame.c", "badge-compiler/tools/benchmark-c06.mjs"], "experiment_refs": []
+    },
+    {
+      "id": "AAPCS-ARGS-001", "topic": "registers-and-abi", "status": "documented", "confidence": "high",
+      "claim": "Base argument marshaling uses r0-r3 then stack rules; double-word-aligned arguments round the next core register number to an even number, and hidden result addresses affect initial allocation.",
+      "conditions": ["Apply the complete staged marshaling rules, including composites and split/stack cases; do not count one register per C argument."],
+      "references": [{"source": "aapcs32", "section": "6.5", "pages": [{"pdf": 23, "printed": "23"}, {"pdf": 24, "printed": "24"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_frame.c"], "experiment_refs": []
+    },
+    {
+      "id": "AAPCS-VFP-001", "topic": "registers-and-abi", "status": "documented", "confidence": "high",
+      "claim": "VFP register argument passing is a separate non-variadic PCS variant; variadic calls follow base marshaling. s16-s31/d8-d15 are preserved, while s0-s15/d0-d7 are scratch/argument/result registers.",
+      "conditions": ["Do not mix hard-float/base interfaces because the silicon has an FPU.", "This describes applicable scalar register subsets, not proof of MVE/NEON support."],
+      "references": [{"source": "aapcs32", "section": "7.1", "pages": [{"pdf": 27, "printed": "27"}]}, {"source": "aapcs32", "section": "6.1.2.1", "pages": [{"pdf": 19, "printed": "19"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_frame.c", "badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-BUS-001", "topic": "memory-system", "status": "visually_verified", "confidence": "high",
+      "claim": "UNCROSS_I_D routes all instruction fetch to the Code port and load/store/debug accesses to the System port, unlike the generic core's address-based routing.",
+      "conditions": ["This removes the described internal routing conflict, not downstream AHB-bank contention."],
+      "references": [{"source": "rp2350", "section": "3.7.2.1.1", "pages": [{"pdf": 118, "printed": "117"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "badge-compiler/src/badge_link.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-SRAM-001", "topic": "memory-system", "status": "visually_verified", "confidence": "high",
+      "claim": "SRAM totals 520 KiB in eight 64 KiB and two 4 KiB banks; the two main 256 KiB regions word-stripe across separate four-bank groups.",
+      "conditions": ["Logical contiguity does not imply one physical port.", "Different managers can proceed in parallel only when bank/arbiter constraints permit.", "Code placement must retain BSS, stack, startup-copy and other memory budgets."],
+      "references": [{"source": "rp2350", "section": "4.2", "pages": [{"pdf": 312, "printed": "311"}]}],
+      "compiler_consumers": ["badge-compiler/src/badge_link.c", "src/arch/rp2350/start.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-XIP-001", "topic": "memory-system", "status": "visually_verified", "confidence": "high-conditional",
+      "claim": "The XIP cache is 16 KiB, two-way, with 8-byte lines and a documented one-cycle hit; it serves QSPI accesses, not all SRAM or peripheral memory.",
+      "conditions": ["A cache hit is not a whole-program CPI guarantee; misses, QMI configuration, arbitration and cold/warm state matter.", "Secure/Non-secure cache access/maintenance permissions must be respected."],
+      "references": [{"source": "rp2350", "section": "4.4.1", "pages": [{"pdf": 316, "printed": "315"}]}],
+      "compiler_consumers": ["badge-compiler/src/badge_link.c", "badge-compiler/src/codegen_thumb.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-COPROC-001", "topic": "coprocessors", "status": "documented", "confidence": "high",
+      "claim": "Coprocessor access needs Secure CPACR enablement or the appropriate Non-secure NSACR/CPACR_NS permissions; chip support alone is insufficient.",
+      "conditions": ["Actual application-entry register state has not been measured in D01.", "GPIOC Non-secure accesses additionally follow GPIO access masks."],
+      "references": [{"source": "rp2350", "section": "3.6", "pages": [{"pdf": 97, "printed": "96"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "src/arch/rp2350/start.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-DCP-001", "topic": "coprocessors", "status": "documented", "confidence": "high",
+      "claim": "DCP uses canned multi-instruction CPU/coprocessor sequences, not a conventional full double-precision FPU; mantissa multiplication uses CPU long-multiply instructions.",
+      "conditions": ["Count transfers, CPU arithmetic, dependencies and context costs, not one cycle per C double operation.", "Do not assume state persists between completed canned sequences."],
+      "references": [{"source": "rp2350", "section": "3.6.2.2", "pages": [{"pdf": 101, "printed": "100"}, {"pdf": 102, "printed": "101"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c", "badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-DCP-002", "topic": "coprocessors", "status": "documented", "confidence": "high",
+      "claim": "DCP port 4 selects the current security state's instance; port 5 selects the Non-secure instance but is accessible only from Secure code. Interrupted engaged sequences need context handling.",
+      "conditions": ["The documented engaged-state save/restore protocol is necessary if an interrupt uses the same instance."],
+      "references": [{"source": "rp2350", "section": "3.6.2", "pages": [{"pdf": 100, "printed": "99"}]}, {"source": "rp2350", "section": "3.6.2.4", "pages": [{"pdf": 102, "printed": "101"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "src/arch/rp2350/start.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-DCP-003", "topic": "coprocessors", "status": "visually_verified", "confidence": "high",
+      "claim": "Standard DCP sequences flush subnormal input/output to zero and round nearest-even; fast division/square-root variants are not always correctly rounded.",
+      "conditions": ["Do not enable these sequences as a silent replacement for strict double semantics.", "SDK benchmark figures and SDK helpers do not establish dependency-free compiler support."],
+      "references": [{"source": "rp2350", "section": "3.6.2.9", "pages": [{"pdf": 107, "printed": "106"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "badge-compiler/src/codegen.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-FPU-001", "topic": "coprocessors", "status": "documented", "confidence": "high",
+      "claim": "FPv5 single-precision arithmetic uses overlapping S0-S31/D0-D15 views; double-word load/store capability is not double-precision arithmetic support.",
+      "conditions": ["FZ/DN modes alter subnormal/NaN handling; FP exceptions update status rather than providing FPU exception traps.", "Do not reassociate arithmetic or split fused operations without preserving required rounding semantics."],
+      "references": [{"source": "rp2350", "section": "3.7.3.5", "pages": [{"pdf": 121, "printed": "120"}, {"pdf": 122, "printed": "121"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "badge-compiler/src/codegen.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-FPU-002", "topic": "coprocessors", "status": "documented", "confidence": "high",
+      "claim": "Lazy FP stacking reserves an extended exception frame when FP context is active and delays saving FP state until needed; it does not eliminate stack demand.",
+      "conditions": ["Interrupt nesting, context state and handler FP use need explicit stack accounting before enabling FPU code."],
+      "references": [{"source": "rp2350", "section": "3.7.3.5.2", "pages": [{"pdf": 122, "printed": "121"}]}],
+      "compiler_consumers": ["badge-compiler/tools/benchmark-c06.mjs", "src/arch/rp2350/start.c"], "experiment_refs": []
+    },
+    {
+      "id": "M33-FPU-TIMING-001", "topic": "coprocessors", "status": "visually_verified", "confidence": "high-conditional", "core_timing": true, "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Scalar VADD/VSUB/VMUL have one-cycle execution plus result delay; VMLA/VFMA occupy the FPU for three cycles and VDIV/VSQRT for fourteen, each with a result-delay qualification.",
+      "conditions": ["FP issue occupies the integer core for a cycle; later integer work and FPU readiness are distinct resources.", "Same-accumulator forwarding and independent interleaving alter observed throughput.", "Separate VMUL/VADD and fused VFMA are not generally rounding-equivalent."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.10", "pages": [{"pdf": 132, "printed": "131"}, {"pdf": 133, "printed": "132"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen_select.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-COPROC-TIMING-001", "topic": "coprocessors", "status": "visually_verified", "confidence": "high-conditional", "core_timing": true, "timing_context": "M33-TIMING-BASE-001",
+      "claim": "Unstalled CDP/MCR/MCRR transfers have one-cycle costs; MRC/MRRC add result delay. A coprocessor can stall when not ready.",
+      "conditions": ["The ideal interface transfer rate is not the latency of an entire accelerated operation.", "RCP delay variants and state/permission checks cannot be ignored."],
+      "references": [{"source": "rp2350", "section": "3.7.4.9.11", "pages": [{"pdf": 133, "printed": "132"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "badge-compiler/src/codegen_select.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-GPIOC-001", "topic": "coprocessors", "status": "documented", "confidence": "high",
+      "claim": "GPIOC port 0 provides specific SIO GPIO operations; it is not an alternative implementation of every peripheral/MMIO load and store.",
+      "conditions": ["Preserve operation width, masks, simultaneous sampling and permitted security-state behavior.", "Use explicit helpers only after their particular instruction mapping is verified."],
+      "references": [{"source": "rp2350", "section": "3.6.1", "pages": [{"pdf": 97, "printed": "96"}]}],
+      "compiler_consumers": ["badge-compiler/src/codegen.c"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-RCP-001", "topic": "coprocessors", "status": "documented", "confidence": "high",
+      "claim": "RCP provides fault-detection/canary/validation mechanisms with seeded state and security-state-dependent behavior, not a generic arithmetic speedup.",
+      "conditions": ["Do not insert delay/security operations as a performance optimization or claim a security guarantee from instruction presence."],
+      "references": [{"source": "rp2350", "section": "3.6.3", "pages": [{"pdf": 109, "printed": "108"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-ERRATA-E27", "topic": "errata-and-open-questions", "status": "documented", "confidence": "high-conditional",
+      "claim": "E27 miswires priority controls for APB/FASTPERI on the listed A2/A3/A4 revisions; ROM/SRAM/XIP priority controls are documented as correct.",
+      "conditions": ["Read the full priority mapping and both continuation pages before designing a contention experiment.", "Actual badge revision is unresolved; no workaround is enabled here."],
+      "references": [{"source": "rp2350", "section": "D.3.1", "pages": [{"pdf": 1357, "printed": "1356"}, {"pdf": 1358, "printed": "1357"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-ERRATA-E11", "topic": "errata-and-open-questions", "status": "documented", "confidence": "high-conditional",
+      "claim": "E11 clean-by-set/way can retag dirty XIP cache lines on listed A2/A3/A4 revisions; ordinary cache-hit cost is not permission to introduce arbitrary maintenance sequences.",
+      "conditions": ["Preserve the documented workaround if a future cold-cache experiment or runtime helper uses this operation.", "Invalidate, clean and pin are not interchangeable operations."],
+      "references": [{"source": "rp2350", "section": "D.10.1", "pages": [{"pdf": 1366, "printed": "1365"}, {"pdf": 1367, "printed": "1366"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-ERRATA-E26", "topic": "errata-and-open-questions", "status": "documented", "confidence": "high-conditional",
+      "claim": "E26 qualifies RCP delay use; the datasheet recommends non-delay variants and documents an A3 bootrom change.",
+      "conditions": ["Do not make a blanket security or deterministic-timing claim about RCP.", "Hardware revision and actual boot/runtime state remain separate applicability questions."],
+      "references": [{"source": "rp2350", "section": "D.8.1", "pages": [{"pdf": 1365, "printed": "1364"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h"], "experiment_refs": []
+    },
+    {
+      "id": "RP2350-BOARD-STATE-001", "topic": "errata-and-open-questions", "status": "unresolved", "confidence": "unresolved",
+      "claim": "The attached badges' silicon revisions, application-entry security/coprocessor state and cold/warm timing environment were not measured in D01.",
+      "conditions": ["Do not infer these from a target triple, working integer firmware or bootrom defaults.", "Resolve through a separately qualified, non-destructive D02 observation before revision/state-dependent use."],
+      "references": [{"source": "rp2350", "section": "3.6", "pages": [{"pdf": 97, "printed": "96"}]}, {"source": "rp2350", "section": "D.3.1", "pages": [{"pdf": 1357, "printed": "1356"}]}],
+      "compiler_consumers": ["badge-compiler/src/target.h", "src/arch/rp2350/start.c"], "experiment_refs": []
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "sources": [
+    {
+      "id": "rp2350",
+      "edition": "RP-008373-DS-3; build 80d627281ed5, 2026-10-01",
+      "file": "pimoroni/RP-008373-DS-3-rp2350-datasheet.pdf",
+      "sha256": "a638d6780da919162660691bfa02c6dcf7c2a0b6e9f18e2d7519c80b664a2e39",
+      "pages": 1371,
+      "raw": "badge-compiler/build/datasheet/rp2350/pdfkit.json",
+      "raw_sha256": "fd4fdfec5366bc531eb292997172ff9520535a148ec4bd15e32dbbf7a5b66205",
+      "label_rule": "rp2350-footer",
+      "rights": "CC BY-ND 4.0 plus third-party notices; bulk extraction remains local.",
+      "applicability": "Actual RP2350 configuration overrides generic core descriptions.",
+      "reviewed_pages": [107, 118, 128, 129, 130, 131, 132, 133, 312, 316],
+      "inherited_images": {
+        "130": "badge-compiler/build/datasheet/verification/page-0130.png",
+        "131": "badge-compiler/build/datasheet/verification/page-0131.png"
+      }
+    },
+    {
+      "id": "armv8m",
+      "edition": "DDI0553B.y; ID09082024; 2024-08-09",
+      "file": "badge-compiler/build/datasheet/sources/armv8m-ddi0553.pdf",
+      "url": "https://community.arm.com/cfs-file/__key/communityserver-discussions-components-files/471/DDI0553B_5F00_y_5F00_armv8m_5F00_arm.pdf",
+      "sha256": "9a810da15f30d9e120b4e3238616d5d3a547cc23ba6f2c02c716c31f9851f3cd",
+      "pages": 2149,
+      "raw": "badge-compiler/build/datasheet/armv8m/pdfkit.json",
+      "raw_sha256": "722c9b31bcb3177053a3e9521cd4a2c58368008f94933aa4a2309def4df557d2",
+      "label_rule": "last-text-line",
+      "rights": "Arm proprietary notice; Non-confidential is not a redistribution license. Originals/extracts stay local.",
+      "applicability": "Includes v8.1-M, MVE and PACBTI material; use only forms supported by the RP2350 v8.0-M Main/DSP/FP configuration.",
+      "reviewed_pages": [537, 538, 542, 671, 672, 741, 743, 1463],
+      "inherited_images": {}
+    },
+    {
+      "id": "aapcs32",
+      "edition": "2025Q4; date of issue 2026-01-23",
+      "file": "badge-compiler/build/datasheet/sources/aapcs32-2025Q4.pdf",
+      "url": "https://github.com/ARM-software/abi-aa/releases/download/2025Q4/aapcs32.pdf",
+      "sha256": "1bb05c5e2bea7636031e88d2383c9304f07092f1f082c32050ae2fb154c9080e",
+      "pages": 41,
+      "raw": "badge-compiler/build/datasheet/aapcs32/pdfkit.json",
+      "raw_sha256": "94bf59e062916126f8f61bdca9fe05879ad851243cdbe95422fd37780d3f13b2",
+      "label_rule": "before-copyright",
+      "rights": "CC BY-SA 4.0 with additional patent license; attribution retained; no bulk redistribution in this work.",
+      "applicability": "Use base PCS for current integer interface; VFP PCS is a separate ABI choice, not implied by FPU presence.",
+      "reviewed_pages": [18, 20, 21, 24, 27],
+      "inherited_images": {}
+    }
+  ],
+  "unacquired": [
+    {
+      "id": "m33-trm-independent",
+      "locator": "https://developer.arm.com/documentation/100230/0100/",
+      "status": "Portal redirected to an empty documentation shell; attempted old static download returned 404. No standalone PDF/edition hash qualified.",
+      "used_as_evidence": false
+    }
+  ]
+}

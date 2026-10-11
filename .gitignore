@@ -1,0 +1,17 @@
+.DS_Store
+build/
+ssid-data/
+experimental/
+pimoroni/
+vendor/
+.venv/
+.vscode/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "rp2350",
+  "title": "RP2350 Datasheet",
+  "file": "../../../pimoroni/RP-008373-DS-3-rp2350-datasheet.pdf",
+  "sha256": "a638d6780da919162660691bfa02c6dcf7c2a0b6e9f18e2d7519c80b664a2e39",
+  "pages": 1371,
+  "edition": "RP-008373-DS-3; PDF creation/modification metadata 2026-10-01T10:57:53Z",
+  "publisher": "Raspberry Pi Ltd",
+  "rights": "Colophon declares CC BY-ND 4.0 with additional third-party copyright notices. Bulk extracts and rendered pages remain local ignored build artifacts; no converted full-text redistribution is authorized by this inventory."
+}
