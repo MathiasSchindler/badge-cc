@@ -51,6 +51,18 @@ make -C badge-compiler test-metrics test-fast-io
 
 # Execute the real maze source with owned and LLVM ARM code under QEMU.
 make -C badge-compiler test-tilt-maze
+
+# System-register/interrupt encodings and restoring Cortex-M33 runtime probe.
+# Host-only; does not flash a badge.
+make -C badge-compiler test-assembler-system
+
+# Numeric labels, explicit literal pools and RP2350 assembly compatibility.
+# Host-only, including LLVM and Cortex-M33 emulator checks.
+make -C badge-compiler test-assembler-ergonomics
+
+# Exclusives/acquire-release encoding, bounded lock and restoration tests.
+# Host-only; physical two-core qualification is separately permission-gated.
+make -C badge-compiler test-assembler-synchronization
 ```
 
 The oracle targets require LLVM and, for target execution, QEMU. See

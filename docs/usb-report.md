@@ -7,6 +7,9 @@
 > channel. See the physical result below before using these instructions.
 > The replacement [live USB interface](usb-live.md) has now returned fresh
 > verified reports from the attached badge without retaining RAM across reset.
+> Later BA03 work also qualified an explicitly authorized temporary
+> flash-report transport with full original-flash restoration. See
+> [runtime persistence and recovery](rp2350-runtime.md#bootsel-and-report-persistence).
 
 This test establishes a host-readable diagnostic path without adding USB
 device code, Pico SDK, or libc to the RP2350 application. It uses the
@@ -130,7 +133,11 @@ other firmware is unchanged.
 **RAM retention failed on the tested RP2350 A4.** The reserved addresses
 protect the mailbox from the application's linker/startup, but cannot
 protect it from ROM initialization. Software reboot, ROM revision, and
-security settings can affect retention or access. The host does not
+security settings can affect other retention/access paths, but the pinned
+RP2350 manual explicitly specifies clearing on the relevant BOOTSEL entry
+(section 5.2.2, physical PDF pages 340-341).
+Flag `0x100` is `NO_RETURN_ON_SUCCESS`, not a RAM-retention request.
+The host does not
 disable security controls, ignore permissions, or silently fall back to
 flash logging if readback fails. No test results are written to flash;
 installing the application itself does write flash.
@@ -238,3 +245,11 @@ see [the live USB guide](usb-live.md).
 SWD remains the alternative for live RAM/register inspection with an
 external debug probe. The badge is left in BOOTSEL, ready for another
 explicitly selected firmware load.
+
+The separately qualified BA03 flash-report runner is not a silent fallback
+for this historical collector. It requires explicit permission, a selected
+serial, a complete original-flash backup and independently verified
+restoration, including its temporary report sector. See
+[the runtime guide](rp2350-runtime.md) for that evidence, historical BA05
+automatic-recovery failures and the subsequently passing isolated
+startup/watchdog-recovery ladder.

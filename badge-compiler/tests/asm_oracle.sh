@@ -3,7 +3,7 @@ set -euo pipefail
 clang=${LLVM_CLANG:-clang}
 lld=${LLVM_LLD:-ld.lld}
 objcopy=${LLVM_OBJCOPY:-llvm-objcopy}
-for fixture in asm_oracle_fixture object_oracle_fixture frame_addressing_oracle_fixture; do
+for fixture in asm_oracle_fixture object_oracle_fixture frame_addressing_oracle_fixture system_oracle_fixture ergonomics_oracle_fixture synchronization_oracle_fixture; do
     "$clang" --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -x assembler \
         -c "tests/fixtures/$fixture.S" -o "build/$fixture-llvm.o"
     ./build/badge-asm "tests/fixtures/$fixture.S" -o "build/$fixture-ours.o"

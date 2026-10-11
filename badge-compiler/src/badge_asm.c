@@ -42,7 +42,7 @@ enum {
     AS_D_SYNTAX, AS_D_CPU, AS_D_FPU, AS_D_THUMB, AS_D_CODE, AS_D_THUMB_FUNC,
     AS_D_FNSTART, AS_D_CANTUNWIND, AS_D_PAD, AS_D_SAVE, AS_D_FNEND, AS_D_EABI_ATTRIBUTE,
     AS_D_FILE, AS_D_IDENT, AS_D_ADDRSIG, AS_D_ADDRSIG_SYM, AS_D_IF, AS_D_ELSE,
-    AS_D_ENDIF, AS_D_ERROR
+    AS_D_ENDIF, AS_D_ERROR, AS_D_ARCH, AS_D_LTORG, AS_D_POOL
 };
 static unsigned as_directive_code(const char *op) {
     static const char *const names[]={
@@ -51,13 +51,14 @@ static unsigned as_directive_code(const char *op) {
         ".incbin",".global",".globl",".weak",".hidden",".type",".size",".equ",".set",
         ".comm",".syntax",".cpu",".fpu",".thumb",".code",".thumb_func",".fnstart",
         ".cantunwind",".pad",".save",".fnend",".eabi_attribute",".file",".ident",
-        ".addrsig",".addrsig_sym",".if",".else",".endif",".error"
+        ".addrsig",".addrsig_sym",".if",".else",".endif",".error",".arch",".ltorg",".pool"
     };
     if(op[0]!='.' && strcmp(op,"label")!=0) return AS_D_NONE;
     for(size_t k=0;k<sizeof(names)/sizeof(*names);++k)
         if(strcmp(op,names[k])==0) return (unsigned)k+AS_D_LABEL;
     return AS_D_UNKNOWN;
 }
+typedef struct { int64_t value; uint32_t positive, negative; int unknown; } as_value_t;
 typedef struct {
     char *op, *arg[16];
     unsigned count, line, width;
@@ -71,10 +72,16 @@ typedef struct {
     const char *decision;
     int64_t displacement, reach_min, reach_max;
     unsigned pc_base, has_reach, alignment, padding, padding_skipped;
+    uint32_t label_symbol, numeric, label_number, literal_symbol;
+    size_t pool_next, pool_match, pool_hash_next;
+    unsigned pool_generation, pool_section;
+    as_value_t pool_value;
 } as_line_t;
+typedef struct { uint32_t number, symbol; size_t record; } as_numeric_t;
 typedef struct as_listing_range {
     uint32_t section, offset, size;
     size_t record;
+    unsigned pool_padding;
     struct as_listing_range *next;
 } as_listing_range_t;
 typedef struct {
@@ -82,6 +89,9 @@ typedef struct {
     size_t capacity;
     uint32_t section_symbol;
     int mapping;
+    unsigned fallthrough;
+    size_t pool_first, pool_last;
+    unsigned pool_generation;
 } as_section_t;
 typedef struct {
     bo_symbol_t out;
@@ -89,8 +99,8 @@ typedef struct {
     unsigned definition, thumb, referenced, declared, busy;
     const char *equ;
     uint32_t equ_section, equ_offset;
+    size_t equ_record;
 } as_symbol_t;
-typedef struct { int64_t value; uint32_t positive, negative; int unknown; } as_value_t;
 typedef struct {
     const char *input, *output;
     jmp_buf failure;
@@ -98,11 +108,14 @@ typedef struct {
     size_t allocated;
     as_line_t *lines;
     size_t line_count, line_capacity;
+    as_numeric_t *numeric;
+    size_t numeric_count, record;
     as_section_t *sections;
     as_symbol_t *symbols;
     bo_relocation_t *relocations;
     uint32_t buckets[8192];
     as_expression_cache_t *expressions[8192];
+    size_t pools[8192];
     uint32_t section_count, symbol_count, relocation_count, current, line;
     unsigned final, changed, pending_thumb, it_count, it_at, it_conditions[4];
     unsigned unwind_section, unwind_offset, cantunwind;
@@ -121,6 +134,7 @@ typedef struct {
     char *listing_bytes;
     size_t listing_size;
     unsigned ir_lines;
+    unsigned pool_padding;
 } assembler_t;
 
 static _Noreturn void as_error(assembler_t *s, const char *format, ...) {
@@ -175,6 +189,7 @@ static uint32_t as_new_symbol(assembler_t *s, const char *name, int ordinary) {
 }
 
 static uint32_t as_symbol(assembler_t *s, const char *name) {
+    if(isdigit((unsigned char)*name)) as_error(s,"numeric local labels cannot be named symbols");
     for(uint32_t id=s->buckets[as_hash(name)];id;id=s->symbols[id].next)
         if(strcmp(s->symbols[id].out.name,name)==0) return id;
     return as_new_symbol(s,name,1);
@@ -225,11 +240,12 @@ static void as_emit(assembler_t *s, const unsigned char *bytes, uint32_t size) {
     }
     if(s->final && s->listing && size) {
         as_listing_range_t *r=s->listing_last;
-        if(r && r->record==s->listing_record && r->section==s->current &&
+        if(r && r->record==s->listing_record && r->section==s->current && r->pool_padding==s->pool_padding &&
            r->offset+r->size==v->out.size) r->size+=size;
         else {
             r=as_allocate(s,sizeof(*r)); r->record=s->listing_record;
             r->section=s->current; r->offset=v->out.size; r->size=size;
+            r->pool_padding=s->pool_padding;
             if(s->listing_last) s->listing_last->next=r; else s->listing_first=r;
             s->listing_last=r;
         }
@@ -306,7 +322,8 @@ static unsigned char *as_string(assembler_t *s, const char *p, size_t *length) {
     *length=n; return out;
 }
 
-enum { AS_LITERAL=256, AS_SYMBOL, AS_DOT, AS_RESOLVE, AS_NEGATE, AS_COMPLEMENT };
+enum { AS_LITERAL=256, AS_SYMBOL, AS_DOT, AS_RESOLVE, AS_NEGATE, AS_COMPLEMENT,
+    AS_LOCAL_FORWARD, AS_LOCAL_BACKWARD };
 static as_value_t as_expression_level(assembler_t *, const char **, unsigned, unsigned, as_expression_cache_t *);
 static as_value_t as_expression(assembler_t *, const char *);
 
@@ -321,7 +338,7 @@ static void as_expression_code(assembler_t *s, as_expression_cache_t *c, int op,
     }
     as_expression_code_t *code=&c->code[c->count++]; code->op=op;
     if(op==AS_SYMBOL) code->arg.symbol=(uint32_t)arg; else code->arg.value=arg;
-    if(op==AS_LITERAL || op==AS_SYMBOL || op==AS_DOT) {
+    if(op==AS_LITERAL || op==AS_SYMBOL || op==AS_DOT || op==AS_LOCAL_FORWARD || op==AS_LOCAL_BACKWARD) {
         if(++c->stack>c->stack_max) c->stack_max=c->stack;
         if(c->stack_max>512) as_error(s,"expression nesting limit exceeded");
     } else if(op<256) --c->stack;
@@ -335,9 +352,11 @@ static as_value_t as_resolve(assembler_t *s, as_value_t v) {
         if(symbol->equ!=NULL) {
             if(symbol->busy || ++s->alias_depth>64) as_error(s,"cyclic/deep symbol assignment");
             uint32_t current=s->current,size=s->sections[symbol->equ_section].out.size;
+            size_t record=s->record;
             s->current=symbol->equ_section; s->sections[s->current].out.size=symbol->equ_offset;
+            s->record=symbol->equ_record;
             symbol->busy=1; as_value_t alias=as_expression(s,symbol->equ); symbol->busy=0;
-            s->sections[s->current].out.size=size; s->current=current; --s->alias_depth;
+            s->sections[s->current].out.size=size; s->current=current; s->record=record; --s->alias_depth;
             if(alias.negative!=0) as_error(s,"unsupported non-affine symbol assignment");
             if(k!=0 && alias.value==INT64_MIN) as_error(s,"expression overflow");
             int64_t add=k==0?alias.value:-alias.value;
@@ -362,6 +381,28 @@ static as_value_t as_resolve(assembler_t *s, as_value_t v) {
 }
 
 static void as_skip(const char **p) { while(isspace((unsigned char)**p)) ++*p; }
+static uint32_t as_local_reference(assembler_t *s, uint32_t number, int forward) {
+    size_t lo=0,hi=s->numeric_count;
+    while(lo<hi) {
+        size_t mid=lo+(hi-lo)/2; as_numeric_t *v=&s->numeric[mid];
+        if(v->number<number || (v->number==number && v->record<s->record)) lo=mid+1;
+        else hi=mid;
+    }
+    if(forward) {
+        if(lo<s->numeric_count && s->numeric[lo].number==number && s->numeric[lo].record==s->record) ++lo;
+        if(lo<s->numeric_count && s->numeric[lo].number==number) return s->numeric[lo].symbol;
+    } else if(lo && s->numeric[lo-1].number==number) return s->numeric[lo-1].symbol;
+    as_error(s,"unresolved numeric local reference '%" PRIu32 "%c'",number,forward?'f':'b');
+}
+static uint32_t as_decimal_label(assembler_t *s, const char *p, const char *end) {
+    uint32_t number=0;
+    for(;p<end;++p) {
+        unsigned digit=(unsigned char)*p-'0';
+        if(digit>9 || number>(UINT32_MAX-digit)/10) as_error(s,"numeric label outside uint32 decimal range");
+        number=number*10+digit;
+    }
+    return number;
+}
 static as_value_t as_expression_atom(assembler_t *s, const char **p, unsigned depth, as_expression_cache_t *c) {
     if(depth>64) as_error(s,"expression nesting limit exceeded");
     as_skip(p); as_value_t v={0};
@@ -386,6 +427,15 @@ static as_value_t as_expression_atom(assembler_t *s, const char **p, unsigned de
         if(*(*p)++!=')') as_error(s,"missing expression parenthesis"); return v;
     }
     if(isdigit((unsigned char)**p)) {
+        const char *numeric_end=*p;
+        while(isdigit((unsigned char)*numeric_end)) ++numeric_end;
+        if((*numeric_end=='f' || *numeric_end=='b') && !isalnum((unsigned char)numeric_end[1]) &&
+           numeric_end[1]!='_' && numeric_end[1]!='.' && numeric_end[1]!='$') {
+            uint32_t number=as_decimal_label(s,*p,numeric_end); int forward=*numeric_end=='f';
+            *p=numeric_end+1; v.positive=as_local_reference(s,number,forward);
+            as_expression_code(s,c,forward?AS_LOCAL_FORWARD:AS_LOCAL_BACKWARD,number);
+            as_expression_code(s,c,AS_RESOLVE,0); return as_resolve(s,v);
+        }
         errno=0; char *end; unsigned long long n=strtoull(*p,&end,0);
         if(errno!=0 || end==*p || n>INT64_MAX) as_error(s,"integer outside signed 64-bit expression range");
         *p=end; v.value=(int64_t)n; as_expression_code(s,c,AS_LITERAL,v.value); return v;
@@ -476,6 +526,10 @@ static as_value_t as_expression(assembler_t *s, const char *text) {
         as_expression_code_t *code=&c->code[k];
         if(code->op==AS_LITERAL) values[count++]=(as_value_t){.value=code->arg.value};
         else if(code->op==AS_SYMBOL) values[count++]=(as_value_t){.positive=code->arg.symbol};
+        /* Cached directional references must still use the current source record. */
+        else if(code->op==AS_LOCAL_FORWARD || code->op==AS_LOCAL_BACKWARD)
+            values[count++]=(as_value_t){.positive=as_local_reference(s,(uint32_t)code->arg.value,
+                code->op==AS_LOCAL_FORWARD)};
         else if(code->op==AS_DOT) {
             char name[64]; snprintf(name,sizeof(name),".asm.dot.%u.%u",s->current,s->sections[s->current].out.size);
             uint32_t id=as_symbol(s,name); s->symbols[id].out.section=s->current;
@@ -548,6 +602,21 @@ static int as_condition(const char *text) {
 
 static unsigned as_instruction(assembler_t *, as_line_t *);
 
+static as_line_t *as_append_line(assembler_t *s) {
+    if(s->line_count==AS_MAX_LINES) as_error(s,"source record limit exceeded");
+    if(s->line_count==s->line_capacity) {
+        size_t capacity=s->line_capacity*2;
+        if(capacity>AS_MAX_LINES) capacity=AS_MAX_LINES;
+        as_line_t *lines=as_allocate(s,capacity*sizeof(*lines));
+        memcpy(lines,s->lines,s->line_count*sizeof(*lines)); s->lines=lines; s->line_capacity=capacity;
+    }
+    return &s->lines[s->line_count++];
+}
+static int as_numeric_compare(const void *a, const void *b) {
+    const as_numeric_t *x=a,*y=b;
+    if(x->number!=y->number) return x->number<y->number?-1:1;
+    return x->record<y->record?-1:x->record>y->record;
+}
 static void as_parse(assembler_t *s, unsigned char *input, size_t length) {
     if(memchr(input,0,length)!=NULL) as_error(s,"NUL byte in assembly");
     size_t capacity=2;
@@ -583,33 +652,32 @@ static void as_parse(assembler_t *s, unsigned char *input, size_t length) {
         if(*p==0) { line=next; continue; }
         char *end=p;
         while(isalnum((unsigned char)*end) || *end=='.' || *end=='_' || *end=='$') ++end;
-        char *assignment=as_trim(end);
-        if(end!=p && *assignment=='=') {
-            if(s->line_count==capacity) as_error(s,"source record limit exceeded");
-            char *value=as_trim(assignment+1); *end=0;
-            as_line_t *record=&s->lines[s->line_count++];
-            record->op=".set"; record->arg[0]=p; record->arg[1]=value;
-            record->count=2; record->line=number;
-            record->origin_line=origin;
-            line=next; continue;
-        }
-        if(*end==':') {
-            if(end==p || isdigit((unsigned char)*p)) as_error(s,"empty/numeric local labels are unsupported");
-            if(s->line_count==capacity) as_error(s,"source record limit exceeded");
-            *end=0; uint32_t id=as_symbol(s,p);
+        while(*end==':') {
+            if(end==p) as_error(s,"empty label");
+            *end=0; uint32_t id;
+            as_line_t *record=as_append_line(s);
+            if(isdigit((unsigned char)*p)) {
+                record->numeric=1; record->label_number=as_decimal_label(s,p,end);
+                char name[64]; snprintf(name,sizeof(name),".Lasm.numeric.%zu",s->line_count);
+                id=as_new_symbol(s,name,0); ++s->numeric_count;
+            } else id=as_symbol(s,p);
             if(s->symbols[id].definition || s->symbols[id].equ) as_error(s,"duplicate label '%s'",p);
-            s->symbols[id].definition=(unsigned)(s->line_count+1);
-            as_line_t *record=&s->lines[s->line_count++]; record->op="label"; record->arg[0]=p;
+            s->symbols[id].definition=(unsigned)s->line_count;
+            record->op="label"; record->arg[0]=p; record->label_symbol=id;
             record->count=1; record->line=number; p=as_trim(end+1);
             record->origin_line=origin;
-            if(*p==0) { line=next; continue; }
+            if(*p==0) break;
+            end=p;
+            while(isalnum((unsigned char)*end) || *end=='.' || *end=='_' || *end=='$') ++end;
         }
-        if(s->line_count==capacity) as_error(s,"source record limit exceeded");
-        as_line_t *record=&s->lines[s->line_count++]; record->line=number;
+        if(*p==0) { line=next; continue; }
+        as_line_t *record=as_append_line(s); record->line=number;
         record->origin_line=origin;
-        char *equal=strchr(p,'=');
-        if(equal!=NULL && *p!='.' && strchr(p,'"')==NULL) {
-            *equal=0; record->op=".equ"; record->arg[0]=as_trim(p); record->arg[1]=as_trim(equal+1); record->count=2;
+        char *assignment=as_trim(end);
+        if(end!=p && *assignment=='=') {
+            if(isdigit((unsigned char)*p)) as_error(s,"numeric label cannot be assigned");
+            char *value=as_trim(assignment+1); *end=0;
+            record->op=".set"; record->arg[0]=p; record->arg[1]=value; record->count=2;
         } else {
             end=p; while(*end && !isspace((unsigned char)*end)) ++end;
             if(*end) *end++=0; record->op=p; record->count=as_split(s,as_trim(end),record->arg);
@@ -618,6 +686,11 @@ static void as_parse(assembler_t *s, unsigned char *input, size_t length) {
     }
     for(size_t k=0;k<s->line_count;++k)
         s->lines[k].directive=as_directive_code(s->lines[k].op);
+    s->numeric=as_allocate(s,s->numeric_count*sizeof(*s->numeric));
+    size_t at=0;
+    for(size_t k=0;k<s->line_count;++k) if(s->lines[k].numeric)
+        s->numeric[at++]=(as_numeric_t){s->lines[k].label_number,s->lines[k].label_symbol,k};
+    qsort(s->numeric,s->numeric_count,sizeof(*s->numeric),as_numeric_compare);
 }
 
 static void as_alignment(assembler_t *s, as_line_t *l, int power) {
@@ -638,28 +711,81 @@ static void as_alignment(assembler_t *s, as_line_t *l, int power) {
     } else as_emit(s,NULL,pad);
 }
 
+static void as_data_value(assembler_t *s, as_value_t v, unsigned width) {
+    uint32_t place=s->sections[s->current].out.size;
+    if(s->sections[s->current].out.type==BO_NOBITS &&
+        (v.value!=0 || v.positive || v.negative || v.unknown))
+        as_error(s,"nonzero initialized data in NOBITS");
+    if(s->final && (v.positive || v.negative || v.unknown)) {
+        if(width!=4 || v.positive==0 || v.unknown) as_error(s,"unsupported data relocation expression");
+        if(v.negative) {
+            as_symbol_t *neg=&s->symbols[v.negative];
+            if(neg->definition==0 || neg->out.section!=s->current) as_error(s,"subtracted symbol must belong to the relocation section");
+            if(__builtin_add_overflow(v.value,(int64_t)place-neg->raw_value,&v.value)) as_error(s,"relocation addend overflow");
+            as_reloc(s,place,3,v.positive);
+        } else as_reloc(s,place,2,v.positive);
+    }
+    if(s->final && (v.value<-(INT64_C(1)<<(width*8-1)) ||
+        (v.value>=0 && (uint64_t)v.value>(UINT64_C(1)<<(width*8))-1)))
+        as_error(s,"data value does not fit its width");
+    as_word(s,(uint32_t)v.value,width);
+}
 static void as_data(assembler_t *s, as_line_t *l, unsigned width) {
     if(l->count==0) as_error(s,"missing data operand");
     as_mapping(s,0);
-    for(unsigned k=0;k<l->count;++k) {
-        as_value_t v=as_expression(s,l->arg[k]); uint32_t place=s->sections[s->current].out.size;
-        if(s->sections[s->current].out.type==BO_NOBITS &&
-            (v.value!=0 || v.positive || v.negative || v.unknown))
-            as_error(s,"nonzero initialized data in NOBITS");
-        if(s->final && (v.positive || v.negative || v.unknown)) {
-            if(width!=4 || v.positive==0 || v.unknown) as_error(s,"unsupported data relocation expression");
-            if(v.negative) {
-                as_symbol_t *neg=&s->symbols[v.negative];
-                if(neg->definition==0 || neg->out.section!=s->current) as_error(s,"subtracted symbol must belong to the relocation section");
-                if(__builtin_add_overflow(v.value,(int64_t)place-neg->raw_value,&v.value)) as_error(s,"relocation addend overflow");
-                as_reloc(s,place,3,v.positive);
-            } else as_reloc(s,place,2,v.positive);
-        }
-        if(s->final && (v.value<-(INT64_C(1)<<(width*8-1)) ||
-            (v.value>=0 && (uint64_t)v.value>(UINT64_C(1)<<(width*8))-1)))
-            as_error(s,"data value does not fit its width");
-        as_word(s,(uint32_t)v.value,width);
+    for(unsigned k=0;k<l->count;++k) as_data_value(s,as_expression(s,l->arg[k]),width);
+}
+
+static uint32_t as_literal_request(assembler_t *s, as_line_t *l, const char *text) {
+    as_value_t value=as_expression(s,text);
+    if(!value.positive && !value.negative && !value.unknown &&
+       value.value>=INT32_MIN && value.value<=UINT32_MAX) value.value=(uint32_t)value.value;
+    if(l->literal_symbol==0) {
+        char name[64]; snprintf(name,sizeof(name),".Lasm.pool.%zu",s->record);
+        l->literal_symbol=as_new_symbol(s,name,0);
+        s->symbols[l->literal_symbol].definition=UINT_MAX;
     }
+    as_section_t *section=&s->sections[s->current]; size_t record=s->record+1;
+    l->pool_value=value; l->pool_next=0; l->pool_match=0;
+    l->pool_generation=section->pool_generation;
+    l->pool_section=s->current;
+    uint64_t bits=(uint64_t)value.value;
+    uint32_t hash=(uint32_t)bits^(uint32_t)(bits>>32);
+    hash=(hash*16777619u)^value.positive; hash=(hash*16777619u)^value.negative;
+    hash=(hash*16777619u)^s->current; hash=(hash*16777619u)^section->pool_generation;
+    hash%=8192;
+    for(size_t k=s->pools[hash];k;k=s->lines[k-1].pool_hash_next) {
+        as_line_t *other=&s->lines[k-1]; as_value_t v=other->pool_value;
+        if(other->pool_section==s->current && other->pool_generation==section->pool_generation &&
+           v.value==value.value && v.positive==value.positive && v.negative==value.negative &&
+           v.unknown==value.unknown) { l->pool_match=k; break; }
+    }
+    if(!l->pool_match) { l->pool_hash_next=s->pools[hash]; s->pools[hash]=record; }
+    if(section->pool_last) s->lines[section->pool_last-1].pool_next=record;
+    else section->pool_first=record;
+    section->pool_last=record;
+    return l->literal_symbol;
+}
+
+static void as_literal_pool(assembler_t *s, as_line_t *l) {
+    if(l->count || s->it_count) as_error(s,"literal pool requires no operands and must be outside IT");
+    as_section_t *section=&s->sections[s->current];
+    if(!section->pool_first) return;
+    if(section->fallthrough) as_error(s,"literal pool could be executed by fallthrough; branch or return before .ltorg/.pool");
+    as_mapping(s,0);
+    l->alignment=4; l->padding=(0u-section->out.size)&3; l->padding_skipped=0;
+    if(section->out.alignment<4) section->out.alignment=4;
+    s->pool_padding=1; as_emit(s,NULL,l->padding); s->pool_padding=0;
+    for(size_t k=section->pool_first;k;k=s->lines[k-1].pool_next) {
+        as_line_t *load=&s->lines[k-1]; as_symbol_t *symbol=&s->symbols[load->literal_symbol];
+        symbol->out.section=s->current;
+        if(load->pool_match) symbol->raw_value=s->symbols[s->lines[load->pool_match-1].literal_symbol].raw_value;
+        else {
+            symbol->raw_value=section->out.size;
+            as_data_value(s,as_resolve(s,load->pool_value),4);
+        }
+    }
+    section->pool_first=section->pool_last=0; ++section->pool_generation;
 }
 
 static void as_incbin(assembler_t *s, as_line_t *l) {
@@ -692,8 +818,9 @@ static void as_incbin(assembler_t *s, as_line_t *l) {
 static void as_directive(assembler_t *s, as_line_t *l) {
     const char *op=l->op; unsigned n=l->count, d=l->directive;
     if(d==AS_D_LABEL) {
-        as_symbol_t *v=&s->symbols[as_symbol(s,l->arg[0])];
+        as_symbol_t *v=&s->symbols[l->label_symbol];
         v->out.section=s->current; v->raw_value=s->sections[s->current].out.size;
+        s->sections[s->current].fallthrough=1;
         if(s->pending_thumb) { v->thumb=1; v->out.type=2; s->pending_thumb=0; }
     } else if(d==AS_D_SECTION) {
         if(n<1 || n>4 || s->it_count) as_error(s,"invalid section operands or interrupted IT");
@@ -723,6 +850,7 @@ static void as_directive(assembler_t *s, as_line_t *l) {
         uint32_t type=d==AS_D_BSS?BO_NOBITS:BO_PROGBITS;
         s->current=as_section(s,op,type,d==AS_D_TEXT?6:3,0);
     } else if(d==AS_D_P2ALIGN || d==AS_D_BALIGN) as_alignment(s,l,d==AS_D_P2ALIGN);
+    else if(d==AS_D_LTORG || d==AS_D_POOL) as_literal_pool(s,l);
     else if(d==AS_D_WORD || d==AS_D_LONG) as_data(s,l,4);
     else if(d==AS_D_HWORD || d==AS_D_SHORT) as_data(s,l,2);
     else if(d==AS_D_BYTE) as_data(s,l,1);
@@ -765,6 +893,7 @@ static void as_directive(assembler_t *s, as_line_t *l) {
         if(v->definition && v->equ==NULL) as_error(s,"symbol redefinition");
         if(v->equ!=NULL && v->equ!=l->arg[1]) as_error(s,"symbol redefinition");
         v->equ=l->arg[1]; v->equ_section=s->current; v->equ_offset=s->sections[s->current].out.size;
+        v->equ_record=s->record;
     } else if(d==AS_D_COMM) {
         if(n<2 || n>3) as_error(s,"invalid common declaration");
         as_symbol_t *v=&s->symbols[as_symbol(s,l->arg[0])]; v->declared=1; v->definition=UINT_MAX;
@@ -774,6 +903,10 @@ static void as_directive(assembler_t *s, as_line_t *l) {
         if(n!=1 || strcmp(l->arg[0],"unified")!=0) as_error(s,"only unified syntax is supported");
     } else if(d==AS_D_CPU) {
         if(n!=1 || strcmp(l->arg[0],"cortex-m33")!=0) as_error(s,"only Cortex-M33 is supported"); s->cpu=1;
+    } else if(d==AS_D_ARCH) {
+        if(n!=1 || strcmp(l->arg[0],"armv8-m.main")!=0)
+            as_error(s,"only .arch armv8-m.main is supported for RP2350 Cortex-M33");
+        s->cpu=1;
     } else if(d==AS_D_FPU) {
         if(n!=1 || strcmp(l->arg[0],"fpv5-sp-d16")!=0) as_error(s,"unsupported FPU"); s->fpu=1;
     } else if(d==AS_D_THUMB || d==AS_D_CODE) {
@@ -866,11 +999,16 @@ static void as_attributes(assembler_t *s) {
 }
 
 static void as_pass(assembler_t *s) {
-    for(uint32_t k=1;k<=s->section_count;++k) { s->sections[k].out.size=0; s->sections[k].mapping=0; }
+    for(uint32_t k=1;k<=s->section_count;++k) {
+        as_section_t *section=&s->sections[k]; section->out.size=0; section->mapping=0;
+        section->fallthrough=1; section->pool_first=section->pool_last=0; section->pool_generation=0;
+    }
+    memset(s->pools,0,sizeof(s->pools));
     s->current=1; s->pending_thumb=s->it_count=s->it_at=s->unwind_section=0;
     s->changed=0; unsigned conditional[64],depth=0; int active=1;
     for(size_t k=0;k<s->line_count;++k) {
         as_line_t *l=&s->lines[k]; s->line=l->line;
+        s->record=k;
         s->listing_record=k+1;
         if(l->directive==AS_D_IF) {
             if(l->count!=1 || depth==64) as_error(s,"invalid conditional assembly");
@@ -892,7 +1030,14 @@ static void as_pass(assembler_t *s) {
         else {
             if(!(s->sections[s->current].out.flags&4)) as_error(s,"instruction in non-executable section");
             if(s->sections[s->current].out.size&1) as_error(s,"unaligned Thumb instruction");
+            int in_it=s->it_count!=0;
             as_mapping(s,1); unsigned width=as_instruction(s,l);
+            int stops=!in_it && l->condition==14 && !(l->encoding&8) &&
+                (strcmp(l->mnemonic,"b")==0 || strcmp(l->mnemonic,"bx")==0 ||
+                 strcmp(l->mnemonic,"tbb")==0 || strcmp(l->mnemonic,"tbh")==0 ||
+                 ((strcmp(l->mnemonic,"pop")==0 || strcmp(l->mnemonic,"ldm")==0) &&
+                  (as_register_list(s,l->arg[l->count-1])&(1u<<15))));
+            s->sections[s->current].fallthrough=!stops;
             if(l->width!=width) { l->width=width; s->changed=1; }
         }
         uint32_t after_offset=s->sections[s->current].out.size;
@@ -901,6 +1046,10 @@ static void as_pass(assembler_t *s) {
             s->changed=1;
         l->layout_section=before_section; l->layout_offset=before_offset;
         l->layout_end_section=s->current; l->layout_end_offset=after_offset;
+    }
+    for(uint32_t k=1;k<=s->section_count;++k) if(s->sections[k].pool_first) {
+        as_line_t *load=&s->lines[s->sections[k].pool_first-1]; s->line=load->line;
+        as_error(s,"pending literal pool in '%s'; explicit .ltorg/.pool required",s->sections[k].out.name);
     }
     if(depth || s->it_count || s->pending_thumb || s->unwind_section) as_error(s,"unfinished conditional, IT or function annotation");
 }
@@ -1017,7 +1166,7 @@ static void as_listing_write(assembler_t *s) {
     for(as_listing_range_t *r=s->listing_first;r;r=r->next) {
         as_line_t *l=r->record?&s->lines[r->record-1]:NULL;
         as_section_t *section=&s->sections[r->section];
-        const char *kind=l==NULL?"generated-metadata":l->directive==AS_D_NONE?"instruction":
+        const char *kind=r->pool_padding?"alignment":l==NULL?"generated-metadata":l->directive==AS_D_NONE?"instruction":
             (l->directive==AS_D_P2ALIGN || l->directive==AS_D_BALIGN)?"alignment":
             section->out.type==BO_NOBITS?"nobits":"data";
         as_listing_text(s,"%s{\"section\":",first?"":","); first=0;
@@ -1049,6 +1198,9 @@ static void as_listing_write(assembler_t *s) {
             else decision="operand-selected encoding";
         } else if(l && (l->directive==AS_D_P2ALIGN || l->directive==AS_D_BALIGN))
             decision="exact alignment fill; executable default uses Thumb NOPs";
+        else if(l && (l->directive==AS_D_LTORG || l->directive==AS_D_POOL))
+            decision=r->pool_padding?"literal pool word alignment, zero fill":
+                "explicit literal pool, first-use ordering and deduplication";
         as_listing_string(s,decision); as_listing_text(s,"}");
     }
     as_listing_text(s,"],\"decisions\":["); first=1;

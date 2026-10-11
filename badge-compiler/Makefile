@@ -255,7 +255,23 @@ test-fast-io: all
 	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" \
 		QEMU_ARM="$(QEMU_ARM)" bash tests/fast-io-oracle.sh
 
-.PHONY: test-assembler-crossover test-assembler-listing
+.PHONY: test-assembler-crossover test-assembler-listing test-assembler-system test-assembler-ergonomics
+test-assembler-ergonomics: build/badge-asm build/badge-link build/elf2bin build/badge_asm_test
+	./build/badge_asm_test
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" QEMU_ARM="$(QEMU_ARM)" node --test tests/assembler-ergonomics.test.mjs
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" bash tests/asm_oracle.sh
+
+.PHONY: test-assembler-synchronization
+test-assembler-synchronization: build/badge-asm build/badge-link build/elf2bin build/badge_asm_test
+	./build/badge_asm_test
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" QEMU_ARM="$(QEMU_ARM)" node --test tests/synchronization.test.mjs
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" bash tests/asm_oracle.sh
+
+test-assembler-system: build/badge-asm build/badge_asm_test
+	./build/badge_asm_test
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" QEMU_ARM="$(QEMU_ARM)" node --test tests/system-instructions.test.mjs
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" bash tests/asm_oracle.sh
+
 test-assembler-listing: build/badge-asm
 	node --test tests/assembler-listing.test.mjs
 

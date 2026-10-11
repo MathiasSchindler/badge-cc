@@ -4,6 +4,9 @@
 
 This document is the authoritative record of facts confirmed on the GitHub
 Universe 2026 badger prototype available to this project as of 2026-09-15.
+The dated [RP2350 runtime findings](rp2350-runtime.md) extend this with
+subsequent clock, memory, recovery and CPU qualification; they do not
+replace the schematic wiring evidence below.
 
 For subsequent source-radio results, device roles, testing gates and next
 steps, use the [current CYW43439 handoff](cyw43/handoff.md). Those later
@@ -62,6 +65,27 @@ The freestanding linker currently allows up to 4 MiB from `0x10000000`.
 This is a software build limit, not the schematic flash capacity. The SDK
 board configuration declares 16 MiB. Neither setting is a physical capacity
 measurement.
+
+### Subsequent runtime evidence: 2026-10-11
+
+Saved picotool reports identify the BA03/BA05 badge `9BBF88DD17D66E7D`
+as A4, ROM git revision `0xa8bfe860`, Arm, secure boot disabled, with
+16 MiB flash. Full 16 MiB backup/restoration/readback hash verification
+passed. This is operational range evidence, not JEDEC identification,
+alias testing or full memory qualification; PSRAM remains unqualified.
+
+BA03 physically passed its Secure core-0 system-register/interrupt and SVC
+probe. BA05's isolated startup ladder passed core-1 launch/park, single-core
+exclusives, cross-core invalidation, XOSC enable/safe clock switching and
+watchdog-only recovery on that selected badge, with full flash restoration.
+With the MPU disabled, both Cortex-M33 cores needed `ACTLR.EXTEXCLALL`
+enabled for the cross-core exclusive protocol; core 0's original setting
+was restored. Full two-core contention/ordering/progress remains open.
+Minimal startup must not assume
+XOSC enabled, a 150 MHz system clock, calibrated timer ticks, retained RAM
+across BOOTSEL or guaranteed automatic recovery after clock/core changes.
+See [the runtime guide](rp2350-runtime.md) for documentary restrictions,
+measured results and the startup/recovery gate before multicore contention.
 
 ## Schematic-confirmed external memory
 
@@ -519,7 +543,11 @@ The following are explicitly unresolved:
 - validated LED drive levels, brightness, and power consumption;
 - display tearing-effect/vsync timing and readback behavior;
 - wireless range, long-duration loss/stability, coexistence, and multi-badge partner selection;
-- physical identification and full-capacity testing of the schematic flash and PSRAM;
+- physical identification, alias/electrical/endurance qualification of the
+  schematic flash and PSRAM (full-range 16 MiB flash backup/restoration
+  readback is now verified, not comprehensive memory testing);
+- qualified core-1 startup/park, clock-switch recovery and two-core
+  synchronization under the intended runtime configuration;
 - battery capacity, charge-status interpretation, and calibrated voltage/light sensing;
 - physical electrical validation of the schematic Home/Reset and combined-button interrupt behavior; and
 - any GPIO not listed in a confirmed mapping.

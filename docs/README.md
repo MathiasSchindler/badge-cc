@@ -39,6 +39,8 @@ transfer. No documentation page is blanket authorization to flash.
 
 ## Other badge work
 
+- [RP2350 runtime and qualification](rp2350-runtime.md): clocks, memory,
+  report persistence, recovery and the staged multicore qualification gate.
 - [Buttons](button-mapper.md), [touch/peripheral probing](peripheral-probe.md),
   [IMU demo](imu-demo.md) and [GPIO observation](gpio-monitor.md).
 - [Tilt Maze](tilt-maze.md) is a freestanding calibrated marble-maze game.

@@ -161,6 +161,17 @@ If the driver reports an error, it disconnects and requests BOOTSEL.
 If recovery is not observed, the physical Boot procedure remains the
 fallback. No watchdog hang/fault-injection campaign has been performed.
 
+That statement describes this live-USB image's qualification, not a universal
+recovery guarantee. Separate BA05 probes changed clocks/core state and failed
+to return automatically despite successful ROM reboot scheduling; manual
+BOOTSEL recovery and full flash restoration were required.
+The corrected isolated BA05 ladder later passed scheduled-watchdog-only
+recovery with inherited clocks and after a safe switch to XOSC; this does
+not qualify recovery from arbitrary faults or full contention.
+The [runtime qualification guide](rp2350-runtime.md) records the clock-source
+restriction and staged recovery tests. Do not transfer this image's successful
+recovery to a different startup, clock-switch or multicore configuration.
+
 The host waits up to roughly five seconds for live USB enumeration and
 then uses bounded one-second control-transfer timeouts. Recovery polling
 is separate. A 30-second host process alarm also bounds a stuck libusb

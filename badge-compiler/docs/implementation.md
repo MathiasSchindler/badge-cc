@@ -1160,6 +1160,11 @@ badge-compiler/build/badge-asm \
   instruction forms needed by the complete corpus: arithmetic, shifts,
   modified immediates, MOVW/MOVT, loads/stores, register lists, multiply/divide,
   bit-fields, extensions, table branches, hints and SY barriers.
+- BA03 adds named MRS/MSR stack, mask, CONTROL and PSR accesses; CPSID/CPSIE
+  `i`/`f`/`if`; SVC/BKPT unsigned 8-bit immediates. Reserved/unsupported names,
+  widths, operands and IT combinations fail explicitly. See the
+  [system-instruction contract, Secure core-0 physical qualification and
+  remaining limits](badge-assembler.md#ba03--system-registers-exceptions-and-interrupt-control).
 - Local conditional/unconditional branches, calls, CBZ/CBNZ, literal loads
   ADR address generation and IT blocks. Layout relaxation selects narrow/wide encodings and checks
   ranges/alignment; explicit `.n`/`.w` forms are checked. Explicit flag-setting
@@ -1168,6 +1173,20 @@ badge-compiler/build/badge-asm \
   `.equ`/`.set` and `name = expression` without reassignment, common/weak/global/hidden symbols,
   function types/sizes and Thumb marking. Layout-affecting constants must be
   available when used; this is not general forward-expression assembly.
+- BA04 adds repeated numeric local labels with source-relative `Nf`/`Nb`,
+  `.arch armv8-m.main` as a fixed-target declaration, and LDR `=expression`
+  pseudo-loads with section-local deduplicated `.ltorg`/`.pool` data.
+  Explicit placement must prevent instruction fallthrough; no EOF pool or
+  branch around data is synthesized. Small constants also use pool loads,
+  not LLVM-style MOV synthesis. See the
+  [contracts, exact reach tests and LLVM/runtime qualification](badge-assembler.md#ba04--assembly-ergonomics-and-compatibility).
+- BA05 adds byte/halfword/word LDREX/STREX, CLREX, LDA/STL and LDAEX/STLEX
+  acquire/release forms. Register/status overlap, immediate alignment/range,
+  base-only addressing and fixed-width syntax are checked. Runtime address
+  alignment and SRAM ownership remain the caller's responsibility. The
+  host-qualified bounded SRAM lock and two-core test firmware are explicit
+  low-level examples, not C atomic lowering or completed physical qualification;
+  see [BA05 status and memory restrictions](badge-assembler.md#ba05--multicore-synchronization-instruction-coverage).
 - Sections, alignment, fixed-width data, strings, zero/space and `.incbin`
   with optional offset/length. NOBITS accepts only zero initialization.
 - CPU/FPU declarations, target ABI attributes, file/ident/addrsig metadata,
@@ -1182,7 +1201,7 @@ badge-compiler/build/badge-asm \
 
 `.if`/`.error`/`.endif` support **assertion-only** regions, as used by Picobin;
 instruction/data emission or `.else` inside a conditional is rejected rather
-than silently skipped. Numeric local labels, macros/repetition, general
+than silently skipped. Macros/repetition, general
 conditional assembly, debug directives, ARM mode, other targets, arbitrary
 ISA forms, additional relocations and hexadecimal string escapes are outside
 the supported contract and fail explicitly.

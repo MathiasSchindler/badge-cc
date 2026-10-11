@@ -71,6 +71,43 @@ static void check_directive_layout(void) {
     release(s);
 }
 
+static void check_ergonomics(void) {
+    assembler_t *s=fixture(".arch armv8-m.main\n0:nop\nb 0b\n0:nop\nb 0b\n");
+    s->record=3; as_value_t first=as_expression(s,"0b");
+    s->record=6; as_value_t second=as_expression(s,"0b");
+    assert(first.positive!=second.positive);
+    assert(s->symbols[first.positive].raw_value==0 && s->symbols[second.positive].raw_value==4);
+    release(s);
+    s=fixture("ldr r0,=0x12345678\nldr r1,=(0x12340000+0x5678)\nb 0f\n.pool\n0:bx lr\n");
+    assert(s->sections[1].out.size==14 && s->sections[1].pool_first==0);
+    const unsigned char *p=s->sections[1].out.data;
+    assert(read_word(p,2)==0x4801 && read_word(p+2,2)==0x4901);
+    assert(read_word(p+6,2)==0 && read_word(p+8,4)==0x12345678);
+    release(s);
+}
+
+static void check_synchronization(void) {
+    assembler_t *s=fixture(
+        "ldrex r0,[r1,#1020]\nstrex r2,r0,[r1,#1020]\n"
+        "ldrexb r0,[r1]\nldrexh r0,[r1]\nstrexb r2,r0,[r1]\nstrexh r2,r0,[r1]\n"
+        "clrex\nlda r0,[r1]\nldab r0,[r1]\nldah r0,[r1]\n"
+        "stl r0,[r1]\nstlb r0,[r1]\nstlh r0,[r1]\n"
+        "ldaex r0,[r1]\nldaexb r0,[r1]\nldaexh r0,[r1]\n"
+        "stlex r2,r0,[r1]\nstlexb r2,r0,[r1]\nstlexh r2,r0,[r1]\n");
+    static const uint16_t halfwords[]={
+        0xe851,0x0fff,0xe841,0x02ff,0xe8d1,0x0f4f,0xe8d1,0x0f5f,
+        0xe8c1,0x0f42,0xe8c1,0x0f52,0xf3bf,0x8f2f,
+        0xe8d1,0x0faf,0xe8d1,0x0f8f,0xe8d1,0x0f9f,
+        0xe8c1,0x0faf,0xe8c1,0x0f8f,0xe8c1,0x0f9f,
+        0xe8d1,0x0fef,0xe8d1,0x0fcf,0xe8d1,0x0fdf,
+        0xe8c1,0x0fe2,0xe8c1,0x0fc2,0xe8c1,0x0fd2
+    };
+    assert(s->sections[1].out.size==sizeof(halfwords) && s->relocation_count==0);
+    for(size_t i=0;i<sizeof(halfwords)/sizeof(*halfwords);++i)
+        assert(read_word(s->sections[1].out.data+i*2,2)==halfwords[i]);
+    release(s);
+}
+
 static void check_expression_cache(void) {
     assembler_t *s=fixture(
         "start:b target\n.equ here,.\n.equ delta,target-here\n.space 2050\n"
@@ -130,6 +167,7 @@ static void check_expression_cache(void) {
 int main(void) {
     check_mov_relocations();
     check_directive_layout();
+    check_ergonomics();
     char dir[]="build/asm-test-XXXXXX"; assert(mkdtemp(dir)!=NULL);
     char input[128],output[128],binary[128],alias[128];
     assert(snprintf(input,sizeof(input),"%s/input.s",dir)>0);
@@ -171,7 +209,15 @@ int main(void) {
         "b.n target\ntarget:nop\nb.w target\nnop.w\n",
         ".equ extent,end-start\nstart:nop\nend:.word extent,extent\n",
         ".equ first,second+1\n.word first,first\n.equ second,41\n",
-        "itttt eq\nmoveq r0,#1\naddeq r0,#1\nsubeq r0,#1\nbxeq lr\n"
+        "itttt eq\nmoveq r0,#1\naddeq r0,#1\nsubeq r0,#1\nbxeq lr\n",
+        "mrs r0,primask\nmsr basepri,r1\nmsr basepri_max,r2\nmrs lr,control\n",
+        "cpsid i\ncpsie if\nsvc #0\nbkpt #255\n",
+        "mrs r0,msp\nmsr psp,r1\nmrs r2,msplim_ns\nmsr control_ns,r3\n",
+        ".arch armv8-m.main\n1:nop\nb 1b\nb 1f\n1:bx lr\n",
+        "ldr r0,=0x12345678\nldr r1,=0x12345678\nbx lr\n.ltorg\n",
+        "ldr.w r8,=external+4\nb 1f\n.pool\n1:bx lr\n",
+        "0:1:nop\n.equ back,0b\n.word 1b-back\n",
+        "ldr r0,=42\nbx lr\n.section .text.other,\"ax\",%progbits\nnop\n.text\n.pool\n"
     };
     for(size_t k=0;k<sizeof(valid)/sizeof(*valid);++k) {
         save(input,valid[k],strlen(valid[k])); assert(badge_asm_main(4,args)==0);
@@ -215,15 +261,36 @@ int main(void) {
         "start:b target\n.equ here,.\n.space 2050\ntarget:nop\n.word 9223372036854775805+(here-start)\n",
         "start:b target\n.equ here,.\n.space 2050\ntarget:nop\n.word 1/(4-(here-start))\n",
         ".word ~external\n", ".word external*2\n",
-        ".word (1+2\n", ".word 1junk\n", "movseq r0,#1\n"
+        ".word (1+2\n", ".word 1junk\n", "movseq r0,#1\n",
+        "mrs sp,primask\n","msr control,pc\n","mrs r0,basepri_max_ns\n",
+        "msr ipsr,r0\n","msr apsr,r0\n","mrs r0,#16\n",
+        "cpsid a\n","cpsie i,f\n","cpsid.w i\n","it eq\ncpsideq i\n",
+        "svc #-1\n","bkpt #256\n","svc.w #0\n","mrs.n r0,control\n",
+        "dmb ish\n","dsb #15\n","isb.n sy\n",
+        "b 1f\n","b 1b\n1:nop\n","4294967296:nop\n",
+        ".arch armv8-m.base\n",".arch armv8.1-m.main\n",
+        "ldr r0,=42\nbx lr\n","ldr r0,=42\n.pool\n",
+        "ldr r0,=42\nbeq done\n.ltorg\ndone:bx lr\n",
+        "ldr r0,=42\nbx lr\nnamed:\n.pool\n",
+        "it eq\n.pool\nmoveq r0,r1\n","ldr sp,=42\n",
+        "ldr r0,=4294967296\nbx lr\n.pool\n",
+        "ldr.n r0,=42\n.space 1022\nbx lr\n.pool\n",
+        "ldrex sp,[r1]\n","ldrexb r0,[pc]\n","ldrexh r0,[r1,#2]\n",
+        "strex r0,r0,[r1]\n","strex r1,r0,[r1]\n","strex r2,r0,[r1,#1024]\n",
+        "strexb r2,r0,[r1]!\n","strexh r2,pc,[r1]\n","clrex #15\n",
+        "lda r0,[r1,#4]\n","ldab pc,[r1]\n","ldah r0,[r1,r2]\n",
+        "ldaex sp,[r1]\n","ldaexb r0,[r1],#1\n","ldaexh r0,[r1,#2]\n",
+        "stl r0,[pc]\n","stlb sp,[r1]\n","stlh r0,[r1]!\n",
+        "stlex r0,r0,[r1]\n","stlexb r1,r0,[r1]\n","stlexh sp,r0,[r1]\n",
+        "ldrex.n r0,[r1]\n","lda.w r0,[r1]\n"
     };
     for(size_t k=0;k<sizeof(invalid)/sizeof(*invalid);++k) {
         save(input,invalid[k],strlen(invalid[k])); save(output,"preserved",9);
         assert(badge_asm_main(4,args)==1); preserved(output);
     }
     const char *unsupported[]={
-        ".macro foo\n.endm\n","svc #0\n","mrs r0,primask\n",".org 0x100\n",
-        "push.w {lr}\n","beq external\n","1:nop\nb 1b\n",
+        ".macro foo\n.endm\n",".org 0x100\n",
+        "push.w {lr}\n","beq external\n",
         ".if 0\nnop\n.endif\n",".if 0\n.else\nnop\n.endif\n",
         ".ascii \"\\x41\"\n",".loc 1 1\n",".set x,1\n.set x,2\n"
     };
@@ -241,6 +308,7 @@ int main(void) {
     check_branch("target:nop\n.space 2044\n.equ alias,target\nb alias\n",4);
     check_branch("beq target\n.space 254\nb far\ntarget:nop\n.space 2050\nfar:nop\n",4);
     check_expression_cache();
+    check_synchronization();
     assembler_t *s=fixture("it eq\naddseq r0,r1,#1\n");
     assert(s->sections[1].out.size==6 && s->lines[1].width==4); release(s);
     s=fixture("a:nop\n.equ location,.\nnop\n.word location\n");

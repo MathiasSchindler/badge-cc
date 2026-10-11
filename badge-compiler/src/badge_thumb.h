@@ -135,7 +135,12 @@ static unsigned thumb_loadstore(assembler_t *s, as_line_t *l, const char *op,int
     const char *memory=l->arg[dual?2:1];
     if(memory[0]!='[') {
         if(strcmp(op,"ldr")!=0 || l->count!=2) as_error(s,"unsupported literal load");
-        as_value_t value=as_expression(s,memory); int64_t offset=0;
+        as_value_t value;
+        if(memory[0]=='=') {
+            if(rt==13 || rt==15) as_error(s,"literal pseudo-load destination must be r0-r12 or lr");
+            value=(as_value_t){.positive=as_literal_request(s,l,memory+1)};
+        } else value=as_expression(s,memory);
+        int64_t offset=0;
         if(value.positive && !value.negative && !value.unknown) {
             as_symbol_t *v=&s->symbols[value.positive];
             if(v->out.section==s->current) {
@@ -281,12 +286,67 @@ static unsigned thumb_alu(assembler_t *s, as_line_t *l, const char *op,int wide,
         ((unsigned)rd<<8)|thumb_shift_bits(shift_type,amount)|(unsigned)rm);
 }
 
+static unsigned thumb_synchronization(assembler_t *s, as_line_t *l, const char *op) {
+    if(l->encoding&6) as_error(s,"synchronization instructions do not take width suffixes");
+    if(strcmp(op,"clrex")==0) {
+        thumb_count(s,l,0,0);
+        return thumb_emit(s,l,4,0xf3bf,0x8f2f);
+    }
+    int load=op[0]=='l',exclusive=strstr(op,"ex")!=NULL;
+    int acquire_release=strncmp(op,"lda",3)==0 || strncmp(op,"stl",3)==0;
+    unsigned size=op[strlen(op)-1]=='b'?0:op[strlen(op)-1]=='h'?1:2;
+    unsigned count=!load && exclusive?3:2;
+    thumb_count(s,l,count,count);
+    unsigned rt=(unsigned)as_register(s,l->arg[count-2]);
+    unsigned rd=count==3?(unsigned)as_register(s,l->arg[0]):15;
+    thumb_memory_t m=thumb_memory(s,l->arg[count-1],NULL);
+    if(!thumb_data_register(rt) || m.base==15 ||
+        (count==3 && (!thumb_data_register(rd) || rd==rt || rd==(unsigned)m.base)))
+        as_error(s,"invalid synchronization register or overlapping status output");
+    if(m.index>=0 || m.writeback || !m.pre || m.offset<0 ||
+        (exclusive && !acquire_release && size==2?
+            m.offset>1020 || (m.offset&3):m.offset!=0))
+        as_error(s,"synchronization addressing requires a base register and permitted aligned offset");
+    if(!acquire_release && size==2)
+        return thumb_emit(s,l,4,(load?0xe850:0xe840)|(unsigned)m.base,
+            (rt<<12)|((load?15:rd)<<8)|((unsigned)m.offset>>2));
+    unsigned code=acquire_release?(exclusive?0xc0:0x80):0x40;
+    code|=size<<4;
+    return thumb_emit(s,l,4,(load?0xe8d0:0xe8c0)|(unsigned)m.base,
+        (rt<<12)|0xf00|code|rd);
+}
+
+static unsigned thumb_system_register(assembler_t *s, const char *name, int write) {
+    static const struct { const char *name; unsigned number, readable, writable; } registers[]={
+        {"apsr",0,1,0},{"iapsr",1,1,0},{"eapsr",2,1,0},{"xpsr",3,1,0},
+        {"ipsr",5,1,0},{"epsr",6,1,0},{"iepsr",7,1,0},
+        {"msp",8,1,1},{"psp",9,1,1},{"msplim",10,1,1},{"psplim",11,1,1},
+        {"primask",16,1,1},{"basepri",17,1,1},{"basepri_max",18,1,1},
+        {"faultmask",19,1,1},{"control",20,1,1},
+        {"msp_ns",136,1,1},{"psp_ns",137,1,1},{"msplim_ns",138,1,1},{"psplim_ns",139,1,1},
+        {"primask_ns",144,1,1},{"basepri_ns",145,1,1},{"faultmask_ns",147,1,1},{"control_ns",148,1,1},
+        {"sp_ns",152,1,1}
+    };
+    if(write) {
+        if(strcmp(name,"apsr_nzcvq")==0) return 0x800;
+        if(strcmp(name,"apsr_g")==0) return 0x400;
+        if(strcmp(name,"apsr_nzcvqg")==0) return 0xc00;
+    }
+    for(size_t k=0;k<sizeof(registers)/sizeof(*registers);++k)
+        if(strcmp(name,registers[k].name)==0) {
+            if(write? !registers[k].writable:!registers[k].readable)
+                as_error(s,"system register does not support this access");
+            return registers[k].number|(write?0x800:0);
+        }
+    as_error(s,"unsupported named system register '%s'",name);
+}
+
 static unsigned as_instruction(assembler_t *s, as_line_t *l) {
     static const char *const bases[]={
-        "adc","adcs","add","adds","addw","adr","and","ands","asr","asrs","b","bfc","bfi","bic","bics","bl","blx","bx","cbnz","cbz","clz","cmn","cmp","dmb","dsb","eor","eors","isb",
-        "ldm","ldr","ldrb","ldrd","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mla","mls","mov","movs","movt","movw","mul","muls","mvn","mvns","nop","orn","orr","orrs",
+        "adc","adcs","add","adds","addw","adr","and","ands","asr","asrs","b","bfc","bfi","bic","bics","bkpt","bl","blx","bx","cbnz","cbz","clrex","clz","cmn","cmp","cpsid","cpsie","dmb","dsb","eor","eors","isb",
+        "lda","ldab","ldah","ldaex","ldaexb","ldaexh","ldm","ldr","ldrb","ldrd","ldrex","ldrexb","ldrexh","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mla","mls","mov","movs","movt","movw","mrs","msr","mul","muls","mvn","mvns","nop","orn","orr","orrs",
         "pop","push","rev","rev16","ror","rors","rsb","rsbs","sbc","sbcs","sdiv","sev","smlabb","smlal","smull","stm","str","strb","strd","strh","sub","subs","subw",
-        "sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtah","uxtb","uxth","wfe","wfi","yield"
+        "stl","stlb","stlh","stlex","stlexb","stlexh","strex","strexb","strexh","svc","sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtah","uxtb","uxth","wfe","wfi","yield"
     };
     if(!l->encoding) {
         char mnemonic[32]; size_t len=strlen(l->op);
@@ -334,7 +394,9 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
     else if(strcmp(op,"bx")==0 || strcmp(op,"blx")==0) {
         thumb_count(s,l,1,1); int r=as_register(s,l->arg[0]); if(r==15 || wide) as_error(s,"invalid BX/BLX register or width");
         width=thumb_emit(s,l,2,(strcmp(op,"bx")==0?0x4700:0x4780)|((unsigned)r<<3),0);
-    } else if(strncmp(op,"ldr",3)==0 || strncmp(op,"str",3)==0) width=thumb_loadstore(s,l,op,wide);
+    } else if(strcmp(op,"clrex")==0 || strncmp(op,"ldrex",5)==0 || strncmp(op,"strex",5)==0 ||
+        strncmp(op,"lda",3)==0 || strncmp(op,"stl",3)==0) width=thumb_synchronization(s,l,op);
+    else if(strncmp(op,"ldr",3)==0 || strncmp(op,"str",3)==0) width=thumb_loadstore(s,l,op,wide);
     else if(strcmp(op,"push")==0 || strcmp(op,"pop")==0 || strcmp(op,"ldm")==0 || strcmp(op,"stm")==0) {
         int pop=strcmp(op,"pop")==0,push=strcmp(op,"push")==0,load=pop || strcmp(op,"ldm")==0;
         thumb_count(s,l,pop||push?1:2,pop||push?1:2);
@@ -465,6 +527,27 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
             else a=strcmp(op,"uxtb")==0?0xfa5f:strcmp(op,"uxth")==0?0xfa1f:strcmp(op,"sxtb")==0?0xfa4f:0xfa0f;
             width=thumb_emit(s,l,4,a,b);
         }
+    } else if(strcmp(op,"mrs")==0 || strcmp(op,"msr")==0) {
+        thumb_count(s,l,2,2); int write=strcmp(op,"msr")==0;
+        if(l->encoding&6) as_error(s,"MRS/MSR does not take a width suffix");
+        unsigned r=(unsigned)as_register(s,l->arg[write?1:0]);
+        if(!thumb_data_register(r)) as_error(s,"MRS/MSR requires r0-r12 or lr");
+        unsigned sys=thumb_system_register(s,l->arg[write?0:1],write);
+        width=write?thumb_emit(s,l,4,0xf380|r,0x8000|sys):
+            thumb_emit(s,l,4,0xf3ef,0x8000|(r<<8)|sys);
+    } else if(strcmp(op,"cpsid")==0 || strcmp(op,"cpsie")==0) {
+        thumb_count(s,l,1,1);
+        if(wide || in_it) as_error(s,"CPS requires narrow unconditional encoding outside IT");
+        unsigned mask=strcmp(l->arg[0],"i")==0?2:strcmp(l->arg[0],"f")==0?1:strcmp(l->arg[0],"if")==0?3:0;
+        if(!mask) as_error(s,"CPS mask must be i, f or if");
+        width=thumb_emit(s,l,2,(strcmp(op,"cpsid")==0?0xb670:0xb660)|mask,0);
+    } else if(strcmp(op,"svc")==0 || strcmp(op,"bkpt")==0) {
+        thumb_count(s,l,1,1);
+        if(wide) as_error(s,"SVC/BKPT has only a narrow encoding");
+        if(in_it && (strcmp(op,"bkpt")==0 || s->it_count!=1))
+            as_error(s,"BKPT is supported outside IT; SVC must be the last IT instruction");
+        unsigned immediate=as_bounded(s,l->arg[0],255);
+        width=thumb_emit(s,l,2,(strcmp(op,"svc")==0?0xdf00:0xbe00)|immediate,0);
     } else if(strcmp(op,"dsb")==0 || strcmp(op,"dmb")==0 || strcmp(op,"isb")==0) {
         thumb_count(s,l,0,1); if(l->count && strcmp(l->arg[0],"sy")!=0) as_error(s,"only SY barriers are supported");
         width=thumb_emit(s,l,4,0xf3bf,strcmp(op,"dsb")==0?0x8f4f:strcmp(op,"dmb")==0?0x8f5f:0x8f6f);
