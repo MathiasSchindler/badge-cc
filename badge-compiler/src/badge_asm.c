@@ -67,7 +67,16 @@ typedef struct {
     uint32_t layout_section, layout_offset, layout_end_section, layout_end_offset;
     unsigned char *binary;
     size_t binary_size;
+    unsigned origin_line;
+    const char *decision;
+    int64_t displacement, reach_min, reach_max;
+    unsigned pc_base, has_reach, alignment, padding, padding_skipped;
 } as_line_t;
+typedef struct as_listing_range {
+    uint32_t section, offset, size;
+    size_t record;
+    struct as_listing_range *next;
+} as_listing_range_t;
 typedef struct {
     bo_section_t out;
     size_t capacity;
@@ -105,6 +114,13 @@ typedef struct {
     FILE *reading;
     unsigned char *result;
     size_t result_size;
+    const char *listing, *ir_source;
+    unsigned char *original;
+    size_t original_size, listing_record;
+    as_listing_range_t *listing_first, *listing_last;
+    char *listing_bytes;
+    size_t listing_size;
+    unsigned ir_lines;
 } assembler_t;
 
 static _Noreturn void as_error(assembler_t *s, const char *format, ...) {
@@ -206,6 +222,17 @@ static void as_emit(assembler_t *s, const unsigned char *bytes, uint32_t size) {
         }
         if(bytes!=NULL) memcpy((unsigned char *)v->out.data+v->out.size,bytes,size);
         else memset((unsigned char *)v->out.data+v->out.size,0,size);
+    }
+    if(s->final && s->listing && size) {
+        as_listing_range_t *r=s->listing_last;
+        if(r && r->record==s->listing_record && r->section==s->current &&
+           r->offset+r->size==v->out.size) r->size+=size;
+        else {
+            r=as_allocate(s,sizeof(*r)); r->record=s->listing_record;
+            r->section=s->current; r->offset=v->out.size; r->size=size;
+            if(s->listing_last) s->listing_last->next=r; else s->listing_first=r;
+            s->listing_last=r;
+        }
     }
     v->out.size+=size;
 }
@@ -527,10 +554,20 @@ static void as_parse(assembler_t *s, unsigned char *input, size_t length) {
     for(size_t k=0;k<length;++k) if(input[k]=='\n') capacity+=2;
     if(capacity>AS_MAX_LINES) capacity=AS_MAX_LINES;
     s->lines=as_allocate(s,capacity*sizeof(*s->lines)); s->line_capacity=capacity;
-    char *line=(char *)input; unsigned number=0;
+    char *line=(char *)input; unsigned number=0,origin=0;
     while(line!=NULL) {
         ++number; s->line=number;
         char *next=strchr(line,'\n'); if(next!=NULL) *next++=0;
+        if(s->ir_source) {
+            unsigned value; char tail;
+            if(sscanf(line," @ attribution-ir %u %c",&value,&tail)==1) {
+                if(!value || value>s->ir_lines) as_error(s,"invalid attribution IR line");
+                origin=value;
+            } else if(!strncmp(as_trim(line),"@ attribution-ir",16)) {
+                as_error(s,"malformed attribution IR marker");
+            } else if(strstr(line,"@ attribution-function ")!=NULL ||
+                      strstr(line,".type ")!=NULL || strstr(line,".type\t")!=NULL) origin=0;
+        }
         int quoted=0,escaped=0;
         for(char *p=line;*p;++p) {
             if(quoted) { if(escaped) escaped=0; else if(*p=='\\') escaped=1; else if(*p=='"') quoted=0; }
@@ -553,6 +590,7 @@ static void as_parse(assembler_t *s, unsigned char *input, size_t length) {
             as_line_t *record=&s->lines[s->line_count++];
             record->op=".set"; record->arg[0]=p; record->arg[1]=value;
             record->count=2; record->line=number;
+            record->origin_line=origin;
             line=next; continue;
         }
         if(*end==':') {
@@ -563,10 +601,12 @@ static void as_parse(assembler_t *s, unsigned char *input, size_t length) {
             s->symbols[id].definition=(unsigned)(s->line_count+1);
             as_line_t *record=&s->lines[s->line_count++]; record->op="label"; record->arg[0]=p;
             record->count=1; record->line=number; p=as_trim(end+1);
+            record->origin_line=origin;
             if(*p==0) { line=next; continue; }
         }
         if(s->line_count==capacity) as_error(s,"source record limit exceeded");
         as_line_t *record=&s->lines[s->line_count++]; record->line=number;
+        record->origin_line=origin;
         char *equal=strchr(p,'=');
         if(equal!=NULL && *p!='.' && strchr(p,'"')==NULL) {
             *equal=0; record->op=".equ"; record->arg[0]=as_trim(p); record->arg[1]=as_trim(equal+1); record->count=2;
@@ -587,7 +627,8 @@ static void as_alignment(assembler_t *s, as_line_t *l, int power) {
     if(alignment==0 || (alignment&(alignment-1))) as_error(s,"alignment must be a power of two");
     as_section_t *v=&s->sections[s->current]; if(v->out.alignment<alignment) v->out.alignment=alignment;
     uint32_t pad=(0u-v->out.size)&(alignment-1);
-    if(l->count==3 && pad>as_bounded(s,l->arg[2],BO_MAX_FILE)) return;
+    l->alignment=alignment; l->padding=pad; l->padding_skipped=0;
+    if(l->count==3 && pad>as_bounded(s,l->arg[2],BO_MAX_FILE)) { l->padding_skipped=1; return; }
     if(l->count>=2) {
         unsigned char fill=(unsigned char)as_bounded(s,l->arg[1],255);
         for(uint32_t k=0;k<pad;++k) as_emit(s,&fill,1);
@@ -633,6 +674,9 @@ static void as_incbin(assembler_t *s, as_line_t *l) {
         if(!ok) { fclose(f); s->reading=NULL; as_error(s,"incbin must be a regular file of at most 64 MiB"); }
         if(stat(s->output,&dest)==0 && st.st_dev==dest.st_dev && st.st_ino==dest.st_ino) {
             fclose(f); s->reading=NULL; as_error(s,"output aliases incbin input");
+        }
+        if(s->listing && stat(s->listing,&dest)==0 && st.st_dev==dest.st_dev && st.st_ino==dest.st_ino) {
+            fclose(f); s->reading=NULL; as_error(s,"listing aliases incbin input");
         }
         uint32_t start=l->count>=2?as_bounded(s,l->arg[1],(uint32_t)st.st_size):0;
         uint32_t count=l->count==3?as_bounded(s,l->arg[2],(uint32_t)st.st_size-start):(uint32_t)st.st_size-start;
@@ -827,6 +871,7 @@ static void as_pass(assembler_t *s) {
     s->changed=0; unsigned conditional[64],depth=0; int active=1;
     for(size_t k=0;k<s->line_count;++k) {
         as_line_t *l=&s->lines[k]; s->line=l->line;
+        s->listing_record=k+1;
         if(l->directive==AS_D_IF) {
             if(l->count!=1 || depth==64) as_error(s,"invalid conditional assembly");
             conditional[depth++]=(unsigned)active; if(active) active=as_absolute(s,l->arg[0])!=0; continue;
@@ -875,6 +920,7 @@ static void as_assemble(assembler_t *s, unsigned char *input, size_t length,
         as_error(s,"layout relaxation did not converge in %u passes",AS_MAX_LAYOUT_PASSES);
     s->final=1; as_pass(s);
     if(s->changed) as_error(s,"layout changed during final encoding");
+    s->listing_record=0;
     as_attributes(s);
     if(s->addrsig) {
         s->current=as_section(s,".llvm_addrsig",BO_LLVM_ADDRSIG,0x80000000u,0);
@@ -914,9 +960,125 @@ static void as_assemble(assembler_t *s, unsigned char *input, size_t length,
 #include "badge_thumb.h"
 
 #ifndef BADGE_ASM_LIBRARY
+static int as_listing_same_path(assembler_t *s, const char *left, const char *right) {
+    char *a=as_copy(s,left),*b=as_copy(s,right);
+    char *ap=strrchr(a,'/'),*bp=strrchr(b,'/');
+    const char *an=ap?ap+1:a,*bn=bp?bp+1:b;
+    if(strcmp(an,bn)) return 0;
+    const char *ad=".",*bd=".";
+    if(ap) { *ap=0; ad=ap==a?"/":a; }
+    if(bp) { *bp=0; bd=bp==b?"/":b; }
+    struct stat x,y;
+    return !stat(ad,&x) && !stat(bd,&y) && x.st_dev==y.st_dev && x.st_ino==y.st_ino;
+}
+static uint32_t as_listing_u32(const unsigned char *p) {
+    return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
+}
+static void as_listing_text(assembler_t *s, const char *format, ...) {
+    va_list args; va_start(args,format);
+    int n=vsnprintf(s->listing_bytes+s->listing_size,BO_MAX_FILE-s->listing_size,format,args);
+    va_end(args);
+    if(n<0 || (size_t)n>=BO_MAX_FILE-s->listing_size) as_error(s,"listing exceeds 64 MiB");
+    s->listing_size+=(size_t)n;
+}
+static void as_listing_string(assembler_t *s, const char *text) {
+    as_listing_text(s,"\"");
+    for(const unsigned char *p=(const unsigned char *)text;*p;++p)
+        if(*p=='"' || *p=='\\') as_listing_text(s,"\\%c",*p);
+        else if(*p<32 || *p>=127) as_listing_text(s,"\\u%04x",*p);
+        else as_listing_text(s,"%c",*p);
+    as_listing_text(s,"\"");
+}
+static void as_listing_write(assembler_t *s) {
+    /* Object serialization remaps addrsig symbol indices, possibly changing ULEB widths. */
+    uint32_t table=as_listing_u32(s->result+32);
+    for(uint32_t k=1;k<=s->section_count;++k) {
+        if((uint64_t)table+(k+1)*40>s->result_size) as_error(s,"invalid serialized section table");
+        const unsigned char *h=s->result+table+k*40;
+        uint32_t offset=as_listing_u32(h+16),size=as_listing_u32(h+20);
+        as_section_t *section=&s->sections[k];
+        if(section->out.type!=BO_NOBITS) {
+            if((uint64_t)offset+size>s->result_size) as_error(s,"invalid serialized section bounds");
+            section->out.data=s->result+offset;
+        }
+        if(section->out.type==BO_LLVM_ADDRSIG) {
+            for(as_listing_range_t *r=s->listing_first;r;r=r->next)
+                if(r->section==k && r->record==0) r->size=size;
+        } else if(section->out.size!=size) as_error(s,"serialized section layout changed");
+    }
+    s->listing_bytes=as_allocate(s,BO_MAX_FILE);
+    as_listing_text(s,"{\"schema\":1,\"input\":"); as_listing_string(s,s->input);
+    as_listing_text(s,",\"input_bytes\":%zu,\"source_encoding\":\"byte-codepoints\",\"source\":",s->original_size);
+    as_listing_string(s,(const char *)s->original);
+    as_listing_text(s,",\"ir_source\":");
+    if(s->ir_source) as_listing_string(s,s->ir_source); else as_listing_text(s,"null");
+    as_listing_text(s,",\"ranges\":[");
+    int first=1;
+    for(as_listing_range_t *r=s->listing_first;r;r=r->next) {
+        as_line_t *l=r->record?&s->lines[r->record-1]:NULL;
+        as_section_t *section=&s->sections[r->section];
+        const char *kind=l==NULL?"generated-metadata":l->directive==AS_D_NONE?"instruction":
+            (l->directive==AS_D_P2ALIGN || l->directive==AS_D_BALIGN)?"alignment":
+            section->out.type==BO_NOBITS?"nobits":"data";
+        as_listing_text(s,"%s{\"section\":",first?"":","); first=0;
+        as_listing_string(s,section->out.name);
+        as_listing_text(s,",\"offset\":%u,\"size\":%u,\"line\":%u,\"kind\":",
+            r->offset,r->size,l?l->line:0); as_listing_string(s,kind);
+        as_listing_text(s,",\"operation\":"); as_listing_string(s,l?l->op:"generated");
+        as_listing_text(s,",\"width\":%u,\"origin_line\":%u,\"hex\":",
+            l && l->directive==AS_D_NONE?l->width:0,l && l->directive==AS_D_NONE?l->origin_line:0);
+        if(section->out.type==BO_NOBITS) as_listing_text(s,"null");
+        else {
+            as_listing_text(s,"\"");
+            for(uint32_t i=0;i<r->size;++i) as_listing_text(s,"%02x",section->out.data[r->offset+i]);
+            as_listing_text(s,"\"");
+        }
+        as_listing_text(s,",\"relocations\":["); unsigned n=0;
+        for(uint32_t i=0;i<s->relocation_count;++i) {
+            bo_relocation_t *rel=&s->relocations[i];
+            if(rel->section!=r->section || rel->offset<r->offset || rel->offset>=r->offset+r->size) continue;
+            as_listing_text(s,"%s{\"offset\":%u,\"type\":%u,\"symbol\":",n++?",":"",rel->offset,rel->type);
+            as_listing_string(s,s->symbols[rel->symbol].out.name); as_listing_text(s,"}");
+        }
+        as_listing_text(s,"],\"decision\":");
+        const char *decision="exact directive bytes";
+        if(l && l->directive==AS_D_NONE) {
+            if(l->encoding&4) decision="explicit narrow encoding";
+            else if(l->encoding&2) decision="explicit wide encoding";
+            else if(l->decision) decision=l->decision;
+            else decision="operand-selected encoding";
+        } else if(l && (l->directive==AS_D_P2ALIGN || l->directive==AS_D_BALIGN))
+            decision="exact alignment fill; executable default uses Thumb NOPs";
+        as_listing_string(s,decision); as_listing_text(s,"}");
+    }
+    as_listing_text(s,"],\"decisions\":["); first=1;
+    for(size_t k=0;k<s->line_count;++k) {
+        as_line_t *l=&s->lines[k];
+        if(!l->has_reach && !l->alignment) continue;
+        as_listing_text(s,"%s{\"line\":%u,\"section\":",first?"":",",l->line); first=0;
+        as_listing_string(s,s->sections[l->layout_section].out.name);
+        as_listing_text(s,",\"offset\":%u,\"width\":%u,\"explicit_width\":%u",
+            l->layout_offset,l->width,(l->encoding&4)?2:(l->encoding&2)?4:0);
+        if(l->has_reach)
+            as_listing_text(s,",\"pc_base\":%u,\"displacement\":%lld,\"reach_min\":%lld,\"reach_max\":%lld",
+                l->pc_base,(long long)l->displacement,(long long)l->reach_min,(long long)l->reach_max);
+        if(l->alignment)
+            as_listing_text(s,",\"alignment\":%u,\"required_padding\":%u,\"max_skip_exceeded\":%s",
+                l->alignment,l->padding,l->padding_skipped?"true":"false");
+        as_listing_text(s,"}");
+    }
+    as_listing_text(s,"]}\n");
+}
 int main(int argc, char **argv) {
+    const char *listing=NULL,*ir_source=NULL;
+    while(argc>2 && (!strcmp(argv[1],"--listing") || !strcmp(argv[1],"--ir-source"))) {
+        const char **dest=!strcmp(argv[1],"--listing")?&listing:&ir_source;
+        if(*dest) { fprintf(stderr,"badge-asm: duplicate listing option\n"); return 2; }
+        *dest=argv[2]; argv+=2; argc-=2;
+    }
+    if(ir_source && !listing) { fprintf(stderr,"badge-asm: ir-source requires listing\n"); return 2; }
     if(argc!=4 || strcmp(argv[2],"-o")!=0) {
-        fprintf(stderr,"usage: badge-asm input.s -o output.o\n");
+        fprintf(stderr,"usage: badge-asm [--listing output.json] [--ir-source input.ll] input.s -o output.o\n");
         return argc==2 && strcmp(argv[1],"--help")==0?0:2;
     }
     FILE *f=fopen(argv[1],"rb");
@@ -927,6 +1089,14 @@ int main(int argc, char **argv) {
     if(stat(argv[3],&dest)==0 && st.st_dev==dest.st_dev && st.st_ino==dest.st_ino) {
         fclose(f); fprintf(stderr,"badge-asm: output aliases input\n"); return 1;
     }
+    if(listing) {
+        struct stat a,b;
+        if(!strcmp(listing,argv[1]) || !strcmp(listing,argv[3]) ||
+           (!stat(listing,&a) && ((a.st_dev==st.st_dev && a.st_ino==st.st_ino) ||
+            (!stat(argv[3],&b) && a.st_dev==b.st_dev && a.st_ino==b.st_ino)))) {
+            fclose(f); fprintf(stderr,"badge-asm: listing aliases input/output\n"); return 1;
+        }
+    }
     size_t length=(size_t)st.st_size; unsigned char *input=malloc(length+1);
     if(input==NULL) { fclose(f); fprintf(stderr,"badge-asm: out of memory reading input\n"); return 1; }
     ok=fread(input,1,length,f)==length && fgetc(f)==EOF && !ferror(f); if(fclose(f)!=0) ok=0;
@@ -934,7 +1104,45 @@ int main(int argc, char **argv) {
     assembler_t *s=calloc(1,sizeof(*s));
     if(s==NULL) { free(input); fprintf(stderr,"badge-asm: out of memory creating assembler\n"); return 1; }
     s->input=argv[1]; s->output=argv[3];
-    if(setjmp(s->failure)==0) { as_assemble(s,input,length,&s->result,&s->result_size); ok=host_write_file("badge-asm",argv[3],s->result,s->result_size); }
+    s->listing=listing; s->ir_source=ir_source;
+    if(setjmp(s->failure)==0) {
+        if(listing) {
+            if(as_listing_same_path(s,listing,argv[3]) || as_listing_same_path(s,listing,argv[1]) ||
+               (ir_source && as_listing_same_path(s,listing,ir_source)))
+                as_error(s,"listing aliases an input or object output");
+            if(memchr(input,0,length)) as_error(s,"NUL in listing input");
+            s->original=as_allocate(s,length+1); memcpy(s->original,input,length); s->original_size=length;
+        }
+        if(ir_source) {
+            FILE *ir=fopen(ir_source,"rb"); struct stat ir_stat;
+            if(!ir) as_error(s,"cannot open IR source");
+            if(fstat(fileno(ir),&ir_stat) || !S_ISREG(ir_stat.st_mode) ||
+               ir_stat.st_size<0 || ir_stat.st_size>AS_MAX_SOURCE) {
+                fclose(ir); as_error(s,"IR source exceeds input limit");
+            }
+            struct stat listing_stat;
+            if(stat(listing,&listing_stat)==0 && ir_stat.st_dev==listing_stat.st_dev &&
+               ir_stat.st_ino==listing_stat.st_ino) {
+                fclose(ir); as_error(s,"listing aliases IR source");
+            }
+            if((stat(s->output,&listing_stat)==0 && ir_stat.st_dev==listing_stat.st_dev &&
+                ir_stat.st_ino==listing_stat.st_ino) || as_listing_same_path(s,s->output,ir_source)) {
+                fclose(ir); as_error(s,"object output aliases IR source");
+            }
+            s->ir_lines=1;
+            for(off_t at=0;at<ir_stat.st_size;++at) {
+                int byte=fgetc(ir);
+                if(byte==EOF) { fclose(ir); as_error(s,"short IR source read"); }
+                if(byte=='\n') ++s->ir_lines;
+            }
+            int failed=ferror(ir); if(fclose(ir)) failed=1;
+            if(failed) as_error(s,"cannot read IR source");
+        }
+        as_assemble(s,input,length,&s->result,&s->result_size);
+        if(listing) as_listing_write(s);
+        ok=(!listing || host_write_file("badge-asm",listing,(unsigned char *)s->listing_bytes,s->listing_size)) &&
+            host_write_file("badge-asm",argv[3],s->result,s->result_size);
+    }
     else ok=0;
     if(ok) printf("%s: %zu bytes, %u sections, %u symbols, %u relocations\n",argv[3],s->result_size,s->section_count,s->symbol_count,s->relocation_count);
     free(s->result); as_destroy(s); free(input); return ok?0:1;

@@ -8,6 +8,10 @@ and binary extraction. The root firmware build still defaults to LLVM.
 
 ## Directory layout
 
+See the [RP2350 assembler roadmap](docs/badge-assembler.md) for planned
+instruction coverage, source-address evidence and two-core synchronization
+support.
+
 | Directory | Contents |
 | --- | --- |
 | [src/](src/) | Compiler implementation, target support, object/linker code and production host utilities. |

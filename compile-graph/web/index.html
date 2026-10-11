@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compile Graph</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <div><p class="eyebrow">BADGE-CC / COMPILER EXPLORER</p>
+      <h1>Compile Graph</h1>
+      <p>Follow a program from C source to firmware. Compare the decisions along the way.</p>
+    </div>
+    <div class="project-picker">
+      <label for="project">Project</label><select id="project"></select>
+      <span class="pill">OWNED <span class="versus">vs</span> LLVM</span>
+    </div>
+  </header>
+  <main>
+    <p id="error" role="alert" hidden></p>
+    <section aria-labelledby="images-title">
+      <div class="heading"><h2 id="images-title">Firmware at a glance</h2><span id="capture-date"></span></div>
+      <div id="images" class="image-grid"></div>
+    </section>
+    <section class="workspace" aria-label="Stage comparison">
+      <aside>
+        <label for="module">Translation unit</label><select id="module"></select>
+        <label for="search">Find a function</label>
+        <input id="search" type="search" placeholder="Name or byte delta...">
+        <div class="heading"><h3>Functions</h3><span id="function-count"></span></div>
+        <p class="hint">Ranked by object-code size delta. Names are matched within this module.</p>
+        <div id="functions"></div>
+      </aside>
+      <div class="detail">
+        <div class="heading"><h2 id="selection">Whole translation unit</h2><button id="clear">Whole file</button></div>
+        <div id="pipeline" aria-label="Compiler milestones"></div>
+        <div class="toolbar">
+          <label for="pass">Owned optimizer snapshot</label><select id="pass"></select>
+          <label class="checkbox"><input id="differences" type="checkbox" checked> Mark text unique to each panel</label>
+          <label class="checkbox" id="expanded-control" hidden><input id="expanded-c" type="checkbox" checked> Hide line markers and blank lines</label>
+          <label class="checkbox" id="outline-control" hidden><input id="ast-outline" type="checkbox" checked> Structural AST outline</label>
+        </div>
+        <p id="comparison-note" class="hint"></p>
+        <section id="insights" class="insights" aria-label="Stage insights"></section>
+        <div class="panels">
+          <article><div class="panel-heading owned"><h3>Owned compiler</h3><a id="owned-download">Raw artifact</a></div>
+            <p id="owned-info" class="hint"></p>
+            <label for="owned-block">Discovered region</label><select id="owned-block"></select>
+            <p id="owned-stats" class="stats"></p>
+            <pre id="owned-code" tabindex="0"></pre><button id="owned-more" hidden>Show complete selection</button>
+          </article>
+          <article><div class="panel-heading llvm"><h3>LLVM / Clang</h3><a id="llvm-download">Raw artifact</a></div>
+            <p id="llvm-info" class="hint"></p>
+            <label for="llvm-block">Discovered region</label><select id="llvm-block"></select>
+            <p id="llvm-stats" class="stats"></p>
+            <pre id="llvm-code" tabindex="0"></pre><button id="llvm-more" hidden>Show complete selection</button>
+          </article>
+        </div>
+        <section id="listing" class="insights" aria-label="Assembler listing" hidden></section>
+      </div>
+    </section>
+    <details><summary>How to read this comparison</summary><ul id="limitations"></ul></details>
+    <details><summary>Build configuration and provenance</summary><pre id="configuration"></pre></details>
+  </main>
+  <footer>Static evidence, not an optimization score. Inspect the artifact; test the behavior.</footer>
+</body>
+</html>

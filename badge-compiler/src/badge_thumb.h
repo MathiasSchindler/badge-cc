@@ -81,6 +81,9 @@ static unsigned thumb_branch(assembler_t *s, as_line_t *l, const char *op, int c
             else if(s->final) as_error(s,"CBZ/CBNZ requires same-section target");
         } else if(s->final) as_error(s,"invalid CBZ/CBNZ target");
         if((d<0 || d>126 || (d&1)) && s->final) as_error(s,"CBZ/CBNZ target outside forward 0..126 range");
+        l->has_reach=1; l->pc_base=s->sections[s->current].out.size+4;
+        l->displacement=d; l->reach_min=0; l->reach_max=126;
+        l->decision="fixed narrow compare-and-branch, forward reach checked";
         unsigned imm=(unsigned)d&127;
         return thumb_emit(s,l,2,0xb100|(strcmp(op,"cbnz")==0?0x800:0)|((imm>>6)<<9)|((imm>>1)<<3)|(unsigned)rn,0);
     }
@@ -97,6 +100,10 @@ static unsigned thumb_branch(assembler_t *s, as_line_t *l, const char *op, int c
         else external=1;
     } else if(s->final) as_error(s,"branch requires a symbol plus an absolute addend");
     if(s->it_count) cond=14;
+    l->decision=call?"call requires wide encoding":external?"external target requires wide relocation":
+        (known && (d<(cond==14?-2048:-256) || d>(cond==14?2046:254)))?
+        "wide branch: displacement exceeds narrow reach":wide?"wide form retained by monotonic layout":
+        "narrow branch: displacement fits narrow reach";
     if(call || external || (known && (d<(cond==14?-2048:-256) || d>(cond==14?2046:254)))) wide=1;
     if(s->final && (d&1)) as_error(s,"odd branch displacement");
     if(external) {
@@ -104,6 +111,9 @@ static unsigned thumb_branch(assembler_t *s, as_line_t *l, const char *op, int c
         if(v.value<INT32_MIN+4 || v.value>INT32_MAX) as_error(s,"branch addend out of range");
         d=v.value-4; as_reloc(s,s->sections[s->current].out.size,call?10:30,v.positive);
     }
+    l->has_reach=1; l->pc_base=s->sections[s->current].out.size+4; l->displacement=d;
+    l->reach_min=wide?(cond==14?-(INT64_C(1)<<24):-(INT64_C(1)<<20)):(cond==14?-2048:-256);
+    l->reach_max=wide?(cond==14?(INT64_C(1)<<24)-2:(INT64_C(1)<<20)-2):(cond==14?2046:254);
     if(!wide) return thumb_emit(s,l,2,cond==14?0xe000|((uint32_t)(d/2)&2047):
         0xd000|((unsigned)cond<<8)|((uint32_t)(d/2)&255),0);
     if(cond!=14) {
@@ -134,7 +144,13 @@ static unsigned thumb_loadstore(assembler_t *s, as_line_t *l, const char *op,int
             }
             else if(s->final) as_error(s,"literal must be in the same section");
         } else if(s->final) as_error(s,"invalid literal load expression");
-        if(!wide && rt<8 && offset>=0 && offset<=1020 && offset%4==0)
+        int narrow=!wide && rt<8 && offset>=0 && offset<=1020 && offset%4==0;
+        l->has_reach=1; l->pc_base=(s->sections[s->current].out.size+4)&~3u;
+        l->displacement=offset; l->reach_min=narrow?0:-4095; l->reach_max=narrow?1020:4095;
+        l->decision=narrow?"narrow literal: low register, aligned positive displacement fits":
+            wide?"wide literal form retained or explicitly requested":
+            rt>=8?"wide literal: high destination register":"wide literal: narrow displacement constraint fails";
+        if(narrow)
             return thumb_emit(s,l,2,0x4800|((unsigned)rt<<8)|(unsigned)(offset/4),0);
         if(offset<-4095 || offset>4095) as_error(s,"literal load outside +/-4095 range");
         return thumb_emit(s,l,4,offset<0?0xf85f:0xf8df,((unsigned)rt<<12)|(unsigned)(offset<0?-offset:offset));
@@ -401,7 +417,8 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
                 imm=((uint32_t)value.value>>(upper?16:0))&65535;
             }
         } else imm=as_bounded(s,operand,mov?65535:4095);
-        if(!thumb_data_register((unsigned)rd) || rn==15) as_error(s,"invalid plain-immediate register");
+        if((!thumb_data_register((unsigned)rd) && (mov || rd!=13 || rn!=13)) || rn==15)
+            as_error(s,"invalid plain-immediate register");
         unsigned first=mov?(strcmp(op,"movt")==0?0xf2c0:0xf240):(strcmp(op,"subw")==0?0xf2a0:0xf200);
         width=thumb_emit(s,l,4,first|((imm>>11&1)<<10)|(mov?imm>>12:(unsigned)rn),
             ((imm>>8&7)<<12)|((unsigned)rd<<8)|(imm&255));

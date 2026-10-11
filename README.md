@@ -13,6 +13,7 @@ Optional SDK-based applications explore Bluetooth and Wi-Fi.
 | Directory | Contents |
 | --- | --- |
 | [badge-compiler/](badge-compiler/) | C preprocessing, parsing, optimization, Thumb code generation, assembly and linking, with regression tests and benchmarks. |
+| [compile-graph/](compile-graph/) | Interactive HTML comparisons of both compiler pipelines, from source and ASTs to linked firmware. |
 | [src/](src/) | Badge firmware, shared utilities, hardware drivers, games, radio experiments and host tools. |
 | [docs/](docs/) | Hardware specifications, application guides, protocols and physical test results. |
 | [tests/](tests/) | Additional host-side firmware tests. |

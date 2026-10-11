@@ -255,6 +255,16 @@ test-fast-io: all
 	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" \
 		QEMU_ARM="$(QEMU_ARM)" bash tests/fast-io-oracle.sh
 
+.PHONY: test-assembler-crossover test-assembler-listing
+test-assembler-listing: build/badge-asm
+	node --test tests/assembler-listing.test.mjs
+
+test-assembler-crossover: build/badge-asm build/badge-link build/elf2bin build/badge_asm_test build/badge-asm-layout-budget build/badge-elf-info
+	./build/badge_asm_test
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" bash tests/asm_oracle.sh
+	node --test tests/assembler-crossover.test.mjs tests/assembler-listing.test.mjs
+	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" node --test --test-name-pattern='MOVW/MOVT|final branch widths|literal PC' tests/final_layout_test.mjs
+
 test-tilt-maze: all
 	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" \
 		QEMU_ARM="$(QEMU_ARM)" bash tests/tilt-maze-oracle.sh

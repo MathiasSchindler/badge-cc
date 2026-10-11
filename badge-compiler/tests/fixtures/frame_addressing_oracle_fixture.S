@@ -16,6 +16,13 @@ strb.w r0, [r4], #1
 add.w r0, r0, #256
 addw r0, r0, #4095
 subw r0, r0, #4095
+subw sp, sp, #1044
+addw sp, sp, #1044
+addw sp, sp, #0
+subw sp, sp, #4095
+addw sp, sp, #4095
+addw r0, sp, #4095
+subw lr, sp, #1
 and.w r0, r0, #0x00ff00ff
 orr.w r0, r0, #0x80000000
 eor.w r0, r0, #0x55555555
