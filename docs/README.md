@@ -39,6 +39,9 @@ transfer. No documentation page is blanket authorization to flash.
 
 ## Other badge work
 
+- [Animated nametag](tools/nametag.md): continuous single-core prototype,
+  editable-profile architecture, font reuse, measured optimization and
+  hardware-gated implementation milestones.
 - [RP2350 runtime and qualification](rp2350-runtime.md): clocks, memory,
   report persistence, recovery and the staged multicore qualification gate.
 - [Buttons](button-mapper.md), [touch/peripheral probing](peripheral-probe.md),

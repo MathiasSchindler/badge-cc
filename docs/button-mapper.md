@@ -94,6 +94,22 @@ a controller interrupt and the controls may require a bus-aware probe.
 
 ## Current exclusions
 
+## Rear controls in the continuous nametag
+
+The rear **BOOT/HOME** input is active-low GPIO22, also used by the diagnostic
+button code. The [continuous nametag](tools/nametag.md#boothome-light-sleep-2026-10-12)
+uses a debounced press to enter light sleep and another press to wake.
+RESET alone restarts the application. On the primary badge, the owner verified
+at least 35 seconds of sleep without watchdog reboot, HOME wake, held-button
+handling and RESET restart. This does not qualify sleep current or clock
+shutdown, nor does it change the front-button mapper's scope.
+
+The owner's BOOT/HOME + RESET combination enters BOOTSEL; firmware does not
+repurpose RESET or flash/QSPI. The combination was not retested on the final
+sleep image because the owner preferred to leave it running.
+
+## Current exclusions
+
 The mapper excludes the display/power bank, including a protected analog pin:
 
 ```text

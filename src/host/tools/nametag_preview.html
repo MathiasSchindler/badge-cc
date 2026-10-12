@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nametag design laboratory</title>
+<style>
+  :root { color-scheme: dark; font: 15px system-ui, sans-serif; background: #100e14; color: #ede5d3; }
+  body { margin: 0; padding: 24px; }
+  h1 { margin: 0 0 8px; font-size: 26px; }
+  p { color: #b7ae9e; line-height: 1.5; }
+  .layout { display: grid; grid-template-columns: 280px 1fr; gap: 24px; }
+  .controls { background: #1c1822; padding: 18px; border-radius: 12px; }
+  label { display: block; margin: 12px 0 5px; }
+  input, textarea, select, button { box-sizing: border-box; background: #292330; color: inherit; border: 1px solid #514453; border-radius: 5px; padding: 8px; font: inherit; }
+  input:not([type=checkbox]), textarea, select { width: 100%; }
+  textarea { min-height: 120px; resize: vertical; }
+  button { cursor: pointer; margin: 6px 3px 0 0; }
+  button:hover { border-color: #d3ae55; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; align-items: start; }
+  article { padding: 16px; background: #1c1822; border-radius: 12px; overflow: auto; }
+  article h2 { margin: 0 0 12px; font-size: 18px; }
+  canvas { display: block; width: 320px; height: 240px; image-rendering: pixelated; border: 1px solid #5d4b34; }
+  .enlarged canvas { width: 640px; height: 480px; }
+  .caption { max-width: 420px; font-size: 13px; }
+  .timeline { margin-bottom: 20px; background: #1c1822; padding: 16px; border-radius: 12px; }
+  #error { color: #ff9b8f; white-space: pre-wrap; }
+  #status { color: #dac287; font: 12px ui-monospace, monospace; }
+  small { display: block; color: #b7ae9e; margin-top: 10px; }
+  a { color: #dac287; }
+  @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+</style>
+<h1>Nametag design laboratory</h1>
+<p>320 &times; 240, RGB565. These frames come from the shared C renderer, not a browser recreation.
+  Host preview cadence is not evidence of badge frame rate, clock accuracy, or tear-free transfer.</p>
+<div class="layout">
+  <form class="controls" id="profile">
+    <strong>Runtime profile</strong>
+    <label for="name">Name</label><input id="name" value="Mathias Schindler">
+    <label for="role">Role</label><input id="role" value="Senior Manager Developer Policy">
+    <label for="employer">Employer</label><input id="employer" value="GitHub">
+    <label for="username">GitHub username</label><input id="username" value="@mathiasschindler">
+    <label for="location">Location</label><input id="location" value="Potsdam, Germany">
+    <label for="interests">Interests (one per line, up to eight)</label>
+    <textarea id="interests">CRA
+copyright
+AI
+open data
+FOIA</textarea>
+    <button type="submit">Validate and apply</button>
+    <small>All three layouts must fit. Invalid updates leave the active profile unchanged.
+      The glyph atlas is never regenerated for these edits.</small>
+    <label for="family">Font source</label>
+    <select id="family"><option value="mono">Nametag Mono (Cascadia Mono)</option><option value="code">Nametag Code (Cascadia Code)</option></select>
+    <label for="curve">Text coverage</label>
+    <select id="curve"><option value="natural">Natural 8&times;8 coverage</option><option value="crisp">Contrast-boosted coverage</option></select>
+    <label for="coverage">Stored coverage depth</label>
+    <select id="coverage"><option value="8">8-bit</option><option value="4">Packed 4-bit</option></select>
+    <label><input type="checkbox" id="enlarge"> Enlarge 2&times; (inspect at 1&times; first)</label>
+    <small><a href="/license" target="_blank" rel="noopener">Font copyright and SIL OFL 1.1</a>. Rasterizer: project-owned CC0.
+      No hinting, LCD subpixel rendering, or programming ligatures.</small>
+  </form>
+  <main>
+    <div class="timeline">
+      <button id="play" type="button">Pause</button>
+      <button type="button" data-time="0">Start</button>
+      <button type="button" data-time="5000">Fade begins</button>
+      <button type="button" data-time="5500">Midpoint</button>
+      <button type="button" data-time="6000">Next page</button>
+      <label for="time">Elapsed time: <span id="elapsed">0.00</span> s</label>
+      <input type="range" id="time" min="0" max="72000" step="1" value="0">
+      <div id="status">Preparing native-resolution frames...</div>
+      <div id="error" role="alert"></div>
+    </div>
+    <div class="cards" id="cards">
+      <article><h2>A &middot; Editorial halftone</h2><canvas id="A" width="320" height="240"></canvas>
+        <p class="caption">Large stationary name and title. A one-second dissolve rotates username, location and grouped interests.</p><small id="infoA"></small></article>
+      <article><h2>B &middot; Identity + topic cards</h2><canvas id="B" width="320" height="240"></canvas>
+        <p class="caption">Stationary name and username. Role, location and topics dissolve with an eight-pixel, fractional-position vertical transition.</p><small id="infoB"></small></article>
+      <article><h2>C &middot; Quiet identity</h2><canvas id="C" width="320" height="240"></canvas>
+        <p class="caption">Stationary name, title and username. A quieter right-edge pattern accompanies a small location/interests footer.</p><small id="infoC"></small></article>
+    </div>
+  </main>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const variants = ['A', 'B', 'C'];
+const contexts = Object.fromEntries(variants.map(id => [id, $(id).getContext('2d')]));
+let activeProfile, activeFamily = 'mono', activeCoverage = 8, playing = true, baseTime = 0, started = performance.now();
+let busy = false, lastFrame = -1000, generation = 0, dirty = true, metadata;
+function formProfile() {
+  return Object.fromEntries(['name','role','employer','username','location'].map(key => [key, $(key).value])
+    .concat([['interests', $('interests').value === '' ? [] : $('interests').value.split('\n')]]));
+}
+function now() { return (baseTime + (playing ? performance.now() - started : 0)) % 4294967296; }
+function seek(time) { generation++; baseTime = time; started = performance.now(); dirty = true; }
+function info(data) {
+  metadata = data;
+  $('time').max = Math.max(...data.layouts.map(layout => layout.loop_ms));
+  for (const layout of data.layouts) {
+    $('info' + layout.variant).textContent = `${layout.name_px}px name / ${layout.name_lines} lines / ${layout.pages} pages / ${(layout.loop_ms / 1000)}s complete loop`;
+  }
+}
+async function validate(profile, family, coverage = activeCoverage) {
+  const response = await fetch('/validate', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({profile, family, coverage}) });
+  if (!response.ok) throw Error(await response.text());
+  return response.json();
+}
+$('profile').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    const profile = formProfile(), family = $('family').value, coverage = Number($('coverage').value);
+    const data = await validate(profile, family, coverage);
+    activeProfile = profile; activeFamily = family; activeCoverage = coverage; generation++; info(data);
+    $('error').textContent = ''; seek(0);
+  } catch (error) { $('error').textContent = error.message; }
+});
+$('family').addEventListener('change', async () => {
+  try {
+    const data = await validate(activeProfile, $('family').value);
+    activeFamily = $('family').value; generation++; info(data); dirty = true;
+    $('error').textContent = '';
+  } catch (error) { $('family').value = activeFamily; $('error').textContent = error.message; }
+});
+$('curve').addEventListener('change', () => { generation++; dirty = true; });
+$('coverage').addEventListener('change', async () => {
+  try {
+    const coverage = Number($('coverage').value);
+    const data = await validate(activeProfile, activeFamily, coverage);
+    activeCoverage = coverage; generation++; info(data); dirty = true; $('error').textContent = '';
+  } catch (error) { $('coverage').value = String(activeCoverage); $('error').textContent = error.message; }
+});
+$('enlarge').addEventListener('change', () => $('cards').classList.toggle('enlarged', $('enlarge').checked));
+$('play').addEventListener('click', () => {
+  baseTime = now(); started = performance.now(); playing = !playing;
+  generation++; $('play').textContent = playing ? 'Pause' : 'Play'; dirty = true;
+});
+$('time').addEventListener('input', () => {
+  playing = false; $('play').textContent = 'Play'; seek(Number($('time').value));
+});
+document.querySelectorAll('[data-time]').forEach(button => button.addEventListener('click', () => {
+  playing = false; $('play').textContent = 'Play'; seek(Number(button.dataset.time));
+}));
+async function frame(time) {
+  const version = generation, profile = activeProfile, family = activeFamily, coverage = activeCoverage, curve = $('curve').value;
+  const began = performance.now();
+  const frames = await Promise.all(variants.map(async variant => {
+    const response = await fetch('/frame', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({variant, time, family, curve, profile, coverage})});
+    if (!response.ok) throw Error(await response.text());
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length !== 320 * 240 * 3) throw Error('Invalid native RGB frame length');
+    const image = contexts[variant].createImageData(320,240);
+    for (let i = 0, j = 0; i < bytes.length; i += 3, j += 4) {
+      image.data[j] = bytes[i]; image.data[j+1] = bytes[i+1]; image.data[j+2] = bytes[i+2]; image.data[j+3] = 255;
+    }
+    return {variant, image};
+  }));
+  if (version !== generation) return;
+  frames.forEach(({variant,image}) => contexts[variant].putImageData(image,0,0));
+  $('elapsed').textContent = (time / 1000).toFixed(2);
+  if (metadata) $('time').value = time % (Number($('time').max) + 1);
+  $('status').textContent = `${metadata?.coverage_bits ?? '?'}-bit glyphs -> RGB565 | 3 frames in ${(performance.now()-began).toFixed(1)} host ms | target 30 Hz, stale frames skipped`;
+}
+async function tick(timestamp) {
+  if (activeProfile && !busy && (playing || dirty) && timestamp - lastFrame >= 1000/30) {
+    busy = true; dirty = false; lastFrame = timestamp;
+    try { await frame(Math.floor(now())); }
+    catch (error) { $('error').textContent = error.message; playing = false; $('play').textContent = 'Play'; }
+    finally { busy = false; }
+  }
+  requestAnimationFrame(tick);
+}
+fetch('/info').then(response => {
+  if (!response.ok) throw Error('Could not read renderer metadata');
+  return response.json();
+}).then(data => {
+  activeCoverage = data.coverage_bits;
+  $('coverage').replaceChildren(...data.available_coverage.map(bits => {
+    const option = document.createElement('option'); option.value = bits; option.textContent = bits === 4 ? 'Packed 4-bit' : '8-bit'; return option;
+  }));
+  $('coverage').value = String(activeCoverage);
+  return validate(formProfile(), activeFamily);
+}).then(data => {
+  activeProfile = formProfile(); info(data); started = performance.now(); requestAnimationFrame(tick);
+}).catch(error => $('error').textContent = error.message);
+</script>
+</html>

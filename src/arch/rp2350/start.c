@@ -9,6 +9,9 @@ extern uint32_t __StackTop;
 
 void bare_main(void);
 void bare_reset(void);
+#ifdef BARE_GPIO_WAKE_IRQ
+void bare_gpio_wake_irq(void);
+#endif
 
 static void bare_halt(void) __attribute__((noreturn));
 static void bare_halt(void) {
@@ -35,6 +38,9 @@ void (* const bare_vectors[])(void) = {
     0,
     bare_halt,
     bare_halt,
+#ifdef BARE_GPIO_WAKE_IRQ
+    [16u + 21u] = bare_gpio_wake_irq,
+#endif
 };
 
 void bare_reset(void) {

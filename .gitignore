@@ -3,7 +3,8 @@ build/
 ssid-data/
 experimental/
 pimoroni/
-vendor/
+vendor/*
+!vendor/cascadia-code/
 .venv/
 .vscode/
 __pycache__/

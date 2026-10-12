@@ -25,6 +25,11 @@
 #define LIVE_USB_UDP_PAGE 0x5fu
 #define LIVE_USB_UDP_FREEZE 0x60u
 #define LIVE_USB_PACKET 64u
+#ifdef LIVE_USB_NAMETAG_M2
+#include "../shared/nametag_measure.h"
+#define LIVE_USB_M2_SUBMIT 0x63u
+#define LIVE_USB_M2_PAGE 0x64u
+#endif
 #ifdef LIVE_USB_COMPILER
 #include "../tools/compiler_test/suite.h"
 #define LIVE_USB_COMPILER_SUBMIT 0x61u
@@ -83,6 +88,12 @@ typedef struct {
     uint32_t udp_generation;
     uint8_t udp_report[64];
     uint8_t udp_detail[512];
+#ifdef LIVE_USB_NAMETAG_M2
+    uint8_t m2_out, m2_pending, m2_ready, m2_valid;
+    uint32_t m2_generation;
+    uint8_t m2_nonce[16];
+    uint32_t m2_words[NAMETAG_M2_WORDS];
+#endif
 #ifdef LIVE_USB_COMPILER
     uint8_t compiler_out, compiler_pending, compiler_ready, compiler_valid;
     uint32_t compiler_generation;

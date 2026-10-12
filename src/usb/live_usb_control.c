@@ -17,6 +17,12 @@ static void cancel_udp(live_usb_control_t *control) {
     if (++control->udp_generation==0u) ++control->udp_generation;
 }
 
+#ifdef LIVE_USB_NAMETAG_M2
+static void cancel_m2(live_usb_control_t *control) {
+    control->m2_out = control->m2_pending = control->m2_ready = control->m2_valid = 0u;
+    if (++control->m2_generation == 0u) ++control->m2_generation;
+}
+#endif
 #ifdef LIVE_USB_COMPILER
 static void cancel_compiler(live_usb_control_t *control) {
     control->compiler_out = control->compiler_pending = control->compiler_ready = control->compiler_valid = 0u;
@@ -46,6 +52,9 @@ static void stall(live_usb_control_t *control) {
     control->configuration_pending = 0u;
     control->reboot_pending = 0u;
     control->probe_pending = 0u;
+#ifdef LIVE_USB_NAMETAG_M2
+    control->m2_out = control->m2_pending = 0u;
+#endif
 #ifdef LIVE_USB_COMPILER
     control->compiler_out = control->compiler_pending = 0u;
 #endif
@@ -86,6 +95,9 @@ static void string_descriptor(live_usb_control_t *control, const char *text,
 
 void live_usb_control_reset(live_usb_control_t *control) {
     cancel_udp(control);
+#ifdef LIVE_USB_NAMETAG_M2
+    cancel_m2(control);
+#endif
 #ifdef LIVE_USB_COMPILER
     cancel_compiler(control);
 #endif
@@ -117,6 +129,9 @@ void live_usb_control_init(live_usb_control_t *control, uint32_t build_id,
     control->rejected = 0u;
     control->probe_generation = 0u;
     control->udp_generation = 0u;
+#ifdef LIVE_USB_NAMETAG_M2
+    control->m2_generation = 0u;
+#endif
 #ifdef LIVE_USB_COMPILER
     control->compiler_generation = 0u;
 #endif
@@ -180,6 +195,14 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
     } else if (type == 1u && request == 11u && value == 0u && index == 0u &&
                length == 0u && control->configured) {
         status_in(control);
+#ifdef LIVE_USB_NAMETAG_M2
+    } else if (type == 0xc0u && request == LIVE_USB_M2_PAGE && control->configured &&
+               value < NAMETAG_M2_PAGES && index == 0u && length == 64u && control->m2_valid) {
+        uint8_t page[64];
+        if (nametag_m2_page(page, control->m2_words, control->build_id, control->m2_nonce, value))
+            send(control, page, 64u, length);
+        else stall(control);
+#endif
 #ifdef LIVE_USB_UDP
     } else if (type==0xc0u && request==LIVE_USB_UDP_PAGE && control->configured &&
                value<WIFI_UDP_DETAIL_PAGES && index==0u && length==64u &&
@@ -203,6 +226,15 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
         send(control, control->compiler_records + value * 64u, 64u, length);
 #endif
     } else if (control->configured && value == 0u && index == 0u) {
+#ifdef LIVE_USB_NAMETAG_M2
+        if (type == 0x40u && request == LIVE_USB_M2_SUBMIT && length == 64u) {
+            cancel_m2(control);
+            control->m2_out = 1u;
+            control->length = 64u;
+            control->action = USB_ACTION_OUT;
+            control->phase = USB_PHASE_DATA_OUT;
+        } else
+#endif
 #ifdef LIVE_USB_COMPILER
         if (type == 0x40u && request == LIVE_USB_COMPILER_SUBMIT && length == 64u) {
             cancel_compiler(control);
@@ -301,6 +333,9 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
         }
         if (control->configuration_pending) {
             cancel_udp(control);
+#ifdef LIVE_USB_NAMETAG_M2
+            cancel_m2(control);
+#endif
 #ifdef LIVE_USB_COMPILER
             cancel_compiler(control);
 #endif
@@ -316,6 +351,12 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
             control->probe_pending = 0u;
             control->probe_ready = 1u;
         }
+#ifdef LIVE_USB_NAMETAG_M2
+        if (control->m2_pending) {
+            control->m2_pending = 0u;
+            control->m2_ready = 1u;
+        }
+#endif
         if (control->udp_pending) {
             control->udp_pending=0u;
             control->udp_ready=1u;
@@ -332,6 +373,20 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
         }
     } else if (control->phase == USB_PHASE_DATA_OUT && !in &&
                length == USB_REPORT_WIRE_SIZE && data != 0) {
+#ifdef LIVE_USB_NAMETAG_M2
+        if (control->m2_out) {
+            control->m2_out = 0u;
+            if (usb_report_check_request_for_test(data, length, control->build_id,
+                                                  NAMETAG_M2_TEST) != USB_RECORD_OK) {
+                stall(control);
+                return;
+            }
+            badger_bytes_copy(control->m2_nonce, data + 16u, 16u);
+            control->m2_pending = 1u;
+            status_in(control);
+            return;
+        }
+#endif
 #ifdef LIVE_USB_COMPILER
         if (control->compiler_out) {
             control->compiler_out = 0u;

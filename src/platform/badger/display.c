@@ -43,6 +43,8 @@
 
 #define ST7789_SWRESET 0x01u
 #define ST7789_SLPOUT 0x11u
+#define ST7789_SLPIN 0x10u
+#define ST7789_DISPOFF 0x28u
 #define ST7789_INVON 0x21u
 #define ST7789_DISPON 0x29u
 #define ST7789_CASET 0x2au
@@ -77,12 +79,16 @@ static void delay_cycles(uint32_t cycles) {
 #endif
 
 static void gpio_put(uint32_t gpio, uint32_t value) {
+#ifdef BADGER_DISPLAY_GPIO_PUT
+    BADGER_DISPLAY_GPIO_PUT(gpio, value);
+#else
     if (gpio < 32u) {
         *(value ? &SIO_GPIO_OUT_SET : &SIO_GPIO_OUT_CLR) = 1u << gpio;
     } else {
         *(value ? &SIO_GPIO_HI_OUT_SET : &SIO_GPIO_HI_OUT_CLR) =
             1u << (gpio - 32u);
     }
+#endif
 }
 
 static void gpio_output(uint32_t gpio, uint32_t value) {
@@ -97,6 +103,9 @@ static void gpio_output(uint32_t gpio, uint32_t value) {
 }
 
 static void lcd_write_byte(uint8_t value) {
+#ifdef BADGER_DISPLAY_WRITE_BYTE
+    BADGER_DISPLAY_WRITE_BYTE(value);
+#else
     SIO_GPIO_HI_OUT_CLR = LCD_DATA_MASK;
     SIO_GPIO_HI_OUT_SET = value;
 #ifdef BADGER_DISPLAY_SDK_TIMING
@@ -110,6 +119,7 @@ static void lcd_write_byte(uint8_t value) {
     __asm__ volatile ("nop\nnop\nnop");
     SIO_GPIO_OUT_SET = 1u << LCD_WR;
     __asm__ volatile ("nop\nnop");
+#endif
 #endif
 }
 
@@ -262,4 +272,16 @@ void badger_display_set_tearing(int enabled) {
     static const uint8_t vertical_only[] = {0u};
     if (enabled) lcd_command(0x35u, vertical_only, sizeof(vertical_only));
     else lcd_command0(0x34u);
+}
+
+void badger_display_sleep(void) {
+    gpio_put(LCD_BACKLIGHT, 0u);
+    lcd_command0(ST7789_DISPOFF);
+    lcd_command0(ST7789_SLPIN);
+    init_delay(0, 0);
+}
+
+void badger_display_wake(void) {
+    lcd_command0(ST7789_SLPOUT);
+    init_delay(0, 0);
 }

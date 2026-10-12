@@ -19,5 +19,8 @@ void badger_display_write_pixels(const uint16_t *pixels, uint32_t count);
 void badger_display_end_update(void);
 void badger_display_end(void);
 void badger_display_set_tearing(int enabled);
+/* Require a running timer. Wake leaves output/backlight off until display_end. */
+void badger_display_sleep(void);
+void badger_display_wake(void);
 
 #endif

@@ -1,4 +1,5 @@
 BUILD_DIR := build
+.DEFAULT_GOAL := all
 COMPILER_TEST_DIR := src/tools/compiler_test
 TARGET_DIR := $(BUILD_DIR)/universe26
 FIRMWARE_DIR := $(TARGET_DIR)/firmware
@@ -169,6 +170,153 @@ RP2350_LDFLAGS := \
 .PHONY: usb-wifi-link test-wifi-link
 .PHONY: usb-wifi-udp test-wifi-udp
 .PHONY: tilt-maze test-tilt-maze
+.PHONY: test-nametag-control nametag-assets nametag-stills nametag-preview nametag-preview-binary test-nametag test-nametag-target test-nametag-preview
+
+NAMETAG_COVERAGE ?= 8
+ifneq ($(filter $(NAMETAG_COVERAGE),4 8),$(NAMETAG_COVERAGE))
+$(error NAMETAG_COVERAGE must be 4 or 8)
+endif
+FONTRENDER_DIR := $(SHARED_DIR)/fontrender
+FONTRENDER_SOURCES := $(addprefix $(FONTRENDER_DIR)/,fr_platform.c fr_ttf.c fr_raster.c font_backend_truetype.c)
+FONTRENDER_HEADERS := $(wildcard $(FONTRENDER_DIR)/*.h $(FONTRENDER_DIR)/fontrender/*.h)
+NAMETAG_FONT_FILES := $(addprefix vendor/cascadia-code/,CascadiaMono-Regular.ttf CascadiaMono-Bold.ttf CascadiaCode-Regular.ttf CascadiaCode-Bold.ttf)
+NAMETAG_SOURCES := $(SHARED_DIR)/bitmap_font.c $(SHARED_DIR)/nametag.c $(PLATFORM_DIR)/graphics.c
+NAMETAG_RENDER_FLAGS := $(RP2350_CFLAGS) -O2
+NAMETAG_HEADERS := $(SHARED_DIR)/bitmap_font.h $(SHARED_DIR)/nametag.h $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h
+NAMETAG_FRAME_C := $(SHARED_DIR)/frame_diff.c
+NAMETAG_FRAME_H := $(SHARED_DIR)/frame_diff.h
+NAMETAG_ASSET_DIR := $(BUILD_DIR)/nametag/assets-$(NAMETAG_COVERAGE)
+NAMETAG_FONT_C := $(NAMETAG_ASSET_DIR)/nametag_fonts.c
+NAMETAG_FONT_H := $(NAMETAG_ASSET_DIR)/nametag_fonts.h
+NAMETAG_FONT_STAMP := $(NAMETAG_ASSET_DIR)/generated.stamp
+NAMETAG_PREVIEW := $(HOST_TOOLS_DIR)/nametag_preview-$(NAMETAG_COVERAGE)
+NAMETAG_TEST := $(HOST_TOOLS_DIR)/nametag_test-$(NAMETAG_COVERAGE)
+NAMETAG_HOST_FLAGS := -std=c11 -Wall -Wextra -Werror -O2 -iquote $(SHARED_DIR)
+NAMETAG_TARGET_DIR := $(BUILD_DIR)/nametag/target-$(NAMETAG_COVERAGE)
+NAMETAG_TARGET_OBJS := $(addprefix $(NAMETAG_TARGET_DIR)/,bitmap_font.o nametag.o frame_diff.o graphics.o nametag_fonts.o nametag_target.o)
+NAMETAG_M2_DIR := $(BUILD_DIR)/nametag/m2-$(NAMETAG_COVERAGE)
+NAMETAG_M2_NAMES := start picobin display graphics diagnostics_logic bootrom_reboot nametag_clock \
+	bitmap_font nametag frame_diff nametag_fonts nametag_measure usb_report live_usb_control live_usb_hw wifi_trace nametag_m2
+NAMETAG_M2_OBJS := $(addprefix $(NAMETAG_M2_DIR)/,$(addsuffix .o,$(NAMETAG_M2_NAMES)))
+NAMETAG_M2_INPUTS := $(TOOLS_DIR)/nametag_m2.c $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/nametag_measure.h \
+	$(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h $(USB_LIVE_BUILD_INPUTS) $(NAMETAG_SOURCES) \
+	$(NAMETAG_HEADERS) $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(HOST_TOOLS_SRC_DIR)/nametag_m2_host.c \
+	$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h
+BADGE_NAMETAG_DIR := $(BUILD_DIR)/nametag/app-$(NAMETAG_COVERAGE)
+BADGE_NAMETAG_OBJS := $(addprefix $(NAMETAG_M2_DIR)/,picobin.o display.o graphics.o \
+	bootrom_reboot.o nametag_clock.o bitmap_font.o nametag.o frame_diff.o nametag_fonts.o diagnostics_logic.o) \
+	$(addprefix $(BADGE_NAMETAG_DIR)/,start.o home.o badge-nametag.o)
+
+.PHONY: badge-nametag
+badge-nametag: $(UF2_DIR)/badge-nametag.uf2
+	@printf 'Continuous nametag, Mono B, natural coverage: %s\n' $<
+
+$(BADGE_NAMETAG_DIR):
+	mkdir -p $@
+
+$(BADGE_NAMETAG_DIR)/start.o: $(ARCH_DIR)/start.c | $(BADGE_NAMETAG_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -DBARE_GPIO_WAKE_IRQ -c $< -o $@
+
+$(BADGE_NAMETAG_DIR)/home.o: $(PLATFORM_DIR)/home.c $(PLATFORM_DIR)/home.h | $(BADGE_NAMETAG_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -fstack-usage -c $< -o $@
+
+$(BADGE_NAMETAG_DIR)/badge-nametag.o: $(TOOLS_DIR)/badge-nametag.c $(NAMETAG_HEADERS) \
+	$(NAMETAG_FRAME_H) $(NAMETAG_FONT_H) $(PLATFORM_DIR)/display.h \
+	$(PLATFORM_DIR)/home.h $(TOOLS_DIR)/diagnostics_logic.h \
+	$(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(BADGE_NAMETAG_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -I$(PLATFORM_DIR) -I$(NAMETAG_ASSET_DIR) -fstack-usage -c $< -o $@
+
+$(BADGE_NAMETAG_DIR)/badge-nametag.elf: $(BADGE_NAMETAG_OBJS) $(ARCH_DIR)/memmap_flash.ld
+	$(RP2350_CC) $(RP2350_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
+		-T$(ARCH_DIR)/memmap_flash.ld -Wl,-Map=$(BADGE_NAMETAG_DIR)/badge-nametag.map $(BADGE_NAMETAG_OBJS) -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+	$(RP2350_SIZE) $@
+
+$(UF2_DIR)/badge-nametag.uf2: $(BADGE_NAMETAG_DIR)/badge-nametag.elf $(BIN2UF2) | $(UF2_DIR)
+	$(RP2350_OBJCOPY) -O binary $< $(BADGE_NAMETAG_DIR)/badge-nametag.bin
+	$(BIN2UF2) $(BADGE_NAMETAG_DIR)/badge-nametag.bin $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
+
+$(HOST_TOOLS_DIR)/home_test: src/host/tests/home_test.c $(PLATFORM_DIR)/home.c $(PLATFORM_DIR)/home.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined $< -o $@
+
+.PHONY: test-home
+test-home: $(HOST_TOOLS_DIR)/home_test
+	$(HOST_TOOLS_DIR)/home_test
+
+.PHONY: nametag-m2 test-nametag-m2
+nametag-m2: $(UF2_DIR)/nametag_m2.uf2 $(HOST_TOOLS_DIR)/nametag_m2_host
+	@printf 'M2 diagnostic only, bounded recovery, selected 8-bit Mono B: %s\n' $(UF2_DIR)/nametag_m2.uf2
+
+$(NAMETAG_M2_DIR):
+	mkdir -p $@
+
+$(NAMETAG_M2_DIR)/nametag_m2_build.h: $(NAMETAG_M2_INPUTS) Makefile | $(NAMETAG_M2_DIR)
+	@test "$(NAMETAG_COVERAGE)" = 8 || { echo 'M2 requires the accepted 8-bit baseline'; exit 1; }
+	@id=$$(shasum -a 256 $(NAMETAG_M2_INPUTS) Makefile | shasum -a 256 | cut -c1-8); \
+	printf '#define USB_REPORT_BUILD_ID 0x%su\n' "$$id" > $@
+
+$(NAMETAG_M2_DIR)/start.o: $(ARCH_DIR)/start.c | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/picobin.o: $(ARCH_DIR)/picobin.S | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+
+$(NAMETAG_M2_DIR)/display.o: $(PLATFORM_DIR)/display.c $(PLATFORM_DIR)/display.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/graphics.o: $(PLATFORM_DIR)/graphics.c $(PLATFORM_DIR)/graphics.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/diagnostics_logic.o: $(TOOLS_DIR)/diagnostics_logic.c $(TOOLS_DIR)/diagnostics_logic.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/bootrom_reboot.o: $(ARCH_DIR)/bootrom_reboot.c $(ARCH_DIR)/bootrom_reboot.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/nametag_clock.o: $(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/bitmap_font.o: $(SHARED_DIR)/bitmap_font.c $(NAMETAG_HEADERS) | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+$(NAMETAG_M2_DIR)/nametag.o: $(SHARED_DIR)/nametag.c $(NAMETAG_HEADERS) | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+$(NAMETAG_M2_DIR)/frame_diff.o: $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+$(NAMETAG_M2_DIR)/nametag_fonts.o: $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -I$(NAMETAG_ASSET_DIR) -c $< -o $@
+$(NAMETAG_M2_DIR)/nametag_measure.o: $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/nametag_measure.h $(SHARED_DIR)/usb_report.h $(SHARED_DIR)/bytes.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/usb_report.o: $(SHARED_DIR)/usb_report.c $(SHARED_DIR)/usb_report.h $(SHARED_DIR)/bytes.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/wifi_trace.o: $(RADIO_DIR)/wifi_trace.c $(RADIO_DIR)/wifi_trace.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/live_usb_control.o: src/usb/live_usb_control.c src/usb/live_usb.h $(SHARED_DIR)/nametag_measure.h $(SHARED_DIR)/bytes.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -c $< -o $@
+$(NAMETAG_M2_DIR)/live_usb_hw.o: src/usb/live_usb_hw.c src/usb/live_usb_hw.h src/usb/live_usb.h $(SHARED_DIR)/nametag_measure.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -c $< -o $@
+$(NAMETAG_M2_DIR)/nametag_m2.o: $(TOOLS_DIR)/nametag_m2.c $(NAMETAG_M2_INPUTS) $(NAMETAG_M2_DIR)/nametag_m2_build.h | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -I$(PLATFORM_DIR) -I$(NAMETAG_ASSET_DIR) -I$(NAMETAG_M2_DIR) -fstack-usage -c $< -o $@
+
+$(NAMETAG_M2_DIR)/nametag_m2.elf: $(NAMETAG_M2_OBJS) $(ARCH_DIR)/memmap_report.ld
+	$(RP2350_CC) $(RP2350_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
+		-T$(ARCH_DIR)/memmap_report.ld -Wl,-Map=$(NAMETAG_M2_DIR)/nametag_m2.map $(NAMETAG_M2_OBJS) -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+	$(RP2350_SIZE) $@
+
+$(UF2_DIR)/nametag_m2.uf2: $(NAMETAG_M2_DIR)/nametag_m2.elf $(BIN2UF2) | $(UF2_DIR)
+	$(RP2350_OBJCOPY) -O binary $< $(NAMETAG_M2_DIR)/nametag_m2.bin
+	$(BIN2UF2) $(NAMETAG_M2_DIR)/nametag_m2.bin $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
+
+$(HOST_TOOLS_DIR)/nametag_m2_host: $(HOST_TOOLS_SRC_DIR)/nametag_m2_host.c $(HOST_TOOLS_SRC_DIR)/usb_live_transport.h $(NAMETAG_M2_DIR)/nametag_m2_build.h $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c src/usb/live_usb.h | $(HOST_TOOLS_DIR)
+	@pkg-config --exists libusb-1.0 || { echo 'M2 collector requires the existing libusb-1.0 host dependency'; exit 1; }
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -DLIVE_USB_NAMETAG_M2 -I$(NAMETAG_M2_DIR) \
+		$$(pkg-config --cflags libusb-1.0) $(HOST_TOOLS_SRC_DIR)/nametag_m2_host.c \
+		$(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c \
+		$$(pkg-config --libs libusb-1.0) -o $@
+
+$(HOST_TOOLS_DIR)/nametag_m2_test: src/host/tests/nametag_m2_test.c $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/nametag_measure.h \
+		src/usb/live_usb_control.c src/usb/live_usb.h $(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_trace.c $(TOOLS_DIR)/diagnostics_logic.c | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined -DLIVE_USB_NAMETAG_M2 \
+		src/host/tests/nametag_m2_test.c $(SHARED_DIR)/nametag_measure.c src/usb/live_usb_control.c \
+		$(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_trace.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
+
+test-nametag-m2: $(HOST_TOOLS_DIR)/nametag_m2_test
+	$(HOST_TOOLS_DIR)/nametag_m2_test
+	node --test src/host/tests/nametag_m2_campaign_test.mjs
 
 all: $(UF2S)
 	@printf '%s\n' $(addprefix "UF2: ",$(UF2S))
@@ -204,6 +352,97 @@ usb-live-report: $(USB_LIVE_UF2) $(HOST_TOOLS_DIR)/usb_live_host
 test-live-usb: $(HOST_TOOLS_DIR)/live_usb_test
 	$(HOST_TOOLS_DIR)/live_usb_test
 	bash -n src/host/tools/usb_live_run.sh
+
+test-nametag-control:
+	node --test src/host/tests/nametag_control_test.mjs
+
+nametag-assets: $(NAMETAG_FONT_STAMP)
+
+$(HOST_TOOLS_DIR)/nametag_font_compile: $(HOST_TOOLS_SRC_DIR)/nametag_font_compile.c $(HOST_TOOLS_SRC_DIR)/font_platform.c $(HOST_TOOLS_SRC_DIR)/font_platform.h $(FONTRENDER_SOURCES) $(FONTRENDER_HEADERS) $(NAMETAG_HEADERS) $(SHARED_DIR)/bitmap_font.c | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -DFR_RASTER_DISABLE_SIMD=1 -I$(FONTRENDER_DIR) \
+		$(HOST_TOOLS_SRC_DIR)/nametag_font_compile.c $(HOST_TOOLS_SRC_DIR)/font_platform.c \
+		$(FONTRENDER_SOURCES) $(SHARED_DIR)/bitmap_font.c -lm -o $@
+
+$(HOST_TOOLS_DIR)/nametag_font_compile_sanitized: $(HOST_TOOLS_SRC_DIR)/nametag_font_compile.c $(HOST_TOOLS_SRC_DIR)/font_platform.c $(HOST_TOOLS_SRC_DIR)/font_platform.h $(FONTRENDER_SOURCES) $(FONTRENDER_HEADERS) $(NAMETAG_HEADERS) $(SHARED_DIR)/bitmap_font.c | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined -DFR_RASTER_DISABLE_SIMD=1 -I$(FONTRENDER_DIR) \
+		$(HOST_TOOLS_SRC_DIR)/nametag_font_compile.c $(HOST_TOOLS_SRC_DIR)/font_platform.c \
+		$(FONTRENDER_SOURCES) $(SHARED_DIR)/bitmap_font.c -lm -o $@
+
+$(HOST_TOOLS_DIR)/font_core_test: src/host/tests/font_core_test.c $(HOST_TOOLS_SRC_DIR)/font_platform.c $(HOST_TOOLS_SRC_DIR)/font_platform.h $(FONTRENDER_SOURCES) $(FONTRENDER_HEADERS) | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined -DFR_RASTER_DISABLE_SIMD=1 -I$(FONTRENDER_DIR) \
+		src/host/tests/font_core_test.c $(HOST_TOOLS_SRC_DIR)/font_platform.c $(FONTRENDER_SOURCES) -lm -o $@
+
+$(NAMETAG_FONT_STAMP): $(HOST_TOOLS_DIR)/nametag_font_compile $(NAMETAG_FONT_FILES) vendor/cascadia-code/LICENSE $(NAMETAG_HEADERS)
+	mkdir -p $(NAMETAG_ASSET_DIR)
+	$(HOST_TOOLS_DIR)/nametag_font_compile $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_FONT_FILES) $(NAMETAG_COVERAGE) vendor/cascadia-code/LICENSE
+	touch $@
+
+$(NAMETAG_FONT_C) $(NAMETAG_FONT_H): $(NAMETAG_FONT_STAMP)
+	@test -f $@ || { echo "Missing generated font output; remove $(NAMETAG_FONT_STAMP) and rebuild"; exit 1; }
+
+$(NAMETAG_PREVIEW): $(HOST_TOOLS_SRC_DIR)/nametag_preview.c $(NAMETAG_SOURCES) $(NAMETAG_HEADERS) $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -I$(NAMETAG_ASSET_DIR) \
+		$(HOST_TOOLS_SRC_DIR)/nametag_preview.c $(NAMETAG_SOURCES) $(NAMETAG_FONT_C) -o $@
+
+$(NAMETAG_TEST): src/host/tests/nametag_test.c $(NAMETAG_SOURCES) $(NAMETAG_HEADERS) $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined -I$(NAMETAG_ASSET_DIR) \
+		src/host/tests/nametag_test.c $(NAMETAG_SOURCES) $(NAMETAG_FRAME_C) $(NAMETAG_FONT_C) -o $@
+
+test-nametag: $(NAMETAG_TEST) $(HOST_TOOLS_DIR)/font_core_test $(HOST_TOOLS_DIR)/nametag_font_compile_sanitized
+	$(NAMETAG_TEST)
+	$(HOST_TOOLS_DIR)/font_core_test
+	NAMETAG_GENERATOR=$(abspath $(HOST_TOOLS_DIR)/nametag_font_compile_sanitized) node --test src/host/tests/nametag_assets_test.mjs
+
+nametag-stills: $(NAMETAG_PREVIEW)
+	mkdir -p $(BUILD_DIR)/nametag/preview-$(NAMETAG_COVERAGE)
+	@for variant in A B C; do for family in mono code; do for curve in natural crisp; do \
+		for time in 0 5500 6000; do \
+			$(NAMETAG_PREVIEW) --still $$variant $$time $$family $$curve \
+				$(BUILD_DIR)/nametag/preview-$(NAMETAG_COVERAGE)/$$variant-$$family-$$curve-$$time.ppm || exit; \
+		done; done; done; done
+	$(NAMETAG_PREVIEW) --info
+
+nametag-preview-binary: $(NAMETAG_PREVIEW)
+
+nametag-preview:
+	$(MAKE) NAMETAG_COVERAGE=8 nametag-preview-binary
+	$(MAKE) NAMETAG_COVERAGE=4 nametag-preview-binary
+	node $(HOST_TOOLS_SRC_DIR)/nametag_preview_server.mjs $(HOST_TOOLS_DIR)/nametag_preview-8 $(HOST_TOOLS_DIR)/nametag_preview-4
+
+test-nametag-preview:
+	$(MAKE) NAMETAG_COVERAGE=8 nametag-preview-binary
+	$(MAKE) NAMETAG_COVERAGE=4 nametag-preview-binary
+	NAMETAG_PREVIEW_8=$(abspath $(HOST_TOOLS_DIR)/nametag_preview-8) NAMETAG_PREVIEW_4=$(abspath $(HOST_TOOLS_DIR)/nametag_preview-4) \
+		node --test src/host/tests/nametag_preview_test.mjs
+
+$(NAMETAG_TARGET_DIR):
+	mkdir -p $@
+
+$(NAMETAG_TARGET_DIR)/bitmap_font.o: $(SHARED_DIR)/bitmap_font.c $(NAMETAG_HEADERS) | $(NAMETAG_TARGET_DIR)
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+
+$(NAMETAG_TARGET_DIR)/nametag.o: $(SHARED_DIR)/nametag.c $(NAMETAG_HEADERS) | $(NAMETAG_TARGET_DIR)
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+$(NAMETAG_TARGET_DIR)/frame_diff.o: $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h | $(NAMETAG_TARGET_DIR)
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+
+$(NAMETAG_TARGET_DIR)/graphics.o: $(PLATFORM_DIR)/graphics.c $(PLATFORM_DIR)/graphics.h | $(NAMETAG_TARGET_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+
+$(NAMETAG_TARGET_DIR)/nametag_fonts.o: $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) | $(NAMETAG_TARGET_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -I$(NAMETAG_ASSET_DIR) -c $< -o $@
+
+$(NAMETAG_TARGET_DIR)/nametag_target.o: src/host/tests/nametag_target.c $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) $(NAMETAG_FRAME_H) | $(NAMETAG_TARGET_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -I$(NAMETAG_ASSET_DIR) -c $< -o $@
+
+$(NAMETAG_TARGET_DIR)/nametag_target.elf: $(NAMETAG_TARGET_OBJS) $(ARCH_DIR)/memmap_flash.ld
+	$(RP2350_CC) $(RP2350_LDFLAGS) -Wl,-e,nametag_target_main -Wl,--undefined=nametag_target_sizes \
+		-Wl,-Map=$(NAMETAG_TARGET_DIR)/nametag_target.map $(NAMETAG_TARGET_OBJS) -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+
+test-nametag-target: $(NAMETAG_TARGET_DIR)/nametag_target.elf
+	$(RP2350_SIZE) $<
+	@echo "Link-only Cortex-M33/no-libc proof; not a bootable or hardware-tested image."
 
 usb-wifi-firmware: $(UF2_DIR)/usb_wifi_firmware.uf2 $(HOST_TOOLS_DIR)/usb_wifi_firmware_host
 	@printf 'UF2: %s (vendor radio firmware/configuration data included)\n' $(UF2_DIR)/usb_wifi_firmware.uf2
