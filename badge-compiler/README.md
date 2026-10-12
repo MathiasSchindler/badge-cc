@@ -65,6 +65,12 @@ make -C badge-compiler test-assembler-ergonomics
 make -C badge-compiler test-assembler-synchronization
 ```
 
+BA05's bounded two-core diagnostic is now physically qualified on the
+selected A4 badge, including contention, payload integrity, progress,
+deliberate timeouts and verified original-flash restoration. See the
+[qualification record and limits](docs/badge-assembler.md#ba05--multicore-synchronization-instruction-coverage);
+this is not production C atomic support or a fairness/performance claim.
+
 The oracle targets require LLVM and, for target execution, QEMU. See
 [tool selection and boundary tests](docs/implementation.md#run-the-boundary-tests)
 for supported tool paths and prerequisites. The standalone

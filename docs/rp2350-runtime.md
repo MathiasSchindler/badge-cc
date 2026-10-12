@@ -145,11 +145,13 @@ it is not an established explanation for the selected A4 badge's BA05
 failure. Hardware spinlocks, FIFO and events still require bounded,
 interrupt-aware ownership and recovery protocols.
 
-## BA05 status and next qualification gate
+## BA05 qualification
 
 Assembler encodings, LLVM comparisons, Cortex-M33 emulator execution,
 bounded lock timeout/recovery and host restoration checks pass.
-These do not prove RP2350 two-core behavior.
+The isolated startup ladder and full bounded two-core protocol now also
+have passing physical evidence on the selected A4 badge. Host/emulator
+results alone would not establish that behavior.
 
 The initial BA05 clock-error report and two later pending reports are
 retained as failed evidence. Both later attempts needed manual BOOTSEL
@@ -158,7 +160,7 @@ The only durable checkpoint in those attempts was committed before the
 probe, so it cannot distinguish clock switching, core launch, contention
 or final publication failure.
 
-Before full contention, qualify an isolated ladder:
+The following isolated ladder was qualified before full contention:
 
 1. Known boot/transport control.
 2. Core-1 FIFO launch, acknowledgement, SRAM park/reset and flash
@@ -210,19 +212,52 @@ Bind each stage to its image, source hashes, fresh nonce, state and
 restoration evidence. Commit a durable stage checkpoint while core 1 is
 stopped. Stop the ladder on the first failed stage; manual recovery is a
 fallback, not a passing watchdog test. Physical contention, ordering,
-progress and both-core configuration remain the BA05 exit criterion.
-The startup/recovery gate is now satisfied for this diagnostic and selected
-badge. The next separately authorized test is the full bounded two-core
-contention/ordering/progress protocol; it was not run in this ladder.
+progress and both-core configuration are the BA05 exit criterion.
+The ladder satisfies the startup/recovery prerequisite; full contention
+was qualified separately below, not inferred from these isolated stages.
+
+### Full bounded two-core protocol results
+
+The separately authorized `ba05-contention-qualified` campaign passed the
+boot control and complete synchronization diagnostic on A4 badge
+`9BBF88DD17D66E7D`. **BA05's physical exit criterion is satisfied.**
+
+| Check | Validated physical result |
+| --- | --- |
+| Progress | Each core completed exactly 1,024 protected updates |
+| Shared counter | Exactly 2,048 updates, with none lost or duplicated |
+| Payload ordering/integrity | Checksum invariant checked inside every critical section; final checksum 2,098,176 |
+| Bounded failure paths | Core 0 and core 1 timed out on the deliberately held lock before release and subsequent successful work |
+| Cross-core invalidation | STREX status 1; competing `0x12345678` remained intact |
+| Configuration | Both cores privileged, interrupt masks clear, MPU disabled, ACTLR external exclusives enabled |
+| Clocks | Shared system/reference XOSC selection, divisors one, XOSC stable |
+| Completion/recovery | No per-core errors or faults; core 1 parked in SRAM and held in reset before publication; automatic BOOTSEL return |
+| Core-0 restoration | Original ACTLR readback checked before final publication; mask/control state unchanged |
+
+The complete LLVM-assembled and owned-assembled diagnostic images matched
+SHA-256 `90d00553fefea70182ee157736979a3fa0605c0aab0367cfd2fc7162f4bce812`.
+The owned-assembled image was executed; running the byte-identical LLVM
+image separately would not provide a distinct firmware test.
+The nominal selected clock is 12 MHz, not an externally measured frequency.
+
+The full original 16 MiB flash was restored and independently readback-verified
+against the original hash recorded above. The selected badge was left in
+BOOTSEL; the other badge was untouched. Source/tool/image hashes, fresh
+nonces, raw reports and restoration evidence remain local in
+`badge-compiler/build/ba05-contention-qualified/results.json`.
+This campaign is functional evidence for this bounded diagnostic, not
+fairness, throughput, arbitrary fault recovery or universal concurrency proof.
 
 Production C atomic lowering, language-level memory ordering, interrupt
 locking, DMA ownership, cache/MPU placement, fairness and performance are
-separate prerequisites or qualification projects.
+separate prerequisites or qualification projects, outside the completed
+BA05 scope. PSRAM, flash endurance/alias testing, external clock calibration
+and Non-secure transitions are likewise not qualified by this result.
 
 ## Evidence navigation
 
 - [BA03 contract and successful physical evidence](../badge-compiler/docs/badge-assembler.md#ba03--system-registers-exceptions-and-interrupt-control).
-- [BA05 contracts, startup qualification and retained attempts](../badge-compiler/docs/badge-assembler.md#ba05--multicore-synchronization-instruction-coverage).
+- [BA05 contracts, complete qualification and retained attempts](../badge-compiler/docs/badge-assembler.md#ba05--multicore-synchronization-instruction-coverage).
 - [Instruction calibration and memory/timing limits](../badge-compiler/docs/datasheet/hardware-calibration.md).
 
 Historical records describe the source/tool revisions actually executed.

@@ -1184,8 +1184,10 @@ badge-compiler/build/badge-asm \
   acquire/release forms. Register/status overlap, immediate alignment/range,
   base-only addressing and fixed-width syntax are checked. Runtime address
   alignment and SRAM ownership remain the caller's responsibility. The
-  host-qualified bounded SRAM lock and two-core test firmware are explicit
-  low-level examples, not C atomic lowering or completed physical qualification;
+  bounded SRAM lock and two-core diagnostic are host/emulator and physically
+  qualified, including contention, ordering, progress and deliberate bounded
+  timeouts. They remain explicit low-level examples, not C atomic lowering
+  or general DMA/interrupt/MPU/Non-secure qualification;
   see [BA05 status and memory restrictions](badge-assembler.md#ba05--multicore-synchronization-instruction-coverage).
 - Sections, alignment, fixed-width data, strings, zero/space and `.incbin`
   with optional offset/length. NOBITS accepts only zero initialization.

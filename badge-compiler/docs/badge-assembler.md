@@ -584,8 +584,8 @@ Compiler defaults and optimization policies are not changed by BA04.
 
 ### BA05 — multicore synchronization instruction coverage
 
-**Status: instruction implementation and host qualification complete;
-physical two-core exit criterion remains open.**
+**Status: instruction implementation, host/emulator qualification and
+physical two-core exit criterion complete.**
 
 - [x] Specify and encode relevant LDREX/STREX byte/halfword/word forms and
   CLREX, including register overlap, alignment and addressing restrictions.
@@ -598,16 +598,16 @@ physical two-core exit criterion remains open.**
 - [x] Compare exclusives with RP2350 SIO hardware spinlocks, FIFO and event
   mechanisms in runtime examples; these peripherals need protocols, not new
   CPU opcodes. SEV/WFE encoding already exists.
-- [ ] Test two-core contention, ordering, progress and bounded timeout/error
-  paths **on hardware**. Host timeout/recovery checks pass; the physical
-  campaign has not reached a qualified result. Do not claim one-way timing
-  or lock fairness from static bytes.
+- [x] Test two-core contention, ordering, progress and bounded timeout/error
+  paths **on hardware**. The full bounded protocol passed on the selected A4
+  badge with verified original-flash restoration. This is functional evidence,
+  not one-way timing or lock fairness.
 - [x] Keep C atomic lowering, shared-memory ownership, cache/memory placement
   and interrupt interactions as explicit compiler/runtime prerequisites.
 
 **Exit:** instruction encoding tests pass and a documented two-core protocol
 has functional physical evidence, with both cores' clocks/configuration bound.
-The second half is **not yet satisfied**.
+**Satisfied:** both encoding and physical bounded-protocol gates pass.
 
 #### Instruction contract
 
@@ -768,10 +768,10 @@ Neither correction establishes the cause of the remaining hang.
 Two subsequent attempts did not automatically return to BOOTSEL. The user
 recovered the selected badge manually; their recovered flash reports contain
 only the pre-probe checkpoint (`progress = 0x102`, result `0xffff0002`).
-**There is no passing two-core contention/ordering/progress report.**
-Physical retries were stopped rather than treating the pending report as
-success. The next hardware investigation must first qualify startup,
-clock switching and recovery with durable phase diagnostics before contention.
+At that point there was no passing two-core contention/ordering/progress
+report. Physical retries were stopped rather than treating the pending
+report as success. Startup, clock switching and recovery were subsequently
+qualified with durable phase diagnostics before returning to contention.
 
 That isolated investigation is now **physically qualified**. The first
 ladder passed launch/park and the single-core probe, then failed cross-core
@@ -785,7 +785,30 @@ watchdog-only recovery with inherited and switched clocks.
 The competing store now yielded STREX status **1**, preserving
 `0x12345678`. Both cores recorded ACTLR `0 -> 0x20000000`; core 0 restored
 zero before publication. No full contention worker is compiled into these
-stage images. The BA05 full-protocol exit criterion remains open.
+stage images. Those results satisfied the startup prerequisite, not the
+full-protocol exit criterion by themselves.
+
+The separately authorized full campaign
+`build/ba05-contention-qualified/results.json` then passed its boot control
+and bounded two-core synchronization probe. Both cores completed exactly
+**1,024** updates, the counter was **2,048**, the checksum **2,098,176**,
+and all per-core errors and fault registers were zero. The deliberately
+held lock timed out on both cores before release and successful work;
+the competing write defeated STREX (status **1**) without changing its
+`0x12345678` payload. Both cores reported the expected privileged,
+interrupt-unmasked, MPU-disabled configuration and enabled external
+exclusives, with shared system/reference XOSC selection and divisors one.
+Core 1 parked in SRAM and was held in reset before publication. Core 0's
+ACTLR restoration readback and mask/control preservation checks passed.
+Automatic BOOTSEL recovery and full original-flash readback verification
+passed. **The BA05 exit criterion is now satisfied.**
+
+The executed owned-assembled firmware matched the complete LLVM-assembled
+image byte-for-byte, SHA-256
+`90d00553fefea70182ee157736979a3fa0605c0aab0367cfd2fc7162f4bce812`.
+This is functional evidence for the specified bounded protocol on the
+selected badge, not fairness, performance, DMA/interrupt/MPU/Non-secure
+qualification or C atomic lowering.
 
 Report version **6** remains 256 bytes. Words 56/57 now identify ACTLR
 (not the old version-5 CCR fields). In ladder modes, words 24/25 hold
@@ -806,7 +829,8 @@ Evidence is retained in ignored
 `build/ba05-hardware-xosc/results.json` and
 `build/ba05-hardware-psm/results.json`, plus the failed
 `build/ba05-startup-ladder/results.json` and passing
-`build/ba05-startup-extexclall/results.json`. All campaigns' original
+`build/ba05-startup-extexclall/results.json` and
+`build/ba05-contention-qualified/results.json`. All campaigns' original
 16 MiB flash was restored and readback-verified against SHA-256
 `91f0dfce98cb2bea2fa0bbb11a27ac04f59dce17a3b4b960517d0fef157a14cd`.
 Both badges are left in BOOTSEL. Reports bind sources, images, nonces and

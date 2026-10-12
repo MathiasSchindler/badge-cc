@@ -80,7 +80,12 @@ exclusives, cross-core invalidation, XOSC enable/safe clock switching and
 watchdog-only recovery on that selected badge, with full flash restoration.
 With the MPU disabled, both Cortex-M33 cores needed `ACTLR.EXTEXCLALL`
 enabled for the cross-core exclusive protocol; core 0's original setting
-was restored. Full two-core contention/ordering/progress remains open.
+was restored. The subsequent full bounded two-core diagnostic also passed:
+1,024 protected updates per core, exactly 2,048 total, checksum 2,098,176,
+deliberate lock timeouts and cross-core invalidation, with no per-core
+errors or faults. Automatic recovery and full original-flash restoration
+were verified. This closes BA05's functional gate, not fairness,
+performance or production C atomic semantics.
 Minimal startup must not assume
 XOSC enabled, a 150 MHz system clock, calibrated timer ticks, retained RAM
 across BOOTSEL or guaranteed automatic recovery after clock/core changes.

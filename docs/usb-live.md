@@ -166,8 +166,10 @@ recovery guarantee. Separate BA05 probes changed clocks/core state and failed
 to return automatically despite successful ROM reboot scheduling; manual
 BOOTSEL recovery and full flash restoration were required.
 The corrected isolated BA05 ladder later passed scheduled-watchdog-only
-recovery with inherited clocks and after a safe switch to XOSC; this does
-not qualify recovery from arbitrary faults or full contention.
+recovery with inherited clocks and after a safe switch to XOSC. The full
+bounded contention diagnostic also subsequently passed automatic BOOTSEL
+return and verified original-flash restoration. Neither result qualifies
+recovery from arbitrary faults.
 The [runtime qualification guide](rp2350-runtime.md) records the clock-source
 restriction and staged recovery tests. Do not transfer this image's successful
 recovery to a different startup, clock-switch or multicore configuration.
