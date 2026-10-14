@@ -17,6 +17,7 @@ Optional SDK-based applications explore Bluetooth and Wi-Fi.
 | [src/](src/) | Badge firmware, shared utilities, hardware drivers, games, radio experiments and host tools. |
 | [docs/](docs/) | Hardware specifications, application guides, protocols and physical test results. |
 | [tests/](tests/) | Additional host-side firmware tests. |
+| [clean-rx/](clean-rx/badge/README.md) | Alternative source-built CYW43439 firmware and an opt-in, no-libc badge host; cold beacon reception and Function-2 delivery tested on hardware. |
 
 ## Highlights
 

@@ -3,10 +3,14 @@
 
 #include "../shared/usb_report.h"
 
+#ifndef WIFI_TRACE_SIZE
 #define WIFI_TRACE_SIZE 256u
+#endif
 #define WIFI_TRACE_CHUNK 24u
-#define WIFI_TRACE_PAGES 11u
-#define WIFI_TRACE_WORDS 64u
+#define WIFI_TRACE_PAGES ((WIFI_TRACE_SIZE + WIFI_TRACE_CHUNK - 1u) / WIFI_TRACE_CHUNK)
+#define WIFI_TRACE_WORDS (WIFI_TRACE_SIZE / 4u)
+_Static_assert(WIFI_TRACE_SIZE % 4u == 0u && WIFI_TRACE_PAGES < 256u,
+               "Trace must contain complete words and fit the page index");
 #define WIFI_TRACE_MAGIC 0x31525457u
 
 typedef enum {

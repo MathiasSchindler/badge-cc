@@ -166,6 +166,10 @@ RP2350_LDFLAGS := \
 .PHONY: all clean force wifi-demo wifi-mac-flash wireless-lab ble-tilt-pong diagnostics test-diagnostics wifi-handover test-wifi-handover wifi-bringup test-wifi-bringup usb-report-test test-usb-report picotool-usb
 .SECONDARY:
 .PHONY: usb-live-report test-live-usb
+.PHONY: clean-rx-badge
+clean-rx-badge:
+	$(MAKE) -C clean-rx/badge all
+
 .PHONY: usb-wifi-firmware test-wifi-firmware
 .PHONY: usb-wifi-link test-wifi-link
 .PHONY: usb-wifi-udp test-wifi-udp
@@ -242,6 +246,200 @@ $(HOST_TOOLS_DIR)/home_test: src/host/tests/home_test.c $(PLATFORM_DIR)/home.c $
 .PHONY: test-home
 test-home: $(HOST_TOOLS_DIR)/home_test
 	$(HOST_TOOLS_DIR)/home_test
+
+BOAT_DIR := $(BUILD_DIR)/boat
+BOAT_OBJS := $(addprefix $(FIRMWARE_DIR)/,start.o picobin.o display.o graphics.o \
+	i2c_bitbang.o lsm6ds3.o diagnostics_logic.o bootrom_reboot.o) \
+	$(addprefix $(BOAT_DIR)/,boat.o boat_physics.o boat_input.o frame_diff.o home.o nametag_clock.o)
+
+.PHONY: boat test-boat
+boat: $(UF2_DIR)/boat.uf2
+	@printf 'Boat prototype (not hardware-qualified): %s\n' $<
+
+$(BOAT_DIR):
+	mkdir -p $@
+
+$(BOAT_DIR)/boat.o: $(TOOLS_DIR)/boat.c $(SHARED_DIR)/boat_physics.h $(SHARED_DIR)/boat_input.h $(SHARED_DIR)/frame_diff.h $(SHARED_DIR)/bytes.h \
+	$(PLATFORM_DIR)/display.h $(PLATFORM_DIR)/graphics.h $(PLATFORM_DIR)/home.h \
+	$(PLATFORM_DIR)/i2c_bitbang.h $(PLATFORM_DIR)/lsm6ds3.h $(TOOLS_DIR)/diagnostics_logic.h \
+	$(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(BOAT_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -I$(PLATFORM_DIR) -O2 -fstack-usage -c $< -o $@
+
+$(BOAT_DIR)/boat_physics.o: $(SHARED_DIR)/boat_physics.c $(SHARED_DIR)/boat_physics.h | $(BOAT_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+
+$(BOAT_DIR)/boat_input.o: $(SHARED_DIR)/boat_input.c $(SHARED_DIR)/boat_input.h \
+	$(PLATFORM_DIR)/lsm6ds3.h $(TOOLS_DIR)/diagnostics_logic.h $(SHARED_DIR)/bytes.h | $(BOAT_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+
+$(BOAT_DIR)/frame_diff.o: $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h | $(BOAT_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+
+$(BOAT_DIR)/home.o: $(PLATFORM_DIR)/home.c $(PLATFORM_DIR)/home.h | $(BOAT_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+
+$(BOAT_DIR)/nametag_clock.o: $(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h | $(BOAT_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+
+$(BOAT_DIR)/boat.elf: $(BOAT_OBJS) $(ARCH_DIR)/memmap_flash.ld
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_LDFLAGS) $(BOAT_OBJS) \
+		-Wl,-Map=$(BOAT_DIR)/boat.map -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+	$(RP2350_SIZE) $@
+
+$(UF2_DIR)/boat.uf2: $(BOAT_DIR)/boat.elf $(BIN2UF2) | $(UF2_DIR)
+	$(RP2350_OBJCOPY) -O binary $< $(BOAT_DIR)/boat.bin
+	$(BIN2UF2) $(BOAT_DIR)/boat.bin $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
+
+$(HOST_TOOLS_DIR)/boat_test: src/host/tests/boat_test.c $(SHARED_DIR)/boat_physics.c $(SHARED_DIR)/boat_physics.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined \
+		src/host/tests/boat_test.c $(SHARED_DIR)/boat_physics.c -o $@
+
+$(HOST_TOOLS_DIR)/boat_application_test: src/host/tests/boat_application_test.c $(TOOLS_DIR)/boat.c \
+	$(SHARED_DIR)/boat_physics.c $(SHARED_DIR)/boat_physics.h $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) \
+	$(SHARED_DIR)/boat_input.c $(SHARED_DIR)/boat_input.h $(SHARED_DIR)/bytes.h \
+	$(PLATFORM_DIR)/graphics.c $(PLATFORM_DIR)/graphics.h $(PLATFORM_DIR)/display.h $(PLATFORM_DIR)/home.h \
+	$(PLATFORM_DIR)/lsm6ds3.h $(PLATFORM_DIR)/i2c_bitbang.h $(TOOLS_DIR)/diagnostics_logic.c \
+	$(TOOLS_DIR)/diagnostics_logic.h $(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined -I$(PLATFORM_DIR) \
+		src/host/tests/boat_application_test.c $(SHARED_DIR)/boat_physics.c $(SHARED_DIR)/boat_input.c $(NAMETAG_FRAME_C) \
+		$(PLATFORM_DIR)/graphics.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
+
+$(HOST_TOOLS_DIR)/boat_input_test: src/host/tests/boat_input_test.c $(SHARED_DIR)/boat_input.c \
+	$(SHARED_DIR)/boat_input.h $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/lsm6ds3.h \
+	$(TOOLS_DIR)/diagnostics_logic.c $(TOOLS_DIR)/diagnostics_logic.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined \
+		src/host/tests/boat_input_test.c $(SHARED_DIR)/boat_input.c $(TOOLS_DIR)/diagnostics_logic.c -lm -o $@
+
+test-boat: $(HOST_TOOLS_DIR)/boat_test $(HOST_TOOLS_DIR)/boat_application_test $(HOST_TOOLS_DIR)/boat_input_test $(HOST_TOOLS_DIR)/boat_profile_test
+	$(HOST_TOOLS_DIR)/boat_test
+	$(HOST_TOOLS_DIR)/boat_application_test
+	$(HOST_TOOLS_DIR)/boat_input_test
+	$(HOST_TOOLS_DIR)/boat_profile_test
+	node --test src/host/tests/boat_profile_report_test.mjs
+
+.PHONY: test-boat-fluid boat-fluid-preview
+$(HOST_TOOLS_DIR)/boat_fluid_test: src/host/tests/boat_fluid_test.c $(SHARED_DIR)/boat_fluid.c \
+	$(HOST_TOOLS_SRC_DIR)/boat_fluid_topology.h \
+	$(SHARED_DIR)/boat_fluid.h $(SHARED_DIR)/boat_physics.h $(SHARED_DIR)/bytes.h \
+	$(TOOLS_DIR)/diagnostics_logic.c $(TOOLS_DIR)/diagnostics_logic.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined \
+		$< $(SHARED_DIR)/boat_fluid.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
+$(HOST_TOOLS_DIR)/boat_fluid_preview: $(HOST_TOOLS_SRC_DIR)/boat_fluid_preview.c $(SHARED_DIR)/boat_fluid.c \
+	$(HOST_TOOLS_SRC_DIR)/boat_fluid_topology.h \
+	$(SHARED_DIR)/boat_fluid.h $(SHARED_DIR)/boat_physics.h $(SHARED_DIR)/bytes.h \
+	$(TOOLS_DIR)/diagnostics_logic.c $(TOOLS_DIR)/diagnostics_logic.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) $< $(SHARED_DIR)/boat_fluid.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
+test-boat-fluid: $(HOST_TOOLS_DIR)/boat_fluid_test $(HOST_TOOLS_DIR)/boat_breaking_application_test
+	$(HOST_TOOLS_DIR)/boat_fluid_test
+	$(HOST_TOOLS_DIR)/boat_breaking_application_test
+boat-fluid-preview: $(HOST_TOOLS_DIR)/boat_fluid_preview
+
+BOAT_BREAKING_DIR := $(BOAT_DIR)/breaking
+BOAT_BREAKING_OBJS := $(filter-out $(BOAT_DIR)/boat.o $(BOAT_DIR)/boat_physics.o,$(BOAT_OBJS)) \
+	$(addprefix $(BOAT_BREAKING_DIR)/,boat-breaking.o boat_fluid.o)
+.PHONY: boat-breaking
+boat-breaking: $(UF2_DIR)/boat-breaking.uf2
+	@printf 'Experimental 2D particle water (cadence not hardware-qualified): %s\n' $<
+$(BOAT_BREAKING_DIR):
+	mkdir -p $@
+$(BOAT_BREAKING_DIR)/boat-breaking.o: $(TOOLS_DIR)/boat-breaking.c $(TOOLS_DIR)/boat.c \
+	$(SHARED_DIR)/boat_fluid.h $(SHARED_DIR)/boat_input.h $(SHARED_DIR)/boat_physics.h \
+	$(SHARED_DIR)/frame_diff.h $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h \
+	$(PLATFORM_DIR)/display.h $(PLATFORM_DIR)/home.h $(PLATFORM_DIR)/lsm6ds3.h \
+	$(PLATFORM_DIR)/i2c_bitbang.h $(TOOLS_DIR)/diagnostics_logic.h \
+	$(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(BOAT_BREAKING_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -I$(PLATFORM_DIR) -c $< -o $@
+$(BOAT_BREAKING_DIR)/boat_fluid.o: $(SHARED_DIR)/boat_fluid.c $(SHARED_DIR)/boat_fluid.h \
+	$(SHARED_DIR)/boat_physics.h $(SHARED_DIR)/bytes.h $(TOOLS_DIR)/diagnostics_logic.h \
+	$(PLATFORM_DIR)/graphics.h | $(BOAT_BREAKING_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+$(BOAT_BREAKING_DIR)/boat-breaking.elf: $(BOAT_BREAKING_OBJS) $(ARCH_DIR)/memmap_flash.ld
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_LDFLAGS) $(BOAT_BREAKING_OBJS) \
+		-Wl,-Map=$(BOAT_BREAKING_DIR)/boat-breaking.map -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+	$(RP2350_SIZE) $@
+$(UF2_DIR)/boat-breaking.uf2: $(BOAT_BREAKING_DIR)/boat-breaking.elf $(BIN2UF2) | $(UF2_DIR)
+	$(RP2350_OBJCOPY) -O binary $< $(BOAT_BREAKING_DIR)/boat-breaking.bin
+	$(BIN2UF2) $(BOAT_BREAKING_DIR)/boat-breaking.bin $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
+$(HOST_TOOLS_DIR)/boat_breaking_application_test: src/host/tests/boat_application_test.c \
+	$(TOOLS_DIR)/boat-breaking.c $(TOOLS_DIR)/boat.c $(SHARED_DIR)/boat_fluid.c $(SHARED_DIR)/boat_fluid.h \
+	$(SHARED_DIR)/boat_physics.h $(SHARED_DIR)/boat_input.c $(SHARED_DIR)/boat_input.h \
+	$(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.c \
+	$(PLATFORM_DIR)/graphics.h $(TOOLS_DIR)/diagnostics_logic.c $(TOOLS_DIR)/diagnostics_logic.h \
+	$(PLATFORM_DIR)/display.h $(PLATFORM_DIR)/home.h $(PLATFORM_DIR)/lsm6ds3.h \
+	$(PLATFORM_DIR)/i2c_bitbang.h $(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined \
+		-DBOAT_BREAKING_TEST -I$(PLATFORM_DIR) $< $(SHARED_DIR)/boat_fluid.c \
+		$(SHARED_DIR)/boat_input.c $(NAMETAG_FRAME_C) $(PLATFORM_DIR)/graphics.c \
+		$(TOOLS_DIR)/diagnostics_logic.c -o $@
+
+BOAT_PROFILE_DIR := $(BOAT_DIR)/profile
+BOAT_PROFILE_OBJS := $(filter-out $(BOAT_DIR)/boat.o,$(BOAT_OBJS)) \
+	$(addprefix $(BOAT_PROFILE_DIR)/,boat_profile.o boat_measure.o live_usb_control.o live_usb_hw.o nametag_measure.o usb_report.o wifi_trace.o)
+BOAT_PROFILE_INPUTS := $(TOOLS_DIR)/boat_profile.c $(TOOLS_DIR)/boat.c \
+	$(SHARED_DIR)/boat_measure.c $(SHARED_DIR)/boat_measure.h \
+	$(SHARED_DIR)/boat_physics.c $(SHARED_DIR)/boat_physics.h $(SHARED_DIR)/boat_input.c $(SHARED_DIR)/boat_input.h \
+	$(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(PLATFORM_DIR)/display.c $(PLATFORM_DIR)/graphics.c \
+	$(PLATFORM_DIR)/i2c_bitbang.c $(PLATFORM_DIR)/lsm6ds3.c $(PLATFORM_DIR)/home.c \
+	$(TOOLS_DIR)/diagnostics_logic.c $(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/bootrom_reboot.c \
+	$(ARCH_DIR)/start.c $(ARCH_DIR)/picobin.S $(ARCH_DIR)/memmap_flash.ld \
+	$(PLATFORM_DIR)/display.h $(PLATFORM_DIR)/graphics.h $(PLATFORM_DIR)/i2c_bitbang.h \
+	$(PLATFORM_DIR)/lsm6ds3.h $(PLATFORM_DIR)/home.h $(TOOLS_DIR)/diagnostics_logic.h \
+	$(SHARED_DIR)/bytes.h $(SHARED_DIR)/stdint.h $(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h \
+	src/usb/live_usb_control.c src/usb/live_usb_hw.c src/usb/live_usb.h src/usb/live_usb_hw.h \
+	$(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/nametag_measure.h $(SHARED_DIR)/usb_report.c \
+	$(SHARED_DIR)/usb_report.h $(RADIO_DIR)/wifi_trace.c $(RADIO_DIR)/wifi_trace.h \
+	$(HOST_TOOLS_SRC_DIR)/boat_profile_host.c $(HOST_TOOLS_SRC_DIR)/usb_live_transport.h
+
+.PHONY: boat-profile
+boat-profile: $(UF2_DIR)/boat_profile.uf2 $(HOST_TOOLS_DIR)/boat_profile_host
+
+$(HOST_TOOLS_DIR)/boat_profile_test: src/host/tests/boat_application_test.c $(BOAT_PROFILE_INPUTS) \
+	$(BOAT_PROFILE_DIR)/boat_profile_build.h | $(HOST_TOOLS_DIR)
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -O1 -g -fsanitize=address,undefined \
+		-DBOAT_PROFILE -DBOAT_PROFILE_TEST -DLIVE_USB_NAMETAG_M2 -I$(PLATFORM_DIR) -I$(BOAT_PROFILE_DIR) \
+		src/host/tests/boat_application_test.c $(SHARED_DIR)/boat_physics.c $(SHARED_DIR)/boat_input.c \
+		$(SHARED_DIR)/boat_measure.c $(NAMETAG_FRAME_C) $(PLATFORM_DIR)/graphics.c \
+		$(TOOLS_DIR)/diagnostics_logic.c -o $@
+
+$(BOAT_PROFILE_DIR):
+	mkdir -p $@
+$(BOAT_PROFILE_DIR)/boat_profile_build.h: $(BOAT_PROFILE_INPUTS) Makefile | $(BOAT_PROFILE_DIR)
+	@id=$$(shasum -a 256 $(BOAT_PROFILE_INPUTS) Makefile | shasum -a 256 | cut -c1-8); \
+	printf '#define USB_REPORT_BUILD_ID 0x%su\n' "$$id" > $@
+$(BOAT_PROFILE_DIR)/boat_profile.o: $(BOAT_PROFILE_INPUTS) $(BOAT_PROFILE_DIR)/boat_profile_build.h | $(BOAT_PROFILE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -DBOAT_PROFILE -DLIVE_USB_NAMETAG_M2 \
+		-I$(PLATFORM_DIR) -I$(BOAT_PROFILE_DIR) -c $(TOOLS_DIR)/boat_profile.c -o $@
+$(BOAT_PROFILE_DIR)/boat_measure.o: $(SHARED_DIR)/boat_measure.c $(SHARED_DIR)/boat_measure.h | $(BOAT_PROFILE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -c $< -o $@
+$(BOAT_PROFILE_DIR)/live_usb_control.o: src/usb/live_usb_control.c src/usb/live_usb.h $(SHARED_DIR)/nametag_measure.h | $(BOAT_PROFILE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -c $< -o $@
+$(BOAT_PROFILE_DIR)/live_usb_hw.o: src/usb/live_usb_hw.c src/usb/live_usb_hw.h src/usb/live_usb.h | $(BOAT_PROFILE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -c $< -o $@
+$(BOAT_PROFILE_DIR)/nametag_measure.o: $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/nametag_measure.h | $(BOAT_PROFILE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(BOAT_PROFILE_DIR)/usb_report.o: $(SHARED_DIR)/usb_report.c $(SHARED_DIR)/usb_report.h | $(BOAT_PROFILE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(BOAT_PROFILE_DIR)/wifi_trace.o: $(RADIO_DIR)/wifi_trace.c $(RADIO_DIR)/wifi_trace.h | $(BOAT_PROFILE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+$(BOAT_PROFILE_DIR)/boat_profile.elf: $(BOAT_PROFILE_OBJS) $(ARCH_DIR)/memmap_flash.ld
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_LDFLAGS) $(BOAT_PROFILE_OBJS) \
+		-Wl,-Map=$(BOAT_PROFILE_DIR)/boat_profile.map -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+	$(RP2350_SIZE) $@
+$(UF2_DIR)/boat_profile.uf2: $(BOAT_PROFILE_DIR)/boat_profile.elf $(BIN2UF2) | $(UF2_DIR)
+	$(RP2350_OBJCOPY) -O binary $< $(BOAT_PROFILE_DIR)/boat_profile.bin
+	$(BIN2UF2) $(BOAT_PROFILE_DIR)/boat_profile.bin $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
+$(HOST_TOOLS_DIR)/boat_profile_host: $(HOST_TOOLS_SRC_DIR)/boat_profile_host.c \
+	$(BOAT_PROFILE_DIR)/boat_profile_build.h $(SHARED_DIR)/boat_measure.h \
+	$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/usb_report.c \
+	$(TOOLS_DIR)/diagnostics_logic.c | $(HOST_TOOLS_DIR)
+	@pkg-config --exists libusb-1.0 || { echo 'Boat collector requires the existing libusb-1.0 host dependency'; exit 1; }
+	$(HOST_CC) $(NAMETAG_HOST_FLAGS) -DLIVE_USB_NAMETAG_M2 -I$(BOAT_PROFILE_DIR) \
+		$$(pkg-config --cflags libusb-1.0) $< $(SHARED_DIR)/nametag_measure.c \
+		$(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c \
+		$$(pkg-config --libs libusb-1.0) -o $@
 
 .PHONY: nametag-m2 test-nametag-m2
 nametag-m2: $(UF2_DIR)/nametag_m2.uf2 $(HOST_TOOLS_DIR)/nametag_m2_host

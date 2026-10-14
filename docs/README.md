@@ -39,6 +39,8 @@ transfer. No documentation page is blanket authorization to flash.
 
 ## Other badge work
 
+- [Boat physics demo](tools/boat.md): conservative sloshing-water prototype,
+  buoyant boat, accelerometer input and hardware-gated milestones.
 - [Animated nametag](tools/nametag.md): continuous single-core prototype,
   editable-profile architecture, font reuse, measured optimization and
   hardware-gated implementation milestones.

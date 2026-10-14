@@ -3,7 +3,7 @@
 An engineering guide to the badge's wireless hardware, the working
 project-owned Wi-Fi host, and the separate controller-firmware research.
 Documentation consolidated **2026-10-08**, followed by explicitly authorized
-cold-source implementation and hardware diagnostics through 2026-10-09.
+cold-source implementation and hardware diagnostics through 2026-10-13.
 The documentation-only review itself performed no firmware execution or RF
 measurement. This page owns the current status and priorities;
 the linked experiment records retain exact captures, manifests and failures.
@@ -25,8 +25,25 @@ evidence index. A historical build or successful test is not flash authority.
 
 ## Current status
 
+### Separate clean-rx firmware: physical checkpoint, 2026-10-14
+
+The newly supplied [`clean-rx`](../../clean-rx/badge/README.md) image now has
+an opt-in freestanding RP2350 host. Its cold-source physical test receives
+the configured local AP's channel-1 beacons with independently checked FCS,
+including delivery through D11 DMA and gSPI Function 2. The final RX-only
+repeat captures and delivers 12 frames without a controller error. No vendor
+executable, NVRAM or CLM is downloaded; on-chip ROM calibration data remain.
+
+One-packet TX commands execute and return controller status, but neither
+wildcard nor SSID-directed probing establishes AP reception. Disabled-TX
+rejection is physically verified; the flag now gates explicit TX and automatic
+ACKs. RF qualification, WPA2 association and general networking are not proved.
+The badge's original program was restored and BOOTSEL recovery verified.
+This separate checkpoint does not qualify or relabel the older R3 profiles
+below, and default networking continues to use the pinned vendor image.
+
 **Own code executes on the radio, but a fresh cold-source frame has not been
-proved.** Keep these results separate:
+proved by the existing R3 workflow.** Keep these results separate:
 
 | Track | Strongest recorded result | Not established |
 | --- | --- | --- |
@@ -44,7 +61,124 @@ NVRAM or CLM and calls no vendor ROM services; explicitly pinned ROM
 configuration/table data remain a dependency. The frozen **source5840**
 recovery image holds D11 in reset and is not the larger startup/receive image.
 
-### Latest cold checkpoint: 2026-10-09
+### First-frame workflow checkpoint: 2026-10-13
+
+**2026-10-13 first-frame workflow follow-up:** the existing runner now has
+[`--first-frame-control`](../../experimental/cyw43/r3/pmu-startup/pll-probe/README.md#synchronized-first-frame-workflow---2026-10-13):
+a separately validated vendor reference, cold reset/full-RAM source ownership,
+and one post-READY AP-only challenge/burst with unchanged guards. It has not
+received a cold frame. The initial missing-transmitter invocation refused
+before flash; both badges are now available in BOOTSEL. Fresh MODE0
+[`g44ewgsa`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-0-g44ewgsa/outcome.json),
+MODE2 [`jwhlgq42`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-2-jwhlgq42/outcome.json),
+and dedicated active-only qualification
+[`m9tt2mm7`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-m9tt2mm7/outcome.json)
+were acquired with independent recovery. A new no-controlled-stimulus cold run,
+[`i73hjicz`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-i73hjicz/outcome.json),
+reaches MAC with a complete bound report but ends at controller time error 6,
+mailbox `[7,3,0]`, no accepted frame and the same zero-length/status RXE samples.
+142 affected host tests, native checks and 214 Cortex-M3 cases pass.
+No controller C, PSM instructions, PHY/MAC bits, inhibits or deadlines changed.
+The corrected paired trial
+[`f7z5__ou`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-f7z5__ou/outcome.json)
+validates five vendor-reference frames, completes one protected 32-frame
+post-READY challenge burst and acknowledges release. Source condition-36
+MAC-wait fault 5 appears during post-release revalidation, before the controller
+enables MAC; controller error 9/evidence bit 64 is not an RX timeout.
+Both badges independently recovered to BOOTSEL. The reference now uses the
+separately pinned frozen station image/client, not the AP-only fresh image.
+That was the initial pre-MAC boundary, not a demonstrated PHY defect.
+
+**Later guarded-pause/filter follow-up:** the explicitly armed fresh READY
+path now pauses RUN without JMP_0 and checks exact readback/stable READY
+before the host hold and again after release. A shared revalidation helper
+fits the original executable/stack limits; the original PSM and wait bounds
+remain unchanged.
+[`zk4ufjij`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-zk4ufjij/report.json)
+reaches MAC but reports source event fault 6, mailbox `[7,3,6]`, no frame.
+The separately selected promiscuous contrast
+[`1ern6kv4`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-1ern6kv4/report.json)
+verifies `0x85020403` but has the same event fault and zero-length/status RXE
+samples. Each validates five vendor-reference frames and completes 32 AP
+submissions with zero errors; both badges independently recover.
+Default receive filtering is unchanged. `MCTL_PROMISC` is not a no-TX control.
+
+The pause/filter generation used MODE0 prerequisites
+[`7978o6h4`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-0-7978o6h4/outcome.json),
+MODE2 [`_q72wq2d`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-2-_q72wq2d/outcome.json)
+and dedicated active-only
+[`94dnqn4x`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-94dnqn4x/outcome.json).
+Native fresh/HOF8/promiscuous/legacy suites and HOF7/HOF8 Cortex-M3
+private-stack execution pass, as do 144 affected host tests and the additional
+CLI selector regression. Final default filtered HOF8 builds and passes strict
+preflight against these prerequisites. The current blocker is receive-event acquisition
+and/or unmeasured source-window airtime, not missing badge availability or
+the earlier MAC-wait failure. Ordered vendor D11 initialization is a static
+lead, not an RX-safe replay recipe or proven cause. See the
+[detailed ledger](../../../wifi-assets/analysis/EARLY_RX.md).
+
+**Matched D11 configuration lead:** a separately selected, read-only normal
+vendor observer now measures BRED0/BRPO0 and D11 `+0x450/+0x452` after five
+validated reference frames. Two independently recovered physical runs
+measure `f3f1/fdef/4e01/015b`, matching the exact firmware table-A words.
+The corrected
+[latest proof](../../experimental/cyw43/r3/rxe-observe/runs/vendor-ch1-b6f_g9g7/configuration.proof.json)
+retains the entire halfword range, including all-ones configuration masks;
+the sample has no register-data/object-selector writes or IRQ masking.
+The original ARM reservation is unchanged (6564/6592 bytes).
+These sequential measurements are not rev39 instruction/branch semantics,
+whole-table execution proof, cold readiness or RF qualification. The matched
+cold HOF9/wire2 diagnostic is implemented and passes focused host/native/ARM
+and actual QEMU checks, preserving HOF7/HOF8. Its blocked offline artifacts
+have no flash authority. New MODE0
+[`p35d556v`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-0-p35d556v/outcome.json),
+MODE2 [`2gq3_yuw`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-2-2gq3_yuw/outcome.json)
+and dedicated active-only
+[`jpdr5m4m`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-jpdr5m4m/outcome.json)
+qualify the new source; HOF9 RP `cb5c6153` / source `e87b12a2` passes strict
+preflight. The first no-AP attempt
+[`lx1hsz0k`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-lx1hsz0k/outcome.json)
+recovers cleanly but has no committed PSM/configuration capture. Its generic
+no-frame verdict is not a new receive-event measurement.
+Subsequent guarded READY withhold/release controls isolate that boundary:
+[`niau43gq`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-niau43gq/report.json)
+captures pre-PSM/post-MAC `e1fb/ffaf/0000/0000`, with zero sticky-fault
+brackets, before source receive-event fault 6.
+The paired
+[`0o6l8mb1`](../../experimental/cyw43/r3/pmu-startup/pll-probe/runs/source-pll-14-0o6l8mb1/outcome.json)
+reproduces the values after five reference frames and a 32-submission,
+zero-error AP burst, but later AP status times out; its whole lifecycle is
+not passing, despite clean independent recovery.
+Bit 14 already matches vendor in both masks; the source-used differences
+are BRED0 bit 3 and BRPO0 bit 6, not a proved cause. Offsets `+0x450/+0x452`
+remain target-semantically unresolved. All 136 affected host tests pass,
+and the measured HOF9 rebuild/preflight reproduces its IDs. No initialization
+writes or blanket table replay are added; no cold frame is proved.
+
+The [working retained-source comparison](../../experimental/cyw43/r3/rxe-observe/README.md#opt-in-retained-source-configuration-readback)
+now has a default-off fresh-v5 read-only profile, with checked configuration
+samples before PSM execution and after MAC enable. Selected/default fresh
+software checks pass within14409/14412 ARM bytes. The physical pre-PSM
+sample matches vendor`f3f1/fdef/4e01/015b`, but the unpaused source reaches
+MAC-wait fault5 before MAC enable/post sampling. An explicit pinned physical
+reference now verifies all106 shared RP hashes and176 current fresh inputs;
+the historical whole-tree audit remains failed, not waived or reported passing.
+The full legacy suite passes after a test-only5ms transfer-cadence correction.
+
+The [default-off READY pause](../../experimental/cyw43/r3/rxe-observe/README.md#opt-in-guarded-ready-pause)
+resolves that host-handshake timing failure without changing the source PSM,
+wait bounds or candidate inhibits. RP`59761147`/controller`e11f7076` fits
+14293/14412 bytes and captures three consecutive complete fresh challenge-bound
+88-byte MPDUs, followed by passing no-burst and old-challenge controls.
+All five independently recover both badges, restore the frozen baseline and
+finish in BOOTSEL with no cleanup errors. Default, readback and pause-only
+build/test/verify profiles and44 host tests pass. The combined pause/readback
+image still exceeds the fixed reservation by37 bytes; it was not flashed,
+and no physical post-MAC configuration sample is available.
+These successes remain vendor-retained, not cold source-only reception.
+Shared cold qualification identities must be checked again before activation.
+
+### Earlier cold checkpoint: 2026-10-09
 
 The owner-selected [opt-in pre-fault RXE diagnostic](../../experimental/cyw43/r3/pmu-startup/pll-probe/README.md#opt-in-pre-fault-rxe-diagnostic---2026-10-09)
 is implemented and tested on both unarmed no-AP/AP controls, source

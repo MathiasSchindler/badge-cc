@@ -92,8 +92,6 @@ If `NO EVENTS` appears for a control, the control may not be a direct digital
 GPIO. If several controls consistently produce the same GPIO, that GPIO may be
 a controller interrupt and the controls may require a bus-aware probe.
 
-## Current exclusions
-
 ## Rear controls in the continuous nametag
 
 The rear **BOOT/HOME** input is active-low GPIO22, also used by the diagnostic
