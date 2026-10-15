@@ -3,10 +3,91 @@
 This guide explains how an RP2350 host application loads, boots, and communicates with the open-source `cyw43_rx_fw.bin` transceiver firmware over the 4-pin gSPI bus.
 
 The repository now includes a working [freestanding badge host](../badge/README.md)
-with build commands and physical results from 2026-10-14. Cold beacon reception
-and Function-2 delivery have been verified on a badge; over-the-air TX and WPA2
-connectivity have not. `CFG_TX_ENABLE` must be set for explicit TX or automatic
+with build commands and physical results from 2026-10-14 and 2026-10-15.
+Cold beacon reception, Function-2 delivery and single-frame 11 Mbps CCK OTA TX
+have been verified between a Universe badge and a Tufty2350, in both
+directions. Peer RX matches a fresh challenge, full MPDU and valid FCS. Other
+TX rates, automatic ACK timing and WPA2 connectivity remain unqualified.
+For a persistent, no-USB application using this loader and radio interface, see
+[Micro Signal](../../docs/micro-signal.md): the same small UF2 on both boards
+sends debounced button presses and displays received peer events.
+Its startup timeout repair passed 80 controlled cold radio boots, but repeated
+multi-minute tests still expose intermittent Function-2 framing failures.
+See its qualification results before relying on sustained operation.
+`CFG_TX_ENABLE` must be set for explicit TX or automatic
 ACKs; a command-5 request with TX disabled reports firmware error `0x81`.
+Incomplete TXE/IFS completion reports `0x82`; an invalid TX length reports
+`0x83`. RXE/PSM restart failure reports `0x84`; an invalid template for the
+optional management-frame address matcher reports `0x85`.
+An invalid SDIO TX consumer pointer reports `0x86`;
+failure to disable SDIO TX DMA during initialization reports `0x87`. Both
+these and the preceding errors preserve ERROR through cleanup.
+TX completion predicates are
+reported in `fw_substage`: bit 0 means TXE busy cleared, bit 1 means TXE
+completion asserted, and bit 2 means IFS TX cleared. All three bits must be set,
+but this does not establish reception over the air.
+
+The badge loader requests continuous reception (`CFG_CONTINUOUS_RX`) explicitly,
+including when using a compatible reference image for comparison.
+During explicit TX, the controller uses the mailbox's 180-byte `rx_input`
+diagnostic area for `clean_tx_diag_t` (`TXD3`, defined in `../tx_diag.h`),
+instead of the final RX SHM snapshot. The host trace offset is 296; the mailbox
+layout and total 448-byte size are unchanged. RX-only and disabled-TX-rejection
+trials retain the original snapshot. Diagnostic readbacks happen before the
+trigger, and timing records distinguish TX completion from MAC RX re-enable.
+PHYDEBUG is additionally sampled immediately after triggering TX. Its bit 2
+means the MAC instructs the PHY to transmit, not that an AP received the frame.
+The former staged CRC field is no longer present; the badge host verifies the
+staged bytes directly.
+
+Sustained Function-2 delivery uses a 32-descriptor circular SDIO TX ring.
+The final descriptor carries end-of-table, and a slot is reused only after
+the hardware consumer advances. A full queue drops new frames instead of
+resetting live DMA or overwriting pending buffers. The old mailbox's final
+four padding bytes now expose `f2_counts` at offset 444: low 16 bits count
+published frames, high 16 bits count full-queue drops, both saturating.
+Existing mailbox offsets and the 448-byte size are unchanged. Initialization
+clears the producer pointer before enabling DMA and publishes RX_ACTIVE only
+after the RX path is ready.
+
+The badge loader counts SPI read-frame resynchronizations in `rx_resyncs`.
+It terminates a read frame on invalid advertised lengths or underflow, or when
+SDIO reports FIFO data but SPI exposes no complete packet across two separated
+checks. It permits at most three consecutive resynchronizations without a
+valid SDPCM packet; persistent faults and malformed headers still fail.
+[Micro Signal](../../docs/micro-signal.md#sustained-rx-repair) displays drop and
+recovery counters and includes a minute-long paired regression.
+The collector now also accepts bounded 30..600-second runs; a five-minute pass
+was not repeatable. Malformed SDPCM headers still fail explicitly.
+
+SPI bulk backplane reads and writes must set the `0x8000` word-access address
+flag, as scalar backplane I/O does. The badge loader now enforces this mode
+for its aligned bursts, including TX staging and source-firmware loading.
+
+Command 5 has two opt-in receive-path diagnostic bits, defined in
+`../tx_diag.h`. Bit 27 (`CLEAN_TX_REARM_RX`) explicitly restarts PSM/RXE after
+TX, waits for READY with a deadline, and preserves the channel and CCMP key
+configuration before enabling MAC RX. PSM discard counters reset on restart.
+Bit 28 (`CLEAN_TX_MATCH_SOURCE`) programs hardware RX address matching before
+TX: template address 2 becomes the station match and address 3 the BSSID match.
+This option requires a version-0, non-DS management template at least 34 bytes
+long with a unicast source address. It does not change the SHM auto-ACK MAC.
+The matcher remains configured during subsequent reception until reprogrammed
+or reset. Both bits leave the TX count field (bits 19..26) unchanged; omitting
+them preserves normal TX resume behavior. The badge collector exposes these
+through `--tx-auth-rearm`, `--tx-auth-match` and `--tx-auth-match-rearm`.
+Programming uses D11 `rcm_ctl` at `+0x420` and `rcm_mat_data` at `+0x422`,
+with `RCM_INC_DATA = 0x20`, station offset 0 and BSSID offset 3, following
+the public Linux brcmsmac address-match sequence
+([implementation](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/broadcom/brcm80211/brcmsmac/main.c),
+[register definitions](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/broadcom/brcm80211/brcmsmac/d11.h)).
+
+The badge host also supports a two-radio test using this unchanged controller
+ABI: `--peer-tx`, `--peer-tx-1m` and `--peer-rx`, with a shared fresh 14-byte
+challenge. Peer RX runs with TX disabled and validates an exact challenge
+frame received over Function 2. Transmitter command completion alone still
+does not qualify OTA TX. See the badge guide for staged loading, serial
+binding, negative controls and `--inspect-peer` offline verification.
 
 ---
 
@@ -18,7 +99,7 @@ First, build `build/cyw43_rx_fw.bin` from `clean-rx/src/`:
 make -C clean-rx/src
 ```
 
-This produces a ~19 KiB raw ARM Cortex-M3 binary (`clean-rx/src/build/cyw43_rx_fw.bin`) linked to execute at CYW43439 SRAM address `0x00000000`.
+This produces a ~20 KiB raw ARM Cortex-M3 binary (`clean-rx/src/build/cyw43_rx_fw.bin`) linked to execute at CYW43439 SRAM address `0x00000000`.
 
 Embed `cyw43_rx_fw.bin` into your RP2350 image using `.incbin` in an assembly file (e.g. `assets.S`):
 
@@ -162,6 +243,26 @@ Every valid 802.11 frame (with good hardware CRC-32 FCS) is automatically pushed
    - `int is_ofdm = (buf[16] & 0x10u) != 0u;`
    - **802.11 MPDU bytes** start at `&buf[18]` with length `mpdu_len = sdpcm_len - 18u` (including the trailing 4-byte FCS).
 
+The source-built controller additionally uses the two SDPCM padding bytes
+`buf[12..13]` for optional RX publication-phase metadata. The little-endian word
+masked with `0xff7f` equals `CLEAN_RX_PHASE_MAGIC` (`0x5258`); bit 7 of byte 12
+is excluded from that match and marks publication after a successful explicit
+TX command. Thus the complete words are `0x5258` before and `0x52d8` after TX.
+The tag remains set until controller reset. BDC offset byte 17 remains zero;
+the MPDU offset and packet lengths are unchanged. Older compatible images
+without this tag remain readable, but cannot provide phase-qualified counts.
+
+The badge trace stores pre-command packet count at 2016, controller-tagged
+post-TX count at 2020, its valid-FCS subset at 2024, first tagged delivery delay
+in RP2350 timer ticks at 2028, matching AP management frames at 2032, matching
+AP beacons at 2036, all packets delivered during the response window at 2040,
+and observed phase-tag support at 2044. AP counts require matching transmitter
+and BSSID. The delay measures host delivery, not RF arrival or SIFS readiness.
+A normal TX resume may finish one previously started PSM frame; multiple
+post-TX AP beacons, or the explicit rearm experiment, avoid treating that one
+frame as proof of continued reception. These counters never establish OTA TX
+without the separate fresh-MAC ACK or bound management-reply evidence.
+
 ### Hardware SIFS Auto-ACK on Unicast Reception
 When the firmware receives a Management (`type == 0`) or Data (`type == 2`) frame whose Receiver Address (`RA`, `mpdu[4..9]`) matches the station MAC stored in `SHM 0x612..0x614`:
 - Default MAC (`CFG_STA_ROLE == 0`): `02:9b:bf:88:dd:7d`
@@ -186,37 +287,38 @@ To transmit an 802.11 frame from the RP2350:
        if (us * 11u - bits >= 8u) plcp[1] |= 0x80u; /* Length extension bit */
        plcp[2] = (uint8_t)(us & 0xffu);
        plcp[3] = (uint8_t)((us >> 8u) & 0xffu);
-       /* 16-bit CCITT CRC over plcp[0..3] in plcp[4..5] */
+       /* LSB-first CRC-16 over plcp[0..3], complemented, little-endian. */
        uint16_t crc = 0xffffu;
        for (uint32_t i = 0u; i < 4u; ++i) {
-           uint8_t d = plcp[i];
+           crc ^= plcp[i];
            for (uint32_t b = 0u; b < 8u; ++b) {
-               uint16_t mix = (crc ^ ((uint16_t)d << 8u)) & 0x8000u;
-               crc = (uint16_t)((crc << 1u) ^ (mix ? 0x1021u : 0u));
-               d >>= 1u;
+               crc = (uint16_t)((crc >> 1u) ^ ((crc & 1u) ? 0x8408u : 0u));
            }
        }
        crc = (uint16_t)~crc;
-       uint16_t rev = 0u;
-       for (uint32_t b = 0u; b < 16u; ++b)
-           if (crc & (1u << b)) rev |= (uint16_t)(1u << (15u - b));
-       plcp[4] = (uint8_t)(rev & 0xffu);
-       plcp[5] = (uint8_t)(rev >> 8u);
+       plcp[4] = (uint8_t)crc;
+       plcp[5] = (uint8_t)(crc >> 8u);
    }
    ```
-   *(Note: For unencrypted frames (`(FC & 0x4000) == 0`), pad `mpdu_no_fcs` to at least 84 bytes before appending the 4-byte FCS so `total_len >= 94` bytes).*
+   For an 88-byte MPDU including FCS, this produces `6e 04 40 00 7f ee`.
+   Badge diagnostics test both padded 94-byte templates and an exact-length
+   40-byte authentication template (including PLCP). Neither length has
+   established AP reception in the current cold-source test.
 2. Write the frame into `FW_TX_BUF_ADDR` (`0x00038400`) using 32-bit backplane writes:
    ```c
    for (uint32_t off = 0u; off < total_len; off += 4u) {
        bp_write(0x00038400u + off, 4u, load_le32(frame + off));
    }
    ```
-3. Trigger transmission via `MBOX->host_cmd` (`0x00020018`) and wait for `host_cmd == 2`:
+3. Trigger transmission via `MBOX->host_cmd` (`0x00020018`):
    ```c
    uint32_t cmd = 5u | (total_len << 8u) | (1u << 19u); /* 1 repetition, CCK */
    bp_write(0x00020018u, 4u, cmd);
-   while (bp_read32(0x00020018u) != 2u) { /* wait ~200-500 us */ }
    ```
+   Poll for `host_cmd == 2` under a host deadline, checking `fw_state` for
+   ERROR (`255`) during the wait. Do not retry or report success after an error
+   or timeout. Then require an independent valid-FCS response to the fresh
+   source MAC; command completion alone is not over-the-air confirmation.
 
 ---
 

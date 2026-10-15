@@ -170,6 +170,69 @@ RP2350_LDFLAGS := \
 clean-rx-badge:
 	$(MAKE) -C clean-rx/badge all
 
+MICRO_SIGNAL_DIR := $(BUILD_DIR)/micro-signal
+MICRO_SIGNAL_CONTROLLER := $(BUILD_DIR)/clean-rx/cyw43_rx_fw.bin
+MICRO_SIGNAL_SOURCES := $(TOOLS_DIR)/micro-signal.c $(TOOLS_DIR)/diagnostics_logic.c \
+	clean-rx/badge/loader.c clean-rx/badge/assets.S \
+	$(ARCH_DIR)/start.c $(ARCH_DIR)/picobin.S $(ARCH_DIR)/bootrom_reboot.c \
+	$(PLATFORM_DIR)/home.c $(PLATFORM_DIR)/display.c $(PLATFORM_DIR)/graphics.c \
+	$(PLATFORM_DIR)/wifi_board.c $(PLATFORM_DIR)/wifi_pio.c \
+	$(RADIO_DIR)/wifi_gspi.c $(RADIO_DIR)/wifi_probe.c
+MICRO_SIGNAL_HEADERS := $(TOOLS_DIR)/micro-signal.h $(TOOLS_DIR)/diagnostics_logic.h \
+	clean-rx/badge/loader.h clean-rx/badge/frames.h clean-rx/tx_diag.h clean-rx/src/sdio_ring.h \
+	$(wildcard $(ARCH_DIR)/*.h $(SHARED_DIR)/*.h $(PLATFORM_DIR)/*.h $(RADIO_DIR)/*.h)
+
+.PHONY: micro-signal micro-signal-self-test test-micro-signal
+micro-signal: $(UF2_DIR)/micro-signal.uf2
+micro-signal-self-test: $(UF2_DIR)/micro-signal-self-test.uf2
+
+$(MICRO_SIGNAL_CONTROLLER): force
+	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx
+
+$(MICRO_SIGNAL_DIR):
+	mkdir -p $@
+
+$(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: MICRO_SIGNAL_FLAGS = -DMICRO_SIGNAL_SELF_TEST
+MICRO_SIGNAL_TEST_USB := src/usb/live_usb_control.c src/usb/live_usb_hw.c \
+	$(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
+$(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: MICRO_SIGNAL_EXTRA_SOURCES = $(MICRO_SIGNAL_TEST_USB)
+$(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: $(MICRO_SIGNAL_TEST_USB) \
+	src/usb/live_usb.h src/usb/live_usb_hw.h
+$(MICRO_SIGNAL_DIR)/micro-signal.elf $(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: \
+		$(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_HEADERS) $(MICRO_SIGNAL_CONTROLLER) \
+		$(ARCH_DIR)/memmap_flash.ld Makefile | $(MICRO_SIGNAL_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -flto $(MICRO_SIGNAL_FLAGS) \
+		-DCLEAN_CONTROLLER_PATH='"$(abspath $(MICRO_SIGNAL_CONTROLLER))"' \
+		$(RP2350_LDFLAGS) $(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_EXTRA_SOURCES) \
+		-Wl,-Map=$(@:.elf=.map) -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+	$(RP2350_SIZE) $@
+
+$(MICRO_SIGNAL_DIR)/%.bin: $(MICRO_SIGNAL_DIR)/%.elf
+	$(RP2350_OBJCOPY) -O binary $< $@
+
+$(UF2_DIR)/micro-signal.uf2 $(UF2_DIR)/micro-signal-self-test.uf2: \
+		$(UF2_DIR)/%.uf2: $(MICRO_SIGNAL_DIR)/%.bin $(BIN2UF2) | $(UF2_DIR)
+	$(BIN2UF2) $< $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
+
+$(MICRO_SIGNAL_DIR)/micro-signal-test: $(TOOLS_DIR)/micro-signal_test.c \
+		$(TOOLS_DIR)/diagnostics_logic.c $(MICRO_SIGNAL_HEADERS) | $(MICRO_SIGNAL_DIR)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 \
+		$(TOOLS_DIR)/micro-signal_test.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
+
+test-micro-signal: $(MICRO_SIGNAL_DIR)/micro-signal-test
+	$(MICRO_SIGNAL_DIR)/micro-signal-test
+	$(MAKE) -C clean-rx/src BUILD=../../$(BUILD_DIR)/clean-rx test
+
+micro-signal-self-test: $(MICRO_SIGNAL_DIR)/collect
+$(MICRO_SIGNAL_DIR)/collect: $(HOST_TOOLS_SRC_DIR)/micro_signal_collect.c \
+		$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h $(TOOLS_DIR)/diagnostics_logic.c \
+		$(TOOLS_DIR)/diagnostics_logic.h $(SHARED_DIR)/bytes.h $(SHARED_DIR)/usb_report.h \
+		$(RADIO_DIR)/wifi_trace.h src/usb/live_usb.h | $(MICRO_SIGNAL_DIR)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 $$(pkg-config --cflags libusb-1.0) \
+		$(HOST_TOOLS_SRC_DIR)/micro_signal_collect.c $(TOOLS_DIR)/diagnostics_logic.c \
+		$$(pkg-config --libs libusb-1.0) -o $@
+
 .PHONY: usb-wifi-firmware test-wifi-firmware
 .PHONY: usb-wifi-link test-wifi-link
 .PHONY: usb-wifi-udp test-wifi-udp

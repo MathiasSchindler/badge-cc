@@ -28,6 +28,10 @@ Optional SDK-based applications explore Bluetooth and Wi-Fi.
   including multiplayer over Bluetooth.
 - **[Hardware diagnostics](docs/diagnostics.md)** — interactive checks for
   the display, buttons, touch controls, motion sensors and other peripherals.
+- **[Micro Signal](docs/micro-signal.md)** — a small, no-libc button messenger
+  for two badges, using source-built Wi-Fi firmware without an AP or SDK.
+  Experimental: multi-minute testing still reproduces intermittent receive
+  framing failures; see the guide's qualification results.
 - **[USB feedback](docs/usb-live.md)** and **[Wi-Fi experiments](docs/wifi.md)**
   — live device reports, paired badge connections and measured UDP round trips.
 - **[The compiler](badge-compiler/README.md)** — an end-to-end owned toolchain,

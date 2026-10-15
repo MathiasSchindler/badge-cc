@@ -171,6 +171,10 @@ The D11 Programmable State Machine executes 295 64-bit Arch15 instructions (`2,3
    - Sets `spr:0x001 = 0x6a0` (SHM base) and `spr:0x002 = 512` (512-byte max frame capture).
    - Requests PHY/MAC core access (`spr:0x078` bit 5 = `1`, waits for bit 13 = `1`).
    - Flushes RXE (`spr:0x02a = 0`, `spr:0x024 = 0x0c02`, `spr:0x004 = 0x14`, waits for `spr:0x004` bits 2 and 4 to clear), drains stale external conditions (`ext 3, 5, 6, 11, 13, 14`), writes `shm:0x601 = 13` (`PSM_STATE_READY`), and waits for `MACCONTROL` `EN_MAC` (`ext 36`).
+   - Initial flush uses a bounded 65,535-iteration countdown. The former 255-poll
+     bound faulted while RXCTL was still `0x0804`; a later hardware sample
+     confirmed completion (`0x0800`). Only the counter-load instruction changed;
+     the completion/fault branches and outer ARM deadline remain intact.
 2. **PLCP Detection & Prefix Copy (`event_start` -> `prefix_seen`):**
    - Polls `ext 14` (PLCP valid). When asserted, issues a 6-byte initial copy (`spr:0x02a = 6`, `spr:0x004 = 0x40`) and waits for `spr:0x00d` bit 12 and `spr:0x00c >= 6`.
    - The 6-byte PLCP header is written by RXE into `shm:0x6a1..0x6a3` (`shm:0x6a0` holds a duplicate of `shm:0x6a1`).
@@ -276,10 +280,14 @@ Whenever `PSM_STATE_CAPTURED` (`14`) is reached on a valid Management (`frame_ty
 
 ## 10. Building the Firmware
 
-The `clean-rx/src` directory has zero external file or library dependencies (`-ffreestanding -nostdinc -nostdlib -fno-builtin`). To build `build/cyw43_rx_fw.bin`:
+The controller has no external library or SDK dependency
+(`-ffreestanding -nostdinc -nostdlib -fno-builtin`). It shares the project-owned
+`clean-rx/tx_diag.h` diagnostic layout with the badge host. To build the image:
 
 ```bash
 make -C clean-rx/src
 ```
 
-This compiles `startup.S`, `main.c`, `pmu.c`, `radio_phy.c`, and `psm_ucode.c` into a self-contained **18,240-byte (~17.8 KiB)** ARM Cortex-M3 binary (`build/cyw43_rx_fw.bin`).
+This compiles `startup.S`, `main.c`, `pmu.c`, `radio_phy.c`, and `psm_ucode.c`
+into a self-contained ARM Cortex-M3 binary of approximately 20 KiB
+(`build/cyw43_rx_fw.bin`). The build reports its exact linked size.

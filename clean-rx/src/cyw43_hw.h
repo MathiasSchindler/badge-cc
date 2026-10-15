@@ -191,7 +191,7 @@ typedef struct {
     uint16_t rxe_post[8];
     uint8_t  rx_snapshot[96];
     uint8_t  rx_input[180];
-    uint8_t  pad[4];
+    uint32_t f2_counts;
 } fw_mbox_t;
 
 _Static_assert(sizeof(fw_mbox_t) == 448u, "Mailbox is 448 bytes");

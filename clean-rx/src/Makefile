@@ -14,9 +14,17 @@ LDFLAGS := -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings -T cyw4
 SRCS    := main.c pmu.c radio_phy.c psm_ucode.c
 OBJS    := $(BUILD)/startup.o $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
-.PHONY: all clean
+.PHONY: all clean test
 
 all: $(BUILD)/cyw43_rx_fw.bin
+
+test: $(BUILD)/psm_ucode_test
+	$<
+
+$(BUILD)/psm_ucode_test: psm_ucode_test.c psm_ucode.c ../../src/shared/stdint.h \
+		../../src/tools/diagnostics_logic.c ../../src/tools/diagnostics_logic.h | $(BUILD)
+	cc -std=c11 -Wall -Wextra -Werror -O2 psm_ucode_test.c psm_ucode.c \
+		../../src/tools/diagnostics_logic.c -o $@
 
 $(BUILD):
 	mkdir -p $@
@@ -24,7 +32,7 @@ $(BUILD):
 $(BUILD)/startup.o: startup.S | $(BUILD)
 	$(CC) --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -nostdinc -c $< -o $@
 
-$(BUILD)/%.o: %.c cyw43_hw.h types.h | $(BUILD)
+$(BUILD)/%.o: %.c cyw43_hw.h types.h sdio_ring.h ../../src/shared/stdint.h ../tx_diag.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cyw43_rx_fw.elf: $(OBJS) cyw43.ld

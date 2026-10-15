@@ -23,6 +23,9 @@ void clean_loader_init(clean_loader_t *l, const wifi_wire_t *wire,
     l->started = wire->now_us(wire->context);
     l->window = l->error = l->address = l->actual = l->verified = l->stage = 0u;
     l->window_valid = 0u;
+    l->rx_checked = l->started;
+    l->rx_resyncs = 0u;
+    l->rx_stalled = l->rx_retries = 0u;
 }
 
 static int reg_write(clean_loader_t *l, uint8_t fn, uint32_t addr,
@@ -81,8 +84,9 @@ int clean_block(clean_loader_t *l, uint32_t address, uint8_t *bytes,
         uint32_t count = 64u - (addr & 63u);
         if (count > length - offset) count = length - offset;
         if (!clean_service(l) || !window(l, addr)) return 0;
+        /* SPI backplane bursts need the same word-access flag as scalar I/O. */
         badger_bytes_store_u32(tx, ((uint32_t)write << 31u) | 0x50000000u |
-                               ((addr & 0x7fffu) << 11u) | count);
+                               (((addr & 0x7fffu) | 0x8000u) << 11u) | count);
         if (write) badger_bytes_copy(tx + 4u, bytes + offset, count);
         wifi_bus_result_t result = l->wire->transfer(l->wire, tx, write ? count + 4u : 4u,
             write ? 0 : rx, write ? 0u : count + WIFI_GSPI_BACKPLANE_PAD);
@@ -109,17 +113,41 @@ int clean_wait_state(clean_loader_t *l, uint32_t expected, uint32_t timeout) {
     return fail(l, CLEAN_TIMEOUT);
 }
 
+static int receive_resync(clean_loader_t *l, uint32_t actual) {
+    l->actual = actual;
+    if (l->rx_retries >= 3u) return fail(l, CLEAN_INPUT);
+    /* Terminate the incomplete read frame, not the running DMA descriptor ring. */
+    if (!reg_write(l, 1u, 0x1000du, 1u, 1u) ||
+        !reg_write(l, 0u, 4u, 2u, 0x23u)) return 0;
+    ++l->rx_retries;
+    ++l->rx_resyncs;
+    l->rx_stalled = 0u;
+    l->rx_checked = l->wire->now_us(l->wire->context);
+    return 1;
+}
+
 int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
     *length = 0u;
     uint32_t status;
     if (!clean_service(l) || !reg_read(l, 0u, 8u, 4u, &status)) return 0;
     if (status == 0xffffffffu) return fail(l, CLEAN_BUS);
-    if ((status & 0x100u) == 0u) return 1;
+    if ((status & 0x100u) == 0u) {
+        uint32_t now = l->wire->now_us(l->wire->context);
+        if (now - l->rx_checked < 100000u) return 1;
+        l->rx_checked = now;
+        uint32_t fifo;
+        if (!clean_read(l, 0x18002020u, &fifo)) return 0;
+        if ((fifo & 0x00800000u) == 0u) l->rx_stalled = 0u;
+        else if (l->rx_stalled) return receive_resync(l, status);
+        else l->rx_stalled = 1u;
+        return 1;
+    }
+    l->rx_stalled = 0u;
     uint32_t size = (status >> 9u) & 0x7ffu;
     if (size < 18u || size > 524u) {
-        l->actual = size;
-        return fail(l, CLEAN_INPUT);
+        return receive_resync(l, size);
     }
+    if (status & 2u) return receive_resync(l, status);
     uint8_t command[4];
     badger_bytes_store_u32(command, 0x60000000u | size);
     wifi_bus_result_t result = l->wire->transfer(l->wire, command, 4u, packet, (size + 3u) & ~3u);
@@ -135,6 +163,8 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
         return fail(l, CLEAN_INPUT);
     }
     *length = sdpcm;
+    l->rx_retries = 0u;
+    l->rx_checked = l->wire->now_us(l->wire->context);
     return 1;
 }
 
@@ -179,7 +209,7 @@ int clean_boot(clean_loader_t *l, const uint8_t *image, uint32_t length,
         l->verified += count;
         offset += count;
     }
-    if (!clean_write(l, CLEAN_MBOX + 28u, 0x3fu | (channel << 16u) | ((uint32_t)tx_enabled << 8u)) ||
+    if (!clean_write(l, CLEAN_MBOX + 28u, 0xbfu | (channel << 16u) | ((uint32_t)tx_enabled << 8u)) ||
         !clean_write(l, CLEAN_MBOX + 32u, generation) ||
         !clean_write(l, CLEAN_MULTI + 4u, 0xffffffffu)) return 0;
     l->stage = 4u;

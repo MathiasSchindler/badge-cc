@@ -3,9 +3,10 @@
 
 #include "../../src/shared/bytes.h"
 #include "../../src/tools/diagnostics_logic.h"
+#include "../tx_diag.h"
 
 static inline int clean_frame_valid(const uint8_t *mpdu, uint32_t length) {
-    return length >= 28u && length <= 504u &&
+    return length >= 14u && length <= 504u &&
            diag_crc32(mpdu, length - 4u) == badger_bytes_load_u32(mpdu + length - 4u);
 }
 
@@ -29,29 +30,34 @@ static inline int clean_beacon_info(const uint8_t *mpdu, uint32_t length,
     return 0;
 }
 
+static inline void clean_cck_plcp(uint8_t frame[6], uint8_t rate, uint16_t duration) {
+    frame[0] = rate;
+    frame[1] = 0x04u;
+    frame[2] = (uint8_t)duration;
+    frame[3] = (uint8_t)(duration >> 8u);
+    uint16_t crc = 0xffffu;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        crc ^= frame[i];
+        for (uint32_t bit = 0u; bit < 8u; ++bit)
+            crc = (uint16_t)((crc >> 1u) ^ ((crc & 1u) ? 0x8408u : 0u));
+    }
+    crc = (uint16_t)~crc;
+    frame[4] = (uint8_t)crc;
+    frame[5] = (uint8_t)(crc >> 8u);
+}
+
+static inline void clean_ofdm_plcp(uint8_t frame[6]) {
+    /* 6 Mbps SIGNAL code, 88-byte PSDU, even parity, zero tail. */
+    frame[0] = 0x0bu;
+    frame[1] = 0x0bu;
+    frame[2] = frame[3] = frame[4] = frame[5] = 0u;
+}
+
 static inline int clean_probe_request(uint8_t frame[96], uint16_t sequence,
                                       const uint8_t *ssid, uint8_t ssid_length) {
     if (ssid_length > 32u || (ssid_length != 0u && ssid == 0)) return 0;
     badger_bytes_zero(frame, 96u);
-    /* 11 Mbps CCK, 88-byte MPDU including FCS, 64 us PLCP length. */
-    frame[0] = 0x6eu;
-    frame[1] = 0x04u;
-    frame[2] = 64u;
-    uint16_t crc = 0xffffu;
-    for (uint32_t i = 0u; i < 4u; ++i) {
-        uint8_t byte = frame[i];
-        for (uint32_t bit = 0u; bit < 8u; ++bit) {
-            uint16_t mix = (crc ^ ((uint16_t)byte << 8u)) & 0x8000u;
-            crc = (uint16_t)((crc << 1u) ^ (mix ? 0x1021u : 0u));
-            byte >>= 1u;
-        }
-    }
-    crc = (uint16_t)~crc;
-    uint16_t reversed = 0u;
-    for (uint32_t bit = 0u; bit < 16u; ++bit)
-        if (crc & (1u << bit)) reversed |= (uint16_t)(1u << (15u - bit));
-    frame[4] = (uint8_t)reversed;
-    frame[5] = (uint8_t)(reversed >> 8u);
+    clean_cck_plcp(frame, 0x6eu, 64u);
     uint8_t *mpdu = frame + 6u;
     mpdu[0] = 0x40u;
     for (uint32_t i = 0u; i < 6u; ++i) mpdu[4u+i] = mpdu[16u+i] = 255u;
@@ -78,6 +84,145 @@ static inline int clean_probe_request(uint8_t frame[96], uint16_t sequence,
     mpdu[at + 2u] = 0x02u;
     badger_bytes_store_u32(mpdu + 84u, diag_crc32(mpdu, 84u));
     return 1;
+}
+
+static inline uint32_t clean_auth_request(uint8_t frame[96], uint16_t sequence,
+                                         const uint8_t bssid[6], uint8_t short_frame) {
+    (void)clean_probe_request(frame, sequence, 0, 0u);
+    uint8_t *mpdu = frame + 6u;
+    mpdu[0] = 0xb0u;
+    badger_bytes_copy(mpdu + 4u, bssid, 6u);
+    badger_bytes_copy(mpdu + 16u, bssid, 6u);
+    badger_bytes_zero(mpdu + 24u, 60u);
+    mpdu[26] = 1u; /* Open-system authentication transaction 1. */
+    mpdu[30] = 221u;
+    mpdu[31] = 52u;
+    mpdu[32] = 0x02u;
+    badger_bytes_store_u32(mpdu + 84u, diag_crc32(mpdu, 84u));
+    if (short_frame) {
+        clean_cck_plcp(frame, 0x0au, 272u);
+        badger_bytes_zero(frame + 36u, 60u);
+        badger_bytes_store_u32(frame + 36u, diag_crc32(mpdu, 30u));
+        return 40u;
+    }
+    return 94u;
+}
+
+static inline void clean_peer_request(uint8_t frame[96], const uint8_t challenge[14],
+                                     uint8_t one_mbps) {
+    (void)clean_probe_request(frame, (uint16_t)badger_bytes_load_u32(challenge), 0, 0u);
+    frame[16] = 2u;
+    badger_bytes_copy(frame + 17u, challenge, 5u);
+    static const uint8_t tag[4] = {'C','R','X','P'};
+    badger_bytes_copy(frame + 53u, tag, sizeof(tag));
+    badger_bytes_copy(frame + 57u, challenge, 14u);
+    if (one_mbps) clean_cck_plcp(frame, 0x0au, 704u);
+    badger_bytes_store_u32(frame + 90u, diag_crc32(frame + 6u, 84u));
+}
+
+static inline int clean_peer_reply(const uint8_t *mpdu, uint32_t length,
+                                   const uint8_t challenge[14]) {
+    if (length != 88u || !clean_frame_valid(mpdu, length)) return 0;
+    uint8_t expected[96];
+    clean_peer_request(expected, challenge, 0u);
+    return badger_bytes_equal(mpdu, expected + 6u, 88u);
+}
+
+static inline int clean_peer_received(const uint8_t detail[2048],
+                                      const uint8_t challenge[14]) {
+    return badger_bytes_load_u32(detail + 8u) == 0u &&
+           badger_bytes_load_u32(detail + 4u) == 8u &&
+           badger_bytes_load_u32(detail + 32u) == 0x4f505258u &&
+           badger_bytes_load_u32(detail + 36u) == 10u &&
+           badger_bytes_load_u32(detail + 44u) == 0u &&
+           badger_bytes_load_u32(detail + 1092u) == 0u &&
+           badger_bytes_load_u32(detail + 1996u) != 0u &&
+           badger_bytes_load_u32(detail + 1088u) == 106u &&
+           clean_peer_reply(detail + 1122u, 88u, challenge);
+}
+
+static inline uint32_t clean_compact_probe_request(uint8_t frame[96], uint16_t sequence,
+                                                   const uint8_t *ssid, uint8_t ssid_length,
+                                                   const uint8_t bssid[6]) {
+    if (!clean_probe_request(frame, sequence, ssid, ssid_length)) return 0u;
+    uint32_t total = 52u + ssid_length;
+    clean_cck_plcp(frame, 0x0au, (uint16_t)((total - 6u) * 8u));
+    badger_bytes_copy(frame + 10u, bssid, 6u);
+    badger_bytes_copy(frame + 22u, bssid, 6u);
+    badger_bytes_zero(frame + total - 4u, 96u - total + 4u);
+    badger_bytes_store_u32(frame + total - 4u, diag_crc32(frame + 6u, total - 10u));
+    return total;
+}
+
+static inline int clean_ap_reply(const uint8_t *mpdu, uint32_t length,
+                                 const uint8_t mac[6], const uint8_t bssid[6],
+                                 uint8_t auth) {
+    if (length < 28u || !clean_frame_valid(mpdu, length) || (mpdu[1] & 0xc7u) != 0u ||
+        !badger_bytes_equal(mpdu + 4u, mac, 6u) ||
+        !badger_bytes_equal(mpdu + 10u, bssid, 6u) ||
+        !badger_bytes_equal(mpdu + 16u, bssid, 6u)) return 0;
+    if (mpdu[0] == 0xc0u || mpdu[0] == 0xa0u) return length >= 30u;
+    if (!auth) return length >= 40u && mpdu[0] == 0x50u;
+    return length >= 34u && mpdu[0] == 0xb0u && mpdu[24] == 0u && mpdu[25] == 0u &&
+           mpdu[26] == 2u && mpdu[27] == 0u;
+}
+
+static inline int clean_ack_reply(const uint8_t *mpdu, uint32_t length,
+                                  const uint8_t mac[6]) {
+    return length == 14u && clean_frame_valid(mpdu, length) &&
+           mpdu[0] == 0xd4u && mpdu[1] == 0u &&
+           badger_bytes_equal(mpdu + 4u, mac, 6u);
+}
+
+static inline int clean_rx_phase(const uint8_t *packet, uint32_t size) {
+    if (size < 18u || (packet[12] & 0x7fu) != (uint8_t)CLEAN_RX_PHASE_MAGIC ||
+        packet[13] != (uint8_t)(CLEAN_RX_PHASE_MAGIC >> 8u))
+        return -1;
+    return packet[12] >> 7u;
+}
+
+static inline void clean_record_post_tx(uint8_t detail[2048], const uint8_t *packet,
+                                       uint32_t size, uint32_t elapsed) {
+    uint32_t delivered = badger_bytes_load_u32(detail + 2040u);
+    badger_bytes_store_u32(detail + 2040u, delivered + 1u);
+    if (clean_rx_phase(packet, size) != 1) return;
+    uint32_t post = badger_bytes_load_u32(detail + 2020u);
+    if (post == 0u) badger_bytes_store_u32(detail + 2028u, elapsed);
+    badger_bytes_store_u32(detail + 2020u, post + 1u);
+    if (size < 32u || !clean_frame_valid(packet + 18u, size - 18u)) return;
+    uint32_t valid = badger_bytes_load_u32(detail + 2024u);
+    badger_bytes_store_u32(detail + 2024u, valid + 1u);
+    if (size < 46u || (packet[18] & 0x0fu) != 0u ||
+        !badger_bytes_equal(packet + 28u, detail + 1980u, 6u) ||
+        !badger_bytes_equal(packet + 34u, detail + 1980u, 6u)) return;
+    uint32_t ap = badger_bytes_load_u32(detail + 2032u);
+    badger_bytes_store_u32(detail + 2032u, ap + 1u);
+    if (packet[18] == 0x80u) {
+        uint32_t beacons = badger_bytes_load_u32(detail + 2036u);
+        badger_bytes_store_u32(detail + 2036u, beacons + 1u);
+    }
+}
+
+static inline int clean_tx_confirmed(const uint8_t detail[2048]) {
+    uint32_t size = badger_bytes_load_u32(detail + 1088u);
+    uint32_t tx_length = badger_bytes_load_u32(detail + 1988u);
+    if (size < 18u || size > 522u ||
+        (tx_length != 40u && tx_length != 94u && (tx_length < 52u || tx_length > 84u)) ||
+        badger_bytes_load_u32(detail + 8u) != 0u ||
+        badger_bytes_load_u32(detail + 4u) != 8u ||
+        badger_bytes_load_u32(detail + 32u) != 0x4f505258u ||
+        badger_bytes_load_u32(detail + 36u) != 10u ||
+        badger_bytes_load_u32(detail + 44u) != 0u ||
+        badger_bytes_load_u32(detail + 1092u) != 1u ||
+        badger_bytes_load_u32(detail + 1096u) != 1u ||
+        badger_bytes_load_u32(detail + 40u) != 7u ||
+        badger_bytes_load_u32(detail + 76u) != (0x55550000u | tx_length)) return 0;
+    const uint8_t *mpdu = detail + 1122u;
+    return (badger_bytes_load_u32(detail + 1992u) != 0u &&
+            clean_ack_reply(mpdu, size - 18u, detail + 1972u)) ||
+           (badger_bytes_load_u32(detail + 1960u) != 0u &&
+            (clean_ap_reply(mpdu, size - 18u, detail + 1972u, detail + 1980u, 0u) ||
+             clean_ap_reply(mpdu, size - 18u, detail + 1972u, detail + 1980u, 1u)));
 }
 
 #endif

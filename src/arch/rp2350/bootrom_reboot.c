@@ -29,18 +29,33 @@ int32_t badger_schedule_bootsel(uint32_t delay_ms) {
     return reboot_to_bootsel(0x2u, delay_ms);
 }
 
-int32_t badger_rom_chip_id(uint32_t id[2]) {
+static int32_t rom_info(uint32_t *data, uint32_t words, uint32_t flag) {
     uintptr_t lookup_address = *(const volatile uint16_t *)0x16u;
-    if (id == 0 || !rom_thumb_pointer(lookup_address)) return -1001;
+    if (!rom_thumb_pointer(lookup_address)) return -1001;
     rom_lookup_t lookup = (rom_lookup_t)lookup_address;
     uintptr_t info_address = lookup(0x5347u, 0x0004u);
     if (!rom_thumb_pointer(info_address)) return -1002;
     typedef int32_t (*info_fn_t)(uint32_t *, uint32_t, uint32_t);
     info_fn_t info = (info_fn_t)info_address;
+    int32_t result = info(data, words, flag);
+    return result == (int32_t)words && (data[0] & flag) != 0u ? 0 : -1005;
+}
+
+int32_t badger_rom_chip_id(uint32_t id[2]) {
+    if (id == 0) return -1001;
     uint32_t data[4] = {0};
-    int32_t result = info(data, 4u, 1u);
-    if (result != 4 || (data[0] & 1u) == 0u) return -1005;
+    int32_t result = rom_info(data, 4u, 1u);
+    if (result != 0) return result;
     id[0] = data[2];
     id[1] = data[3];
+    return 0;
+}
+
+int32_t badger_rom_boot_random(uint32_t random[4]) {
+    if (random == 0) return -1001;
+    uint32_t data[5];
+    int32_t result = rom_info(data, 5u, 0x10u);
+    if (result != 0) return result;
+    for (uint32_t i = 0u; i < 4u; ++i) random[i] = data[i + 1u];
     return 0;
 }

@@ -18,7 +18,11 @@ typedef struct {
     uint32_t actual;
     uint32_t verified;
     uint32_t stage;
+    uint32_t rx_checked;
+    uint32_t rx_resyncs;
     uint8_t window_valid;
+    uint8_t rx_stalled;
+    uint8_t rx_retries;
 } clean_loader_t;
 
 enum {

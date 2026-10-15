@@ -1,12 +1,26 @@
 #include "cyw43_hw.h"
+#include "sdio_ring.h"
+#include "../tx_diag.h"
 
 #define MBOX  ((volatile fw_mbox_t *)FW_MBOX_ADDR)
 #define MULTI ((volatile fw_multi_t *)FW_MULTI_ADDR)
+
+_Static_assert(__builtin_offsetof(fw_mbox_t, rx_input) + 32u == CLEAN_TX_DIAG_OFFSET,
+               "TX diagnostic trace offset");
+_Static_assert(sizeof(clean_tx_diag_t) <= sizeof(((fw_mbox_t *)0)->rx_input),
+               "TX diagnostic fits mailbox");
+_Static_assert(__builtin_offsetof(fw_mbox_t, f2_counts) == 444u, "F2 counter offset");
 
 static uint32_t dma_consumer;
 static uint32_t dma_producer;
 static uint32_t sdio_tx_idx;
 static uint8_t  sdpcm_seq;
+static uint8_t rx_after_explicit_tx;
+static clean_tx_diag_t tx_diag;
+
+static uint32_t tx_status(void) {
+    return ((uint32_t)mmio_read16(0x1800150eu) << 16u) | mmio_read16(0x18001690u);
+}
 
 static int fail(uint32_t err, uint32_t addr, uint32_t val) {
     MBOX->fw_error = err;
@@ -217,11 +231,14 @@ static int rx_dma_poll_and_reclaim(volatile fw_frame_slot_t *slot) {
 }
 
 /* SDIOD Function 2 TX DMA ring management (0x18002200..0x18002214) */
-static void sdio_f2_init(void) {
+static int sdio_f2_init(void) {
     mmio_write32(SDIOD_TX_DMA_CTL, 0u);
-    for (uint32_t i = 0u; i < 200u; ++i) {
-        if ((mmio_read32(SDIOD_TX_DMA_STATUS0) & 0xf0000000u) == 0u) break;
+    uint32_t status = 0u;
+    for (uint32_t i = 0u; i < 2000u; ++i) {
+        status = mmio_read32(SDIOD_TX_DMA_STATUS0);
+        if ((status & 0xf0000000u) == 0u) break;
     }
+    if (status & 0xf0000000u) return fail(0x87u, SDIOD_TX_DMA_STATUS0, status);
     volatile uint32_t *ring = (volatile uint32_t *)FW_SDIO_TX_RING_ADDR;
     for (uint32_t i = 0u; i < 32u * 4u; ++i)
         ring[i] = 0u;
@@ -229,9 +246,11 @@ static void sdio_f2_init(void) {
 
     mmio_write32(SDIOD_TX_DMA_ADDRLOW, FW_SDIO_TX_RING_ADDR);
     mmio_write32(SDIOD_TX_DMA_ADDRHIGH, 0u);
-    mmio_write32(SDIOD_TX_DMA_CTL, 0x000a0801u);
     mmio_write32(SDIOD_TX_DMA_PTR, FW_SDIO_TX_RING_ADDR);
     sdio_tx_idx = 0u;
+    MBOX->f2_counts = 0u;
+    mmio_write32(SDIOD_TX_DMA_CTL, 0x000a0801u);
+    return 1;
 }
 
 static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot) {
@@ -241,12 +260,15 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot) {
     uint32_t sdpcm_len = 18u + mpdu_len;
     uint32_t dma_len = (sdpcm_len + 3u) & ~3u;
 
-    if (sdio_tx_idx >= 31u) {
-        for (uint32_t wait = 0u; wait < 2000u; ++wait) {
-            uint32_t cur = (mmio_read32(SDIOD_TX_DMA_STATUS0) & 0x1fffu) >> 4u;
-            if (cur == sdio_tx_idx) break;
-        }
-        sdio_f2_init();
+    uint32_t status = mmio_read32(SDIOD_TX_DMA_STATUS0);
+    int available = clean_sdio_available(sdio_tx_idx, status);
+    if (available < 0) {
+        (void)fail(0x86u, SDIOD_TX_DMA_STATUS0, status);
+        return;
+    }
+    if (!available) {
+        MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 1u);
+        return;
     }
 
     uint32_t idx = sdio_tx_idx;
@@ -267,6 +289,8 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot) {
     pkt[9] = 8u;  /* Credit */
     pkt[10] = 0u;
     pkt[11] = 0u;
+    pkt[12] = (uint8_t)CLEAN_RX_PHASE_MAGIC | (uint8_t)(rx_after_explicit_tx << 7u);
+    pkt[13] = (uint8_t)(CLEAN_RX_PHASE_MAGIC >> 8u);
 
     /* 4-byte BDC header at offset 14 */
     pkt[14] = 0x20u;
@@ -280,14 +304,15 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot) {
     __asm__ volatile("dsb" ::: "memory");
 
     volatile uint32_t *ring = (volatile uint32_t *)FW_SDIO_TX_RING_ADDR;
-    ring[4u * idx + 0u] = 0xc0000000u;
+    ring[4u * idx + 0u] = clean_sdio_flags(idx);
     ring[4u * idx + 1u] = dma_len & 0x7fffu;
     ring[4u * idx + 2u] = buf_addr;
     ring[4u * idx + 3u] = 0u;
     __asm__ volatile("dsb" ::: "memory");
 
-    sdio_tx_idx = idx + 1u;
+    sdio_tx_idx = (idx + 1u) & 31u;
     mmio_write32(SDIOD_TX_DMA_PTR, FW_SDIO_TX_RING_ADDR + sdio_tx_idx * 16u);
+    MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 0u);
 }
 
 /* Transmit an 11 Mbps CCK IEEE 802.11 ACK frame (FC=0x00d4, RA=ta[0..5]) immediately upon unicast reception */
@@ -361,8 +386,18 @@ static void d11_transmit_ack_frame(const uint8_t ta[6], uint32_t channel, uint32
 
 /* Transmit a raw 802.11 frame (6-byte PLCP + MPDU) stored at FW_TX_BUF_ADDR via D11 Template RAM + TXE */
 static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uint32_t channel, uint32_t mac_tx_ctl) {
-    if (total_len < 16u || total_len > 512u) return 0;
+    if (total_len < 16u || total_len > 512u)
+        return fail(0x83u, FW_TX_BUF_ADDR, total_len);
     const volatile uint8_t *tx_buf = (const volatile uint8_t *)FW_TX_BUF_ADDR;
+    tx_diag.magic = CLEAN_TX_DIAG_MAGIC;
+    tx_diag.resume_ticks = 0u;
+    tx_diag.mac_resume_us = 0u;
+    tx_diag.psm_after = 0u;
+    tx_diag.start_ticks = ARM_CYCLE_COUNTER;
+    tx_diag.length = total_len;
+    tx_diag.channel = (uint16_t)channel;
+    tx_diag.psm_before = shm_read16(0x601u);
+    tx_diag.status_before = tx_status();
 
     mmio_write32(D11_MACCONTROL, 0x84020400u);
     (void)mmio_read32(D11_MACCONTROL);
@@ -412,31 +447,71 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     mmio_write16(0x1800156au, (uint16_t)total_len);
     mmio_write16(0x18001568u, 0x0826u);
     mmio_write16(0x18001500u, 0x0000u);
+    static const uint16_t phy_regs[CLEAN_TX_PHY_COUNT] = CLEAN_TX_PHY_REGS;
+    static const uint16_t radio_regs[8] = CLEAN_TX_RADIO_REGS;
+    static const uint16_t ihr_regs[8] = CLEAN_TX_IHR_REGS;
+    for (uint32_t i = 0u; i < CLEAN_TX_PHY_COUNT; ++i) tx_diag.phy[i] = phy_reg_read(phy_regs[i]);
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        tx_diag.radio[i] = radio_reg_read(radio_regs[i]);
+        tx_diag.ihr[i] = mmio_read16(D11_BASE + ihr_regs[i]);
+    }
+    uint16_t saved_9a5 = phy_reg_read(0x9a5u);
+    phy_reg_mod(0x9a5u, 2u, 2u);
+    for (uint32_t group = 0u; group < 2u; ++group) {
+        phy_reg_write(0x00du, 0u);
+        phy_reg_write(0x00eu, group ? 112u : 96u);
+        for (uint32_t i = 0u; i < 4u; ++i)
+            tx_diag.iq[group * 4u + i] = phy_reg_read(0x456u);
+    }
+    phy_reg_write(0x9a5u, saved_9a5);
+    tx_diag.maccontrol = mmio_read32(D11_MACCONTROL);
+    tx_diag.gci_output = mmio_read32(GCI_OUTPUT_REG1);
+    tx_diag.gci_control = mmio_read32(GCI_CONTROL_REG1);
     MBOX->rc_dacbuf = 0x55550004u;
+    tx_diag.trigger_ticks = ARM_CYCLE_COUNTER;
+    tx_diag.mac_trigger_us = mmio_read32(D11_BASE + 0x1cu);
     mmio_write16(0x18001502u, 0x00d0u);
     MBOX->rc_dacbuf = 0x55550005u;
     (void)mmio_read16(0x18001502u);
+    tx_diag.phy_debug_first = mmio_read32(D11_BASE + 0x158u);
+    tx_diag.status_first = tx_status();
 
     uint16_t st_50e_seen = 0u, st_690_seen = 0u;
+    uint32_t tx_conditions = 0u;
     for (uint32_t i = 0u; i < 2000u; ++i) {
         uint16_t v = mmio_read16(0x1800150eu);
         st_50e_seen |= v;
-        if ((v & 0x0080u) == 0u) break;
+        if ((v & 0x0080u) == 0u) {
+            tx_conditions |= 1u;
+            break;
+        }
         (void)delay_ticks(180u);
     }
     for (uint32_t i = 0u; i < 2000u; ++i) {
         uint16_t v = mmio_read16(0x1800150eu);
         st_50e_seen |= v;
-        if ((v & 0x0400u) != 0u) break;
+        if ((v & 0x0400u) != 0u) {
+            tx_conditions |= 2u;
+            break;
+        }
         (void)delay_ticks(180u);
     }
     for (uint32_t i = 0u; i < 2000u; ++i) {
         uint16_t v = mmio_read16(0x18001690u);
         st_690_seen |= v;
-        if ((v & 0x0100u) == 0u) break;
+        if ((v & 0x0100u) == 0u) {
+            tx_conditions |= 4u;
+            break;
+        }
         (void)delay_ticks(180u);
     }
     MBOX->vco_status = ((uint32_t)st_50e_seen << 16u) | st_690_seen;
+    MBOX->fw_substage = tx_conditions;
+    tx_diag.complete_ticks = ARM_CYCLE_COUNTER;
+    tx_diag.mac_complete_us = mmio_read32(D11_BASE + 0x1cu);
+    tx_diag.status_after = tx_status();
+    tx_diag.phy_error = mmio_read16(D11_BASE + 0x3eeu);
+    tx_diag.psm_debug = mmio_read32(D11_BASE + 0x154u);
 
     mmio_write16(0x18001502u, 0x0000u);
     mmio_write16(0x18001568u, 0x0000u);
@@ -447,7 +522,18 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     (void)mmio_read32(D11_MACCONTROL);
     phy_tx_set_inhibit(1);
     MBOX->rc_dacbuf = 0x55550000u | total_len;
-    return 1;
+    return tx_conditions == 7u || fail(0x82u, 0x1800150eu, MBOX->vco_status);
+}
+
+static void snapshot_psm(uint32_t started, uint32_t polls) {
+    for (uint32_t i = 0u; i < 16u; ++i) {
+        MBOX->psm_mailbox[i] = shm_read16(0x600u + i);
+        MBOX->psm_diag[i] = shm_read16(0x7a0u + i);
+    }
+    sample_rxe8(MBOX->rxe_pre);
+    MBOX->rx_polls = polls;
+    MBOX->rx_elapsed_ticks = ARM_CYCLE_COUNTER - started;
+    MBOX->maccontrol_active = mmio_read32(D11_MACCONTROL);
 }
 
 static int load_and_start_psm(uint32_t generation, uint32_t channel) {
@@ -480,6 +566,7 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
     shm_write16(0x611u, (uint16_t)(generation >> 16u));
 
     static const uint8_t start_bits[4] = {0u, 4u, 6u, 2u};
+    uint32_t started = ARM_CYCLE_COUNTER;
     for (uint32_t i = 0u; i < 4u; ++i) {
         mmio_write32(D11_MACCONTROL, 0x84020400u | start_bits[i]);
         (void)mmio_read32(D11_MACCONTROL);
@@ -488,20 +575,63 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
     for (uint32_t poll = 0u; poll < 2000u; ++poll) {
         uint16_t st = shm_read16(0x601u);
         if (st == PSM_STATE_READY) {
+            snapshot_psm(started, poll);
             ready = 1u;
             break;
         }
         if (st == PSM_STATE_FAULT) {
+            snapshot_psm(started, poll);
+            /* Observe late completion without restarting or accepting the failed PSM. */
+            (void)delay_ticks(2000000u);
+            sample_rxe8(MBOX->rxe_post);
             return fail(0x71u, shm_read16(0x602u), st);
         }
         (void)delay_ticks(500u);
     }
-    if (!ready)
+    if (!ready) {
+        snapshot_psm(started, 2000u);
         return fail(0x72u, 0x601u, shm_read16(0x601u));
+    }
 
     mmio_write32(D11_MACCONTROL, 0x84020400u);
     (void)mmio_read32(D11_MACCONTROL);
     shm_write16(0x609u, (uint16_t)channel);
+    return 1;
+}
+
+static void d11_set_addrmatch(uint16_t offset, const volatile uint8_t *address) {
+    mmio_write16(D11_BASE + 0x420u, 0x0020u | offset);
+    for (uint32_t i = 0u; i < 3u; ++i)
+        mmio_write16(D11_BASE + 0x422u,
+                     (uint16_t)address[2u * i] | ((uint16_t)address[2u * i + 1u] << 8u));
+}
+
+static int d11_restart_rx_psm(uint32_t channel) {
+    mmio_write32(D11_MACCONTROL, 0x84020400u);
+    (void)mmio_read32(D11_MACCONTROL);
+    uint16_t saved_tk[8];
+    uint16_t saved_ccmp_en = shm_read16(0x615u);
+    for (uint32_t k = 0u; k < 8u; ++k) saved_tk[k] = shm_read16(0x618u + k);
+    shm_write16(0x601u, 0u);
+    shm_write16(0x602u, 0u);
+    shm_write16(0x609u, (uint16_t)channel);
+    static const uint8_t restart_bits[4] = {0u, 4u, 6u, 2u};
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        mmio_write32(D11_MACCONTROL, 0x84020400u | restart_bits[i]);
+        (void)mmio_read32(D11_MACCONTROL);
+    }
+    uint16_t state = 0u;
+    for (uint32_t poll = 0u; poll < 2000u; ++poll) {
+        state = shm_read16(0x601u);
+        if (state == PSM_STATE_READY || state == PSM_STATE_FAULT) break;
+        (void)delay_ticks(200u);
+    }
+    mmio_write32(D11_MACCONTROL, 0x84020400u);
+    (void)mmio_read32(D11_MACCONTROL);
+    if (state != PSM_STATE_READY) return fail(0x84u, 0x601u, state);
+    shm_write16(0x609u, (uint16_t)channel);
+    shm_write16(0x615u, saved_ccmp_en);
+    for (uint32_t k = 0u; k < 8u; ++k) shm_write16(0x618u + k, saved_tk[k]);
     return 1;
 }
 
@@ -584,7 +714,6 @@ void cyw43_main(void) {
     }
 
     /* 8. Pre-configure TX chain, set station MAC for Auto-ACK, initialize RX/SDIO DMA, and enable MAC + PSM */
-    MBOX->fw_state = FW_STATE_RX_ACTIVE;
     phy_tx_hw_configure(channel);
     phy_tx_set_inhibit(1);
     if (flags & CFG_STA_ROLE) {
@@ -597,7 +726,7 @@ void cyw43_main(void) {
         shm_write16(0x614u, 0x7dddu);
     }
     rx_dma_init();
-    sdio_f2_init();
+    if (!sdio_f2_init()) return;
 
     uint32_t raw_target = MULTI->target_frames;
     uint32_t scanner_mode = (raw_target == 0xffffffffu);
@@ -612,10 +741,12 @@ void cyw43_main(void) {
         mac_en |= 0x01d00000u;
     mmio_write32(D11_MACCONTROL, mac_en);
     MBOX->maccontrol_active = mmio_read32(D11_MACCONTROL);
+    MBOX->fw_state = FW_STATE_RX_ACTIVE;
 
     uint32_t rx_start = ARM_CYCLE_COUNTER;
     uint32_t polls = 0u;
     for (; scanner_mode || polls < 1800000u; ++polls) {
+        if ((polls & 4095u) == 0u) snapshot_psm(rx_start, polls);
         uint32_t cmd = MBOX->host_cmd;
         if (cmd == 3u)
             break;
@@ -648,18 +779,37 @@ void cyw43_main(void) {
             uint32_t is_ofdm = (cmd >> 18u) & 1u;
             uint32_t tx_cnt  = (cmd >> 19u) & 0xffu;
             if (tx_cnt == 0u) tx_cnt = 1u;
+            const volatile uint8_t *frame = (const volatile uint8_t *)FW_TX_BUF_ADDR;
+            if ((cmd & CLEAN_TX_MATCH_SOURCE) &&
+                (tx_len < 34u || tx_len > 512u || (frame[6] & 0x0fu) != 0u ||
+                 (frame[7] & 3u) != 0u || (frame[16] & 1u) != 0u)) {
+                fail(0x85u, FW_TX_BUF_ADDR, tx_len);
+                break;
+            }
             mmio_write32(D11_MACCONTROL, 0x84020400u);
             (void)mmio_read32(D11_MACCONTROL);
             (void)delay_ticks(2000u);
+            if (cmd & CLEAN_TX_MATCH_SOURCE) {
+                d11_set_addrmatch(0u, frame + 16u);
+                d11_set_addrmatch(3u, frame + 22u);
+            }
             for (uint32_t t = 0u; t < tx_cnt; ++t) {
-                (void)d11_transmit_template_frame(tx_len, is_ofdm, channel, mac_en & ~2u);
+                if (!d11_transmit_template_frame(tx_len, is_ofdm, channel, mac_en & ~2u))
+                    break;
                 if (t + 1u < tx_cnt)
                     (void)delay_ticks(180u * 1500u);
             }
-            if (shm_read16(0x601u) == PSM_STATE_CAPTURED || shm_read16(0x601u) == PSM_STATE_FAULT)
+            if (MBOX->fw_state == FW_STATE_ERROR) break;
+            if (cmd & CLEAN_TX_REARM_RX) {
+                if (!d11_restart_rx_psm(channel)) break;
+            } else if (shm_read16(0x601u) == PSM_STATE_CAPTURED || shm_read16(0x601u) == PSM_STATE_FAULT)
                 shm_write16(0x601u, 0u);
+            rx_after_explicit_tx = 1u;
             mmio_write32(D11_MACCONTROL, mac_en);
             MBOX->maccontrol_active = mmio_read32(D11_MACCONTROL);
+            tx_diag.resume_ticks = ARM_CYCLE_COUNTER;
+            tx_diag.mac_resume_us = mmio_read32(D11_BASE + 0x1cu);
+            tx_diag.psm_after = shm_read16(0x601u);
             MBOX->host_cmd = 2u;
             __asm__ volatile("dsb" ::: "memory");
             continue;
@@ -684,26 +834,7 @@ void cyw43_main(void) {
         }
         uint16_t st = shm_read16(0x601u);
         if (st == PSM_STATE_FAULT) {
-            mmio_write32(D11_MACCONTROL, 0x84020400u);
-            (void)mmio_read32(D11_MACCONTROL);
-            uint16_t saved_tk[8];
-            uint16_t saved_ccmp_en = shm_read16(0x615u);
-            for (uint32_t k = 0u; k < 8u; ++k) saved_tk[k] = shm_read16(0x618u + k);
-            shm_write16(0x601u, 0u);
-            shm_write16(0x602u, 0u);
-            shm_write16(0x609u, (uint16_t)channel);
-            static const uint8_t restart_bits[4] = {0u, 4u, 6u, 2u};
-            for (uint32_t i = 0u; i < 4u; ++i) {
-                mmio_write32(D11_MACCONTROL, 0x84020400u | restart_bits[i]);
-                (void)mmio_read32(D11_MACCONTROL);
-            }
-            for (uint32_t poll = 0u; poll < 2000u; ++poll) {
-                if (shm_read16(0x601u) == PSM_STATE_READY) break;
-                (void)delay_ticks(200u);
-            }
-            shm_write16(0x609u, (uint16_t)channel);
-            shm_write16(0x615u, saved_ccmp_en);
-            for (uint32_t k = 0u; k < 8u; ++k) shm_write16(0x618u + k, saved_tk[k]);
+            if (!d11_restart_rx_psm(channel)) break;
             mmio_write32(D11_MACCONTROL, mac_en);
             continue;
         }
@@ -753,6 +884,7 @@ void cyw43_main(void) {
             slot->f2_sdpcm_len = 0u;
             (void)rx_dma_poll_and_reclaim(slot);
             sdio_f2_send_frame(slot);
+            if (MBOX->fw_state == FW_STATE_ERROR) break;
             MULTI->captured_frames = total + 1u;
             if (!scanner_mode && total + 1u >= target_frames)
                 break;
@@ -781,11 +913,15 @@ void cyw43_main(void) {
         MBOX->psm_mailbox[1] = PSM_STATE_CAPTURED;
         MBOX->psm_mailbox[2] = 0u;
     }
-    for (uint32_t i = 0u; i < 90u; ++i) {
-        uint16_t w = shm_read16(0x6a0u + i);
-        MBOX->rx_input[2u * i] = (uint8_t)w;
-        MBOX->rx_input[2u * i + 1u] = (uint8_t)(w >> 8u);
-    }
+    if (tx_diag.magic == CLEAN_TX_DIAG_MAGIC) {
+        const uint8_t *bytes = (const uint8_t *)&tx_diag;
+        for (uint32_t i = 0u; i < sizeof(tx_diag); ++i) MBOX->rx_input[i] = bytes[i];
+    } else
+        for (uint32_t i = 0u; i < 90u; ++i) {
+            uint16_t w = shm_read16(0x6a0u + i);
+            MBOX->rx_input[2u * i] = (uint8_t)w;
+            MBOX->rx_input[2u * i + 1u] = (uint8_t)(w >> 8u);
+        }
     MULTI->discard_bad_fcs  = MBOX->psm_diag[8];
     MULTI->discard_oversize = MBOX->psm_diag[9];
     MULTI->discard_rx_event = MBOX->psm_diag[10];
