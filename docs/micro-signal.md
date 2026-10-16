@@ -176,7 +176,7 @@ bytes have now passed exact bidirectional OTA qualification at 11 Mbps CCK.**
 This is raw Data-frame support, not an Ethernet interface, association or IP
 stack.
 
-At that stage, [frame_limits.h](../clean-rx/frame_limits.h) provided:
+At that stage, [frame_limits.h](../clean-rx/src/frame_limits.h) provided:
 
 - 1,600-byte MPDU storage, including FCS; 1,606-byte TX input including PLCP.
 - 1,608 bytes of RX scratch at SHM word addresses `0x200..0x523`, separate from

@@ -10,8 +10,8 @@
 #include "loader.h"
 #include "frames.h"
 #include "station.h"
-#include "../wpa2_crypto.h"
-#include "../tx_diag.h"
+#include "../src/wpa2_crypto.h"
+#include "../src/tx_diag.h"
 
 static int ap_bssid_decode(const char *text, uint8_t bssid[6]) {
     static const char digits[] = "0123456789abcdef";
@@ -234,10 +234,8 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         valid=fread(secret+32u,1u,32u,rng)==32u;
         if (fclose(rng)) valid=0;
         if (!valid) { fputs("SNonce read failed\n",stderr); wpa_wipe(secret,sizeof(secret)); return 0; }
-        wpa_sha1_t sha;
-        wpa_sha1_init(&sha); wpa_sha1_update(&sha,secret,64u);
-        wpa_sha1_update(&sha,nonce,6u); wpa_sha1_update(&sha,nonce+15u,1u);
-        wpa_sha1_final(&sha,digest); memcpy(nonce+6u,digest,8u);
+        wpa_secret_binding(secret,nonce,nonce[15],digest);
+        memcpy(nonce+6u,digest,8u);
         valid=transfer(device,0x40u,LIVE_USB_CLEAN_SECRET,secret,64u);
         wpa_wipe(secret,sizeof(secret)); wpa_wipe(digest,sizeof(digest));
         if (!valid) return 0;

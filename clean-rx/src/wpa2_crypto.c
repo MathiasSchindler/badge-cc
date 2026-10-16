@@ -1,5 +1,5 @@
 #include "wpa2_crypto.h"
-#include "../src/shared/bytes.h"
+#include "../../src/shared/bytes.h"
 
 void wpa_wipe(void *p, uint32_t n) {
     volatile uint8_t *b = p;
@@ -64,6 +64,16 @@ void wpa_sha1_final(wpa_sha1_t *s, uint8_t out[20]) {
 void wpa_sha1(const uint8_t *p, uint32_t n, uint8_t out[20]) {
     wpa_sha1_t s;
     wpa_sha1_init(&s); wpa_sha1_update(&s,p,n); wpa_sha1_final(&s,out);
+}
+
+void wpa_secret_binding(const uint8_t secret[64], const uint8_t bssid[6],
+                         uint8_t channel, uint8_t out[20]) {
+    wpa_sha1_t s;
+    wpa_sha1_init(&s);
+    wpa_sha1_update(&s,secret,64u);
+    wpa_sha1_update(&s,bssid,6u);
+    wpa_sha1_update(&s,&channel,1u);
+    wpa_sha1_final(&s,out);
 }
 
 void wpa_hmac(const uint8_t *key, uint32_t kn, const uint8_t *p, uint32_t n, uint8_t out[20]) {

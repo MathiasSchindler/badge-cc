@@ -179,9 +179,9 @@ MICRO_SIGNAL_SOURCES := $(TOOLS_DIR)/micro-signal.c $(TOOLS_DIR)/diagnostics_log
 	$(PLATFORM_DIR)/wifi_board.c $(PLATFORM_DIR)/wifi_pio.c \
 	$(RADIO_DIR)/wifi_gspi.c $(RADIO_DIR)/wifi_probe.c
 MICRO_SIGNAL_HEADERS := $(TOOLS_DIR)/micro-signal.h $(TOOLS_DIR)/micro-signal-mtu.h \
-	$(TOOLS_DIR)/micro-signal-ofdm.h clean-rx/phy_rates.h \
-	clean-rx/frame_limits.h $(TOOLS_DIR)/diagnostics_logic.h \
-	clean-rx/badge/loader.h clean-rx/badge/frames.h clean-rx/tx_diag.h clean-rx/src/sdio_ring.h clean-rx/sdio_test.h \
+	$(TOOLS_DIR)/micro-signal-ofdm.h clean-rx/src/phy_rates.h \
+	clean-rx/src/frame_limits.h $(TOOLS_DIR)/diagnostics_logic.h \
+	clean-rx/badge/loader.h clean-rx/badge/frames.h clean-rx/src/tx_diag.h clean-rx/src/sdio_ring.h clean-rx/src/sdio_test.h \
 	$(wildcard $(ARCH_DIR)/*.h $(SHARED_DIR)/*.h $(PLATFORM_DIR)/*.h $(RADIO_DIR)/*.h)
 MICRO_SIGNAL_TEST_USB := src/usb/live_usb_control.c src/usb/live_usb_hw.c \
 	$(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
@@ -300,8 +300,8 @@ test-micro-signal: $(MICRO_SIGNAL_DIR)/micro-signal-test
 micro-signal-self-test: $(MICRO_SIGNAL_DIR)/collect
 $(MICRO_SIGNAL_DIR)/collect: $(HOST_TOOLS_SRC_DIR)/micro_signal_collect.c \
 		$(TOOLS_DIR)/micro-signal-ofdm.h $(TOOLS_DIR)/micro-signal-mtu.h \
-		$(TOOLS_DIR)/micro-signal.h clean-rx/badge/frames.h clean-rx/phy_rates.h clean-rx/tx_diag.h \
-		clean-rx/sdio_test.h clean-rx/src/sdio_ring.h clean-rx/frame_limits.h \
+		$(TOOLS_DIR)/micro-signal.h clean-rx/badge/frames.h clean-rx/src/phy_rates.h clean-rx/src/tx_diag.h \
+		clean-rx/src/sdio_test.h clean-rx/src/sdio_ring.h clean-rx/src/frame_limits.h \
 		$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h $(TOOLS_DIR)/diagnostics_logic.c \
 		$(TOOLS_DIR)/diagnostics_logic.h $(SHARED_DIR)/bytes.h $(SHARED_DIR)/usb_report.h \
 		$(RADIO_DIR)/wifi_trace.h src/usb/live_usb.h | $(MICRO_SIGNAL_DIR)

@@ -2,7 +2,7 @@
 #include "usb_live_transport.h"
 #include "../../shared/bytes.h"
 #include "../../tools/diagnostics_logic.h"
-#include "../../../clean-rx/sdio_test.h"
+#include "../../../clean-rx/src/sdio_test.h"
 #include "../../tools/micro-signal-ofdm.h"
 #include <errno.h>
 #include <stdlib.h>

@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_PSM_ACK_H
 #define CLEAN_RX_PSM_ACK_H
 
-#include "../unicast.h"
+#include "unicast.h"
 
 /* Only the final GoodFCS path reaches this program. RX streaming is unchanged.
  * Labels are enumerated from the existing image's last instruction. */

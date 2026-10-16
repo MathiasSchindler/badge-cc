@@ -5,8 +5,8 @@
 #include "../../src/shared/bytes.h"
 #include "frames.h"
 #include "station.h"
-#include "../unicast.h"
-#include "../tx_diag.h"
+#include "../src/unicast.h"
+#include "../src/tx_diag.h"
 
 static uint32_t ticks, calls, blocks, state, base;
 static int cancel, mismatch, bus_error, terminate_error, f2_post_status, ack_error;

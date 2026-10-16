@@ -2,7 +2,7 @@
 #define CLEAN_BADGE_WPA2_H
 
 #include "station.h"
-#include "../wpa2_crypto.h"
+#include "../src/wpa2_crypto.h"
 
 enum { WPA_WAIT_M1, WPA_WAIT_M3, WPA_KEYS, WPA_M4_SENT, WPA_PROTECTED };
 enum { WPA_OK, WPA_FORMAT, WPA_REPLAY, WPA_NONCE, WPA_MIC, WPA_UNWRAP,

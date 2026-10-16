@@ -312,7 +312,7 @@ To transmit a raw or hardware-encrypted 802.11 frame (`cmd = 5 | clean_tx_length
    - Otherwise (unencrypted frame): sets `0x180017c0 = 0x0100`, `0x180017d0 = 0x0300`
    - `0x1800150c = is_ofdm ? 0x0041 : 0x0040` (`TXE_PHYCTL`: OFDM vs. CCK modulation)
    - `0x18001514 = phyctl1` (`TXE_PHYCTL1`): OFDM rate-specific modulation/coding
-     plus 20-MHz SISO bandwidth from [phy_rates.h](../phy_rates.h). For
+     plus 20-MHz SISO bandwidth from [phy_rates.h](../src/phy_rates.h). For
      6/9/12/18/24/36/48/54 Mbps these words are
      `0x0002/0x0202/0x0802/0x0a02/0x1002/0x1202/0x1902/0x1a02`.
      The existing CCK path retains `0x1a02`.
@@ -357,7 +357,7 @@ Whenever `PSM_STATE_CAPTURED` (`14`) is reached on a valid Management (`frame_ty
 
 The controller has no external library or SDK dependency
 (`-ffreestanding -nostdinc -nostdlib -fno-builtin`). It shares the project-owned
-`clean-rx/tx_diag.h` diagnostic layout with the badge host. To build the image:
+`clean-rx/src/tx_diag.h` diagnostic layout with the badge host. To build the image:
 
 ```bash
 make -C clean-rx/src

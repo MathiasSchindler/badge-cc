@@ -54,7 +54,7 @@ but this does not establish reception over the air.
 The badge loader requests continuous reception (`CFG_CONTINUOUS_RX`) explicitly,
 including when using a compatible reference image for comparison.
 During explicit TX, the controller uses the mailbox's 180-byte `rx_input`
-diagnostic area for `clean_tx_diag_t` (`TXD3`, defined in `../tx_diag.h`),
+diagnostic area for `clean_tx_diag_t` (`TXD3`, defined in `../src/tx_diag.h`),
 instead of the final RX SHM snapshot. The host trace offset is 296; the mailbox
 previous field offsets are unchanged; the current mailbox is 480 bytes.
 RX-only and disabled-TX-rejection
@@ -109,7 +109,7 @@ flag, as scalar backplane I/O does. The badge loader now enforces this mode
 for its aligned bursts, including TX staging and source-firmware loading.
 
 Command 5 has two opt-in receive-path diagnostic bits, defined in
-`../tx_diag.h`. Bit 27 (`CLEAN_TX_REARM_RX`) explicitly restarts PSM/RXE after
+`../src/tx_diag.h`. Bit 27 (`CLEAN_TX_REARM_RX`) explicitly restarts PSM/RXE after
 TX, waits for READY with a deadline, and preserves the channel and CCMP key
 configuration before enabling MAC RX. PSM discard counters reset on restart.
 Bit 28 (`CLEAN_TX_MATCH_SOURCE`) programs hardware RX address matching before

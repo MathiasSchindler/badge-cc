@@ -3,8 +3,8 @@
 
 #include "../../src/shared/bytes.h"
 #include "../../src/tools/diagnostics_logic.h"
-#include "../tx_diag.h"
-#include "../phy_rates.h"
+#include "../src/tx_diag.h"
+#include "../src/phy_rates.h"
 
 static inline int clean_frame_valid(const uint8_t *mpdu, uint32_t length) {
     return length >= 14u && length <= CLEAN_MPDU_BYTES &&

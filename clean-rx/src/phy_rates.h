@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_PHY_RATES_H
 #define CLEAN_RX_PHY_RATES_H
 
-#include "../src/shared/stdint.h"
+#include "../../src/shared/stdint.h"
 
 #define CLEAN_OFDM_RATES 8u
 

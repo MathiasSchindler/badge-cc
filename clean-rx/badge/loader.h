@@ -3,7 +3,7 @@
 
 #include "../../src/radio/wifi_gspi.h"
 #include "../src/sdio_ring.h"
-#include "../frame_limits.h"
+#include "../src/frame_limits.h"
 
 #define CLEAN_MBOX 0x20000u
 #define CLEAN_MULTI 0x20d80u

@@ -1,8 +1,8 @@
 #ifndef CLEAN_RX_SDIO_TEST_H
 #define CLEAN_RX_SDIO_TEST_H
 
-#include "../src/shared/stdint.h"
-#include "src/sdio_ring.h"
+#include "../../src/shared/stdint.h"
+#include "sdio_ring.h"
 #include "frame_limits.h"
 
 #define CLEAN_SDIO_TEST_PACING_TICKS 500000u

@@ -25,6 +25,31 @@ to other CCK rates, automatic ACK timing, complete 802.11g MAC operation,
 general-purpose station reliability. The separate controlled WPA2 qualification
 below proves a bounded encrypted exchange, not sustained networking.
 
+## Source layout and maintenance
+
+- [`../src/`](../src/) contains the CYW43439 firmware and portable shared code:
+  frame limits, PHY rates, TX diagnostics, unicast/SDIO definitions and WPA2
+  cryptography. New shared C/headers belong there, not in the `clean-rx/` root.
+  The controller Makefile explicitly selects its sources; placing shared code
+  here does not automatically link it into the controller image.
+- This [`badge/`](./) directory remains the RP2350 diagnostic application,
+  USB collector and native tests. Existing build entry points and generated
+  output paths are unchanged.
+- Host and badge use the same `wpa_secret_binding` implementation, with a
+  known-answer vector and changed-secret/BSSID/channel regression tests.
+  Keep public wire formats and crypto operations shared rather than duplicating
+  them in endpoint code.
+- Native badge tests share header prerequisites and loader source lists so
+  changing an included protocol header or transport implementation rebuilds
+  the corresponding tests.
+
+Useful next structural refactors are separating controller RX/SDIO and TX
+handling from [`main.c`](../src/main.c), extracting station orchestration from
+the [badge entry point](main.c), and replacing duplicated numeric diagnostic
+offsets with a shared layout/encoder. Keep those changes separate from radio
+timing or protocol behavior changes so existing hardware evidence remains
+meaningful.
+
 ## Experimental WPA2 protected exchange
 
 ```sh

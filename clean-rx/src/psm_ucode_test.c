@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../src/tools/diagnostics_logic.h"
-#include "../frame_limits.h"
+#include "frame_limits.h"
 #include "psm_ack.h"
 
 #define WORD(op,a,b,d) (((uint64_t)(op) << 39u) | ((uint64_t)(a) << 26u) | \

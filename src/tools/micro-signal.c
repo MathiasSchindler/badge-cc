@@ -6,7 +6,7 @@
 #include "micro-signal-mtu.h"
 #endif
 #ifdef MICRO_SIGNAL_TRANSPORT_TEST
-#include "../../clean-rx/sdio_test.h"
+#include "../../clean-rx/src/sdio_test.h"
 #endif
 #include "../../clean-rx/badge/loader.h"
 #include "../arch/rp2350/bootrom_reboot.h"

@@ -1,10 +1,10 @@
 #include "cyw43_hw.h"
 #include "sdio_ring.h"
-#include "../tx_diag.h"
-#include "../phy_rates.h"
-#include "../unicast.h"
+#include "tx_diag.h"
+#include "phy_rates.h"
+#include "unicast.h"
 #ifdef CLEAN_SDIO_SELF_TEST
-#include "../sdio_test.h"
+#include "sdio_test.h"
 #endif
 
 #define MBOX  ((volatile fw_mbox_t *)FW_MBOX_ADDR)

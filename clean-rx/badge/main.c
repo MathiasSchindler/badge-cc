@@ -3,8 +3,8 @@
 #include "frames.h"
 #include "station.h"
 #include "wpa2.h"
-#include "../unicast.h"
-#include "../tx_diag.h"
+#include "../src/unicast.h"
+#include "../src/tx_diag.h"
 #include "../../src/shared/bytes.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -398,10 +398,7 @@ static void run(const uint8_t nonce[16]) {
     if (nonce[14]==18u) {
         uint8_t digest[20];
         badger_bytes_copy(wpa_secret,control.clean_secret,64u);
-        wpa_sha1_t sha;
-        wpa_sha1_init(&sha); wpa_sha1_update(&sha,wpa_secret,64u);
-        wpa_sha1_update(&sha,nonce,6u); wpa_sha1_update(&sha,nonce+15u,1u);
-        wpa_sha1_final(&sha,digest);
+        wpa_secret_binding(wpa_secret,nonce,nonce[15],digest);
         secret_valid=control.clean_secret_ready && wpa_equal(digest,nonce+6u,8u);
         wpa_wipe(digest,sizeof(digest));
     }

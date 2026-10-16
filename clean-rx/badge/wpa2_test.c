@@ -58,6 +58,27 @@ static void crypto(void) {
 
 static const uint8_t rsn[22]={48u,20u,1u,0u,0u,15u,172u,4u,1u,0u,0u,15u,172u,4u,1u,0u,0u,15u,172u,2u,0u,0u};
 
+static void binding(void) {
+    uint8_t secret[64], ap[6]={2u,1u,2u,3u,4u,5u}, digest[20], changed[20];
+    for (unsigned i=0u;i<sizeof(secret);++i) secret[i]=(uint8_t)i;
+    wpa_secret_binding(secret,ap,11u,digest);
+    expected(digest,"f18b1be11c549f1e96bc3bec6c7daa76a9cfaa4d");
+    for (unsigned i=0u;i<sizeof(secret);++i) {
+        secret[i]^=1u;
+        wpa_secret_binding(secret,ap,11u,changed);
+        assert(!wpa_equal(digest,changed,8u));
+        secret[i]^=1u;
+    }
+    for (unsigned i=0u;i<sizeof(ap);++i) {
+        ap[i]^=1u;
+        wpa_secret_binding(secret,ap,11u,changed);
+        assert(!wpa_equal(digest,changed,8u));
+        ap[i]^=1u;
+    }
+    wpa_secret_binding(secret,ap,1u,changed);
+    assert(!wpa_equal(digest,changed,8u));
+}
+
 static uint32_t wrap(const uint8_t key[16], const uint8_t plain[48], uint8_t out[56]) {
     wpa_aes_t aes; wpa_aes_init(&aes,key); memset(out,0xa6,8u); memcpy(out+8u,plain,48u);
     uint8_t block[16];
@@ -191,7 +212,7 @@ static void handshake(void) {
 }
 
 int main(void) {
-    crypto(); handshake();
+    crypto(); binding(); handshake();
     puts("WPA2: independent SHA1/HMAC/PBKDF2/PTK/AES/CCMP vectors, unwrap, handshake, MIC/replay and no reinstall pass");
     return 0;
 }
