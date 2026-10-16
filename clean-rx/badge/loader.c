@@ -133,7 +133,7 @@ static int receive_resync(clean_loader_t *l, uint32_t actual) {
     return 1;
 }
 
-int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
+int clean_receive(clean_loader_t *l, uint8_t packet[CLEAN_RX_PACKET_BYTES], uint32_t *length) {
     *length = 0u;
     uint32_t status;
     if (!clean_service(l) || !reg_read(l, 0u, 8u, 4u, &status)) return 0;
@@ -168,7 +168,7 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
     }
     l->rx_stalled = 0u;
     uint32_t size = (status >> 9u) & 0x7ffu;
-    if (size < 18u || size > 524u) {
+    if (size < 18u || size > CLEAN_RX_PACKET_BYTES) {
         return receive_resync(l, size);
     }
     if (status & 2u) return receive_resync(l, status);
@@ -196,7 +196,8 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
     }
     uint32_t sdpcm = (uint32_t)packet[0] | ((uint32_t)packet[1] << 8u);
     uint32_t inverse = (uint32_t)packet[2] | ((uint32_t)packet[3] << 8u);
-    if ((sdpcm ^ inverse) != 0xffffu || sdpcm < 18u || sdpcm > size || sdpcm > 522u ||
+    if ((sdpcm ^ inverse) != 0xffffu || sdpcm < 18u || sdpcm > size ||
+        sdpcm > CLEAN_SDPCM_BYTES || size > ((sdpcm + 3u) & ~3u) ||
         packet[5] != 2u || packet[7] != 14u || packet[14] != 0x20u) {
         l->actual = badger_bytes_load_u32(packet);
         return fail(l, CLEAN_INPUT);

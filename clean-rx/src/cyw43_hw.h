@@ -2,6 +2,7 @@
 #define CYW43_HW_H
 
 #include "types.h"
+#include "../frame_limits.h"
 
 /* Core Backplane Base Addresses */
 #define CC_BASE              0x18000000u /* ChipCommon + PMU + GCI */
@@ -50,7 +51,8 @@
 #define D11_TPL_WR_DATA      0x18001134u
 #define D11_OBJ_ADDR         0x18001160u
 #define D11_OBJ_DATA         0x18001164u
-#define D11_MACHWCAP         0x18001190u
+#define D11_MACHWCAP         0x1800115cu
+#define D11_TSF_CFP_MAXDUR32  0x18001190u
 #define D11_CLK_CTL_ST       0x180011e0u
 #define D11_RX_DMA_CTL       0x18001220u
 #define D11_RX_DMA_PTR       0x18001224u
@@ -84,15 +86,15 @@
 
 #define FW_MBOX_ADDR         0x00020000u
 #define FW_MULTI_ADDR        0x00020d80u
-#define FW_D11_DMA_RING_ADDR 0x00022000u /* 8-KiB aligned D11 RX DMA ring (32 * 16B = 512B) */
-#define FW_D11_DMA_BUF_ADDR  0x00022200u /* 32 * 1716B RX DMA buffers (0x22200..0x2fa80) */
+#define FW_D11_DMA_RING_ADDR CLEAN_D11_RING_ADDR
+#define FW_D11_DMA_BUF_ADDR  CLEAN_D11_BUFFER_ADDR
 #define FW_D11_DMA_BUF_BYTES 1716u
 #define FW_D11_DMA_CONTROL   0x0004084du /* parity-disable 0x800 | mode 0x40000 | offset (38<<1) | enable 1 */
 
-#define FW_SDIO_TX_RING_ADDR 0x00030000u /* 8-KiB aligned SDIOD Function 2 TX DMA ring (32 * 16B = 512B) */
-#define FW_SDIO_TX_BUF_ADDR  0x00030200u /* 32 * 1024B SDIOD TX buffers (0x30200..0x38200) */
-#define FW_SDIO_TX_BUF_BYTES 1024u
-#define FW_TX_BUF_ADDR       0x00038400u /* 512-byte custom 802.11 TX frame staging buffer in SRAM */
+#define FW_SDIO_TX_RING_ADDR CLEAN_SDIO_RING_ADDR
+#define FW_SDIO_TX_BUF_ADDR  CLEAN_SDIO_BUFFER_ADDR
+#define FW_SDIO_TX_BUF_BYTES CLEAN_SDIO_BUFFER_BYTES
+#define FW_TX_BUF_ADDR       CLEAN_TX_BUFFER_ADDR
 
 #define FW_MAX_FRAMES        8u
 
@@ -145,10 +147,10 @@ typedef struct {
     uint16_t rx_tick_hi;
     uint8_t  dma_hdr[38];
     uint8_t  pad[2];
-    uint8_t  raw[512];
+    uint8_t  raw[CLEAN_RAW_BYTES];
 } fw_frame_slot_t;
 
-_Static_assert(sizeof(fw_frame_slot_t) == 568u, "Frame slot is 568 bytes");
+_Static_assert(sizeof(fw_frame_slot_t) == 56u + CLEAN_RAW_BYTES, "Frame slot layout");
 
 typedef struct {
     uint32_t magic;
@@ -164,7 +166,13 @@ typedef struct {
     fw_frame_slot_t frames[FW_MAX_FRAMES];
 } fw_multi_t;
 
-_Static_assert(sizeof(fw_multi_t) == 4584u, "Multi buffer is 4584 bytes");
+_Static_assert(sizeof(fw_multi_t) == 40u + FW_MAX_FRAMES * sizeof(fw_frame_slot_t),
+               "Multi buffer layout");
+_Static_assert(FW_MULTI_ADDR + sizeof(fw_multi_t) <= FW_D11_DMA_RING_ADDR,
+               "Capture slots must not overlap D11 ring");
+_Static_assert(FW_D11_DMA_BUF_ADDR + 32u * FW_D11_DMA_BUF_BYTES <= FW_SDIO_TX_RING_ADDR,
+               "D11 slots must not overlap SDIO ring");
+_Static_assert(38u + CLEAN_RXE_BYTES <= FW_D11_DMA_BUF_BYTES, "D11 receive slot size");
 
 typedef struct {
     uint32_t magic;
@@ -194,9 +202,11 @@ typedef struct {
     uint32_t f2_counts;
     uint32_t f2_consumed;
     uint32_t f2_posted;
+    uint16_t rx_fifo_fault[4];
 } fw_mbox_t;
 
-_Static_assert(sizeof(fw_mbox_t) == 456u, "Mailbox is 456 bytes");
+_Static_assert(sizeof(fw_mbox_t) == 464u, "Mailbox size");
+_Static_assert(__builtin_offsetof(fw_mbox_t, rx_fifo_fault) == 456u, "RX fault snapshot offset");
 
 static inline uint32_t mmio_read32(uint32_t addr) {
     return *(volatile uint32_t *)(uintptr_t)addr;

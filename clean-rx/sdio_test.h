@@ -3,6 +3,7 @@
 
 #include "../src/shared/stdint.h"
 #include "src/sdio_ring.h"
+#include "frame_limits.h"
 
 #define CLEAN_SDIO_TEST_PACING_TICKS 500000u
 #define CLEAN_SDIO_TEST_ACK_OFFSET CLEAN_SDIO_ACK_OFFSET
@@ -26,6 +27,16 @@ static inline uint32_t clean_sdio_test_length(uint32_t sequence) {
 }
 
 static inline uint32_t clean_sdio_test_pattern_length(uint32_t sequence, uint32_t pattern) {
+    if (pattern == 2u) {
+        static const uint16_t boundaries[] = {
+            8u,14u,15u,16u,31u,32u,33u,465u,502u,504u,505u,511u,512u,513u,
+            1005u,1006u,1007u,1008u,1023u,1024u,1025u,1499u,1500u,1501u,
+            1535u,1536u,1537u,1597u,1598u,1599u,1600u
+        };
+        return (sequence & 1u) ? boundaries[(sequence >> 1u) %
+                (sizeof(boundaries) / sizeof(boundaries[0]))] :
+                8u + ((sequence >> 1u) * 37u) % (CLEAN_MPDU_BYTES - 7u);
+    }
     return pattern == 1u ? ((sequence & 1u) ? 465u : 502u) : clean_sdio_test_length(sequence);
 }
 

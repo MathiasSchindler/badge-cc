@@ -6,7 +6,7 @@
 #include "../tx_diag.h"
 
 static inline int clean_frame_valid(const uint8_t *mpdu, uint32_t length) {
-    return length >= 14u && length <= 504u &&
+    return length >= 14u && length <= CLEAN_MPDU_BYTES &&
            diag_crc32(mpdu, length - 4u) == badger_bytes_load_u32(mpdu + length - 4u);
 }
 
@@ -30,9 +30,10 @@ static inline int clean_beacon_info(const uint8_t *mpdu, uint32_t length,
     return 0;
 }
 
-static inline void clean_cck_plcp(uint8_t frame[6], uint8_t rate, uint16_t duration) {
+static inline void clean_cck_plcp_service(uint8_t frame[6], uint8_t rate,
+                                         uint16_t duration, uint8_t service) {
     frame[0] = rate;
-    frame[1] = 0x04u;
+    frame[1] = service;
     frame[2] = (uint8_t)duration;
     frame[3] = (uint8_t)(duration >> 8u);
     uint16_t crc = 0xffffu;
@@ -44,6 +45,17 @@ static inline void clean_cck_plcp(uint8_t frame[6], uint8_t rate, uint16_t durat
     crc = (uint16_t)~crc;
     frame[4] = (uint8_t)crc;
     frame[5] = (uint8_t)(crc >> 8u);
+}
+
+static inline void clean_cck_plcp(uint8_t frame[6], uint8_t rate, uint16_t duration) {
+    clean_cck_plcp_service(frame, rate, duration, 0x04u);
+}
+
+static inline void clean_cck11_plcp(uint8_t frame[6], uint32_t mpdu_length) {
+    uint32_t bits = mpdu_length * 8u;
+    uint16_t duration = (uint16_t)((bits + 10u) / 11u);
+    uint8_t service = (uint8_t)(0x04u | (duration * 11u - bits >= 8u ? 0x80u : 0u));
+    clean_cck_plcp_service(frame, 0x6eu, duration, service);
 }
 
 static inline void clean_ofdm_plcp(uint8_t frame[6]) {
@@ -206,7 +218,7 @@ static inline void clean_record_post_tx(uint8_t detail[2048], const uint8_t *pac
 static inline int clean_tx_confirmed(const uint8_t detail[2048]) {
     uint32_t size = badger_bytes_load_u32(detail + 1088u);
     uint32_t tx_length = badger_bytes_load_u32(detail + 1988u);
-    if (size < 18u || size > 522u ||
+    if (size < 18u || size > CLEAN_DETAIL_PACKET_BYTES ||
         (tx_length != 40u && tx_length != 94u && (tx_length < 52u || tx_length > 84u)) ||
         badger_bytes_load_u32(detail + 8u) != 0u ||
         badger_bytes_load_u32(detail + 4u) != 8u ||

@@ -3,12 +3,16 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../src/tools/diagnostics_logic.h"
+#include "../frame_limits.h"
+
+#define WORD(op,a,b,d) (((uint64_t)(op) << 39u) | ((uint64_t)(a) << 26u) | \
+                       ((uint64_t)(b) << 13u) | (d))
 
 extern const uint32_t psm_ucode_byte_count;
-extern const uint8_t psm_ucode_bytes[2360];
+extern const uint8_t psm_ucode_bytes[2408];
 
 static uint64_t instruction(uint32_t pc) {
-    assert(pc < 295u);
+    assert(pc < 301u);
     uint64_t word = 0u;
     for (uint32_t i = 0u; i < 8u; ++i)
         word |= (uint64_t)psm_ucode_bytes[pc * 8u + i] << (8u * i);
@@ -19,6 +23,51 @@ static uint16_t immediate(uint32_t operand) {
     assert(operand >= 0x1800u && operand <= 0x1fffu);
     uint16_t value = (uint16_t)(operand & 0x7ffu);
     return (uint16_t)((value & 0x400u) ? value | 0xf800u : value);
+}
+
+static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint64_t old) {
+    assert(instruction(pc) == expected);
+    for (uint32_t i = 0u; i < 8u; ++i)
+        original[pc * 8u + i] = (uint8_t)(old >> (8u * i));
+}
+
+static void capture_layout(uint8_t original[2360]) {
+    const uint32_t fault_regs[] = {0x100cu,0x102bu,0x100du,0x1002u};
+    for (uint32_t i = 0u; i < 4u; ++i)
+        assert(instruction(295u + i) == WORD(0x3f0u,fault_regs[i],0x1800u,0x620u + i));
+    assert(instruction(299u) == WORD(0x1c0u,0x7abu,0x1801u,0x7abu));
+    assert(instruction(300u) == WORD(0x77fu,0x1780u,0x1780u,266u));
+    restore(original, 257u, WORD(0x77fu,0x1780u,0x1780u,295u),
+            WORD(0x1c0u,0x7abu,0x1801u,0x7abu));
+    for (uint32_t pc = 65u; pc <= 285u; pc += 220u) {
+        restore(original, pc, WORD(0x3f0u,0x1800u | (CLEAN_SHM_FRAME & 255u),0x1800u,0x1782u),
+                WORD(0x3f0u,0x18a0u,0x1800u,0x1782u));
+        restore(original, pc + 1u, WORD(0x378u,0x1800u | (CLEAN_SHM_FRAME >> 8u),0x1782u,0x1782u),
+                WORD(0x378u,0x1806u,0x1782u,0x1782u));
+        restore(original, pc + 3u, WORD(0x3f0u,CLEAN_SHM_CAPTURE_LIMIT,0x1800u,0x1002u),
+                WORD(0x3f0u,0x1a00u,0x1800u,0x1002u));
+    }
+    const uint32_t checks[] = {142u,156u,166u};
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        uint32_t reg = i == 1u ? 0x1782u : 0x100cu;
+        restore(original, checks[i], WORD(0xdcu,reg,CLEAN_SHM_RXE_LIMIT,0x103u),
+                WORD(0xdcu,reg,0x19feu,0x103u));
+    }
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        restore(original, 147u + i, WORD(0x3f0u,CLEAN_SHM_FRAME + 1u + i,0x1800u,0x7acu + i),
+                WORD(0x3f0u,0x6a1u + i,0x1800u,0x7acu + i));
+        restore(original, 225u + i, WORD(0x3f0u,CLEAN_SHM_FRAME + 1u + i,0x1800u,0x7fau + i),
+                WORD(0x3f0u,0x6a1u + i,0x1800u,0x7fau + i));
+    }
+    restore(original, 169u, WORD(0x40eu,CLEAN_SHM_FRAME + 4u,0x1800u,0xbfu),
+            WORD(0x40eu,0x6a4u,0x1800u,0xbfu));
+    restore(original, 172u, WORD(0x407u,CLEAN_SHM_FRAME + 4u,0x1800u,0xaeu),
+            WORD(0x407u,0x6a4u,0x1800u,0xaeu));
+    for (uint32_t length = 6u; length <= CLEAN_RXE_BYTES; ++length) {
+        uint32_t words = (length + 3u) >> 1u;
+        assert(words <= CLEAN_RAW_BYTES / 2u);
+        assert(CLEAN_SHM_FRAME + words <= 0x600u);
+    }
 }
 
 static int flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t limit) {
@@ -74,6 +123,7 @@ int main(void) {
     memcpy(original, psm_ucode_bytes, sizeof(original));
     static const uint8_t old_counter[8] = {0x80,0x17,0x00,0xff,0x63,0xf8,0x01,0x00};
     memcpy(original + 81u * 8u, old_counter, sizeof(old_counter));
+    capture_layout(original);
     assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
     for (uint16_t bits = 0u; bits < 32u; ++bits) {
         uint32_t delays[] = {0u, 254u, 255u, 256u, 4096u, 65534u, 65535u, 65536u};
@@ -84,6 +134,6 @@ int main(void) {
                    ((bits & 0x14u) == 0u || delays[i] < 255u));
         }
     }
-    puts("PSM: image identity, signed countdown, flush completion and timeout branches OK");
+    puts("PSM: image identity, relocated capture, SHM length operands and startup flush OK");
     return 0;
 }

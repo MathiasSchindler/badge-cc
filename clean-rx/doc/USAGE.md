@@ -2,6 +2,13 @@
 
 This guide explains how an RP2350 host application loads, boots, and communicates with the open-source `cyw43_rx_fw.bin` transceiver firmware over the 4-pin gSPI bus.
 
+**Larger-frame qualification is incomplete.** The shared storage/transport
+ceiling is now 1,600 MPDU bytes, but hardware large-frame RX still encounters a
+separate FIFO overflow. See the current
+[Ethernet-MTU investigation](../../docs/micro-signal.md#ethernet-mtu-work-transport-ready-radio-qualification-still-blocked).
+Use the shared limits and TX length helpers rather than copying old sizes or
+shifting a large length directly into command flags.
+
 The repository now includes a working [freestanding badge host](../badge/README.md)
 with build commands and physical results from 2026-10-14 and 2026-10-15.
 Cold beacon reception, Function-2 delivery and single-frame 11 Mbps CCK OTA TX
@@ -191,7 +198,7 @@ To boot `cyw43_rx_fw.bin` from cold power-on on the RP2350:
    - Disable SRAM bank standby by writing `0` to `SOCRAM + 0x10` (`0x18004010 = 0`) and `0` to `SOCRAM + 0x44` (`0x18004044 = 0`).
 
 ### Step 3: Load `cyw43_rx_fw.bin` and Configure the Mailbox
-1. Zero the mailbox (`0x00020000`, `448` bytes) and multi-frame capture ring (`0x00020d80`, `4584` bytes).
+1. Zero the mailbox (`0x00020000`, `464` bytes) and multi-frame capture ring (`0x00020d80`, `13352` bytes).
 2. Copy `cyw43_rx_fw.bin` (`cyw43_rx_fw_start..cyw43_rx_fw_end`) into CYW43439 SRAM starting at `0x00000000` using 64-byte aligned backplane writes.
 3. Configure the initial mailbox fields at `0x00020000` (`FW_MBOX_ADDR`):
    ```c
@@ -217,7 +224,7 @@ To boot `cyw43_rx_fw.bin` from cold power-on on the RP2350:
    ```c
    bp_write(0x00020000u + 24u, 4u, 1u); /* MBOX->host_cmd = 1 */
    ```
-5. Poll `MBOX->fw_state` (`0x00020004`) until it reaches `FW_STATE_PSM_READY` (`8`). At this point, the D11 core, Radio 20691, LCN20 PHY, and 295-instruction PSM microcode are calibrated and ready.
+5. Poll `MBOX->fw_state` (`0x00020004`) until it reaches `FW_STATE_PSM_READY` (`8`). At this point, the D11 core, Radio 20691, LCN20 PHY, and 301-instruction PSM microcode have completed initialization.
 6. Start active reception by writing `host_cmd = 2`:
    ```c
    bp_write(0x00020000u + 24u, 4u, 2u); /* MBOX->host_cmd = 2 (FW_STATE_RX_ACTIVE) */
@@ -234,8 +241,8 @@ Once `MBOX->fw_state == FW_STATE_RX_ACTIVE` (`9`), the RP2350 controls the trans
 | `2` | **Idle / Active RX** | Firmware is actively receiving frames and streaming them over gSPI Function 2. Look for `host_cmd == 2` to confirm completion of commands `4`, `5`, or `6`. |
 | `3` | **Stop Transceiver** | Cleanly stops MAC/PSM and D11 RX DMA, populates diagnostic snapshots in `MBOX`, and transitions `fw_state` to `FW_STATE_RX_DONE` (`10`). |
 | `4 \| (ch << 8)` | **Fast Channel Switch** | Tunes Radio 20691 and LCN20 PHY to 2.4 GHz channel `ch` (`1..14`) in ~3.5 ms without re-running cold calibration, then resumes reception. |
-| `5 \| (total_len << 8) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Transmits the raw 802.11 frame (`total_len = 6 + mpdu_len` bytes, `16..512`) staged at `FW_TX_BUF_ADDR` (`0x00038400`) `cnt` times (`1..255`), using hardware `AES-128-CCMP` encryption if enabled and `(FC & 0x4000) != 0`. |
-| `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x00038400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
+| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..1606`, staged at `FW_TX_BUF_ADDR` (`0x00044400`), repeated `1..255` times. The extended bound is a storage/command limit, not qualified large-frame OTA support. Hardware CCMP hooks remain unqualified. |
+| `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x00044400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
 
 ---
 
@@ -320,15 +327,15 @@ To transmit an 802.11 frame from the RP2350:
    Badge diagnostics test both padded 94-byte templates and an exact-length
    40-byte authentication template (including PLCP). Neither length has
    established AP reception in the current cold-source test.
-2. Write the frame into `FW_TX_BUF_ADDR` (`0x00038400`) using 32-bit backplane writes:
+2. Write the frame into `FW_TX_BUF_ADDR` (`0x00044400`) using 32-bit backplane writes:
    ```c
    for (uint32_t off = 0u; off < total_len; off += 4u) {
-       bp_write(0x00038400u + off, 4u, load_le32(frame + off));
+       bp_write(0x00044400u + off, 4u, load_le32(frame + off));
    }
    ```
 3. Trigger transmission via `MBOX->host_cmd` (`0x00020018`):
    ```c
-   uint32_t cmd = 5u | (total_len << 8u) | (1u << 19u); /* 1 repetition, CCK */
+   uint32_t cmd = 5u | clean_tx_length_bits(total_len) | (1u << 19u); /* 1 repetition, CCK; tx_diag.h */
    bp_write(0x00020018u, 4u, cmd);
    ```
    Poll for `host_cmd == 2` under a host deadline, checking `fw_state` for
@@ -345,10 +352,10 @@ The CYW43439 D11 core includes a dedicated hardware `AES-128-CCMP` engine driven
 1. **4-Way EAPOL Handshake:**
    - Associate with the AP using an RSN Information Element advertising `CCMP-128` (`00-0F-AC:4`) and exchange `EAPOL-Key` Messages `1/4..4/4` as normal unencrypted 802.11 Data / QoS Data frames (`FC = 0x0108` or `0x0188`).
 2. **Install the 128-bit Temporal Key (`TK`):**
-   - After deriving `PTK = PRF-384(PMK, "Pairwise key expansion", min(AA,SPA) || max(AA,SPA) || min(ANonce,SNonce) || max(ANonce,SNonce))`, write the 16-byte `TK` (`PTK[32..47]`) to `FW_TX_BUF_ADDR` (`0x00038400`) and issue `host_cmd = 6 | (1 << 8)`:
+   - After deriving `PTK = PRF-384(PMK, "Pairwise key expansion", min(AA,SPA) || max(AA,SPA) || min(ANonce,SNonce) || max(ANonce,SNonce))`, write the 16-byte `TK` (`PTK[32..47]`) to `FW_TX_BUF_ADDR` (`0x00044400`) and issue `host_cmd = 6 | (1 << 8)`:
      ```c
      for (uint32_t off = 0u; off < 16u; off += 4u) {
-         bp_write(0x00038400u + off, 4u, load_le32(tk + off));
+         bp_write(0x00044400u + off, 4u, load_le32(tk + off));
      }
      bp_write(0x00020018u, 4u, 6u | (1u << 8u));
      while (bp_read32(0x00020018u) != 2u) { /* wait for key install */ }

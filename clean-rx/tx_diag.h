@@ -1,6 +1,18 @@
 #ifndef CLEAN_RX_TX_DIAG_H
 #define CLEAN_RX_TX_DIAG_H
 
+#include "../src/shared/stdint.h"
+#include "frame_limits.h"
+
+/* Keep legacy length bits 8..17; use unused bits 29..30 for the extension. */
+static inline uint32_t clean_tx_length_bits(uint32_t length) {
+    return ((length & 0x3ffu) << 8u) | ((length & 0xc00u) << 19u);
+}
+
+static inline uint32_t clean_tx_length(uint32_t command) {
+    return ((command >> 8u) & 0x3ffu) | ((command >> 19u) & 0xc00u);
+}
+
 #define CLEAN_TX_DIAG_MAGIC 0x33445854u
 #define CLEAN_TX_DIAG_OFFSET 296u
 #define CLEAN_TX_REARM_RX (1u << 27)

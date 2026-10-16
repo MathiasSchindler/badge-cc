@@ -54,7 +54,7 @@ static void beacon(const uint8_t *packet, uint32_t size) {
 static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
     uint32_t started = l->wire->now_us(l->wire->context);
     while (l->wire->now_us(l->wire->context) - started < duration) {
-        uint8_t packet[544];
+        uint8_t packet[CLEAN_RX_PACKET_BYTES];
         uint32_t size;
         if (!clean_receive(l, packet, &size)) return 0;
         if (size != 0u) {
@@ -88,7 +88,9 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 (candidate && !badger_bytes_load_u32(detail + 1960u) &&
                  !badger_bytes_load_u32(detail + 1992u))) {
                 badger_bytes_store_u32(detail + 1088u, size);
-                badger_bytes_copy(detail + 1104u, packet, size);
+                uint32_t saved = size < CLEAN_DETAIL_PACKET_BYTES ? size : CLEAN_DETAIL_PACKET_BYTES;
+                badger_bytes_zero(detail + 1104u, CLEAN_DETAIL_PACKET_BYTES);
+                badger_bytes_copy(detail + 1104u, packet, saved);
             }
             if (response) {
                 uint32_t responses = badger_bytes_load_u32(detail + 1960u);
@@ -176,11 +178,11 @@ static void run(const uint8_t nonce[16]) {
             }
             badger_bytes_store_u32(detail + 1988u, tx_length);
             uint8_t staged[96];
-            if (l.error == CLEAN_OK && clean_block(&l, 0x38400u, frame, sizeof(frame), 1u) &&
-                clean_block(&l, 0x38400u, staged, sizeof(staged), 0u) &&
+            if (l.error == CLEAN_OK && clean_block(&l, CLEAN_TX_BUFFER_ADDR, frame, sizeof(frame), 1u) &&
+                clean_block(&l, CLEAN_TX_BUFFER_ADDR, staged, sizeof(staged), 0u) &&
                 !badger_bytes_equal(frame, staged, sizeof(frame))) {
                 l.error = CLEAN_READBACK;
-                l.address = 0x38400u;
+                l.address = CLEAN_TX_BUFFER_ADDR;
             }
             uint32_t phy_debug;
             if (l.error == CLEAN_OK && clean_read(&l, 0x18001158u, &phy_debug))

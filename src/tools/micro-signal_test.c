@@ -1,4 +1,5 @@
 #include "micro-signal.h"
+#include "micro-signal-mtu.h"
 #include "../../clean-rx/src/sdio_ring.h"
 #include "../../clean-rx/sdio_test.h"
 #include <assert.h>
@@ -18,7 +19,39 @@ static uint32_t independent_crc(const uint8_t *bytes, uint32_t length) {
         for (uint32_t bit = 0u; bit < 8u; ++bit)
             crc = (crc >> 1u) ^ ((crc & 1u) ? 0xedb88320u : 0u);
     }
+
     return ~crc;
+}
+
+static void mtu_frames(void) {
+    micro_signal_event_t input = sample(), output;
+    uint8_t frame[CLEAN_TX_STORAGE_BYTES];
+    for (uint32_t sequence = 1u; sequence <= 65u; ++sequence) {
+        input.sequence = sequence;
+        uint32_t length = micro_mtu_frame(frame, &input) - CLEAN_PLCP_BYTES;
+        assert(length == 1535u + sequence);
+        uint32_t duration = frame[2] | ((uint32_t)frame[3] << 8u);
+        uint32_t decoded_length = (duration * 11u - ((frame[1] & 0x80u) ? 8u : 0u)) / 8u;
+        assert(decoded_length == length);
+        assert(independent_crc(frame + 6u, length - 4u) ==
+               badger_bytes_load_u32(frame + 6u + length - 4u));
+        assert(micro_mtu_decode(frame + 6u, length, &output));
+        assert(output.sequence == input.sequence && output.session == input.session &&
+               memcmp(output.sender, input.sender, 8u) == 0);
+        frame[1000] ^= 1u;
+        assert(!micro_mtu_decode(frame + 6u, length, &output));
+        badger_bytes_store_u32(frame + 6u + length - 4u,
+                               independent_crc(frame + 6u, length - 4u));
+        assert(!micro_mtu_decode(frame + 6u, length, &output));
+    }
+    for (uint32_t length = 0u; length <= 0xfffu; ++length) {
+        uint32_t flags = 5u | (1u << 18u) | (0xa5u << 19u) |
+                         CLEAN_TX_REARM_RX | CLEAN_TX_MATCH_SOURCE;
+        uint32_t command = flags | clean_tx_length_bits(length);
+        assert(clean_tx_length(command) == length);
+        assert((command & ~clean_tx_length_bits(0xfffu)) == flags);
+        if (length < 1024u) assert(clean_tx_length_bits(length) == length << 8u);
+    }
 }
 
 static void frames(void) {
@@ -167,6 +200,15 @@ static void sdio_patterns(void) {
     assert(clean_sdio_test_byte(927u, 0u) == 5u);
     assert(clean_sdio_test_byte(6743u, 501u) == 189u);
     assert(clean_sdio_test_byte(UINT32_MAX, UINT32_MAX) == 150u);
+    uint8_t large_lengths[CLEAN_MPDU_BYTES - 7u] = {0};
+    for (uint32_t i = 0u; i < CLEAN_MPDU_BYTES - 7u; ++i) {
+        uint32_t length = clean_sdio_test_pattern_length(i * 2u, 2u);
+        assert(length >= 8u && length <= CLEAN_MPDU_BYTES);
+        assert(++large_lengths[length - 8u] == 1u);
+        assert(((length + 21u) & ~3u) <= CLEAN_RX_PACKET_BYTES);
+        length = clean_sdio_test_pattern_length(i * 2u + 1u, 2u);
+        assert(length >= 8u && length <= CLEAN_MPDU_BYTES);
+    }
 }
 
 static void sdio_windows(void) {
@@ -193,11 +235,12 @@ static void sdio_windows(void) {
 
 int main(void) {
     frames();
+    mtu_frames();
     duplicates();
     debounce();
     sdio_ring();
     sdio_patterns();
     sdio_windows();
-    puts("micro-signal: framing, duplicates, debounce, SDIO ring, host windows and all 497 test lengths OK");
+    puts("micro-signal: small/MTU framing, TX length extension, duplicates, debounce, credits and 1593 transport lengths OK");
     return 0;
 }

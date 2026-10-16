@@ -1,4 +1,7 @@
 #include "micro-signal.h"
+#ifdef MICRO_SIGNAL_MTU_TEST
+#include "micro-signal-mtu.h"
+#endif
 #ifdef MICRO_SIGNAL_TRANSPORT_TEST
 #include "../../clean-rx/sdio_test.h"
 #endif
@@ -22,6 +25,9 @@ static const uint8_t button_pins[5] = {7u,9u,10u,11u,6u};
 #ifdef MICRO_SIGNAL_SELF_TEST
 #include "../usb/live_usb_hw.h"
 #include "../radio/wifi_usb_report.h"
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+_Static_assert(WIFI_TRACE_SIZE == CLEAN_TRANSPORT_TRACE_BYTES, "Transport trace capacity");
+#endif
 static uint32_t evidence[16];
 static live_usb_control_t test_control;
 static uint8_t test_usb_ready;
@@ -136,11 +142,12 @@ static void radio_error(void) {
         loader.address = address;
         loader.actual = actual;
     }
-    if (error == CLEAN_READBACK && address >= 0x38400u && address < 0x38460u) {
+    if (error == CLEAN_READBACK && address >= CLEAN_TX_BUFFER_ADDR &&
+        address < CLEAN_TX_BUFFER_ADDR + CLEAN_TX_STORAGE_BYTES) {
         uint8_t fresh[96];
         loader.error = CLEAN_OK;
         loader.started = now();
-        if (clean_block(&loader, 0x38400u, fresh, sizeof(fresh), 0u))
+        if (clean_block(&loader, CLEAN_TX_BUFFER_ADDR, fresh, sizeof(fresh), 0u))
             badger_bytes_store_u32(test_control.trace + 52u, diag_crc32(fresh, sizeof(fresh)));
         else
             badger_bytes_store_u32(test_control.trace + 60u, loader.error);
@@ -174,15 +181,16 @@ static uint8_t buttons(void) {
     return mask;
 }
 
-static int transmit(uint8_t frame[96]) {
-    uint8_t checked[96];
-    if (!clean_block(&loader, 0x38400u, frame, 96u, 1u) ||
-        !clean_block(&loader, 0x38400u, checked, 96u, 0u)) return 0;
-    if (!badger_bytes_equal(frame, checked, 96u)) {
+static int transmit(uint8_t *frame, uint32_t length) {
+    uint8_t checked[CLEAN_TX_STORAGE_BYTES];
+    uint32_t stored = (length + 3u) & ~3u;
+    if (!clean_block(&loader, CLEAN_TX_BUFFER_ADDR, frame, stored, 1u) ||
+        !clean_block(&loader, CLEAN_TX_BUFFER_ADDR, checked, stored, 0u)) return 0;
+    if (!badger_bytes_equal(frame, checked, stored)) {
         loader.error = CLEAN_READBACK;
-        for (uint32_t i = 0u; i < 96u; i += 4u) {
+        for (uint32_t i = 0u; i < stored; i += 4u) {
             if (badger_bytes_load_u32(frame + i) == badger_bytes_load_u32(checked + i)) continue;
-            loader.address = 0x38400u + i;
+            loader.address = CLEAN_TX_BUFFER_ADDR + i;
             loader.actual = badger_bytes_load_u32(checked + i);
             break;
         }
@@ -195,7 +203,7 @@ static int transmit(uint8_t frame[96]) {
         return 0;
     }
     if (!clean_write(&loader, CLEAN_MBOX + 24u,
-                     5u | (MICRO_SIGNAL_FRAME_BYTES << 8u) | (1u << 19u))) return 0;
+                     5u | clean_tx_length_bits(length) | (1u << 19u))) return 0;
     uint32_t start = now();
     while (1) {
         uint32_t command, state;
@@ -223,8 +231,12 @@ static int transmit(uint8_t frame[96]) {
 }
 
 #ifdef MICRO_SIGNAL_SELF_TEST
-static void receive_evidence(const uint8_t packet[544]) {
+static void receive_evidence(const uint8_t packet[CLEAN_RX_PACKET_BYTES]) {
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+    badger_bytes_copy(test_control.trace + 256u, packet, CLEAN_RX_PACKET_BYTES);
+#else
     badger_bytes_copy(test_control.trace + 256u, packet, 544u);
+#endif
     uint32_t actual = loader.actual, address = loader.address, error = loader.error;
     loader.error = CLEAN_OK;
     loader.started = now();
@@ -247,22 +259,23 @@ static void receive_evidence(const uint8_t packet[544]) {
         badger_bytes_store_u32(test_control.trace + 64u + 4u * i, value);
     }
     if (loader.error == CLEAN_OK &&
-        clean_block(&loader, 0x30000u, test_control.trace + 160u, 96u, 0u))
-        (void)clean_block(&loader, 0x30e00u, test_control.trace + 128u, 32u, 0u);
+        clean_block(&loader, CLEAN_SDIO_RING_ADDR, test_control.trace + 160u, 96u, 0u))
+        (void)clean_block(&loader, CLEAN_SDIO_BUFFER_ADDR + 3u * CLEAN_SDIO_BUFFER_BYTES,
+                          test_control.trace + 128u, 32u, 0u);
     if (loader.error == CLEAN_OK) {
         uint32_t producer = badger_bytes_load_u32(test_control.trace + 4u) & 0x1fffu;
         if ((producer & 15u) != 0u || producer >= 512u) {
             loader.error = CLEAN_INPUT;
         } else {
             uint32_t index = ((producer >> 4u) - 1u) & 31u, dma_length = 0u, buffer = 0u;
-            if (clean_read(&loader, 0x30000u + index * 16u + 4u, &dma_length) &&
-                clean_read(&loader, 0x30000u + index * 16u + 8u, &buffer)) {
+            if (clean_read(&loader, CLEAN_SDIO_RING_ADDR + index * 16u + 4u, &dma_length) &&
+                clean_read(&loader, CLEAN_SDIO_RING_ADDR + index * 16u + 8u, &buffer)) {
                 dma_length &= 0x7fffu;
-                if (dma_length < 18u || dma_length > 524u ||
-                    buffer != 0x30200u + index * 1024u) {
+                if (dma_length < 18u || dma_length > CLEAN_RX_PACKET_BYTES ||
+                    buffer != CLEAN_SDIO_BUFFER_ADDR + index * CLEAN_SDIO_BUFFER_BYTES) {
                     loader.error = CLEAN_INPUT;
                 } else {
-                    uint8_t stored[544];
+                    uint8_t stored[CLEAN_RX_PACKET_BYTES];
                     if (clean_block(&loader, buffer, stored, dma_length, 0u)) {
                         badger_bytes_store_u32(test_control.trace + 96u, buffer);
                         badger_bytes_store_u32(test_control.trace + 100u, dma_length);
@@ -311,7 +324,7 @@ static void transport_test(void) {
     loader.rx_credit = (uint8_t)evidence[10];
     if (!clean_read(&loader, CLEAN_MBOX + CLEAN_SDIO_TEST_PATTERN_OFFSET, &evidence[8]))
         radio_error();
-    if (evidence[8] > 1u) {
+    if (evidence[8] > 2u) {
         loader.error = CLEAN_CONTROLLER;
         loader.actual = evidence[8];
         radio_error();
@@ -327,11 +340,11 @@ static void transport_test(void) {
         uint8_t expected[96], checked[96];
         for (uint32_t i = 0u; i < sizeof(expected); ++i)
             expected[i] = clean_sdio_test_byte(sequence, i);
-        if (!clean_block(&loader, 0x38400u, expected, sizeof(expected), 1u) ||
-            !clean_block(&loader, 0x38400u, checked, sizeof(checked), 0u)) radio_error();
+        if (!clean_block(&loader, CLEAN_TX_BUFFER_ADDR, expected, sizeof(expected), 1u) ||
+            !clean_block(&loader, CLEAN_TX_BUFFER_ADDR, checked, sizeof(checked), 0u)) radio_error();
         if (!badger_bytes_equal(expected, checked, sizeof(expected))) {
             loader.error = CLEAN_READBACK;
-            loader.address = 0x38400u;
+            loader.address = CLEAN_TX_BUFFER_ADDR;
             loader.actual = diag_crc32(checked, sizeof(checked));
             badger_bytes_copy(test_control.trace + 64u, expected, sizeof(expected));
             badger_bytes_copy(test_control.trace + 160u, checked, sizeof(checked));
@@ -341,13 +354,14 @@ static void transport_test(void) {
         if (!clean_write(&loader, CLEAN_MBOX + 24u, 7u | (burst << 8u))) radio_error();
         uint32_t pending = burst, deadline = now();
         while (pending != 0u) {
-            uint8_t packet[544];
+            uint8_t packet[CLEAN_RX_PACKET_BYTES];
             badger_bytes_zero(packet, sizeof(packet));
             uint32_t size;
             uint32_t old_resyncs = loader.rx_resyncs;
             int result = clean_receive(&loader, packet, &size);
             if (size != 0u || loader.rx_resyncs != old_resyncs || !result) {
-                uint8_t *entry = test_control.trace + 800u + (history++ % 13u) * 16u;
+                uint8_t *entry = test_control.trace + CLEAN_TRANSPORT_HISTORY_OFFSET +
+                                 (history++ % 13u) * 16u;
                 badger_bytes_store_u32(entry, sequence);
                 badger_bytes_store_u32(entry + 4u, loader.rx_status);
                 badger_bytes_store_u32(entry + 8u, badger_bytes_load_u32(packet));
@@ -437,6 +451,9 @@ void bare_main(void) {
 #ifdef MICRO_SIGNAL_SELF_TEST
     for (uint32_t i = 0u; i < 16u; ++i) evidence[i] = 0u;
     evidence[0] = 0x5447534du;
+#ifdef MICRO_SIGNAL_MTU_TEST
+    evidence[0] = 0x5554534du;
+#endif
 #ifdef MICRO_SIGNAL_TRANSPORT_TEST
     evidence[8] = 0xffffffffu;
     evidence[9] = 0xffffffffu;
@@ -502,7 +519,12 @@ void bare_main(void) {
     uint32_t sent = 0u, received = 0u, due = now(), state_due = now(), dropped = 0u;
     uint32_t resyncs = 0u;
     uint8_t queue[8], head = 0u, queued = 0u, repeats = 0u;
+    uint32_t frame_length = MICRO_SIGNAL_FRAME_BYTES;
+#ifdef MICRO_SIGNAL_MTU_TEST
+    uint8_t frame[CLEAN_TX_STORAGE_BYTES];
+#else
     uint8_t frame[96];
+#endif
     static diag_buttons_t debounce;
     static micro_signal_peers_t peers;
     counts(sent, received);
@@ -537,7 +559,7 @@ void bare_main(void) {
                 ++queued;
             }
         }
-        uint8_t packet[544];
+        uint8_t packet[CLEAN_RX_PACKET_BYTES];
 #ifdef MICRO_SIGNAL_SELF_TEST
         badger_bytes_zero(packet, sizeof(packet));
 #endif
@@ -556,10 +578,23 @@ void bare_main(void) {
             badger_bytes_store_u32(test_control.trace + 28u,
                                   (uint32_t)packet[4] |
                                   (size > 18u ? (uint32_t)packet[18] << 8u : 0u));
+#ifdef MICRO_SIGNAL_MTU_TEST
+            if (size > 522u && packet[18] == 0x08u) {
+                badger_bytes_store_u32(test_control.trace + 944u, size);
+                badger_bytes_store_u32(test_control.trace + 948u,
+                                       (uint32_t)clean_frame_valid(packet + 18u, size - 18u));
+                badger_bytes_copy(test_control.trace + 1024u, packet, sizeof(packet));
+            }
+#endif
         }
 #endif
         micro_signal_event_t event;
-        if (size >= 18u && micro_signal_decode(packet + 18u, size - 18u, &event) &&
+        if (size >= 18u &&
+#ifdef MICRO_SIGNAL_MTU_TEST
+            micro_mtu_decode(packet + 18u, size - 18u, &event) &&
+#else
+            micro_signal_decode(packet + 18u, size - 18u, &event) &&
+#endif
             micro_signal_accept(&peers, &event, outgoing.sender)) {
             char text[] = "BUTTON 1 PRESSED";
             text[7] = (char)('0' + event.button);
@@ -568,6 +603,13 @@ void bare_main(void) {
             counts(sent, received);
 #ifdef MICRO_SIGNAL_SELF_TEST
             evidence[7] = received;
+#ifdef MICRO_SIGNAL_MTU_TEST
+            uint8_t *coverage = test_control.trace + 800u + (size - 18u - 1536u) * 2u;
+            uint32_t seen = coverage[0] | ((uint32_t)coverage[1] << 8u);
+            if (seen < 65535u) ++seen;
+            coverage[0] = (uint8_t)seen;
+            coverage[1] = (uint8_t)(seen >> 8u);
+#endif
             evidence[8] = badger_bytes_load_u32(event.sender);
             evidence[9] = badger_bytes_load_u32(event.sender + 4u);
             evidence[10] = event.session;
@@ -580,12 +622,16 @@ void bare_main(void) {
             head = (uint8_t)((head + 1u) & 7u);
             --queued;
             ++outgoing.sequence;
+#ifdef MICRO_SIGNAL_MTU_TEST
+            frame_length = micro_mtu_frame(frame, &outgoing);
+#else
             micro_signal_frame(frame, &outgoing);
+#endif
             repeats = 3u;
             due = now() + (random[1] & 0x3fffu);
         }
         if (repeats && (uint32_t)(now() - due) < 0x80000000u) {
-            if (!transmit(frame)) {
+            if (!transmit(frame, frame_length)) {
                 if (recover) bootsel();
                 radio_error();
             }
@@ -645,6 +691,21 @@ void bare_main(void) {
             if (!clean_block(&loader, CLEAN_MBOX + 72u, test_control.trace + 64u, 96u, 0u) ||
                 !clean_block(&loader, CLEAN_MBOX + 60u, test_control.trace + 160u, 12u, 0u))
                 radio_error();
+#ifdef MICRO_SIGNAL_MTU_TEST
+            if (!clean_block(&loader, CLEAN_MBOX + 264u, test_control.trace + 2700u, 180u, 0u))
+                radio_error();
+            static const uint32_t rxe_registers[] = {
+                0x18001400u,0x18001404u,0x1800140cu,0x18001450u,0x18001454u,
+                0x1800115cu,0x18001448u
+            };
+            for (uint32_t i = 0u; i < 7u; ++i) {
+                uint32_t value;
+                if (!clean_read(&loader, rxe_registers[i], &value)) radio_error();
+                badger_bytes_store_u32(test_control.trace + 952u + i * 4u, value);
+            }
+            if (!clean_block(&loader, CLEAN_MBOX + 456u, test_control.trace + 984u, 8u, 0u))
+                radio_error();
+#endif
 #endif
             if ((f2_counts >> 16u) != dropped || loader.rx_resyncs != resyncs) {
                 dropped = f2_counts >> 16u;

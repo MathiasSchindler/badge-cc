@@ -97,8 +97,9 @@ static int inspect(const char *path, const char *credentials) {
     }
     uint32_t rxe = (uint32_t)detail[522] | ((uint32_t)detail[523] << 8u);
     uint32_t f2 = usb_report_u32(detail + 1088u);
-    int raw_valid = rxe >= 6u && clean_frame_valid(detail + 584u, rxe - 6u);
-    int f2_valid = f2 >= 18u && f2 <= 522u && clean_frame_valid(detail + 1122u, f2 - 18u);
+    int raw_valid = rxe >= 6u && rxe <= 510u && clean_frame_valid(detail + 584u, rxe - 6u);
+    int f2_valid = f2 >= 18u && f2 <= CLEAN_DETAIL_PACKET_BYTES &&
+                   clean_frame_valid(detail + 1122u, f2 - 18u);
     uint8_t ssid[32];
     size_t ssid_length = 0u;
     file = fopen(credentials, "r");
@@ -133,7 +134,8 @@ static int inspect(const char *path, const char *credentials) {
            "\"local_ap_matches\":%u,\"probe_response_fcs_valid\":%s,"
            "\"auth_response_fcs_valid\":%s,\"fresh_mac_ack_fcs_valid\":%s,"
            "\"ap_rejection_fcs_valid\":%s,"
-           "\"tx_over_air_confirmed\":%s}\n",
+           "\"tx_over_air_confirmed\":%s,\"raw_capture_truncated\":%s,"
+           "\"f2_capture_truncated\":%s}\n",
            usb_report_u32(detail + 28u), raw_valid ? "true" : "false",
            f2_valid ? "true" : "false", matches,
            f2_valid && detail[1122] == 0x50u &&
@@ -146,7 +148,8 @@ static int inspect(const char *path, const char *credentials) {
            f2_valid && (detail[1122] == 0xc0u || detail[1122] == 0xa0u) &&
            clean_ap_reply(detail + 1122u, f2 - 18u, detail + 1972u,
                           detail + 1980u, 1u) ? "true" : "false",
-           clean_tx_confirmed(detail) ? "true" : "false");
+           clean_tx_confirmed(detail) ? "true" : "false",
+           rxe > 510u ? "true" : "false", f2 > CLEAN_DETAIL_PACKET_BYTES ? "true" : "false");
     return raw_valid && f2_valid;
 }
 

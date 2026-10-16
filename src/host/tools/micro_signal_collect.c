@@ -13,7 +13,8 @@ static void pause_poll(void) {
 }
 
 static int valid(const uint8_t record[64], const char *serial) {
-    if (badger_bytes_load_u32(record) != 0x5447534du ||
+    uint32_t magic = badger_bytes_load_u32(record);
+    if ((magic != 0x5447534du && magic != 0x5554534du) ||
         badger_bytes_load_u32(record + 60u) != diag_crc32(record, 60u)) return 0;
     char actual[17];
     diag_hex(actual, badger_bytes_load_u32(record + 16u), 8u);
@@ -59,7 +60,7 @@ int main(int argc, char **argv) {
     }
     libusb_device_handle *devices[2] = {NULL, NULL};
     uint8_t records[2][64] = {{0}};
-    uint8_t traces[2][1032] = {{0}};
+    uint8_t traces[2][((CLEAN_TRANSPORT_TRACE_BYTES + 23u) / 24u) * 24u] = {{0}};
     int ready[2] = {0,0}, ok = 0;
     uint32_t last_sequence[2] = {0u,0u};
     uint64_t progressed[2] = {0u,0u}, elapsed = 0u;
@@ -125,7 +126,7 @@ int main(int argc, char **argv) {
                         window > 16u || window != badger_bytes_load_u32(peer + 40u) ||
                         (dma_control & 1u) == 0u || dma_control == 0xffffffffu ||
                         dma_control != badger_bytes_load_u32(peer + 36u)) ok = 0;
-                    if (pattern > 1u || pattern != badger_bytes_load_u32(peer + 32u)) ok = 0;
+                    if (pattern > 2u || pattern != badger_bytes_load_u32(peer + 32u)) ok = 0;
                     continue;
                 }
                 if (memcmp(own + 32u, peer + 12u, 8u) != 0 ||
@@ -168,7 +169,9 @@ finish:
             }
         }
         if (devices[i] != NULL) {
-            for (uint16_t page = 0u; page < 43u; ++page) {
+            uint16_t pages = transport || badger_bytes_load_u32(records[i]) == 0x5554534du ?
+                             (CLEAN_TRANSPORT_TRACE_BYTES + 23u) / 24u : 43u;
+            for (uint16_t page = 0u; page < pages; ++page) {
                 uint8_t bytes[64];
                 int read = libusb_control_transfer(devices[i], 0xc0u, LIVE_USB_WIFI_TRACE,
                                                   page, 0u, bytes, sizeof(bytes), 1000u);
@@ -185,8 +188,24 @@ finish:
         }
     }
     libusb_exit(context);
-    printf("{\"bidirectional_button_event_confirmed\":%s,\"transport_confirmed\":%s,\"soak\":%s,\"elapsed_ms\":%llu",
-           ok && !transport ? "true" : "false", ok && transport ? "true" : "false",
+    int mtu = badger_bytes_load_u32(records[0]) == 0x5554534du ||
+              badger_bytes_load_u32(records[1]) == 0x5554534du;
+    if (mtu) {
+        for (unsigned i = 0u; i < 2u; ++i) {
+            if (badger_bytes_load_u32(records[i]) != 0x5554534du) ok = 0;
+            for (unsigned length = 0u; length <= CLEAN_MPDU_BYTES - 1536u; ++length) {
+                if (traces[i][800u + length * 2u] == 0u &&
+                    traces[i][801u + length * 2u] == 0u) {
+                    fprintf(stderr, "Badge %u did not receive MPDU length %u\n", i, 1536u + length);
+                    ok = 0;
+                }
+            }
+        }
+    }
+    printf("{\"bidirectional_button_event_confirmed\":%s,\"mtu_frames_confirmed\":%s,"
+           "\"transport_confirmed\":%s,\"soak\":%s,\"elapsed_ms\":%llu",
+           ok && !transport && !mtu ? "true" : "false", ok && mtu ? "true" : "false",
+           ok && transport ? "true" : "false",
            soak ? "true" : "false", (unsigned long long)elapsed);
     for (unsigned i = 0u; i < 2u; ++i) {
         uint32_t error = badger_bytes_load_u32(records[i] + 4u);
@@ -225,17 +244,19 @@ finish:
             printf(",\"transport_history_%u\":[", i);
             for (uint32_t word = 0u; word < 52u; ++word)
                 printf("%s\"%08x\"", word ? "," : "",
-                       badger_bytes_load_u32(traces[i] + 800u + word * 4u));
+                       badger_bytes_load_u32(traces[i] + CLEAN_TRANSPORT_HISTORY_OFFSET + word * 4u));
             putchar(']');
         }
         if (error != 0u) {
             printf(",\"failed_receive_%u\":\"", i);
-            for (uint32_t byte = 0u; byte < 544u; ++byte) printf("%02x", traces[i][256u + byte]);
+            uint32_t saved = transport ? CLEAN_RX_PACKET_BYTES : 544u;
+            for (uint32_t byte = 0u; byte < saved; ++byte) printf("%02x", traces[i][256u + byte]);
             putchar('"');
         }
         printf(",\"first_stall_ms_%u\":%llu", i, (unsigned long long)first_stall[i]);
         uint32_t address = badger_bytes_load_u32(records[i] + 8u);
-        if (error == 4u && address >= 0x38400u && address < 0x38460u) {
+        if (error == 4u && address >= CLEAN_TX_BUFFER_ADDR &&
+            address < CLEAN_TX_BUFFER_ADDR + CLEAN_TX_STORAGE_BYTES) {
             printf(",\"staging_expected_%u\":\"", i);
             for (uint32_t byte = 0u; byte < 96u; ++byte) printf("%02x", traces[i][64u + byte]);
             printf("\",\"staging_readback_%u\":\"", i);
@@ -244,6 +265,34 @@ finish:
             continue;
         }
         if (transport) continue;
+        if (mtu) {
+            printf(",\"mtu_tx_diag_%u\":[", i);
+            for (uint32_t word = 0u; word < 45u; ++word)
+                printf("%s\"%08x\"", word ? "," : "",
+                       badger_bytes_load_u32(traces[i] + 2700u + word * 4u));
+            putchar(']');
+            printf(",\"mtu_rxe_%u\":[", i);
+            for (uint32_t word = 0u; word < 7u; ++word)
+                printf("%s\"%08x\"", word ? "," : "",
+                       badger_bytes_load_u32(traces[i] + 952u + word * 4u));
+            putchar(']');
+            printf(",\"mtu_rx_fault_%u\":[", i);
+            for (uint32_t word = 0u; word < 4u; ++word)
+                printf("%s\"%04x\"", word ? "," : "", traces[i][984u + word * 2u] |
+                       ((unsigned)traces[i][985u + word * 2u] << 8u));
+            putchar(']');
+            printf(",\"mtu_coverage_%u\":[", i);
+            for (uint32_t length = 0u; length <= CLEAN_MPDU_BYTES - 1536u; ++length)
+                printf("%s%u", length ? "," : "", traces[i][800u + length * 2u] |
+                       ((unsigned)traces[i][801u + length * 2u] << 8u));
+            printf("],\"mtu_capture_length_%u\":%u,\"mtu_capture_fcs_valid_%u\":%u",
+                   i,badger_bytes_load_u32(traces[i] + 944u),
+                   i,badger_bytes_load_u32(traces[i] + 948u));
+            printf(",\"mtu_capture_%u\":\"", i);
+            for (uint32_t byte = 0u; byte < CLEAN_RX_PACKET_BYTES; ++byte)
+                printf("%02x", traces[i][1024u + byte]);
+            putchar('"');
+        }
         static const char *const names[] = {"psm_mailbox", "psm_diag", "rxe_sample", "rxe_post"};
         static const uint32_t offsets[] = {64u, 96u, 128u, 144u};
         for (uint32_t group = 0u; group < 4u; ++group) {

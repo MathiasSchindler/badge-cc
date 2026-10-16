@@ -17,6 +17,87 @@ indefinitely-running messenger or a complete 802.11 implementation.
 
 ## Build and install
 
+### Ethernet-MTU work: transport ready, radio qualification still blocked
+
+The current work targets a 1,500-byte Ethernet payload first, not the complete
+2,304-byte legacy MSDU range. **Do not treat the enlarged buffers as proof of
+large-frame radio support.** The full Ethernet-MTU milestone is not complete.
+
+Shared limits in [frame_limits.h](../clean-rx/frame_limits.h) now provide:
+
+- 1,600-byte MPDU storage, including FCS; 1,606-byte TX input including PLCP.
+- 1,608 bytes of RX scratch at SHM word addresses `0x200..0x523`, separate from
+  control/key words, diagnostics and the receive header.
+- 1,618-byte SDPCM packets, transferred physically as at most 1,620 bytes.
+- Nonoverlapping enlarged capture slots, relocated DMA rings, 2-KiB SDIO slots,
+  and TX staging at `0x44400`.
+- Backward-compatible extended TX length packing: length bits 0..9 remain in
+  command bits 8..17; length bits 10..11 use formerly unused bits 29..30.
+  OFDM, repeat count and diagnostic flags retain their positions.
+
+The production-equivalent RF-free credit profile now checks all **1,593 payload
+lengths, 8..1,600 bytes**, interleaved with explicit boundary cases. It retains
+32-byte bursts, one genuine host credit, exact byte comparisons, and deferred
+acknowledgement until validation. Earlier small-length and 483/520-byte negative
+controls retain their original patterns:
+
+The five-minute run delivered **78,373 / 78,856 exact packets** on the two
+badges, with zero device errors, drops or stalls, using pattern 2, window 1 and
+DMA control `0x00060801`. This qualifies the enlarged SRAM/SDIO path, not RF.
+
+A final 180-second ordinary-messenger regression passed with 276 / 272 peer
+events, zero device errors and no stalls, beyond the former 125-second failure
+point. It is not a loss-free RF benchmark: unrelated incoming traffic can still
+be dropped while the single host credit is occupied.
+
+```sh
+make test-micro-signal micro-signal-transport-credit-test micro-signal-mtu-test
+```
+
+`micro-signal-mtu-test.uf2` is an **experimental qualification image**, not a
+working MTU messenger. It sends broadcast 802.11 Data frames with LLC/SNAP,
+experimental EtherType `0x88b5`, and 1,500..1,564 payload bytes. The 65 MPDU
+lengths are 1,536..1,600 bytes. Its receiver checks the entire canonical frame,
+fresh peer/session/sequence, deterministic payload and FCS. The host collector
+only reports `mtu_frames_confirmed: true` if **both badges receive every one of
+the 65 lengths**. Use `--soak 300`; a short run may not cover the whole sweep.
+CCK PLCP generation includes the 11-Mbps length-extension service bit.
+
+Hardware investigation found a separate radio receive limit:
+
+- The original small-frame messenger still worked after relocating scratch
+  memory and DMA rings.
+- An exact-payload OTA size probe received Data MPDUs from 128 through 480 bytes,
+  in 32-byte steps, on both badges. None of its 512..1,600-byte cases arrived.
+- Rejected large frames latched RXE frame count `0x01fa` (506), status `0x9802`
+  or related values with **FIFO-overflow bit 15 set**, and actual scratch-limit
+  readback `0x0648` (1,608). Thus this is not just an undersized host array or an
+  ignored scratch-limit write.
+- Full TX template-RAM readback succeeded, and TXE/IFS reported completion.
+  Neither proves that a peer received a complete large MPDU.
+- Increasing the prefix timeout, bypassing its bit-12 wait, using a power-of-two
+  scratch size, starting FIFO publication early, changing the low FIFO mode
+  bits, and changing RXE storage configuration did not qualify large reception.
+  Those unsuccessful changes were reverted.
+
+The remaining work is to establish the correct RXE/FIFO buffering and copy
+sequence. Merely enlarging SRAM or relaxing error checks does not fix it.
+The actual MAC capability register (`0x1800115c`) reads `0xb0a08205` on both
+badges. The older public RX-FIFO size field would indicate twenty 512-byte
+units, not a 512-byte total FIFO; its precise applicability still needs
+verification. Register `0x18001190` is TSF CFP maximum duration, not MAC
+capability; its existing writes are unchanged.
+The PSM now preserves the rejecting frame count, raw copy-status word, RXE
+status and copy limit before rearm clears them. These four 16-bit words are
+appended at mailbox byte offset 456; previous mailbox fields and credits are
+unchanged. The historical `discard_plcp` counter also includes this overflow
+branch and must not be interpreted as exclusively bad over-air PLCP CRCs.
+
+The diagnostic badge's fixed 2-KiB report deliberately saves only a bounded
+512-byte raw prefix and 528-byte SDPCM prefix. Its collector marks truncation
+and will not validate an unsaved FCS. The transport test instead preserves the
+whole failed receive buffer, full source/received CRCs and source tail.
+
 Use the repository's normal host C compiler and LLVM ARM tools:
 
 ```sh

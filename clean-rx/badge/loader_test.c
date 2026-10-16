@@ -11,7 +11,7 @@ static int cancel, mismatch, bus_error, terminate_error, f2_post_status, ack_err
 static uint32_t f2_status;
 static uint32_t f2_after_status;
 static uint32_t fifo_status, terminations;
-static uint8_t f2_packet[544];
+static uint8_t f2_packet[CLEAN_RX_PACKET_BYTES];
 static uint8_t ram[0x80000u];
 
 static uint32_t now(void *context) {
@@ -151,7 +151,7 @@ int main(void) {
     assert(!clean_wait_state(&l, 8u, 20u) && l.error == CLEAN_TIMEOUT);
     clean_loader_init(&l, &wire, service, NULL);
     assert(!clean_boot(&l, bytes, sizeof(bytes), 1u, 1u, 0u) && l.error == CLEAN_INPUT);
-    uint8_t packet[544];
+    uint8_t packet[CLEAN_RX_PACKET_BYTES];
     uint32_t packet_length;
     clean_loader_init(&l, &wire, service, NULL);
     assert(clean_receive(&l, packet, &packet_length) && packet_length == 0u);
@@ -162,7 +162,11 @@ int main(void) {
     f2_packet[5] = 2u; f2_packet[7] = 14u; f2_packet[14] = 0x20u;
     assert(clean_receive(&l, packet, &packet_length) && packet_length == 522u);
     assert(l.rx_status == f2_status);
-    static const uint32_t sizes[] = {18u, 26u, 63u, 100u, 106u, 108u, 137u, 522u};
+    static const uint32_t sizes[] = {
+        18u,26u,63u,100u,106u,108u,137u,522u,523u,524u,525u,
+        1023u,1024u,1025u,0x551u,1500u,1535u,1536u,1537u,
+        CLEAN_SDPCM_BYTES - 1u,CLEAN_SDPCM_BYTES
+    };
     for (uint32_t i = 0u; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
         uint32_t size = sizes[i];
         f2_status = 0x100u | (size << 9u);
@@ -172,6 +176,16 @@ int main(void) {
     }
     f2_packet[2] ^= 1u;
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+    for (uint32_t size = 18u; size <= CLEAN_SDPCM_BYTES; ++size) {
+        for (uint32_t rounded = 0u; rounded < 2u; ++rounded) {
+            clean_loader_init(&l, &wire, service, NULL);
+            uint32_t advertised = rounded ? (size + 3u) & ~3u : size;
+            f2_status = 0x100u | (advertised << 9u);
+            badger_bytes_store_u32(f2_packet, size | ((size ^ 0xffffu) << 16u));
+            assert(clean_receive(&l, packet, &packet_length) && packet_length == size);
+            assert(memcmp(packet, f2_packet, size) == 0);
+        }
+    }
     for (uint32_t i = 0u; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
         clean_loader_init(&l, &wire, service, NULL);
         l.rx_credit = 1u;
@@ -287,9 +301,9 @@ int main(void) {
     }
     f2_post_status = 0;
     clean_loader_init(&l, &wire, service, NULL);
-    f2_status = 0x100u | (525u << 9u);
+    f2_status = 0x100u | ((CLEAN_RX_PACKET_BYTES + 1u) << 9u);
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
-    assert(l.rx_status == f2_status && l.actual == 525u);
+    assert(l.rx_status == f2_status && l.actual == CLEAN_RX_PACKET_BYTES + 1u);
     assert(l.rx_resyncs == 0u && terminations == 0u);
     clean_loader_init(&l, &wire, service, NULL);
     f2_status = 0u;
@@ -303,20 +317,20 @@ int main(void) {
     return 0;
 #endif
     clean_loader_init(&l, &wire, service, NULL);
-    f2_status = 0x100u | (525u << 9u);
+    f2_status = 0x100u | ((CLEAN_RX_PACKET_BYTES + 1u) << 9u);
     for (uint32_t retry = 1u; retry <= 3u; ++retry) {
         assert(clean_receive(&l, packet, &packet_length) && packet_length == 0u);
         assert(l.rx_resyncs == retry && terminations == retry && l.error == CLEAN_OK);
     }
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
-    assert(l.actual == 525u && terminations == 3u);
+    assert(l.actual == CLEAN_RX_PACKET_BYTES + 1u && terminations == 3u);
     clean_loader_init(&l, &wire, service, NULL);
     f2_status = 0x100u;
     assert(clean_receive(&l, packet, &packet_length) && l.rx_resyncs == 1u);
     assert(l.actual == 0u);
-    f2_status = 0x100u | (0x551u << 9u);
+    f2_status = 0x100u | (0x7ffu << 9u);
     assert(clean_receive(&l, packet, &packet_length) && l.rx_resyncs == 2u);
-    assert(l.actual == 0x551u);
+    assert(l.actual == 0x7ffu);
     f2_status = 0x100u | (524u << 9u);
     f2_packet[2] ^= 1u;
     assert(clean_receive(&l, packet, &packet_length) && packet_length == 522u);
@@ -542,7 +556,7 @@ int main(void) {
     frame[37] = 255u;
     badger_bytes_store_u32(frame + 44u, diag_crc32(frame, 44u));
     assert(!clean_beacon_info(frame, sizeof(frame), entry, 6u));
-    assert(!clean_frame_valid(frame, 505u));
+    assert(!clean_frame_valid(frame, CLEAN_MPDU_BYTES + 1u));
     uint32_t command = 5u | (40u << 8u) | (1u << 19u) |
                        CLEAN_TX_REARM_RX | CLEAN_TX_MATCH_SOURCE;
     assert((command & 0xffu) == 5u);
