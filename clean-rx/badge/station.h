@@ -2,9 +2,11 @@
 #define CLEAN_RX_STATION_H
 
 #include "frames.h"
+#include "../src/unicast.h"
+#include "../src/mac.h"
 
 typedef struct {
-    uint8_t bssid[6], ssid[32], ssid_length, secured;
+    uint8_t bssid[6], ssid[32], ssid_length, secured, erp;
     uint8_t rsn[128], rsn_length;
     uint16_t capability, rates, basic_rates;
 } clean_station_ap_t;
@@ -71,7 +73,7 @@ static inline int clean_station_beacon(const uint8_t *m, uint32_t n,
     parsed.capability = clean_station_u16(m + 34u);
     if ((parsed.capability & 3u) != 1u) return CLEAN_AP_UNSUPPORTED;
     badger_bytes_copy(parsed.bssid, bssid, 6u);
-    int ssid = 0, rates = 0, rsn = 0, security = CLEAN_AP_OPEN;
+    int ssid = 0, rates = 0, rsn = 0, erp = 0, security = CLEAN_AP_OPEN;
     for (uint32_t at = 36u; at < n - 4u;) {
         if (n - 4u - at < 2u) return CLEAN_AP_INVALID;
         uint32_t id = m[at], size = m[at + 1u];
@@ -94,6 +96,9 @@ static inline int clean_station_beacon(const uint8_t *m, uint32_t n,
                     if (rate & 128u) parsed.basic_rates |= (uint16_t)(1u << j);
                 }
             }
+        } else if (id == 42u) {
+            if (erp++ || size != 1u) return CLEAN_AP_INVALID;
+            parsed.erp = m[at];
         } else if (id == 48u) {
             if (rsn++) return CLEAN_AP_INVALID;
             if (size+2u>sizeof(parsed.rsn)) return CLEAN_AP_UNSUPPORTED;
@@ -105,11 +110,66 @@ static inline int clean_station_beacon(const uint8_t *m, uint32_t n,
         at += size;
     }
     if (!ssid || !rates || !parsed.basic_rates) return CLEAN_AP_INVALID;
-    if (!(parsed.rates & (1u << 4u)) ||
+    if (!(parsed.rates & (1u << 4u)) || ((parsed.erp & 2u) && !(parsed.rates & 8u)) ||
         (!!(parsed.capability & 16u) != !!rsn)) return CLEAN_AP_UNSUPPORTED;
     parsed.secured = (uint8_t)(security == CLEAN_AP_PSK_CCMP);
     badger_bytes_copy((uint8_t *)ap, (const uint8_t *)&parsed, sizeof(parsed));
     return security;
+}
+
+static inline void clean_station_discover(const uint8_t *packet, uint32_t size,
+        const uint8_t bssid[6], clean_station_ap_t *ap, int *status) {
+    if (size >= 58u && packet[18] == 0x80u &&
+        badger_bytes_equal(packet + 34u, bssid, 6u))
+        *status = clean_station_beacon(packet + 18u, size - 18u, bssid, ap);
+}
+
+static inline int clean_station_tx_prepare(uint8_t *frame, uint32_t length,
+                                            const clean_station_ap_t *ap, uint32_t *cmd) {
+    if (length < 34u || length > CLEAN_TX_BYTES || !clean_frame_valid(frame + 6u, length - 6u))
+        return 0;
+    uint32_t rate;
+    if (ap->erp & 2u) {
+        if (!(ap->rates & 8u)) return 0;
+        clean_cck11_plcp(frame, length - 6u);
+        *cmd &= ~(1u << 18u);
+        rate = 3u;
+    } else {
+        if (clean_cck11_valid(frame, length - 6u)) {
+            if (!clean_ofdm_plcp_rate(frame, length - 6u, 0u)) return 0;
+            *cmd |= 1u << 18u;
+        }
+        int index = clean_ofdm_rate_index(frame[0]);
+        if (index < 0 || !clean_ofdm_plcp_valid(frame, length - 6u)) return 0;
+        rate = (uint32_t)index + 4u;
+    }
+    uint32_t airtime = clean_ack_airtime_us(ap->basic_rates, rate);
+    if (!airtime) return 0;
+    /* Duration is excluded from CCMP AAD. Ciphertext/PN/sequence stay intact. */
+    uint16_t duration = (uint16_t)(10u + airtime);
+    frame[8] = (uint8_t)duration; frame[9] = (uint8_t)(duration >> 8u);
+    badger_bytes_store_u32(frame + length - 4u, diag_crc32(frame + 6u, length - 10u));
+    return 1;
+}
+
+static inline int clean_station_refresh(clean_station_ap_t *ap, const uint8_t *m,
+                                         uint32_t n) {
+    if (n < 40u || m[0] != 0x80u || !clean_frame_valid(m, n) ||
+        !badger_bytes_equal(m + 10u, ap->bssid, 6u) ||
+        !badger_bytes_equal(m + 16u, ap->bssid, 6u)) return 0;
+    clean_station_ap_t next;
+    int result = clean_station_beacon(m, n, ap->bssid, &next);
+    if (result < 0) return result;
+    if (next.rates != ap->rates || next.secured != ap->secured ||
+        next.ssid_length != ap->ssid_length ||
+        !badger_bytes_equal(next.ssid, ap->ssid, ap->ssid_length) ||
+        next.rsn_length != ap->rsn_length ||
+        !badger_bytes_equal(next.rsn, ap->rsn, ap->rsn_length))
+        return CLEAN_AP_UNSUPPORTED;
+    int changed = next.erp != ap->erp || next.basic_rates != ap->basic_rates ||
+                  next.capability != ap->capability;
+    badger_bytes_copy((uint8_t *)ap, (const uint8_t *)&next, sizeof(next));
+    return changed;
 }
 
 static inline void clean_station_header(uint8_t *m, uint8_t fc, uint16_t sequence,
@@ -140,7 +200,7 @@ static inline uint32_t clean_station_associate(uint8_t frame[160], uint16_t sequ
     uint8_t *m = frame + 6u;
     clean_station_header(m, 0u, sequence, mac, ap->bssid);
     uint16_t caps = (uint16_t)(1u | (ap->secured ? 16u : 0u) |
-                              (ap->capability & (32u | 1024u)));
+                              (ap->capability & (1024u | 32u)));
     m[24] = (uint8_t)caps; m[25] = (uint8_t)(caps >> 8u);
     m[26] = 10u;
     uint32_t at = 28u;
@@ -175,6 +235,33 @@ static inline uint32_t clean_station_associate(uint8_t frame[160], uint16_t sequ
     return at + 10u;
 }
 
+typedef struct {
+    uint32_t length;
+    uint16_t sequence;
+    uint8_t pending, submitted;
+} clean_station_request_t;
+
+static inline uint32_t clean_station_request_prepare(clean_station_request_t *s,
+        uint8_t frame[160], const uint8_t mac[6], const clean_station_ap_t *ap,
+        uint8_t association) {
+    if (!s->pending) {
+        s->length = association ? clean_station_associate(frame, s->sequence++, mac, ap) :
+                                 clean_station_auth(frame, s->sequence++, mac, ap);
+        s->pending = 1u;
+        s->submitted = 0u;
+    } else if (s->submitted && !clean_mac_retry(frame + 6u, s->length - 6u)) return 0u;
+    return s->length;
+}
+
+static inline void clean_station_request_sent(clean_station_request_t *s,
+                                               uint32_t attempts, uint32_t acked) {
+    if (!attempts) return;
+    s->submitted = 1u;
+    /* A MAC-ACKed request is complete. A response timeout starts a new
+     * management request, not a duplicate MPDU the AP may suppress. */
+    if (acked) s->pending = 0u;
+}
+
 static inline int clean_station_response(const uint8_t *m, uint32_t n,
                                          const uint8_t mac[6], const uint8_t bssid[6],
                                          uint8_t association, uint16_t *aid) {
@@ -188,7 +275,7 @@ static inline int clean_station_response(const uint8_t *m, uint32_t n,
     uint16_t status = clean_station_u16(m + (association ? 26u : 28u));
     if (status || !association) return status;
     uint16_t raw_aid = clean_station_u16(m + 28u);
-    if ((raw_aid & 0xc000u) != 0xc000u || !(raw_aid & 0x3fffu) ||
+    if (!(raw_aid & 0x3fffu) ||
         (raw_aid & 0x3fffu) > 2007u) return -1;
     int supported_rates = 0;
     for (uint32_t at = 30u; at < n - 4u;) {

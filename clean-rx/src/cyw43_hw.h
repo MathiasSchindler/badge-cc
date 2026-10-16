@@ -131,6 +131,7 @@ enum {
 #define CFG_CHANNEL_GET(f)   ((((f) & CFG_CHANNEL_MASK) >> CFG_CHANNEL_SHIFT) ? (((f) & CFG_CHANNEL_MASK) >> CFG_CHANNEL_SHIFT) : 1u)
 
 /* PSM SHM State Values (SHM word 0x601) */
+#define PSM_STATE_WAIT_RX    3u
 #define PSM_STATE_READY      13u
 #define PSM_STATE_CAPTURED   14u
 #define PSM_STATE_FAULT      15u

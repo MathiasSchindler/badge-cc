@@ -347,9 +347,39 @@ At startup, the firmware stores the local 6-byte unicast MAC address in `SHM 0x6
 - Default / AP role (`CFG_STA_ROLE == 0`): `02:9b:bf:88:dd:7d` (`0x9b02, 0x88bf, 0x7ddd`)
 - Station role (`CFG_STA_ROLE != 0`): `02:08:da:57:f5:ea` (`0x0802, 0x57da, 0xeaf5`)
 
-Whenever `PSM_STATE_CAPTURED` (`14`) is reached on a valid Management (`frame_type == 0`) or Data (`frame_type == 2`) frame whose Receiver Address (`RA`, `SHM 0x106..0x108`) matches `SHM 0x612..0x614`, the firmware extracts the Transmitter Address (`TA`, `SHM 0x109..0x10b`) and calls `d11_transmit_ack_frame(ta, channel, mac_en & ~2)`:
+In the legacy raw profile, without station command 7 enabled, whenever `PSM_STATE_CAPTURED` (`14`) is reached on a valid Management (`frame_type == 0`) or Data (`frame_type == 2`) frame whose Receiver Address (`RA`, `SHM 0x106..0x108`) matches `SHM 0x612..0x614`, the firmware extracts the Transmitter Address (`TA`, `SHM 0x109..0x10b`) and calls `d11_transmit_ack_frame(ta, channel, mac_en & ~2)`:
 - Constructs a 20-byte 11 Mbps CCK `ACK` template (`6e 84 0b 00 d0 9b` PLCP + `d4 00 00 00` Frame Control / Duration + 6-byte `RA = ta` + 4-byte IEEE 802.11 CRC-32 FCS).
 - Loads the 5 words into D11 Template RAM (`0x18001130 / 0x18001134`), fires D11 TXE, increments the ACK counter in `SHM 0x7af`, and immediately rearms the receiver.
+
+### 9.5 Experimental pinned-peer PSM responses
+
+Station command 7 disables the legacy Cortex ACK path. The appended PSM
+program is entered only from GoodFCS. It checks all three local RA words and,
+for management/data/RTS responses, all three pinned TA words before scheduling
+an ACK or CTS at a selected basic response rate.
+
+D11 has **one SHM input per instruction**, including on Arch15; see the
+[instruction-format reference](https://bcm-v4.sipsolutions.net/802.11/Microcode/#operands).
+Comparing two SHM addresses directly is invalid. Each address comparison loads
+one word into `r2` before comparing against the other SHM word. The native test
+checks every instruction for multiple direct/indirect memory inputs and tests
+each of the 96 RA/TA address bits. Its former flat-memory interpreter alone
+did not catch this hardware constraint.
+
+`SHM 0x637` response policy bits enable CTS (bit 0), short-preamble selection
+(bit 1), and internal local-ACK consumption (bit 2). Station profile 2 enables
+all three. A valid 14-byte local ACK records `ACK_SEEN` only during an active
+ACK wait, increments `SHM 0x639`, and jumps directly to RX rearm, bypassing
+DMA/header publication and Cortex/host credits. Local ACKs outside an active
+wait are consumed without setting `ACK_SEEN`. Profile 1 retains the older
+capture path.
+
+`SHM 0x67c..0x67f` count scheduled responses by received auth, association,
+non-QoS data and other frame classes. A separate 40-byte `MCR1` report at
+`0x20250` accumulates those counts and counts matching frames actually posted
+to transport, plus FCS failures detected in those posted captures.
+These are local diagnostics, **not** independent proof of RF/SIFS timing.
+See the [milestone-A evidence and remaining gates](../badge/README.md#milestone-a-mac-implementation-experimental-not-complete).
 
 ---
 
@@ -363,6 +393,6 @@ The controller has no external library or SDK dependency
 make -C clean-rx/src
 ```
 
-This compiles `startup.S`, `main.c`, `pmu.c`, `radio_phy.c`, and `psm_ucode.c`
-into a self-contained ARM Cortex-M3 binary of approximately 20 KiB
+This compiles `startup.S`, `main.c`, `pmu.c`, `radio_phy.c`, `psm_ucode.c`, and `mac.c`
+into a self-contained ARM Cortex-M3 binary of approximately 30 KiB
 (`build/cyw43_rx_fw.bin`). The build reports its exact linked size.

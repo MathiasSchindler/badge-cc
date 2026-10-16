@@ -26,6 +26,19 @@ static uint16_t immediate(uint32_t operand) {
     return (uint16_t)((value & 0x400u) ? value | 0xf800u : value);
 }
 
+static void operand_limits(void) {
+    for (uint32_t pc = 0u; pc < ACK_PROGRAM_END; ++pc) {
+        uint64_t w = instruction(pc);
+        uint32_t a = (uint32_t)(w >> 26u) & 0x1fffu;
+        uint32_t b = (uint32_t)(w >> 13u) & 0x1fffu;
+        int a_memory = a < 0x1000u || (a >= 0x1400u && a < 0x1780u);
+        int b_memory = b < 0x1000u || (b >= 0x1400u && b < 0x1780u);
+        if (a_memory && b_memory)
+            fprintf(stderr, "PSM PC %u has two memory inputs: %04x %04x\n", pc, a, b);
+        assert(!(a_memory && b_memory));
+    }
+}
+
 static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint64_t old) {
     assert(instruction(pc) == expected);
     for (uint32_t i = 0u; i < 8u; ++i)
@@ -186,10 +199,10 @@ static uint16_t ack_operand(const uint16_t regs[0x1800], uint32_t operand) {
     return operand >= 0x1800u ? immediate(operand) : regs[operand];
 }
 
-static void ack_run(uint16_t regs[0x1800], int tx_now) {
+static uint32_t ack_run(uint16_t regs[0x1800], int tx_now) {
     uint32_t pc = ACK_ENTER;
     for (uint32_t step = 0u; step < 10000u; ++step) {
-        if (pc == 198u) return;
+        if (pc == 198u || pc == 266u) return pc;
         assert(pc >= ACK_ENTER && pc < ACK_PROGRAM_END);
         uint64_t w = instruction(pc++);
         uint32_t op = (uint32_t)(w >> 39u);
@@ -218,6 +231,7 @@ static void ack_run(uint16_t regs[0x1800], int tx_now) {
         }
     }
     assert(!"ACK path failed to terminate");
+    return 0u;
 }
 
 static void acknowledgements(void) {
@@ -241,12 +255,17 @@ static void acknowledgements(void) {
             regs[CLEAN_ACK_TABLE + 4u*rate + i] =
                 (uint16_t)(plcp[2u*i] | ((uint16_t)plcp[2u*i + 1u] << 8u));
         regs[CLEAN_ACK_TABLE + 4u*rate + 3u] = phy;
+        uint16_t airtime = response >= 4 ?
+            (uint16_t)clean_ofdm_airtime_us(14u, (uint32_t)response - 4u) :
+            (uint16_t)(192u + plcp[2]);
+        regs[CLEAN_ACK_AIRTIME + rate] = airtime;
         regs[CLEAN_SHM_FRAME + 4u] = 0x08b0u;
         regs[0x100e] = rate >= 4u ? 0x2000u : 0u;
         regs[CLEAN_SHM_FRAME + 1u] = rate >= 4u ?
             (uint16_t)(0xf0u | clean_ofdm_rates[rate - 4u].signal) : cck[rate];
         ack_run(regs, 1);
         assert(regs[CLEAN_ACK_SENT] == 1u && !regs[CLEAN_ACK_ERROR]);
+        assert(regs[CLEAN_ACK_KINDS] == 1u);
         assert(regs[0x108a] == phy && regs[0x1086] == (rate >= 4u ? 0x41u : 0x40u));
         assert(regs[0x10b5] == 16u && regs[0x10b4] == 0x0826u);
         assert(regs[0x1080] == 0x4021u && regs[0x1084] == 255u);
@@ -254,6 +273,61 @@ static void acknowledgements(void) {
         for (uint32_t i = 0u; i < 3u; ++i)
             assert(regs[0x10e5u + i] == base_regs[CLEAN_SHM_FRAME + 9u + i]);
         for (uint32_t i = 0u; i < 8u; ++i) assert(regs[0x10c0u + i] == 65535u);
+        regs[CLEAN_ACK_SENT] = 0u;
+        regs[CLEAN_SHM_FRAME + 4u] |= 0x400u;
+        regs[CLEAN_SHM_FRAME + 15u] = 7u;
+        regs[CLEAN_SHM_FRAME + 5u] = 1000u;
+        ack_run(regs, 1);
+        assert(regs[CLEAN_ACK_SENT] == 1u);
+        assert(regs[0x10e4u] == 1000u - 10u - airtime);
+        regs[CLEAN_SHM_FRAME + 5u] = 1u;
+        ack_run(regs, 1);
+        assert(regs[0x10e4u] == 0u);
+        for (uint32_t short_rx = 0u; short_rx < 2u; ++short_rx) {
+            for (uint32_t rts = 0u; rts < 2u; ++rts) {
+                regs[CLEAN_RESPONSE_POLICY] = 3u;
+                regs[CLEAN_CTS_ALLOWED] = 1u;
+                regs[CLEAN_ACK_SENT] = regs[CLEAN_CTS_SENT] = regs[CLEAN_SHORT_SENT] = 0u;
+                regs[CLEAN_SHM_FRAME + 4u] = rts ? 0xb4u : 0x04b0u;
+                regs[CLEAN_SHM_FRAME + 5u] = 1000u;
+                regs[0x100c] = rts ? 26u : 40u;
+                regs[0x1009] = short_rx ? 0x80u : 0u;
+                uint32_t end = ack_run(regs, 1);
+                uint32_t short_tx = short_rx && response > 0 && response < 4;
+                assert(end == (rts ? 266u : 198u));
+                assert(regs[CLEAN_ACK_SENT] == !rts && regs[CLEAN_CTS_SENT] == rts);
+                assert(regs[CLEAN_SHORT_SENT] == short_tx);
+                assert(regs[0x1086] == (rate >= 4u ? 0x41u : short_tx ? 0x50u : 0x40u));
+                assert(regs[0x10e3] == (rts ? 0xc4u : 0xd4u));
+                assert(regs[0x10e4] == 1000u - 10u - airtime + (short_tx ? 96u : 0u));
+            }
+        }
+        if (rate < 4u) {
+            uint8_t fallback[6];
+            uint16_t fallback_phy;
+            assert(clean_ack_template(fallback, 0u, &fallback_phy));
+            for (uint32_t i = 0u; i < 3u; ++i)
+                regs[CLEAN_ACK_TABLE + 4u*rate + i] =
+                    (uint16_t)(fallback[2u*i] | ((uint16_t)fallback[2u*i+1u] << 8u));
+            regs[CLEAN_ACK_TABLE + 4u*rate + 3u] = fallback_phy;
+            regs[CLEAN_ACK_AIRTIME + rate] = 304u;
+            regs[CLEAN_CTS_SENT] = regs[CLEAN_SHORT_SENT] = 0u;
+            assert(ack_run(regs, 1) == 266u && regs[CLEAN_CTS_SENT] == 1u);
+            assert(regs[0x1086] == 0x40u && regs[0x108a] == 2u && !regs[CLEAN_SHORT_SENT]);
+            assert(regs[0x10e4] == 686u);
+        }
+        for (uint32_t fault = 0u; fault < 7u; ++fault) {
+            regs[CLEAN_RESPONSE_POLICY] = fault == 0u ? 0u : 3u;
+            regs[CLEAN_CTS_ALLOWED] = fault == 1u ? 0u : 1u;
+            regs[CLEAN_ACK_SENT] = regs[CLEAN_CTS_SENT] = 0u;
+            regs[CLEAN_SHM_FRAME + 4u] = 0xb4u;
+            regs[CLEAN_SHM_FRAME + 5u] = fault == 2u ? 0x8000u : fault == 3u ? 1u : 1000u;
+            regs[0x100c] = fault == 4u ? 25u : fault == 5u ? 27u : 26u;
+            if (fault == 6u) regs[CLEAN_SHM_FRAME + 9u] ^= 1u;
+            assert(ack_run(regs, 1) == 198u);
+            assert(!regs[CLEAN_ACK_SENT] && !regs[CLEAN_CTS_SENT]);
+            if (fault == 6u) regs[CLEAN_SHM_FRAME + 9u] ^= 1u;
+        }
     }
     for (uint32_t kind = 0u; kind < 10u; ++kind) {
         memcpy(regs, base_regs, sizeof(regs));
@@ -262,8 +336,8 @@ static void acknowledgements(void) {
         if (kind == 1u) regs[CLEAN_SHM_FRAME + 6u] ^= 1u;
         if (kind == 2u) regs[CLEAN_SHM_FRAME + 4u] = 0xd4u;
         if (kind == 3u) regs[CLEAN_SHM_FRAME + 4u] = 0x88u;
-        if (kind == 4u) regs[CLEAN_SHM_FRAME + 4u] = 0x0400u;
-        if (kind == 5u) regs[CLEAN_SHM_FRAME + 15u] = 1u;
+        if (kind == 4u) regs[CLEAN_SHM_FRAME + 4u] = 1u;
+        if (kind == 5u) regs[CLEAN_SHM_FRAME + 4u] = 0xb4u;
         if (kind == 6u) regs[0x100c] = 33u;
         if (kind == 7u) regs[CLEAN_SHM_FRAME + 1u] = 0u;
         if (kind == 8u) regs[CLEAN_SHM_FRAME + 4u] = 0xe0u;
@@ -281,10 +355,69 @@ static void acknowledgements(void) {
     regs[CLEAN_ACK_WAITING] = 1u;
     ack_run(regs, 1);
     assert(regs[CLEAN_ACK_SEEN] == 1u && !regs[CLEAN_ACK_SENT]);
+    const uint8_t frame_controls[] = {0xb0u,0x10u,8u,0x48u,0xb4u};
+    for (uint32_t kind = 0u; kind < sizeof(frame_controls); ++kind) {
+        for (uint32_t mismatch = 0u; mismatch <= 96u; ++mismatch) {
+            memcpy(regs, base_regs, sizeof(regs));
+            regs[CLEAN_SHM_FRAME + 1u] = 10u;
+            regs[CLEAN_RESPONSE_POLICY] = 3u | CLEAN_RESPONSE_INTERNAL_ACK;
+            regs[CLEAN_CTS_ALLOWED] = 1u;
+            regs[CLEAN_ACK_AIRTIME] = 304u;
+            regs[CLEAN_SHM_FRAME + 5u] = 1000u;
+            regs[CLEAN_SHM_FRAME + 4u] = frame_controls[kind];
+            regs[0x100c] = kind == 4u ? 26u : 40u;
+            if (mismatch)
+                regs[CLEAN_SHM_FRAME + 6u + (mismatch - 1u) / 16u] ^=
+                    (uint16_t)(1u << ((mismatch - 1u) & 15u));
+            ack_run(regs, 1);
+            assert(regs[CLEAN_ACK_SENT] == (uint16_t)(!mismatch && kind != 4u));
+            assert(regs[CLEAN_CTS_SENT] == (uint16_t)(!mismatch && kind == 4u));
+            for (uint32_t i = 0u; i < 4u; ++i)
+                assert(regs[CLEAN_ACK_KINDS + i] ==
+                       (uint16_t)(!mismatch && kind != 4u && kind == i));
+        }
+    }
+    for (uint32_t waiting = 0u; waiting < 2u; ++waiting) {
+        for (uint32_t fault = 0u; fault < 7u; ++fault) {
+            memcpy(regs, base_regs, sizeof(regs));
+            regs[CLEAN_RESPONSE_POLICY] = 3u | CLEAN_RESPONSE_INTERNAL_ACK;
+            regs[CLEAN_SHM_FRAME + 4u] = 0xd4u;
+            regs[0x100c] = fault == 1u ? 19u : fault == 2u ? 21u : 20u;
+            regs[CLEAN_ACK_WAITING] = (uint16_t)waiting;
+            regs[CLEAN_ACK_CONSUMED] = 65535u;
+            if (fault >= 3u && fault <= 5u) regs[CLEAN_SHM_FRAME + 3u + fault] ^= 1u;
+            if (fault == 6u) regs[CLEAN_ACK_ENABLE] = 0u;
+            uint32_t end = ack_run(regs, 1);
+            int consumed = fault == 0u;
+            assert(end == (consumed ? 266u : 198u));
+            assert(regs[CLEAN_ACK_CONSUMED] == (consumed ? 0u : 65535u));
+            assert(regs[CLEAN_ACK_SEEN] == (uint16_t)(consumed && waiting));
+            assert(!regs[CLEAN_ACK_SENT]);
+            /* The short ACK must never enter DMA/capture publication. */
+            assert(!regs[0x1007] && !regs[0x1008] && !regs[0x1004]);
+        }
+    }
+    memcpy(regs, base_regs, sizeof(regs));
+    regs[CLEAN_SHM_FRAME + 4u] = 0xd4u;
+    regs[0x100c] = 20u;
+    regs[CLEAN_RESPONSE_POLICY] = 3u | CLEAN_RESPONSE_INTERNAL_ACK;
+    for (uint32_t i = 0u; i < 100000u; ++i) {
+        regs[CLEAN_ACK_WAITING] = (uint16_t)(i & 1u);
+        regs[CLEAN_ACK_SEEN] = 0u;
+        assert(ack_run(regs, 1) == 266u);
+        assert(regs[CLEAN_ACK_SEEN] == (i & 1u));
+        assert(!regs[0x1004] && !regs[0x1007] && !regs[0x1008]);
+    }
+    assert(regs[CLEAN_ACK_CONSUMED] == (uint16_t)100000u);
 }
 
 int main(void) {
     assert(psm_ucode_byte_count == sizeof(psm_ucode_bytes));
+    operand_limits();
+    assert(instruction(118u) == WORD(0x3f0u,0x1803u,0x1800u,0x601u));
+    assert(instruction(193u) == WORD(0x703u,0x1780u,0x1780u,197u));
+    assert(instruction(264u) == WORD(0x1c0u,0x7a8u,0x1801u,0x7a8u));
+    assert(instruction(260u) == WORD(0x1c0u,0x7a9u,0x1801u,0x7a9u));
     assert(instruction(81u) == instruction(105u));
     uint32_t limit = immediate((uint32_t)(instruction(81u) >> 26u) & 0x1fffu);
     assert(limit == 65535u);
@@ -306,5 +439,6 @@ int main(void) {
         }
     }
     puts("PSM: image identity, capture bounds, RX streaming and startup flush OK");
+    puts("PSM: single-SHM inputs, pinned ACK/CTS addresses and 100000 native ACK rearms OK; NOT RF timing");
     return 0;
 }

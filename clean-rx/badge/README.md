@@ -126,7 +126,316 @@ key exchanges fail closed. General CSMA/CA, reliable unicast and RF/SIFS ACK
 timing remain unqualified. This new crypto is experimental, not independently
 audited or production-security-qualified.
 
-## Experimental association and ACK work
+## Milestone A MAC implementation: experimental, not complete
+
+The station diagnostic now selects **profile 2** in controller command 7
+(`config[15] = 2`). Profile 1 remains available for older diagnostic callers;
+raw broadcast/Micro Signal modes do not enable this station MAC. Neither
+profile is a claim that milestone A in the [roadmap](../../todo.md) is complete.
+All implementation and supporting tests remain inside `clean-rx/`.
+
+Implemented paths:
+
+- [`mac.c`](../src/mac.c) / [`mac.h`](../src/mac.h) provide deterministic
+  ERP contention arithmetic: 9/20-us slots, DIFS, EIFS, Duration/NAV,
+  xorshift contention draws, freezing/resumption, CW growth through 1023,
+  success/new-frame CW reset and unsigned timer wrap. Long unsampled intervals
+  are not credited as idle slots.
+- The controller samples D11 PHYDEBUG carrier sense (`PDBG_CRS`, bit 0),
+  observes the actual PSM idle/receive states, and imports PSM FCS/length
+  discard counters. The bit definitions are documented in the public Linux
+  [brcmsmac D11 register header](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/broadcom/brcm80211/brcmsmac/d11.h).
+  TX template selection is deferred until after contention, not enabled while
+  waiting for access. Host credit/capture conflicts return `BUSY`, not a
+  fictitious successful transmission. One command's access wait is bounded
+  at 50 ms; existing host/service deadlines remain in force.
+- Reliable commands support legacy OFDM and long-preamble 11 Mbps CCK.
+  In a BSS advertising ERP `Use_Protection`, this host uses the advertised
+  11 Mbps CCK rate instead of emitting unprotected OFDM. Such a BSS without
+  that rate is explicitly unsupported. Association advertises
+  short-preamble support only when advertised by the AP; control-response
+  preambles are selected from the received PHY header and selected response
+  rate. A 1 Mbps response always retains the long preamble. Short-response RF
+  timing is not qualified.
+- The PSM answers valid bound-peer RTS frames with CTS when the locally
+  observed NAV permits it. CTS Duration subtracts SIFS and the selected response
+  airtime. RTS is consumed and RX rearmed inside the PSM, without waiting for
+  a host credit or Cortex capture handling. This relies on RTS being shorter
+  than the RX streaming prefix, which has a compile-time assertion. Wrong
+  lengths/addresses, reserved Duration/ID and insufficient Duration do not
+  trigger CTS. Profile 1 retains its previous response policy.
+- PSM ACK response-rate selection includes residual Duration for
+  supported fragmented reception. The ACK acceptance window accounts for the
+  complete slowest legacy ACK PPDU in the modulation family, rather than
+  assuming a GoodFCS indication arrives at PHY-RXSTART. It is bounded against
+  the local TX trigger, not an independently measured RF end timestamp.
+- Every RA/TA comparison stages one address word in `r2`: D11 permits only
+  one SHM input per instruction. The six former SHM-versus-SHM comparisons
+  were invalid, despite passing the flat-memory native interpreter. Response
+  telemetry exposed unexpected frame classes; the corrected program and an
+  ISA-wide native check prevent that mistake from recurring.
+- The new profile resumes RX/PSM immediately after triggering TX. Its CPU
+  drain guard does not inhibit the transmitter/receiver while waiting:
+  PHYDEBUG TXA is a byte-transfer strobe, **not** a frame-active/tail signal.
+  Attempts are counted at the actual template trigger, including submissions
+  whose subsequent local completion fails. Retries change only Retry/FCS;
+  sequence, fragment number, encrypted payload and PN remain intact.
+- In profile 2, valid addressed ACK control frames are consumed directly in
+  the PSM and counted at SHM `0x639`. They bypass DMA/header publication and
+  jump to RX rearm, rather than waiting for Cortex handling or occupying the
+  only application RX credit. `ACK_SEEN` is set only during an active ACK wait;
+  local ACKs outside that wait are consumed without completing it. Profile 1
+  retains the earlier capture path. Other held captures
+  survive both host-credit and SDIO DMA backpressure, including their saved
+  DMA metadata. A capture is released only after successful F2 publication.
+  ACK consumption also clears any prepared transport state. Captures arriving
+  after the main loop's first state sample are checked again before publication,
+  so their NAV is not skipped and staged ACK bytes cannot replace the next
+  application capture. These fixes do not explain all observed response loss.
+- [`station_rx.h`](station_rx.h) applies the shared non-QoS duplicate cache
+  and bounded unprotected reassembly to station waits, drains, post-association
+  reception and the WPA loop. The pinned-peer cache tracks subtype, sequence
+  and fragment identity across sequence wrap, with a 512-ms lifetime.
+  One assembly supports up to 16 fragments and 2,304 payload bytes; conflicting,
+  out-of-order, expired and oversized fragments have explicit counters/results.
+  Reassembled packets carry `packet[17] = 1`: their reconstructed FCS is **not**
+  an original over-air FCS or RF timing measurement.
+- Protected frames bypass the unauthenticated duplicate cache. After each
+  non-QoS fragment passes CCMP MIC and PN checks, a separate authenticated
+  cache/reassembly state accepts it. Subsequent fragments must have consecutive
+  PNs, consistent headers/addresses and sequence, and the supported pairwise
+  Key ID. Reassembly retains the Protected bit as a cache-domain discriminator;
+  it never mixes authenticated and unauthenticated fragments. It has the same
+  16-fragment/2,304-byte/lifetime bounds. Reconstructed plaintext/FCS stays
+  internal, and plaintext is wiped on delivery or terminal protocol failure.
+  Protected QoS fragmentation remains unsupported. The existing WPA QoS parser/replay path is preserved, not
+  represented as newly implemented QoS MAC support. Pending WPA transmissions
+  survive zero-attempt `BUSY` results without advancing submission counters or
+  allocating another protected PN.
+- Authentication/association budgets now count actual submissions, not `BUSY`
+  commands. They drain RX on a short deadline before retrying a deferred MPDU,
+  with a separate 1.6-second phase bound. Null-data frames are accepted rather
+  than aborting the station as an unsupported subtype.
+- Management request recovery distinguishes a MAC retransmission from a new
+  request after a MAC-ACKed request's response timeout. A no-ACK retry preserves
+  sequence and body and changes only Retry/FCS; zero-attempt `BUSY` does not
+  advance identity. Once ACKed, the next request gets a fresh sequence and clear
+  Retry bit, avoiding AP duplicate suppression of an already completed MPDU.
+  Authentication and association share the advancing sequence allocator.
+  The four-submission budget and 1.6-second phase deadline are unchanged.
+- Bound, valid-FCS AP beacons refresh ERP policy. Pending frames can switch
+  between long-preamble CCK protection and OFDM without changing sequence,
+  ciphertext or PN. Basic-rate/slot changes queue controller command 8 using
+  the same 16-byte bound-address configuration as command 7. Response-table
+  updates wait for idle RX/PHY; pending updates defer new TX. Slot changes
+  preserve CW, remaining slots, NAV and pending EIFS, but restart idle sampling.
+  Changes of advertised rate set, SSID or RSN are explicitly unsupported rather
+  than silently changing the established profile.
+- Association accepts either setting of the reserved upper AID bits, while
+  retaining the nonzero/1..2007 range, bound addresses, status, FCS and IE checks.
+  The local mesh AP actually returned clear reserved bits.
+
+### Diagnostics and reproducible native tests
+
+The original 40-byte ACK status at `0x201e0` remains unchanged. A separate
+64-byte `clean_mac_radio_status_t` at `0x20210` reports `MAC3` and its profile,
+CW, remaining slots, NAV deadline, TX deferrals, internally consumed ACKs,
+ACK timeouts, RX backpressure polls, a held-capture flag, scheduled CTS/short
+response counts, queued policy status, prepared-ACK discards and live SHM
+address readback. It does not overlap the mailbox, ACK status or capture ring.
+New response counts accumulate sampled 16-bit PSM deltas into 32-bit totals;
+the original ACK-status counters retain their existing format.
+
+A separate 40-byte `MCR1` status at `0x20250`, copied to detail offset 1808,
+reports scheduled responses by auth/association/non-QoS-data/other receive
+classes, corresponding bound frames actually published to transport, and
+invalid-FCS published captures. These counters are reset at controller startup
+and exposed as `mac_response_*`, `mac_published_*` and `mac_trace_report`.
+Class counts distinguish PSM response scheduling from later host delivery;
+they do not identify individual RF exchanges or measure SIFS.
+
+Station evidence at detail offset 1680 contains `MAC1` plus unprotected
+delivery, duplicate, fragment, malformed, unsupported, expiry and fragment-error
+counters. Offset 1712 contains the radio status; offset 1776 contains a separate
+`MAC1` report for authenticated non-QoS reception/reassembly. PN replays are
+rejected before this second cache, not counted as authenticated-cache duplicates.
+The collector reports these
+as `mac_*` fields; `mac_rx_waits` counts backpressure polls, **not lost packets**.
+`ack_responses_scheduled`, `cts_responses_scheduled` and
+`short_responses_scheduled` count submissions, not independently verified RF
+responses. `mac_pending_rx` explicitly exposes a capture still held at stop;
+bounded test completion is not proof that the entire RX queue was drained.
+
+```sh
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx all test
+make -C clean-rx/badge all test
+make test-micro-signal
+```
+
+The ASan/UBSan MAC test covers idle/busy/NAV overlap and expiry, timer wrap,
+EIFS, partial-slot freezing, CW limits/reset, deterministic draws, Retry/FCS
+identity, all supported CCK PLCP lengths, ERP fallback, malformed frames,
+duplicate expiry, maximum-size 16-fragment reassembly and the actual station
+adapter. It delivers 100,000 frames per **simulated** direction, alternating
+32-, 1,500- and 2,304-byte payloads, and suppresses their retries. This is
+**not** the roadmap's 100,000-frame-per-direction OTA qualification.
+PSM tests also run under ASan/UBSan and exercise all 12 receive rates, long/short
+responses, 1 Mbps fallback, CTS Duration, NAV gating, rejection and immediate
+rearm. They reject multiple memory inputs in every instruction, flip each of
+the 96 RA/TA bits for ACK/CTS rejection, and run 100,000 internal ACK rearms
+without DMA/header publication, including counter wrap and out-of-window ACKs.
+Native request tests cover zero-attempt deferrals, no-ACK Retry/FCS identity,
+fresh sequences after ACKed requests, sequence wrap, phase transitions and
+corrupted retry rejection. Discovery tests ensure a matching-BSSID probe
+response, data, authentication or association response cannot overwrite a
+valid beacon result; truncated packets are ignored and malformed complete
+beacons still report parser errors. None of these simulated events counts as
+OTA traffic.
+WPA tests exercise authenticated 16-fragment reception at 32, 1,500 and
+2,304 payload bytes, PN carry/continuity, MIC/header/key-ID/order failures,
+expiry, overflow and plaintext wiping. These are native tests, not OTA
+qualification of those new paths.
+Loader/DMA-credit, WPA2/crypto, secret-provisioning and Micro Signal regressions
+pass; all ten existing Micro Signal modes build, and both freestanding ELFs
+have no unresolved symbols.
+
+### Hardware evidence and remaining gates
+
+Retained build `727a647a` was tested on badge `08DA26F86E57F5EA`, channel 6,
+against the authorized Kerbel4 AP `80:23:95:6d:97:90`. In the bounded
+association-only trial, independently received valid-FCS authentication and
+association responses both had status 0. The controller recorded two received
+ACKs, zero ACK timeouts, one filtered duplicate, four EAPOL M1 messages and
+zero pending captures. There were 301 RX backpressure polls, not transport
+drops. Evidence is retained in
+`build/clean-rx/badge/mac-final-assoc-6-4.bin` from the repository root.
+
+The AP subsequently deauthenticated with reason 15 because this
+`--ap-assoc` trial deliberately did not run the WPA2 handshake. The final
+collector correctly reported `associated:false`, `wpa2_authorized:false`;
+this is not a maintained or authorized connection. An earlier build
+`a4d0abd6` remained associated at the bounded end of its trial, while other
+trials lost replies or missed ACKs. **Reliable MAC operation is not qualified.**
+No credentials were used in these association-only trials.
+
+Further controlled testing on 2026-10-16 used the unchanged vendor
+`usb-wifi-link` AP, build `0353f1de`, on badge `9BBF88DD17D66E7D`, channel 1.
+Every positive trial used a fresh WPA2 network and station challenge; success
+required matching peer MACs, authorization and a protected echo at both ends.
+The successive image results were:
+
+| Station build | Successful protected exchanges / fresh trials |
+| --- | --- |
+| `727a647a` (baseline) | 1 / 1 |
+| `c6d48656` | 2 / 3 |
+| `e5ca386f` | 2 / 3 |
+| `22701056` | 8 / 10 |
+| `43ff54e4` | 4 / 6 |
+| `f42fa969` | 7 / 10 |
+| `65f952ee` (internal ACK consumption) | 8 / 10 |
+| `40ad3bf8` (response-class diagnostics) | 9 / 10 |
+| `06cdb3cc` (single-SHM address checks) | 29 / 30 |
+| `0847d369` (management-request identity) | 29 / 30 |
+| `851d14b4` (explicit diagnostic reset) | 7 / 10 |
+| `5eeed6e7` (retained; discovery guard) | 9 / 10 |
+
+The `f42fa969` failures included one missing authentication exchange and two
+missing association responses, despite received request ACKs and the AP
+retaining the station. An open-AP control reproduced the association-response
+failure, so it is not solely a WPA2 parser problem. Two `f42fa969`
+wrong-password controls associated and sent M2 but neither endpoint authorized
+or exchanged protected data; another failed before association and is **not**
+a valid password-rejection control. Evidence/log prefixes from the repository
+root are `build/clean-rx/badge/mac-a-{baseline,controls,final,capture,binding,budget,open}`.
+Later prefixes are `mac-a-{direct,trace,address,request,retained}` under the
+same build directory. All attempts, including failures, are retained and
+results are not pooled across images.
+
+The address-check fix corrects six instructions that used two SHM input
+operands, which the D11 ISA does not permit. All comparisons now stage one
+word in a register. The native interpreter previously accepted the invalid
+encoding; the new instruction-wide operand-limit regression was observed
+failing before the fix. Consequently, older ACK counters cannot establish
+correct peer-bound ACK filtering. Earlier independently confirmed protected
+echoes remain valid evidence of those exchanges, not of ACK timing/filtering.
+
+The `06cdb3cc` association failure occurred after 18 consecutive successes.
+In `0847d369`, trials 13 and 16 completed after a second ACKed association
+request: a MAC-ACKed request now retires its identity, so a later management
+request is not incorrectly presented as a duplicate retry. No-ACK retries
+retain the original sequence/body and only update Retry/FCS. BUSY with zero
+attempts does not advance the request. The four-submission/1.6-second phase
+budget was not enlarged. Trial 10 still exhausted authentication retries.
+
+For `851d14b4`, trial 1 failed before station configuration with
+`CLEAN_INPUT` (error 6), AP profile `-1`, and no management submissions;
+trials 3 and 6 exhausted four authentication submissions without request ACKs.
+Two wrong-password controls were valid and three open-AP controls all passed.
+The final station-profile reports had zero other-class responses and zero
+invalid-FCS bound publications; these diagnostics are not RF timing evidence.
+The subsequent discovery guard fixes a demonstrated code defect that could
+overwrite a valid beacon result with a non-beacon parser error. It does not
+prove the cause of the earlier input failure.
+
+In the retained `5eeed6e7` series, all ten protected-attempt station reports
+confirmed authentication/association. Nine completed independently confirmed
+protected echoes. Trial 3 received no EAPOL M1, while the vendor peer failed
+with `RADIO ERROR` / firmware error 7 and produced no final AP observation;
+it is retained as an unconfirmed attempt, not attributed to clean-MAC RF loss.
+Trials 6 and 10 needed two and three association requests respectively.
+Both wrong-password controls were valid; all three open controls passed
+(open trial 2 needed two association requests). All 15 reports had zero
+other-class responses and zero invalid-FCS bound publications. Evidence prefix
+is `build/clean-rx/badge/mac-a-regression-5eeed6e7`. The connection runner
+correctly returned failure for the unconfirmed attempt; this series is not
+a zero-failure qualification result.
+
+Four valid unchanged-vendor-versus-vendor controls independently confirmed
+association/authorization with 20 stable observations each, under prefixes
+`mac-a-vendor-control-{1,2,4,6}`. Attempts 3 and 5 failed to launch in BOOTSEL
+and are not RF connection trials. These controls did not perform a data soak.
+The clean-station protected trials used 32-byte plaintexts, 76-byte station
+MPDUs and 6 Mbps OFDM. A bounded single protected echo is not full-sized or
+sustained MAC qualification. No RTS, short-preamble response, fragmented
+protected exchange or dynamic-policy transition was independently exercised.
+
+With the vendor image already on the AP badge and the current clean image
+on the station badge, reproduce ten protected trials, two wrong-password
+controls and three open controls without changing the Mac's network:
+
+```sh
+bash clean-rx/badge/mac_trials.sh AP_SERIAL CLEAN_STATION_SERIAL \
+  build/clean-rx/badge/NEW_EVIDENCE_PREFIX
+```
+
+This runner does not flash. It retains per-trial endpoint reports, diagnostics
+and station detail blobs, writes a JSONL summary, continues after failures
+and exits unsuccessfully if any trial is unconfirmed. An existing summary
+prefix is rejected. Wrong-password success requires association and M2 but
+no authorization/protected traffic at either endpoint. These 15 connection
+regressions are **not** the 100,000-frame OTA soak.
+
+Initiator RTS/TX chaining is not implemented; ERP transmission uses the CCK
+fallback instead. Current carrier/NAV scheduling
+is a conservative Cortex polling implementation: NAV is anchored to capture
+observation and sampling/trigger gaps are not precise hardware slot timing.
+Moving/qualifying the timing-critical scheduler against RF measurements is
+still necessary. Independent contention/SIFS captures, controlled missing/late
+ACK and occupied-credit RF trials, and the required large bidirectional OTA
+soak/vendor control have **not** passed. Earlier unexplained response loss
+and no-ACK authentication failures have not been established as resolved.
+Native arithmetic, local counters, a scheduled CTS or
+a successful protected echo cannot establish independent RF/SIFS timing.
+
+After these trials, badge `08DA26F86E57F5EA` had its original 33,604-byte
+application restored and independently read back/compared byte-for-byte.
+Badge `9BBF88DD17D66E7D` had its entire original 16 MiB flash restored and
+independently read back/compared byte-for-byte against its verified backup.
+Both were left in BOOTSEL. No additional timing hardware was available, and
+the Mac's networking was left unchanged at the user's request; no host
+monitor-mode capture was attempted.
+
+## Earlier experimental association and ACK work
 
 ```sh
 build/clean-rx/badge/collector SERIAL evidence.bin CHANNEL \

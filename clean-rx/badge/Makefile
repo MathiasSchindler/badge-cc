@@ -6,7 +6,7 @@ CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-Wall -Wextra -Werror -Oz -ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
 	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u -DLIVE_USB_CLEAN
-SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c \
+SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb_hw.c \
 	$(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
@@ -19,7 +19,7 @@ VPATH := $(sort $(dir $(SOURCES)))
 HEADERS := $(wildcard *.h ../src/*.h $(ROOT)/src/tools/diagnostics_logic.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test)
-LOADER_TEST_SOURCES := loader_test.c loader.c \
+LOADER_TEST_SOURCES := loader_test.c loader.c ../src/mac.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/tools/diagnostics_logic.c
 
@@ -73,11 +73,12 @@ test: $(NATIVE_TESTS)
 	$(BUILD)/wpa2_test
 	$(BUILD)/secret_test
 	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh
+	bash -n mac_trials.sh
 
 $(NATIVE_TESTS): $(HEADERS) $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
 
-$(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../src/wpa2_crypto.c ../src/wpa2_crypto.h
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined wpa2_test.c wpa2.c ../src/wpa2_crypto.c \
+$(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../src/wpa2_crypto.c ../src/wpa2_crypto.h ../src/mac.c
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined wpa2_test.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c \
 		$(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/secret_test: secret_test.c $(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb.h \

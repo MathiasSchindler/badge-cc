@@ -253,6 +253,35 @@ static void station_tests(void) {
     ap.ssid_length = 4u; ap.secured = 1u;
     ap.rates = 0xfffu; ap.basic_rates = 0x15fu; ap.capability = 0x431u;
     uint8_t frame[160], beacon[200] = {0};
+    clean_station_request_t request = {.sequence = 4095u};
+    uint8_t original[160];
+    uint32_t length = clean_station_request_prepare(&request, frame, mac, &ap, 0u);
+    memcpy(original, frame, sizeof(original));
+    assert(clean_station_u16(frame + 28u) == 0xfff0u && !(frame[7] & 8u));
+    clean_station_request_sent(&request, 0u, 0u);
+    assert(clean_station_request_prepare(&request, frame, mac, &ap, 0u) == length);
+    assert(!memcmp(original, frame, sizeof(frame)) && request.sequence == 4096u);
+    clean_station_request_sent(&request, 1u, 0u);
+    assert(clean_station_request_prepare(&request, frame, mac, &ap, 0u) == length);
+    assert(frame[7] & 8u);
+    assert(clean_station_u16(frame + 28u) == 0xfff0u &&
+           clean_frame_valid(frame + 6u, length - 6u));
+    assert(!memcmp(frame + 8u, original + 8u, length - 12u));
+    clean_station_request_sent(&request, 0u, 0u);
+    assert(request.pending && request.submitted && request.sequence == 4096u);
+    clean_station_request_sent(&request, 1u, 1u);
+    assert(!request.pending);
+    assert(clean_station_request_prepare(&request, frame, mac, &ap, 0u) == length);
+    assert(!clean_station_u16(frame + 28u) && !(frame[7] & 8u));
+    assert(request.sequence == 4097u && clean_frame_valid(frame + 6u, length - 6u));
+    clean_station_request_sent(&request, 1u, 0u);
+    frame[10] ^= 1u;
+    assert(!clean_station_request_prepare(&request, frame, mac, &ap, 0u));
+    /* A valid response may arrive without its preceding request ACK. */
+    request.pending = 0u;
+    length = clean_station_request_prepare(&request, frame, mac, &ap, 1u);
+    assert(frame[6] == 0u && clean_station_u16(frame + 28u) == 16u &&
+           !(frame[7] & 8u) && clean_frame_valid(frame + 6u, length - 6u));
     uint32_t auth_len = clean_station_auth(frame, 0x123u, mac, &ap);
     assert(auth_len == 40u && clean_frame_valid(frame + 6u, 34u));
     assert(clean_ofdm_plcp_valid(frame, 34u));
@@ -272,6 +301,50 @@ static void station_tests(void) {
     assert(clean_station_beacon(beacon, n, peer, &parsed) == CLEAN_AP_PSK_CCMP);
     assert(parsed.basic_rates == ap.basic_rates && parsed.rates == ap.rates);
     assert(parsed.ssid_length == 4u && !memcmp(parsed.ssid, "test", 4u));
+    uint8_t discovery[218] = {0};
+    memcpy(discovery + 18u, beacon, n);
+    clean_station_ap_t discovered = {0};
+    int discovery_status = 0;
+    clean_station_discover(discovery, n + 18u, peer, &discovered, &discovery_status);
+    assert(discovery_status == CLEAN_AP_PSK_CCMP && !memcmp(&discovered, &parsed, sizeof(parsed)));
+    const uint8_t non_beacons[] = {0x50u,8u,0xb0u,0x10u};
+    for (uint32_t i = 0u; i < sizeof(non_beacons); ++i) {
+        discovery[18] = non_beacons[i];
+        badger_bytes_store_u32(discovery + 18u + n - 4u, diag_crc32(discovery + 18u, n - 4u));
+        clean_station_discover(discovery, n + 18u, peer, &discovered, &discovery_status);
+        assert(discovery_status == CLEAN_AP_PSK_CCMP &&
+               !memcmp(&discovered, &parsed, sizeof(parsed)));
+    }
+    discovery[18] = 0x80u;
+    clean_station_discover(discovery, 57u, peer, &discovered, &discovery_status);
+    assert(discovery_status == CLEAN_AP_PSK_CCMP);
+    clean_station_discover(discovery, n + 18u, peer, &discovered, &discovery_status);
+    assert(discovery_status == CLEAN_AP_INVALID);
+    clean_station_ap_t refreshed = parsed;
+    assert(clean_station_refresh(&refreshed, beacon, n) == 0);
+    beacon[n - 4u] = 42u; beacon[n - 3u] = 1u; beacon[n - 2u] = 2u;
+    badger_bytes_store_u32(beacon + n - 1u, diag_crc32(beacon, n - 1u));
+    assert(clean_station_beacon(beacon, n + 3u, peer, &parsed) == CLEAN_AP_PSK_CCMP);
+    assert(parsed.erp == 2u);
+    assert(clean_station_refresh(&refreshed, beacon, n + 3u) == 1 && refreshed.erp == 2u);
+    beacon[35] ^= 4u;
+    beacon[44] &= 127u;
+    badger_bytes_store_u32(beacon + n - 1u, diag_crc32(beacon, n - 1u));
+    assert(clean_station_refresh(&refreshed, beacon, n + 3u) == 1);
+    assert(!(refreshed.capability & 1024u) && !(refreshed.basic_rates & 1u));
+    beacon[44] = 12u;
+    badger_bytes_store_u32(beacon + n - 1u, diag_crc32(beacon, n - 1u));
+    assert(clean_station_refresh(&refreshed, beacon, n + 3u) == CLEAN_AP_UNSUPPORTED);
+    beacon[44] = 130u;
+    beacon[35] ^= 4u;
+    beacon[n - 2u] = 0u;
+    badger_bytes_store_u32(beacon + n - 1u, diag_crc32(beacon, n - 1u));
+    assert(clean_station_beacon(beacon, n + 3u, peer, &parsed) == CLEAN_AP_PSK_CCMP);
+    assert(clean_station_refresh(&refreshed, beacon, n + 3u) == 1 && refreshed.erp == 0u);
+    beacon[n] ^= 1u;
+    assert(clean_station_refresh(&refreshed, beacon, n + 3u) == 0);
+    beacon[n] ^= 1u;
+    badger_bytes_store_u32(beacon + n - 4u, diag_crc32(beacon, n - 4u));
     for (uint32_t truncated = 0u; truncated < n; ++truncated)
         assert(clean_station_beacon(beacon, truncated, peer, &parsed) == CLEAN_AP_INVALID);
     uint8_t rsn[24] = {1u,0u,0u,15u,172u,4u,1u,0u,0u,15u,172u,4u,
@@ -324,8 +397,18 @@ static void station_tests(void) {
     badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
     assert(clean_station_response(response, 34u, mac, peer, 1u, &aid) == -1);
     response[28] = 38u; response[29] = 0u;
+    response[24] = 1u; response[25] = response[26] = response[27] = 0u;
     badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
-    assert(clean_station_response(response, 34u, mac, peer, 1u, &aid) == -1);
+    /* Reserved upper AID bits vary between APs; range/IE checks still apply. */
+    response[30] = 1u; response[31] = 2u; response[32] = 0x82u; response[33] = 0x84u;
+    for (uint32_t upper = 0u; upper < 4u; ++upper) {
+        response[29] = (uint8_t)(upper << 6u);
+        badger_bytes_store_u32(response + 34u, diag_crc32(response, 34u));
+        assert(clean_station_response(response, 38u, mac, peer, 1u, &aid) == 0 && aid == 38u);
+    }
+    response[28] = response[29] = 0u;
+    badger_bytes_store_u32(response + 34u, diag_crc32(response, 34u));
+    assert(clean_station_response(response, 38u, mac, peer, 1u, &aid) == -1);
 }
 
 static void eapol_tests(uint8_t evidence[2048]) {

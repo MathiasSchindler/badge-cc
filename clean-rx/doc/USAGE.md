@@ -245,7 +245,7 @@ To boot `cyw43_rx_fw.bin` from cold power-on on the RP2350:
    ```c
    bp_write(0x00020000u + 24u, 4u, 1u); /* MBOX->host_cmd = 1 */
    ```
-5. Poll `MBOX->fw_state` (`0x00020004`) until it reaches `FW_STATE_PSM_READY` (`8`). At this point, the D11 core, Radio 20691, LCN20 PHY, and 314-instruction PSM microcode have completed initialization.
+5. Poll `MBOX->fw_state` (`0x00020004`) until it reaches `FW_STATE_PSM_READY` (`8`). At this point, the D11 core, Radio 20691, LCN20 PHY, and RX/optional-response PSM program have completed initialization.
 6. Start active reception by writing `host_cmd = 2`:
    ```c
    bp_write(0x00020000u + 24u, 4u, 2u); /* MBOX->host_cmd = 2 (FW_STATE_RX_ACTIVE) */
@@ -264,12 +264,33 @@ Once `MBOX->fw_state == FW_STATE_RX_ACTIVE` (`9`), the RP2350 controls the trans
 | `4 \| (ch << 8)` | **Fast Channel Switch** | Tunes Radio 20691 and LCN20 PHY to 2.4 GHz channel `ch` (`1..14`) in ~3.5 ms without re-running cold calibration, then resumes reception. |
 | `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..2406`, staged at `FW_TX_BUF_ADDR` (`0x0004a400`), repeated `1..255` times. Full-MSDU qualification reaches 2,332 MPDU bytes at 11 Mbps CCK and all eight legacy OFDM rates. OFDM requires a valid SIGNAL header with matching MPDU length; use `clean_ofdm_plcp_rate` in `phy_rates.h`. Other CCK rates and hardware CCMP remain unqualified. |
 | `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x0004a400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
+| `7` | **Enable experimental station MAC** | Stage 16 bytes: local MAC at 0, pinned peer at 6, little-endian basic-rate mask at 12, short-slot flag at 14 and profile at 15. Profile 2 enables experimental DCF/NAV, reliable unicast and PSM ACK/CTS handling. Profile 1 retains the older ACK experiment. Both require TX enabled and unicast, nonzero addresses. Reconfiguration with command 7 is rejected. |
+| `8` | **Queue station rate/slot policy** | Stage the same 16-byte configuration with unchanged bound addresses and profile 2. Updates response rates and slot policy at idle RX/PHY without resetting pending TX identity, NAV or receive transport. Completion acknowledges queueing; `mac_policy_pending` reports whether application is still pending. |
+
+With station MAC enabled, commands 4 and 6 and TX rearm/source-match overrides
+are rejected rather than discarding held captures. Profile 2 requires reliable
+unicast TX: set `CLEAN_TX_ACK_REQUIRED`, use at most eight attempts, and provide
+a valid-FCS, bound-peer management or non-QoS ToDS data MPDU. Supported templates
+are legacy OFDM or validated long-preamble 11 Mbps CCK. Inspect the separate
+ACK status at `0x201e0`: a `BUSY` result with zero attempts is a deferral, not
+a radio transmission or retry.
+
+MAC retransmissions retain sequence/fragment identity and protected bytes/PN.
+After a request is MAC-ACKed, a management response timeout instead starts a
+new request with a fresh sequence and clear Retry bit; resending the completed
+MPDU as a duplicate can prevent AP recovery. This does not enlarge the bounded
+authentication/association retry budget or phase deadline.
 
 ---
 
 ## 5. Receiving 802.11 Frames on the RP2350 (gSPI Function 2)
 
-Every valid 802.11 frame (with good hardware CRC-32 FCS) is automatically pushed by the firmware to the SDIOD Function 2 TX DMA ring. To poll and read incoming frames on the RP2350:
+Capture-eligible 802.11 frames with good hardware CRC-32 FCS are published to
+the SDIOD Function 2 TX DMA ring. Station profile 2 consumes local ACK control
+frames internally and rearms directly after an accepted RTS/CTS response;
+those control frames are not application data. A completed station capture
+is held while host credit is occupied, rather than silently discarded.
+To poll and read incoming frames on the RP2350:
 
 1. Read the 32-bit gSPI Function 0 status register at `0x0008`:
    ```c

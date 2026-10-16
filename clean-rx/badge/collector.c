@@ -11,6 +11,7 @@
 #include "frames.h"
 #include "station.h"
 #include "../src/wpa2_crypto.h"
+#include "station_rx.h"
 #include "../src/tx_diag.h"
 
 static int ap_bssid_decode(const char *text, uint8_t bssid[6]) {
@@ -308,7 +309,24 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                "\"own_rx_candidates\":%u,\"association_candidate_bytes\":%u,"
                "\"eapol_m1_received\":%s,\"eapol_m1_count\":%u,"
                "\"wpa_stage\":%u,\"wpa_error\":%u,\"m2_sent\":%u,\"m3_validated\":%u,"
-               "\"m4_sent\":%u,\"protected_echoes\":%u,\"gtk_kde\":\"%06x\"}\n",
+               "\"m4_sent\":%u,\"protected_echoes\":%u,\"gtk_kde\":\"%06x\","
+               "\"mac_rx_report\":%s,\"mac_delivered\":%u,\"mac_duplicates\":%u,"
+               "\"mac_fragments\":%u,\"mac_malformed\":%u,\"mac_unsupported\":%u,"
+               "\"mac_expired\":%u,\"mac_fragment_errors\":%u,"
+               "\"mac_radio_report\":%s,\"mac_profile\":%u,\"mac_cw\":%u,"
+               "\"mac_slots\":%u,\"mac_deferrals\":%u,\"mac_control_acks\":%u,"
+               "\"mac_ack_timeouts\":%u,\"mac_rx_waits\":%u,\"mac_pending_rx\":%u,"
+               "\"cts_responses_scheduled\":%u,\"short_responses_scheduled\":%u,"
+               "\"mac_policy_pending\":%u,\"mac_prepared_acks\":%u,"
+               "\"mac_address_lo\":\"%08x\",\"mac_address_hi\":\"%04x\","
+               "\"protected_mac_report\":%s,\"protected_mac_delivered\":%u,"
+               "\"protected_mac_duplicates\":%u,\"protected_mac_fragments\":%u,"
+               "\"protected_mac_malformed\":%u,\"protected_mac_unsupported\":%u,"
+               "\"protected_mac_expired\":%u,\"protected_mac_fragment_errors\":%u,"
+               "\"mac_trace_report\":%s,\"mac_response_auth\":%u,\"mac_response_assoc\":%u,"
+               "\"mac_response_data\":%u,\"mac_response_other\":%u,"
+               "\"mac_published_auth\":%u,\"mac_published_assoc\":%u,"
+               "\"mac_published_data\":%u,\"mac_published_other\":%u,\"mac_published_invalid\":%u}\n",
                serial, USB_REPORT_BUILD_ID, usb_report_u32(detail + 28u),
                usb_report_u32(detail + 4u), usb_report_u32(detail + 8u),
                usb_report_u32(detail + 16u), usb_report_u32(detail + 44u),
@@ -325,7 +343,48 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                tx==18u?usb_report_u32(detail+1644u):0u,tx==18u?usb_report_u32(detail+1648u):0u,
                tx==18u?usb_report_u32(detail+1656u):0u,tx==18u?usb_report_u32(detail+1660u):0u,
                tx==18u?usb_report_u32(detail+1664u):0u,tx==18u?usb_report_u32(detail+1668u):0u,
-               tx==18u?usb_report_u32(detail+1672u):0u);
+               tx==18u?usb_report_u32(detail+1672u):0u,
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL)==CLEAN_STATION_MAC_MAGIC?"true":"false",
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+4u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+8u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+12u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+16u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+20u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+24u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+28u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+32u)==CLEAN_MAC_RADIO_MAGIC?"true":"false",
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+36u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+40u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+44u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+52u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+56u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+60u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+64u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+68u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+72u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+76u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+80u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+84u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+88u),
+               usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+92u),
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL)==CLEAN_STATION_MAC_MAGIC?"true":"false",
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL+4u),
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL+8u),
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL+12u),
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL+16u),
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL+20u),
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL+24u),
+               usb_report_u32(detail+CLEAN_STATION_PROTECTED_DETAIL+28u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL)==CLEAN_MAC_TRACE_MAGIC?"true":"false",
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+4u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+8u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+12u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+16u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+20u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+24u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+28u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+32u),
+               usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+36u));
         if (!associated) fputs("No validated successful association exchange\n", stderr);
         if (tx==18u && !authorized) fputs("WPA2 protected round trip not established\n",stderr);
         return tx==18u?authorized:associated;
