@@ -13,8 +13,15 @@ targets. Host USB collection uses the repository's existing libusb dependency.
 **Current qualification:** cold RX and single-frame **11 Mbps CCK OTA TX** are
 verified between a Universe badge and a Pimoroni Tufty2350, in both directions.
 The receiver independently checks the entire MPDU, FCS and fresh challenge.
-The 1 Mbps experiments have not passed; do not generalize the 11 Mbps result
-to other rates, automatic ACK timing, association or WPA2 connectivity.
+The separate [Micro Signal OFDM profile](../../docs/micro-signal.md#80211g-legacy-ofdm)
+now qualifies raw 6/9/12/18/24/36/48/54 Mbps legacy OFDM in both directions
+between two Universe badges, at six MPDU sizes through 2,332 bytes.
+Use `make micro-signal-g` for the normal fixed-6-Mbps button application or
+`make micro-signal-g-test` for that all-rate sweep. This badge diagnostic
+application still uses its original CCK challenge protocol.
+The 1 Mbps experiments have not passed; do not generalize the qualification
+to other CCK rates, automatic ACK timing, complete 802.11g MAC operation,
+association or WPA2 connectivity.
 
 ## Build and test
 

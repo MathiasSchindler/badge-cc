@@ -4,6 +4,7 @@
 #include "../../src/shared/bytes.h"
 #include "../../src/tools/diagnostics_logic.h"
 #include "../tx_diag.h"
+#include "../phy_rates.h"
 
 static inline int clean_frame_valid(const uint8_t *mpdu, uint32_t length) {
     return length >= 14u && length <= CLEAN_MPDU_BYTES &&
@@ -59,10 +60,7 @@ static inline void clean_cck11_plcp(uint8_t frame[6], uint32_t mpdu_length) {
 }
 
 static inline void clean_ofdm_plcp(uint8_t frame[6]) {
-    /* 6 Mbps SIGNAL code, 88-byte PSDU, even parity, zero tail. */
-    frame[0] = 0x0bu;
-    frame[1] = 0x0bu;
-    frame[2] = frame[3] = frame[4] = frame[5] = 0u;
+    (void)clean_ofdm_plcp_rate(frame, 88u, 0u);
 }
 
 static inline int clean_probe_request(uint8_t frame[96], uint16_t sequence,

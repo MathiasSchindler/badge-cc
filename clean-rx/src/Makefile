@@ -33,7 +33,7 @@ $(BUILD):
 $(BUILD)/startup.o: startup.S | $(BUILD)
 	$(CC) --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -nostdinc -c $< -o $@
 
-$(BUILD)/%.o: %.c cyw43_hw.h types.h sdio_ring.h ../../src/shared/stdint.h ../tx_diag.h ../sdio_test.h ../frame_limits.h | $(BUILD)
+$(BUILD)/%.o: %.c cyw43_hw.h types.h sdio_ring.h ../../src/shared/stdint.h ../tx_diag.h ../phy_rates.h ../sdio_test.h ../frame_limits.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cyw43_rx_fw.elf: $(OBJS) cyw43.ld

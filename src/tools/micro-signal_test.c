@@ -1,5 +1,6 @@
 #include "micro-signal.h"
 #include "micro-signal-mtu.h"
+#include "micro-signal-ofdm.h"
 #include "../../clean-rx/src/sdio_ring.h"
 #include "../../clean-rx/sdio_test.h"
 #include <assert.h>
@@ -21,6 +22,73 @@ static uint32_t independent_crc(const uint8_t *bytes, uint32_t length) {
     }
 
     return ~crc;
+}
+
+static void ofdm_rates(void) {
+    static const uint8_t codes[8] = {11u, 15u, 10u, 14u, 9u, 13u, 8u, 12u};
+    static const uint16_t controls[8] = {
+        0x0002u, 0x0202u, 0x0802u, 0x0a02u, 0x1002u, 0x1202u, 0x1902u, 0x1a02u
+    };
+    static const uint16_t short_airtime[8] = {150u, 110u, 90u, 70u, 58u, 50u, 42u, 42u};
+    static const uint16_t full_airtime[8] = {3142u, 2102u, 1586u, 1066u, 806u, 546u, 418u, 374u};
+    uint8_t plcp[6];
+    for (uint32_t rate = 0u; rate < CLEAN_OFDM_RATES; ++rate) {
+        assert(clean_ofdm_rates[rate].phyctl1 == controls[rate]);
+        assert(clean_ofdm_airtime_us(88u, rate) == short_airtime[rate]);
+        assert(clean_ofdm_airtime_us(2332u, rate) == full_airtime[rate]);
+        for (uint32_t length = 14u; length <= 4095u; ++length) {
+            uint32_t airtime = clean_ofdm_airtime_us(length, rate);
+            uint32_t symbols = (airtime - 26u) / 4u;
+            uint32_t bits = 16u + 8u * length + 6u;
+            uint32_t capacity = 4u * clean_ofdm_rates[rate].mbps;
+            assert(airtime >= 30u && (airtime - 26u) % 4u == 0u);
+            assert((symbols - 1u) * capacity < bits && symbols * capacity >= bits);
+            assert(clean_ofdm_plcp_rate(plcp, length, rate));
+            uint32_t signal = plcp[0] | ((uint32_t)plcp[1] << 8u) | ((uint32_t)plcp[2] << 16u);
+            assert((signal & 15u) == codes[rate]);
+            assert(((signal >> 5u) & 4095u) == length);
+            assert((signal & 0xfc0010u) == 0u);
+            uint32_t ones = 0u;
+            for (uint32_t bit = 0u; bit < 24u; ++bit)
+                ones += (signal >> bit) & 1u;
+            assert((ones & 1u) == 0u);
+            assert(clean_ofdm_plcp_valid(plcp, length));
+            assert(clean_ofdm_rate_index(plcp[0]) == (int)rate);
+            assert(!clean_ofdm_plcp_valid(plcp, length ^ 1u));
+            for (uint32_t bit = 0u; bit < 48u; ++bit) {
+                plcp[bit / 8u] ^= (uint8_t)(1u << (bit % 8u));
+                assert(!clean_ofdm_plcp_valid(plcp, length));
+                plcp[bit / 8u] ^= (uint8_t)(1u << (bit % 8u));
+            }
+        }
+    }
+    assert(!clean_ofdm_plcp_rate(plcp, 13u, 0u));
+    assert(!clean_ofdm_plcp_rate(plcp, 4096u, 0u));
+    assert(!clean_ofdm_plcp_rate(plcp, 88u, CLEAN_OFDM_RATES));
+    assert(clean_ofdm_airtime_us(13u, 0u) == 0u);
+    assert(clean_ofdm_airtime_us(4096u, 0u) == 0u);
+    assert(clean_ofdm_airtime_us(88u, CLEAN_OFDM_RATES) == 0u);
+    for (uint8_t code = 0u; code < 8u; ++code)
+        assert(clean_ofdm_rate_index(code) == -1);
+    micro_signal_event_t input = sample(), output;
+    uint8_t frame[CLEAN_TX_STORAGE_BYTES];
+    for (uint32_t sequence = 1u; sequence <= 2u * MICRO_OFDM_CASES; ++sequence) {
+        input.sequence = sequence;
+        uint32_t length = micro_ofdm_frame(frame, &input) - CLEAN_PLCP_BYTES;
+        uint32_t index = (sequence - 1u) % MICRO_OFDM_CASES;
+        assert(length == micro_ofdm_lengths[index / CLEAN_OFDM_RATES]);
+        assert(clean_ofdm_plcp_valid(frame, length));
+        assert(independent_crc(frame + 6u, length - 4u) ==
+               badger_bytes_load_u32(frame + 6u + length - 4u));
+        assert(micro_ofdm_decode(frame + 6u, length, frame[0], 0x16u, &output));
+        assert(output.sequence == sequence && output.session == input.session);
+        assert(!micro_ofdm_decode(frame + 6u, length, frame[0], 6u, &output));
+        assert(!micro_ofdm_decode(frame + 6u, length, 0u, 0x16u, &output));
+        assert(!micro_ofdm_decode(frame + 6u, length, codes[(index + 1u) % CLEAN_OFDM_RATES], 0x16u,
+                                  &output));
+        frame[40] ^= 1u;
+        assert(!micro_ofdm_decode(frame + 6u, length, frame[0], 0x16u, &output));
+    }
 }
 
 static void mtu_frames(void) {
@@ -235,12 +303,13 @@ static void sdio_windows(void) {
 
 int main(void) {
     frames();
+    ofdm_rates();
     mtu_frames();
     duplicates();
     debounce();
     sdio_ring();
     sdio_patterns();
     sdio_windows();
-    puts("micro-signal: small/full-MSDU framing, TX length extension, duplicates, debounce, credits and all transport lengths OK");
+    puts("micro-signal: OFDM rates/airtime, small/full-MSDU framing, TX length extension, duplicates, debounce, credits and all transport lengths OK");
     return 0;
 }

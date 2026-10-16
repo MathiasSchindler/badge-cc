@@ -9,6 +9,11 @@ and FCS checks. Shared storage supports MPDUs through 2,400 bytes, but buffer
 capacity does not qualify every header, encryption mode or PHY rate.
 See [full-MSDU implementation and qualification](../../docs/micro-signal.md#full-2304-byte-msdus).
 This does not add association or an Ethernet/IP stack.
+**Legacy 802.11g OFDM is now OTA-qualified at 6, 9, 12, 18, 24, 36, 48 and
+54 Mbps** for six MPDU sizes through 2,332 bytes on channel 6. The paired
+five-minute test requires exact payload/FCS and received modulation/rate
+metadata for all 48 cases on both badges. See
+[OFDM implementation, build targets and limitations](../../docs/micro-signal.md#80211g-legacy-ofdm).
 Use the shared limits and TX length helpers rather than copying old sizes or
 shifting a large length directly into command flags.
 
@@ -23,8 +28,9 @@ The repository now includes a working [freestanding badge host](../badge/README.
 with build commands and physical results from 2026-10-14 and 2026-10-15.
 Cold beacon reception, Function-2 delivery and single-frame 11 Mbps CCK OTA TX
 have been verified between a Universe badge and a Tufty2350, in both
-directions. Peer RX matches a fresh challenge, full MPDU and valid FCS. Other
-TX rates, automatic ACK timing and WPA2 connectivity remain unqualified.
+directions. Peer RX matches a fresh challenge, full MPDU and valid FCS.
+Micro Signal additionally qualifies the eight legacy OFDM rates above;
+other CCK TX rates, automatic ACK timing and WPA2 connectivity remain unqualified.
 For a persistent, no-USB application using this loader and radio interface, see
 [Micro Signal](../../docs/micro-signal.md): the same small UF2 on both boards
 sends debounced button presses and displays received peer events.
@@ -256,7 +262,7 @@ Once `MBOX->fw_state == FW_STATE_RX_ACTIVE` (`9`), the RP2350 controls the trans
 | `2` | **Idle / Active RX** | Firmware is actively receiving frames and streaming them over gSPI Function 2. Look for `host_cmd == 2` to confirm completion of commands `4`, `5`, or `6`. |
 | `3` | **Stop Transceiver** | Cleanly stops MAC/PSM and D11 RX DMA, populates diagnostic snapshots in `MBOX`, and transitions `fw_state` to `FW_STATE_RX_DONE` (`10`). |
 | `4 \| (ch << 8)` | **Fast Channel Switch** | Tunes Radio 20691 and LCN20 PHY to 2.4 GHz channel `ch` (`1..14`) in ~3.5 ms without re-running cold calibration, then resumes reception. |
-| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..2406`, staged at `FW_TX_BUF_ADDR` (`0x0004a400`), repeated `1..255` times. The full-MSDU qualification profile reaches 2,332 MPDU bytes at 11 Mbps CCK; other rates and hardware CCMP remain unqualified. |
+| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..2406`, staged at `FW_TX_BUF_ADDR` (`0x0004a400`), repeated `1..255` times. Full-MSDU qualification reaches 2,332 MPDU bytes at 11 Mbps CCK and all eight legacy OFDM rates. OFDM requires a valid SIGNAL header with matching MPDU length; use `clean_ofdm_plcp_rate` in `phy_rates.h`. Other CCK rates and hardware CCMP remain unqualified. |
 | `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x0004a400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
 
 ---
@@ -280,6 +286,11 @@ Every valid 802.11 frame (with good hardware CRC-32 FCS) is automatically pushed
    - `uint8_t channel = buf[16] & 0x0fu;`
    - `int is_ofdm = (buf[16] & 0x10u) != 0u;`
    - **802.11 MPDU bytes** start at `&buf[18]` with length `mpdu_len = sdpcm_len - 18u` (including the trailing 4-byte FCS).
+
+For OFDM, use `clean_ofdm_rate_index(plcp_rate)` from `phy_rates.h`:
+only the low RATE nibble identifies Mbps; the upper nibble also contains
+LENGTH bits. The controller derives the OFDM flag from DMA PHY status or
+RXE encoding bit 13, not the unrelated RXE bits 9..10.
 
 The source-built controller additionally uses the two SDPCM padding bytes
 `buf[12..13]` for optional RX publication-phase metadata. The little-endian word

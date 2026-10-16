@@ -1,6 +1,7 @@
 #include "cyw43_hw.h"
 #include "sdio_ring.h"
 #include "../tx_diag.h"
+#include "../phy_rates.h"
 #ifdef CLEAN_SDIO_SELF_TEST
 #include "../sdio_test.h"
 #endif
@@ -350,7 +351,7 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t ch
         /* 4-byte BDC header at offset 14 */
         pkt[14] = fragments > 1u ? 0x21u : 0x20u;
         pkt[15] = slot->raw[2]; /* PLCP[0] rate/SIGNAL byte */
-        uint8_t is_ofdm = (uint8_t)((slot->dma_hdr[4] & 1u) || ((slot->rxe_status2 >> 9u) & 3u));
+        uint8_t is_ofdm = (uint8_t)((slot->dma_hdr[4] & 1u) || ((slot->rxe_status2 >> 13u) & 1u));
         pkt[16] = (uint8_t)((channel & 0xfu) | (is_ofdm ? 0x10u : 0u));
         pkt[17] = 0u;
 
@@ -454,6 +455,15 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     if (total_len < 16u || total_len > CLEAN_TX_BYTES)
         return fail(0x83u, FW_TX_BUF_ADDR, total_len);
     const volatile uint8_t *tx_buf = (const volatile uint8_t *)FW_TX_BUF_ADDR;
+    uint16_t phyctl1 = 0x1a02u;
+    uint32_t ofdm_airtime = 0u;
+    if (is_ofdm) {
+        int rate = clean_ofdm_rate_index(tx_buf[0]);
+        if (rate < 0 || !clean_ofdm_plcp_valid(tx_buf, total_len - CLEAN_PLCP_BYTES))
+            return fail(0x83u, FW_TX_BUF_ADDR, total_len);
+        phyctl1 = clean_ofdm_rates[(uint32_t)rate].phyctl1;
+        ofdm_airtime = clean_ofdm_airtime_us(total_len - CLEAN_PLCP_BYTES, (uint32_t)rate);
+    }
     tx_diag.magic = CLEAN_TX_DIAG_MAGIC;
     tx_diag.resume_ticks = 0u;
     tx_diag.mac_resume_us = 0u;
@@ -513,7 +523,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         mmio_write16(0x180017d0u, 0x0300u);
     }
     mmio_write16(0x1800150cu, is_ofdm ? 0x0041u : 0x0040u);
-    mmio_write16(0x18001514u, 0x1a02u);
+    mmio_write16(0x18001514u, phyctl1);
     mmio_write16(0x18001508u, 0x0000u);
     mmio_write16(0x1800150au, 0x0000u);
     mmio_write16(0x1800154cu, 0x0000u);
@@ -580,6 +590,19 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     }
     MBOX->vco_status = ((uint32_t)st_50e_seen << 16u) | st_690_seen;
     MBOX->fw_substage = tx_conditions;
+    uint32_t phy_drained = 1u;
+    if (is_ofdm) {
+        /* MAC completion precedes the OFDM PHY tail. Retain TX enable for a
+         * complete PPDU after MAC drain, including the ERP signal extension. */
+        uint32_t drain_start = mmio_read32(D11_BASE + 0x1cu);
+        phy_drained = 0u;
+        for (uint32_t poll = 0u; poll < 2000000u; ++poll) {
+            if (mmio_read32(D11_BASE + 0x1cu) - drain_start >= ofdm_airtime) {
+                phy_drained = 1u;
+                break;
+            }
+        }
+    }
     tx_diag.complete_ticks = ARM_CYCLE_COUNTER;
     tx_diag.mac_complete_us = mmio_read32(D11_BASE + 0x1cu);
     tx_diag.status_after = tx_status();
@@ -595,6 +618,9 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     (void)mmio_read32(D11_MACCONTROL);
     phy_tx_set_inhibit(1);
     MBOX->rc_dacbuf = 0x55550000u | total_len;
+    if (!phy_drained) return fail(0x82u, D11_BASE + 0x1cu, ofdm_airtime);
+    if (is_ofdm && tx_diag.phy_error != 0u)
+        return fail(0x82u, D11_BASE + 0x3eeu, tx_diag.phy_error);
     return tx_conditions == 7u || fail(0x82u, 0x1800150eu, MBOX->vco_status);
 }
 

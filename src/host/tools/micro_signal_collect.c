@@ -3,6 +3,7 @@
 #include "../../shared/bytes.h"
 #include "../../tools/diagnostics_logic.h"
 #include "../../../clean-rx/sdio_test.h"
+#include "../../tools/micro-signal-ofdm.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <time.h>
@@ -14,7 +15,8 @@ static void pause_poll(void) {
 
 static int valid(const uint8_t record[64], const char *serial) {
     uint32_t magic = badger_bytes_load_u32(record);
-    if ((magic != 0x5447534du && magic != 0x5554534du) ||
+    if ((magic != 0x5447534du && magic != 0x5554534du &&
+         magic != MICRO_OFDM_TEST_MAGIC) ||
         badger_bytes_load_u32(record + 60u) != diag_crc32(record, 60u)) return 0;
     char actual[17];
     diag_hex(actual, badger_bytes_load_u32(record + 16u), 8u);
@@ -172,7 +174,8 @@ finish:
             }
         }
         if (devices[i] != NULL) {
-            uint16_t pages = transport || badger_bytes_load_u32(records[i]) == 0x5554534du ?
+            uint16_t pages = transport || badger_bytes_load_u32(records[i]) == 0x5554534du ||
+                             badger_bytes_load_u32(records[i]) == MICRO_OFDM_TEST_MAGIC ?
                              (CLEAN_TRANSPORT_TRACE_BYTES + 23u) / 24u : 43u;
             for (uint16_t page = 0u; page < pages; ++page) {
                 uint8_t bytes[64];
@@ -193,23 +196,41 @@ finish:
     libusb_exit(context);
     int mtu = badger_bytes_load_u32(records[0]) == 0x5554534du ||
               badger_bytes_load_u32(records[1]) == 0x5554534du;
-    if (mtu) {
+    int ofdm = badger_bytes_load_u32(records[0]) == MICRO_OFDM_TEST_MAGIC ||
+               badger_bytes_load_u32(records[1]) == MICRO_OFDM_TEST_MAGIC;
+    if (mtu || ofdm) {
         for (unsigned i = 0u; i < 2u; ++i) {
-            if (badger_bytes_load_u32(records[i]) != 0x5554534du) ok = 0;
-            for (unsigned length = 0u; length < CLEAN_MTU_LENGTHS; ++length) {
+            if (badger_bytes_load_u32(records[i]) !=
+                (ofdm ? MICRO_OFDM_TEST_MAGIC : 0x5554534du)) ok = 0;
+            for (unsigned length = 0u; length < (ofdm ? MICRO_OFDM_CASES : CLEAN_MTU_LENGTHS); ++length) {
                 if (traces[i][800u + length * 2u] == 0u &&
                     traces[i][801u + length * 2u] == 0u) {
-                    fprintf(stderr, "Badge %u did not receive MPDU length %u\n", i, CLEAN_MTU_MIN_BYTES + length);
+                    if (ofdm)
+                        fprintf(stderr, "Badge %u did not receive %u Mbps OFDM, %u MPDU bytes\n",
+                                i, clean_ofdm_rates[length % CLEAN_OFDM_RATES].mbps,
+                                micro_ofdm_lengths[length / CLEAN_OFDM_RATES]);
+                    else
+                        fprintf(stderr, "Badge %u did not receive MPDU length %u\n", i, CLEAN_MTU_MIN_BYTES + length);
                     ok = 0;
                 }
             }
         }
     }
     printf("{\"bidirectional_button_event_confirmed\":%s,\"mtu_frames_confirmed\":%s,"
-           "\"transport_confirmed\":%s,\"soak\":%s,\"elapsed_ms\":%llu",
-           ok && !transport && !mtu ? "true" : "false", ok && mtu ? "true" : "false",
+           "\"ofdm_rates_confirmed\":%s,\"transport_confirmed\":%s,\"soak\":%s,\"elapsed_ms\":%llu",
+           ok && !transport && !mtu && !ofdm ? "true" : "false", ok && mtu ? "true" : "false",
+           ok && ofdm ? "true" : "false",
            ok && transport ? "true" : "false",
            soak ? "true" : "false", (unsigned long long)elapsed);
+    if (ofdm) {
+        printf(",\"ofdm_rates_mbps\":[");
+        for (uint32_t rate = 0u; rate < CLEAN_OFDM_RATES; ++rate)
+            printf("%s%u", rate ? "," : "", clean_ofdm_rates[rate].mbps);
+        printf("],\"ofdm_mpdu_lengths\":[");
+        for (uint32_t length = 0u; length < MICRO_OFDM_LENGTHS; ++length)
+            printf("%s%u", length ? "," : "", micro_ofdm_lengths[length]);
+        putchar(']');
+    }
     for (unsigned i = 0u; i < 2u; ++i) {
         uint32_t error = badger_bytes_load_u32(records[i] + 4u);
         uint32_t f2_counts = error ? 0u : badger_bytes_load_u32(records[i] + 8u);
@@ -271,7 +292,7 @@ finish:
             continue;
         }
         if (transport) continue;
-        if (mtu) {
+        if (mtu || ofdm) {
             printf(",\"mtu_tx_diag_%u\":[", i);
             for (uint32_t word = 0u; word < 45u; ++word)
                 printf("%s\"%08x\"", word ? "," : "",
@@ -296,8 +317,8 @@ finish:
                 printf("%s\"%04x\"", word ? "," : "", traces[i][984u + word * 2u] |
                        ((unsigned)traces[i][985u + word * 2u] << 8u));
             putchar(']');
-            printf(",\"mtu_coverage_%u\":[", i);
-            for (uint32_t length = 0u; length < CLEAN_MTU_LENGTHS; ++length)
+            printf(",\"%s_coverage_%u\":[", ofdm ? "ofdm" : "mtu", i);
+            for (uint32_t length = 0u; length < (ofdm ? MICRO_OFDM_CASES : CLEAN_MTU_LENGTHS); ++length)
                 printf("%s%u", length ? "," : "", traces[i][800u + length * 2u] |
                        ((unsigned)traces[i][801u + length * 2u] << 8u));
             printf("],\"mtu_capture_length_%u\":%u,\"mtu_capture_fcs_valid_%u\":%u",

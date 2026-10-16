@@ -311,10 +311,36 @@ To transmit a raw or hardware-encrypted 802.11 frame (`cmd = 5 | clean_tx_length
      - Programs `0x180017c0 = 0x1170` (`WEP_CTL`: AES-128-CCMP TX encrypt + 8-byte MIC generation + hardware FCS regeneration), `0x180017d4 = 0x0000`, `0x180017d6 = total_len`, `0x180017d0 = 0x0305`
    - Otherwise (unencrypted frame): sets `0x180017c0 = 0x0100`, `0x180017d0 = 0x0300`
    - `0x1800150c = is_ofdm ? 0x0041 : 0x0040` (`TXE_PHYCTL`: OFDM vs. CCK modulation)
-   - `0x18001514 = 0x1a02` (`TXE_PHYCTL1`)
+   - `0x18001514 = phyctl1` (`TXE_PHYCTL1`): OFDM rate-specific modulation/coding
+     plus 20-MHz SISO bandwidth from [phy_rates.h](../phy_rates.h). For
+     6/9/12/18/24/36/48/54 Mbps these words are
+     `0x0002/0x0202/0x0802/0x0a02/0x1002/0x1202/0x1902/0x1a02`.
+     The existing CCK path retains `0x1a02`.
    - `0x18001508 = 0x0000` (Template RAM start offset = `0`), `0x1800156a = total_len` (byte count)
    - `0x18001568 = 0x0826`, `0x18001500 = 0x0000`, `0x18001502 = 0x00d0` (`TXE_CTL`: immediate template transmit)
-4. The firmware polls `TXE_STATUS` (`0x1800150e`, waiting for bit 7 to clear and bit 10 `0x0400` to assert) and `IFS_STAT` (`0x18001690`, waiting for bit 8 `0x0100` TX-active to clear), records `(st_50e << 16) | st_690` (`0x04c10022`) into `MBOX->vco_status`, clears `0x18001502 = 0` and `0x18001568 = 0`, restores `0x180017c0 = 0x8300` and `0x180017d0 = 0x0300`, re-arms `phy_tx_set_inhibit(1)`, and resumes continuous reception (`MACCONTROL = mac_en`).
+4. The firmware polls `TXE_STATUS` (`0x1800150e`, waiting for bit 7 to clear and
+   bit 10 `0x0400` to assert) and `IFS_STAT` (`0x18001690`, waiting for bit 8
+   `0x0100` to clear), recording `(st_50e << 16) | st_690` into
+   `MBOX->vco_status`. **These checks can finish before the OFDM PHY tail.**
+   Before shutting down OFDM TX, it conservatively waits one complete PPDU
+   after MAC drain using the D11 `usectimer` (`0x1800101c`):
+   `20 + 4 * ceil((16 + 8 * mpdu_len + 6) / (4 * Mbps)) + 6` microseconds.
+   This includes OFDM training/SIGNAL, SERVICE, tail, whole DATA symbols and
+   the ERP signal extension. The polling loop is bounded; a stopped timer
+   or nonzero OFDM PHY TX error fails explicitly with error `0x82`.
+   It then clears `0x18001502 = 0` and `0x18001568 = 0`, restores
+   `0x180017c0 = 0x8300` and `0x180017d0 = 0x0300`, re-arms
+   `phy_tx_set_inhibit(1)`, and resumes continuous reception
+   (`MACCONTROL = mac_en`).
+
+OFDM templates are validated before TX hardware is touched: valid RATE,
+matching 12-bit LENGTH including FCS, even SIGNAL parity, zero reserved/tail
+bits and zero padding. Malformed templates report error `0x83`.
+The five-minute paired qualification received all eight rates at each of
+88/128/1,600/2,026/2,027/2,332 MPDU bytes, at least nine times per case per
+badge. See [results and scope](../../docs/micro-signal.md#80211g-legacy-ofdm).
+This qualifies raw PHY operation, not full 802.11g MAC compliance, ACK timing,
+ERP protection or hardware CCMP.
 
 ### 9.4 Unicast MAC Filter and Automatic 802.11 `ACK` Transmission (`d11_transmit_ack_frame`)
 At startup, the firmware stores the local 6-byte unicast MAC address in `SHM 0x612..0x614`:

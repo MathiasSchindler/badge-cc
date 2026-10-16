@@ -17,6 +17,77 @@ indefinitely-running messenger or a complete 802.11 implementation.
 
 ## Build and install
 
+### 802.11g legacy OFDM
+
+The source-built controller now supports raw **6, 9, 12, 18, 24, 36, 48 and
+54 Mbps legacy OFDM TX and RX** on the tested channel 6 path. The default
+`micro-signal` target remains the 11 Mbps CCK messenger. Build
+`micro-signal-g` for the same button/TFT application transmitting at the more
+robust **6 Mbps OFDM** rate:
+
+```sh
+make test-micro-signal micro-signal-g micro-signal-g-test
+```
+
+The normal image is `build/universe26/uf2/micro-signal-g.uf2`: **67,584 bytes
+(66 KiB)**, containing a 21,704-byte source-built controller. It still needs
+no AP, credentials, target libc, Pico SDK or vendor Wi-Fi executable.
+
+`micro-signal-g-test.uf2` is a separate paired qualification image. It cycles
+all eight rates at each of **88, 128, 1,600, 2,026, 2,027 and 2,332 MPDU
+bytes**, including FCS. This covers button events, Ethernet-sized frames,
+both sides of the host-transport fragmentation boundary and a full
+2,304-byte MSDU. Both receivers require a fresh peer session/sequence, exact
+canonical payload and FCS, and the expected RATE nibble from received PLCP
+plus received OFDM metadata. Payload-declared rate alone is not evidence.
+The collector only succeeds after all **48 combinations on both badges**:
+
+```sh
+# Load the g-test UF2 on both authorized badges, then reboot both.
+build/micro-signal/collect SERIAL_A SERIAL_B \
+  build/micro-signal/g-ofdm-soak --soak 300
+```
+
+The final one-minute run `g-drain` passed with **84 / 84 peer events**.
+The five-minute `g-ofdm-soak` then passed with **466 / 461 peer events**,
+every combination received at least **nine times on each badge**, zero device
+errors and no stalls. Receive-credit drops still occur under ambient traffic;
+this is not a loss-free link, throughput benchmark or RF conformance test.
+The separate fixed-6-Mbps button-mode soak passed **180 seconds, 275 / 272
+peer events**. Default CCK regression also passed **180 seconds, 275 / 272
+events**, and the 65-length full-MSDU CCK sweep passed **85 / 83 events** in
+60 seconds, all with zero device errors or stalls.
+
+Both attached Universe badges were then installed with the normal
+`micro-signal-g.uf2`. Complete **33,604-byte flash readbacks** matched its
+binary on both badges. They were left in BOOTSEL, ready to boot that image.
+
+Two TX assumptions needed correction:
+
+- OFDM SIGNAL RATE and LENGTH must agree with the payload's hardware
+  modulation/coding control. `phy_rates.h` now supplies all eight mappings;
+  the former fixed `TXE_PHYCTL1 = 0x1a02` was not appropriate for every rate.
+- MAC/TXE completion and the existing IFS checks do **not** establish that
+  the OFDM PHY has finished its tail. Immediately inhibiting TX truncated
+  reception. After MAC drain, the firmware conservatively retains TX enable
+  for one complete rate/length-derived PPDU, including the 6-us ERP signal
+  extension, using the D11 microsecond timer. The wait is bounded and a
+  stopped timer or PHY TX error fails explicitly. No fixed multi-millisecond
+  experimental delay remains.
+
+The PSM receive-gate experiment was removed: the already-qualified receive
+streaming engine works with OFDM once TX is allowed to finish. Native and
+ASan/UBSan tests check every OFDM SIGNAL length 14..4,095, all eight rates,
+parity/reserved bits, invalid headers, symbol-capacity/airtime boundaries and
+the full qualification frame set. Normal and strict loader tests also pass.
+
+This is **raw legacy OFDM support, not a complete 802.11g station or AP**.
+It does not add rate adaptation, qualified OFDM unicast ACK/retry/SIFS timing,
+complete CSMA/CA or mixed-mode ERP protection, association, WPA2, HT/802.11n
+or aggregation. The 2,400-byte buffer ceiling does not qualify every size
+and header variant at every rate. Only the combinations above were tested
+over the air; automatic ACKs and hardware CCMP remain unqualified.
+
 ### Full 2,304-byte MSDUs
 
 The raw-frame buffers now allow **2,400-byte MPDUs**, including FCS. A basic

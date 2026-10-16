@@ -1,4 +1,7 @@
 #include "micro-signal.h"
+#ifdef MICRO_SIGNAL_OFDM_TEST
+#include "micro-signal-ofdm.h"
+#endif
 #ifdef MICRO_SIGNAL_MTU_TEST
 #include "micro-signal-mtu.h"
 #endif
@@ -203,7 +206,11 @@ static int transmit(uint8_t *frame, uint32_t length) {
         return 0;
     }
     if (!clean_write(&loader, CLEAN_MBOX + 24u,
-                     5u | clean_tx_length_bits(length) | (1u << 19u))) return 0;
+                     5u | clean_tx_length_bits(length) | (1u << 19u)
+#if defined(MICRO_SIGNAL_OFDM_TEST) || defined(MICRO_SIGNAL_OFDM_RATE)
+                     | (1u << 18u)
+#endif
+                     )) return 0;
     uint32_t start = now();
     while (1) {
         uint32_t command, state;
@@ -445,7 +452,14 @@ void bare_main(void) {
     badger_display_init();
     badger_gfx_clear(&canvas, 0x0863u);
     badger_gfx_text(&canvas, 8, 12, "MICRO SIGNAL", 3u, 0xffffu);
+#ifdef MICRO_SIGNAL_OFDM_TEST
+    badger_gfx_text(&canvas, 8, 200, "CH 6 / OFDM RATE SWEEP", 1u, 0x9cf3u);
+#elif defined(MICRO_SIGNAL_OFDM_RATE)
+    _Static_assert(MICRO_SIGNAL_OFDM_RATE == 0u, "Fixed messenger uses 6 Mbps");
+    badger_gfx_text(&canvas, 8, 200, "CH 6 / 6 MBPS OFDM / NO AP", 1u, 0x9cf3u);
+#else
     badger_gfx_text(&canvas, 8, 200, "CH 6 / 11 MBPS / NO AP", 1u, 0x9cf3u);
+#endif
     badger_gfx_text(&canvas, 8, 216, "HOLD HOME FOR BOOTSEL", 1u, 0x9cf3u);
     badger_display_begin();
     badger_display_write_pixels(canvas.pixels, 320u * 240u);
@@ -457,6 +471,9 @@ void bare_main(void) {
     evidence[0] = 0x5447534du;
 #ifdef MICRO_SIGNAL_MTU_TEST
     evidence[0] = 0x5554534du;
+#endif
+#ifdef MICRO_SIGNAL_OFDM_TEST
+    evidence[0] = MICRO_OFDM_TEST_MAGIC;
 #endif
 #ifdef MICRO_SIGNAL_TRANSPORT_TEST
     evidence[8] = 0xffffffffu;
@@ -609,7 +626,9 @@ void bare_main(void) {
 #endif
         micro_signal_event_t event;
         if (size >= 18u &&
-#ifdef MICRO_SIGNAL_MTU_TEST
+#ifdef MICRO_SIGNAL_OFDM_TEST
+            micro_ofdm_decode(packet + 18u, size - 18u, packet[15], packet[16], &event) &&
+#elif defined(MICRO_SIGNAL_MTU_TEST)
             micro_mtu_decode(packet + 18u, size - 18u, &event) &&
 #else
             micro_signal_decode(packet + 18u, size - 18u, &event) &&
@@ -623,8 +642,12 @@ void bare_main(void) {
 #ifdef MICRO_SIGNAL_SELF_TEST
             evidence[7] = received;
 #ifdef MICRO_SIGNAL_MTU_TEST
+#ifdef MICRO_SIGNAL_OFDM_TEST
+            uint8_t *coverage = test_control.trace + 800u + micro_ofdm_case(&event) * 2u;
+#else
             uint8_t *coverage = test_control.trace + 800u +
                                 (size - 18u - CLEAN_MTU_MIN_BYTES) * 2u;
+#endif
             uint32_t seen = coverage[0] | ((uint32_t)coverage[1] << 8u);
             if (seen < 65535u) ++seen;
             coverage[0] = (uint8_t)seen;
@@ -642,11 +665,25 @@ void bare_main(void) {
             head = (uint8_t)((head + 1u) & 7u);
             --queued;
             ++outgoing.sequence;
-#ifdef MICRO_SIGNAL_MTU_TEST
+#ifdef MICRO_SIGNAL_OFDM_TEST
+            frame_length = micro_ofdm_frame(frame, &outgoing);
+#elif defined(MICRO_SIGNAL_MTU_TEST)
             frame_length = micro_mtu_frame(frame, &outgoing);
 #else
             micro_signal_frame(frame, &outgoing);
 #endif
+#ifdef MICRO_SIGNAL_OFDM_RATE
+            if (!clean_ofdm_plcp_rate(frame, frame_length - CLEAN_PLCP_BYTES,
+                                      MICRO_SIGNAL_OFDM_RATE)) {
+                loader.error = CLEAN_INPUT;
+                loader.actual = frame_length;
+                radio_error();
+            }
+#endif
+            if (frame_length == 0u) {
+                loader.error = CLEAN_INPUT;
+                radio_error();
+            }
             repeats = 3u;
             due = now() + (random[1] & 0x3fffu);
         }
