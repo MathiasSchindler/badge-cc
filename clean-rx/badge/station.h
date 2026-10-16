@@ -5,6 +5,7 @@
 
 typedef struct {
     uint8_t bssid[6], ssid[32], ssid_length, secured;
+    uint8_t rsn[128], rsn_length;
     uint16_t capability, rates, basic_rates;
 } clean_station_ap_t;
 
@@ -95,6 +96,9 @@ static inline int clean_station_beacon(const uint8_t *m, uint32_t n,
             }
         } else if (id == 48u) {
             if (rsn++) return CLEAN_AP_INVALID;
+            if (size+2u>sizeof(parsed.rsn)) return CLEAN_AP_UNSUPPORTED;
+            parsed.rsn_length=(uint8_t)(size+2u);
+            badger_bytes_copy(parsed.rsn,m+at-2u,size+2u);
             security = clean_station_rsn(m + at, size);
             if (security < 0) return security;
         }
@@ -213,7 +217,7 @@ static inline int clean_station_evidence(const uint8_t detail[2048]) {
     uint32_t auth_size = badger_bytes_load_u32(detail + 596u);
     uint32_t assoc_size = badger_bytes_load_u32(detail + 796u);
     uint16_t aid = 0u;
-    return detail[2000u] == 16u && badger_bytes_load_u32(detail + 8u) == 0u &&
+    return (detail[2000u] == 16u || detail[2000u] == 18u) && badger_bytes_load_u32(detail + 8u) == 0u &&
            badger_bytes_load_u32(detail + 4u) == 8u &&
            badger_bytes_load_u32(detail + 520u) == 0x31545341u &&
            badger_bytes_load_u32(detail + 524u) == 4u &&
@@ -239,7 +243,7 @@ static inline int clean_station_eapol_m1(const uint8_t *m, uint32_t n,
     const uint8_t *e = m + header + 8u;
     uint32_t body = ((uint32_t)e[2] << 8u) | e[3];
     if ((e[0] != 1u && e[0] != 2u) || e[1] != 3u || body < 95u ||
-        body != n - header - 16u || e[4] != 2u ||
+        body > n - header - 16u || e[4] != 2u ||
         e[5] != 0u || e[6] != 0x8au || e[7] != 0u || e[8] != 16u ||
         (((uint32_t)e[97] << 8u) | e[98]) != body - 95u) return 0;
     for (uint32_t i = 81u; i < 97u; ++i) if (e[i]) return 0;

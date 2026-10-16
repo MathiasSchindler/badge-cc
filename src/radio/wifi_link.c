@@ -169,12 +169,12 @@ void wifi_link_init(wifi_link_t *link, const wifi_link_ops_t *ops, uint8_t role,
     if (link == 0) return;
     clear((uint8_t *)link, sizeof(*link));
     link->report.role = role;
-    if (ops == 0 || ops->control == 0 || nonce == 0 || mac == 0 || role > WIFI_LINK_OPEN_STATION) {
+    if (ops == 0 || ops->control == 0 || nonce == 0 || mac == 0 || role > WIFI_LINK_FIXTURE_AP) {
         fail(link, WIFI_LINK_BAD_CONFIG);
         return;
     }
-    link->open_network = role >= WIFI_LINK_OPEN_AP;
-    if (link->open_network) link->report.role = role == WIFI_LINK_OPEN_AP ? WIFI_LINK_AP : WIFI_LINK_STATION;
+    link->open_network = role == WIFI_LINK_OPEN_AP || role == WIFI_LINK_OPEN_STATION;
+    if (role>=WIFI_LINK_OPEN_AP) link->report.role = role == WIFI_LINK_OPEN_STATION ? WIFI_LINK_STATION : WIFI_LINK_AP;
     link->ops = *ops;
     copy(link->report.mac, mac, 6u);
     if ((mac[0] & 3u) != 2u) {

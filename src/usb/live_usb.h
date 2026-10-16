@@ -20,6 +20,8 @@
 #define LIVE_USB_LINK_AP 0x5au
 #define LIVE_USB_LINK_OPEN_AP 0x65u
 #define LIVE_USB_LINK_OPEN_STATION 0x66u
+#define LIVE_USB_CLEAN_SECRET 0x67u
+#define LIVE_USB_LINK_WPA2_FIXTURE 0x68u
 #define LIVE_USB_LINK_STATION 0x5bu
 #define LIVE_USB_LINK_REPORT 0x5cu
 #define LIVE_USB_UDP_START 0x5du
@@ -90,6 +92,9 @@ typedef struct {
     uint32_t udp_generation;
     uint8_t udp_report[64];
     uint8_t udp_detail[512];
+#ifdef LIVE_USB_CLEAN
+    uint8_t clean_secret[64], clean_secret_ready, clean_secret_out;
+#endif
 #ifdef LIVE_USB_NAMETAG_M2
     uint8_t m2_out, m2_pending, m2_ready, m2_valid;
     uint32_t m2_generation;

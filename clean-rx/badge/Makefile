@@ -4,9 +4,9 @@ CONTROLLER_BIN ?= $(ROOT)/build/clean-rx/cyw43_rx_fw.bin
 CC := clang
 CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-Wall -Wextra -Werror -Oz -ffreestanding -fno-builtin -fno-stack-protector \
-	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections \
-	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u
-SOURCES := main.c loader.c \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
+	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u -DLIVE_USB_CLEAN
+SOURCES := main.c loader.c wpa2.c ../wpa2_crypto.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb_hw.c \
 	$(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
@@ -16,7 +16,7 @@ SOURCES := main.c loader.c \
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
-HEADERS := ../tx_diag.h ../frame_limits.h ../phy_rates.h ../unicast.h ../src/sdio_ring.h $(wildcard *.h $(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
+HEADERS := ../wpa2_crypto.h ../tx_diag.h ../frame_limits.h ../phy_rates.h ../unicast.h ../src/sdio_ring.h $(wildcard *.h $(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 
 .PHONY: all controller force test
 all: $(BUILD)/clean_rx.uf2 $(BUILD)/collector
@@ -57,14 +57,27 @@ $(ROOT)/build/host-tools/bin2uf2:
 $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
 
-$(BUILD)/collector: collector.c frames.h station.h ../tx_diag.h $(BUILD)/build_id.h
+$(BUILD)/collector: collector.c frames.h station.h ../wpa2_crypto.c ../tx_diag.h $(BUILD)/build_id.h
 	cc -std=c11 -Wall -Wextra -Werror -O2 -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
-		$< $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
+		$< ../wpa2_crypto.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
-test: $(BUILD)/loader_test $(BUILD)/loader_strict_test
+test: $(BUILD)/loader_test $(BUILD)/loader_strict_test $(BUILD)/wpa2_test $(BUILD)/secret_test
 	$(BUILD)/loader_test
 	$(BUILD)/loader_strict_test
+	$(BUILD)/wpa2_test
+	$(BUILD)/secret_test
+	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh
+
+$(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../wpa2_crypto.c ../wpa2_crypto.h
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined wpa2_test.c wpa2.c ../wpa2_crypto.c \
+		$(ROOT)/src/tools/diagnostics_logic.c -o $@
+
+$(BUILD)/secret_test: secret_test.c $(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb.h \
+		$(ROOT)/src/radio/wifi_trace.c $(ROOT)/src/shared/usb_report.c | $(BUILD)
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -DLIVE_USB_CLEAN \
+		secret_test.c $(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/radio/wifi_trace.c \
+		$(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/loader_strict_test: loader_test.c loader.c loader.h frames.h station.h ../unicast.h ../tx_diag.h ../frame_limits.h ../phy_rates.h ../src/sdio_ring.h | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O2 -DCLEAN_RX_STRICT_TEST loader_test.c loader.c \

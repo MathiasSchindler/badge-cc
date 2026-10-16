@@ -152,8 +152,17 @@ static int32_t poll_active(live_usb_control_t *control, uint32_t status) {
         if (length > sizeof(data)) return -2011;
         volatile uint8_t *source = (volatile uint8_t *)0x50100100u;
         for (uint32_t i = 0u; i < length; ++i) data[i] = source[i];
+#ifdef LIVE_USB_CLEAN
+        uint8_t secret=control->clean_secret_out;
+#endif
         ++stats.completions;
         live_usb_control_complete(control, 0u, data, length);
+#ifdef LIVE_USB_CLEAN
+        if (secret) for (uint32_t i=0u;i<sizeof(data);++i) {
+            ((volatile uint8_t *)data)[i]=0u;
+            source[i]=0u;
+        }
+#endif
         apply_action(control);
     }
     uint32_t errors = status & 0x8f800000u;

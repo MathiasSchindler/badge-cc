@@ -7,8 +7,9 @@ SDK, a downloaded vendor executable, NVRAM, or CLM. The controller still
 reads its on-chip ROM calibration tables.
 
 This is a bounded radio test, not a WiFi connection manager. It includes an
-experimental association trial but does not implement a WPA2 handshake or replace the default networking
-targets. Host USB collection uses the repository's existing libusb dependency.
+experimental WPA2-PSK/CCMP supplicant and protected round-trip trial, but does
+not replace the default networking targets. Host USB collection uses the
+repository's existing libusb dependency.
 
 **Current qualification:** cold RX and single-frame **11 Mbps CCK OTA TX** are
 verified between a Universe badge and a Pimoroni Tufty2350, in both directions.
@@ -21,7 +22,84 @@ Use `make micro-signal-g` for the normal fixed-6-Mbps button application or
 application still uses its original CCK challenge protocol.
 The 1 Mbps experiments have not passed; do not generalize the qualification
 to other CCK rates, automatic ACK timing, complete 802.11g MAC operation,
-general-purpose station reliability or WPA2-authorized connectivity.
+general-purpose station reliability. The separate controlled WPA2 qualification
+below proves a bounded encrypted exchange, not sustained networking.
+
+## Experimental WPA2 protected exchange
+
+```sh
+build/clean-rx/badge/collector SERIAL evidence.bin CHANNEL \
+  --ap-wpa2 XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE
+```
+
+The credential file must be owned by the current user, have no group/other
+permissions (`chmod 600`), and contain exactly two LF-terminated lines: SSID
+(1..32 bytes), then passphrase (8..63 bytes). Raw 64-hex-digit PSKs are not
+accepted. The host derives the PMK using PBKDF2-HMAC-SHA1/4096 and provisions
+the PMK plus a fresh OS-random SNonce through clean-image-only USB command
+`0x67`. A hash binds the one-use provisioning to the BSSID, channel and request.
+The radio/badge programs remain freestanding C with no cryptographic library
+or vendor radio executable.
+
+The supplicant derives KCK/KEK/TK, sends EAPOL messages 2/4, authenticates
+message 3, checks its ANonce/replay counter/RSN IE, unwraps its GTK using
+RFC3394 AES, and installs software CCMP state. Duplicate message 3 resends
+message 4 without reinstalling keys or resetting packet numbers. EAPOL MICs
+cover the declared EAPOL length, not trailing MAC-payload padding. Physical
+SDIO staging is rounded to four bytes without changing the transmitted frame
+length or FCS. Old authentication retries are drained before association,
+and a received request ACK no longer suppresses retries for a missing response.
+
+After message 4, the station sends a fresh CCMP-protected EtherType `0x88b5`
+challenge. `wpa2_authorized:true` and collector success require an authenticated,
+non-replayed protected echo matching this session, in addition to independently
+validated authentication/association responses. Merely building message 2,
+sending message 4, or observing the AP's authorization does not pass.
+`m2_sent`/`m4_sent` count completed controller submissions, not ACK confirmations.
+The TFT reports the verified protected exchange or an explicit failure.
+
+For a reproducible two-badge test, first load the vendor `usb-wifi-link` image
+on the AP and this image on the station, leaving both in BOOTSEL, then run:
+
+```sh
+bash src/host/tools/usb_wifi_clean_wpa2_run.sh AP_SERIAL STATION_SERIAL build/wpa2-trial
+# Negative control, with a fresh temporary network:
+bash src/host/tools/usb_wifi_clean_wpa2_run.sh AP_SERIAL STATION_SERIAL build/wpa2-wrong --wrong-password
+```
+
+The runner creates temporary credentials in a private directory, removes them
+on exit, and requires matching station MACs and protected RX/TX evidence at
+both endpoints. It does not flash either badge. The AP fixture exports a
+temporary passphrase only with explicit `--credentials-out`; neither collector
+logs passwords, PMKs, PTKs or GTKs.
+
+**Hardware qualification:** retained build `0ebad503` completed all four EAPOL
+messages and a protected round trip in three of five fresh positive trials,
+independently confirmed by the vendor AP (30, 38 and 37 stable peer observations).
+The other two trials failed before the key exchange because no association
+response reached the host; neither reported authorization.
+A real wrong-password control associated and submitted message 2 but neither
+endpoint authorized or exchanged protected data. Association-response loss
+still occurs in separate trials; this is not a reliable general station.
+An intermediate trial also rejected GTK key data; broader AP compatibility
+is unqualified. `gtk_kde` reports only KDE length/flags/reserved-byte metadata,
+never key bytes.
+
+Native ASan/UBSan tests cover independent SHA1/HMAC/PBKDF2/PTK/AES/CCMP
+known-answer vectors, unwrap integrity, padded/truncated EAPOL, wrong MIC/key,
+ANonce/replay/RSN/GTK validation, duplicate-message non-reinstallation,
+per-TID CCMP replay/MIC failures, PN exhaustion and USB secret lifecycle.
+Compiler stack-usage output is retained alongside objects. RX consumers share
+a static packet rather than stacking multiple full-sized frames on the 8 KiB
+stack; the measured WPA2 decrypt call chain is approximately 4.3 KiB.
+
+Limitations: this bounded fixture stops and wipes keys after its result.
+There is no DHCP/IP stack, sustained application link, roaming, group-data
+decryption, group/pairwise rekey, WPA3, enterprise authentication or PMF.
+GTK is validated/stored but not used for group RX. Other suites and malformed
+key exchanges fail closed. General CSMA/CA, reliable unicast and RF/SIFS ACK
+timing remain unqualified. This new crypto is experimental, not independently
+audited or production-security-qualified.
 
 ## Experimental association and ACK work
 
@@ -44,7 +122,8 @@ response addresses, FCS, authentication transaction, status, association IEs
 and AID (1..2007), and observes a 2.5-million-tick post-association window. A bound
 deauthentication/disassociation clears the associated result.
 Collector success independently revalidates both saved responses. It always
-reports `wpa2_authorized:false`; there is no EAPOL supplicant, DHCP or IP stack.
+reports `wpa2_authorized:false`; this association-only mode does not run the
+supplicant. There is no DHCP or IP stack.
 It now recognizes and saves complete valid-FCS RSN EAPOL-Key message 1
 frames, including address, LLC/SNAP, descriptor/key-info, body/key-data length
 and zero-MIC validation. `eapol_m1_received` independently revalidates the
@@ -92,7 +171,8 @@ Controlled vendor-SoftAP results superseding the earlier mesh failures below:
   AID 1, matching AP records for 33–36 observations, and valid saved EAPOL
   message 1 frames. Neither endpoint claimed WPA2 authorization.
 - Default all-vendor WPA2 remained functional, including authorization on
-  both peers. The source-built station still has no supplicant/key exchange.
+  both peers. These association-only results precede the protected-exchange
+  qualification above.
 
 For setup, use the [explicit open AP collector](../../docs/usb-live.md#paired-link-image).
 Correlate `local_mac` in the clean-rx JSON with the AP observer's peer; an

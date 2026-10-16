@@ -46,6 +46,10 @@ static uint16_t read16(const uint8_t *bytes) {
 }
 
 static void stall(live_usb_control_t *control) {
+#ifdef LIVE_USB_CLEAN
+    for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
+    control->clean_secret_ready=control->clean_secret_out=0u;
+#endif
     control->phase = USB_PHASE_STALL;
     control->action = USB_ACTION_STALL;
     control->address_pending = 0u;
@@ -94,6 +98,10 @@ static void string_descriptor(live_usb_control_t *control, const char *text,
 }
 
 void live_usb_control_reset(live_usb_control_t *control) {
+#ifdef LIVE_USB_CLEAN
+    for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
+    control->clean_secret_ready=control->clean_secret_out=0u;
+#endif
     cancel_udp(control);
 #ifdef LIVE_USB_NAMETAG_M2
     cancel_m2(control);
@@ -141,6 +149,13 @@ void live_usb_control_init(live_usb_control_t *control, uint32_t build_id,
 }
 
 void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8]) {
+#ifdef LIVE_USB_CLEAN
+    if (control->clean_secret_out) {
+        for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
+        control->clean_secret_ready=0u;
+    }
+    control->clean_secret_out=0u;
+#endif
     uint8_t type = setup[0], request = setup[1];
     uint16_t value = read16(setup + 2u);
     uint16_t index = read16(setup + 4u);
@@ -226,6 +241,13 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
         send(control, control->compiler_records + value * 64u, 64u, length);
 #endif
     } else if (control->configured && value == 0u && index == 0u) {
+#ifdef LIVE_USB_CLEAN
+        if (type==0x40u && request==LIVE_USB_CLEAN_SECRET && length==64u && !control->probe_inflight) {
+            for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
+            control->clean_secret_ready=0u; control->clean_secret_out=1u;
+            control->length=64u; control->action=USB_ACTION_OUT; control->phase=USB_PHASE_DATA_OUT;
+        } else
+#endif
 #ifdef LIVE_USB_NAMETAG_M2
         if (type == 0x40u && request == LIVE_USB_M2_SUBMIT && length == 64u) {
             cancel_m2(control);
@@ -266,7 +288,8 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
 #else
                              || request == LIVE_USB_LINK_AP || request == LIVE_USB_LINK_STATION
 #ifndef LIVE_USB_UDP
-                             || request == LIVE_USB_LINK_OPEN_AP || request == LIVE_USB_LINK_OPEN_STATION
+                             || request == LIVE_USB_LINK_OPEN_AP || request == LIVE_USB_LINK_OPEN_STATION ||
+                                request == LIVE_USB_LINK_WPA2_FIXTURE
 #endif
 #endif
 #endif
@@ -282,9 +305,11 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
 #endif
 #ifdef LIVE_USB_LINK
             if (request == LIVE_USB_LINK_AP || request == LIVE_USB_LINK_STATION ||
-                request == LIVE_USB_LINK_OPEN_AP || request == LIVE_USB_LINK_OPEN_STATION) {
+                request == LIVE_USB_LINK_OPEN_AP || request == LIVE_USB_LINK_OPEN_STATION ||
+                request == LIVE_USB_LINK_WPA2_FIXTURE) {
                 control->incoming_test = WIFI_LINK_TEST_ID;
-                control->probe_role = request == LIVE_USB_LINK_OPEN_AP ? WIFI_LINK_OPEN_AP :
+                control->probe_role = request == LIVE_USB_LINK_WPA2_FIXTURE ? WIFI_LINK_FIXTURE_AP :
+                                      request == LIVE_USB_LINK_OPEN_AP ? WIFI_LINK_OPEN_AP :
                                       request == LIVE_USB_LINK_OPEN_STATION ? WIFI_LINK_OPEN_STATION :
                                       request == LIVE_USB_LINK_AP ? WIFI_LINK_AP : WIFI_LINK_STATION;
             }
@@ -332,12 +357,22 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
         control->phase = USB_PHASE_IDLE;
     } else if (control->phase == USB_PHASE_STATUS_IN && in && length == 0u) {
         control->phase = USB_PHASE_IDLE;
+#ifdef LIVE_USB_CLEAN
+        if (control->clean_secret_out==2u) {
+            control->clean_secret_out=0u;
+            control->clean_secret_ready=1u;
+        }
+#endif
         if (control->address_pending) {
             control->address = control->pending_address;
             control->address_pending = 0u;
             control->action = USB_ACTION_ADDRESS;
         }
         if (control->configuration_pending) {
+#ifdef LIVE_USB_CLEAN
+            for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
+            control->clean_secret_ready=control->clean_secret_out=0u;
+#endif
             cancel_udp(control);
 #ifdef LIVE_USB_NAMETAG_M2
             cancel_m2(control);
@@ -379,6 +414,14 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
         }
     } else if (control->phase == USB_PHASE_DATA_OUT && !in &&
                length == USB_REPORT_WIRE_SIZE && data != 0) {
+#ifdef LIVE_USB_CLEAN
+        if (control->clean_secret_out==1u) {
+            control->clean_secret_out=2u;
+            badger_bytes_copy(control->clean_secret,data,64u);
+            status_in(control);
+            return;
+        }
+#endif
 #ifdef LIVE_USB_NAMETAG_M2
         if (control->m2_out) {
             control->m2_out = 0u;

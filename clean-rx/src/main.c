@@ -988,8 +988,13 @@ void cyw43_main(void) {
             }
             if (reliable && (!station_enabled || tx_cnt > 8u ||
                 !is_ofdm || tx_len < 34u || tx_len > CLEAN_TX_BYTES ||
-                (frame[10] & 1u) || (frame[6] & 0x0fu) != 0u ||
-                (frame[7] & 7u) || (frame[28] & 15u) ||
+                (frame[10] & 1u) ||
+                !(((frame[6] & 0x0fu)==0u && (frame[7]&7u)==0u) ||
+                  (frame[6]==8u && (frame[7]&7u)==1u)) ||
+                (frame[28] & 15u) ||
+                ((uint16_t)frame[10] | ((uint16_t)frame[11] << 8u)) != shm_read16(CLEAN_ACK_PEER) ||
+                ((uint16_t)frame[12] | ((uint16_t)frame[13] << 8u)) != shm_read16(CLEAN_ACK_PEER+1u) ||
+                ((uint16_t)frame[14] | ((uint16_t)frame[15] << 8u)) != shm_read16(CLEAN_ACK_PEER+2u) ||
                 ((uint16_t)frame[16] | ((uint16_t)frame[17] << 8u)) != shm_read16(0x612u) ||
                 ((uint16_t)frame[18] | ((uint16_t)frame[19] << 8u)) != shm_read16(0x613u) ||
                 ((uint16_t)frame[20] | ((uint16_t)frame[21] << 8u)) != shm_read16(0x614u))) {

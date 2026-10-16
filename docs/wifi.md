@@ -703,16 +703,34 @@ After that open qualification, three WPA2-PSK/CCMP trials also completed
 association with AID 1 and matching AP peer records (33–36 observations).
 Each captured complete, valid-FCS RSN EAPOL-Key message 1 frames from the
 selected AP. Both endpoints correctly remained **not WPA2-authorized**.
-No local AP password was read. Clean-rx still needs a supplicant, messages
-2–4, MIC/replay validation, key derivation/installation and protected data;
-these results do not establish encrypted connectivity, DHCP or IP.
+No local AP password was read in those association-only trials. They did not
+establish encrypted connectivity, DHCP or IP.
+
+The subsequent clean-rx WPA2 implementation now completes messages 1–4,
+PBKDF2/PTK derivation, MIC/replay/ANonce/RSN validation, AES GTK unwrap and
+software CCMP. Fresh two-badge trials independently confirmed vendor-AP
+authorization and a protected challenge/echo round trip for the exact same
+station MAC. Retained build `0ebad503` passed three of five positive trials;
+the other two lost association responses before starting the key exchange.
+A wrong-password hardware control reached association/message 2
+but neither endpoint authorized or exchanged protected traffic. Native
+ASan/UBSan tests cover independent crypto vectors, malformed key exchanges,
+CCMP replay/MIC failures and duplicate-message non-reinstallation.
+
+This remains a bounded experiment, not a sustained network connection:
+separate trials still lose association responses, broader AP/GTK compatibility
+is unqualified, and there is no DHCP/IP, group-data RX, rekey, roaming, PMF,
+enterprise authentication or WPA3. See the
+[clean-rx WPA2 workflow and limits](../clean-rx/badge/README.md#experimental-wpa2-protected-exchange).
 
 The investigation corrected station-mode loss of a captured/ACK-scheduled
 frame behind an occupied single-credit SDIO slot, and changed management
 retries to allow RX draining between attempts. It also renewed the bounded
 BOOTSEL watchdog when the diagnostic starts, rather than consuming its
 budget while waiting for USB, and extended host polling beyond the target's
-six-second diagnostic deadline. Full CSMA/CA and RF/SIFS-qualified return
+six-second diagnostic deadline. WPA2 work additionally fixed odd-length
+SDIO staging, EAPOL trailing-padding parsing, stack pressure, and management
+retry/drain handling. Full CSMA/CA and RF/SIFS-qualified return
 ACKs remain unfinished.
 
 The unchanged default all-vendor WPA2 control also passed, with both peers

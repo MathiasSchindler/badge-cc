@@ -2,6 +2,7 @@
 #include "build_id.h"
 #include "frames.h"
 #include "station.h"
+#include "wpa2.h"
 #include "../unicast.h"
 #include "../tx_diag.h"
 #include "../../src/shared/bytes.h"
@@ -23,6 +24,12 @@ static uint8_t peer_challenge[14];
 static clean_station_ap_t station_ap;
 static uint8_t station_target[6];
 static int station_ap_status;
+static clean_wpa_t wpa;
+static uint8_t wpa_secret[64];
+/* RX consumers run synchronously; share a packet outside the 8 KiB stack. */
+static uint8_t rx_packet[CLEAN_RX_PACKET_BYTES];
+
+static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u; }
 
 static void monitor_packet(const uint8_t *packet, uint32_t size) {
     if (size < 32u || !clean_frame_valid(packet + 18u, size - 18u)) return;
@@ -76,7 +83,7 @@ static void screen(const char *status, uint32_t packets, uint32_t error) {
 }
 
 static void beacon(const uint8_t *packet, uint32_t size) {
-    if (detail[2000u] == 16u && size >= 40u &&
+    if (station_mode() && size >= 40u &&
         badger_bytes_equal(packet + 34u, station_target, 6u)) {
         station_ap_status = clean_station_beacon(packet + 18u, size - 18u,
                                                  station_target, &station_ap);
@@ -95,12 +102,12 @@ static void beacon(const uint8_t *packet, uint32_t size) {
 static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
     uint32_t started = l->wire->now_us(l->wire->context);
     while (l->wire->now_us(l->wire->context) - started < duration) {
-        uint8_t packet[CLEAN_RX_PACKET_BYTES];
+        uint8_t *packet=rx_packet;
         uint32_t size;
         if (!clean_receive(l, packet, &size)) return 0;
         if (size != 0u) {
             if (detail[2000u] == 17u) monitor_packet(packet, size);
-            if (detail[2000u] == 16u && size >= 18u &&
+            if (station_mode() && size >= 18u &&
                 badger_bytes_load_u32(detail + 524u) == 4u) {
                 int reason = clean_station_departure(packet + 18u, size - 18u,
                                                      detail + 1972u, detail + 1980u);
@@ -162,7 +169,7 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 badger_bytes_store_u32(detail + 1992u, acks + 1u);
             }
             badger_bytes_store_u32(detail + 1636u, packets + 1u);
-            beacon(packet, size);
+            if (!station_mode() || !badger_bytes_load_u32(detail+524u)) beacon(packet, size);
         }
         uint32_t state;
         if (!clean_read(l, CLEAN_MBOX + 4u, &state)) return 0;
@@ -183,13 +190,20 @@ static int service(void *unused) {
 }
 
 static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd) {
-    uint8_t readback[160];
-    if (!clean_block(l, CLEAN_TX_BUFFER_ADDR, bytes, size, 1u) ||
-        !clean_block(l, CLEAN_TX_BUFFER_ADDR, readback, size, 0u)) return 0;
-    if (!badger_bytes_equal(bytes, readback, size)) {
-        l->error = CLEAN_READBACK;
-        l->address = CLEAN_TX_BUFFER_ADDR;
-        return 0;
+    uint8_t readback[64], staged[64];
+    if (!size || size>512u) { l->error=CLEAN_INPUT; return 0; }
+    for (uint32_t at=0u;at<size;at+=64u) {
+        uint32_t count=size-at<64u?size-at:64u;
+        uint32_t padded=(count+3u)&~3u;
+        badger_bytes_zero(staged,padded);
+        badger_bytes_copy(staged,bytes+at,count);
+        if (!clean_block(l,CLEAN_TX_BUFFER_ADDR+at,staged,padded,1u) ||
+            !clean_block(l,CLEAN_TX_BUFFER_ADDR+at,readback,padded,0u)) return 0;
+        if (!badger_bytes_equal(staged,readback,padded)) {
+            l->error = CLEAN_READBACK;
+            l->address = CLEAN_TX_BUFFER_ADDR+at;
+            return 0;
+        }
     }
     if (!clean_write(l, CLEAN_MBOX + 24u, cmd)) return 0;
     uint32_t started = l->wire->now_us(l->wire->context), command, state;
@@ -212,7 +226,7 @@ static int station_wait(clean_loader_t *l, const uint8_t mac[6], uint8_t associa
                          uint16_t *aid, uint32_t duration) {
     uint32_t started = l->wire->now_us(l->wire->context);
     while (l->wire->now_us(l->wire->context) - started < duration) {
-        uint8_t packet[CLEAN_RX_PACKET_BYTES];
+        uint8_t *packet=rx_packet;
         uint32_t size;
         if (!clean_receive(l, packet, &size)) return -1;
         if (size < 18u) continue;
@@ -253,7 +267,65 @@ static int station_wait(clean_loader_t *l, const uint8_t mac[6], uint8_t associa
     return -1;
 }
 
+static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
+    clean_wpa_init(&wpa,wpa_secret,mac,station_ap.bssid,station_ap.rsn,station_ap.rsn_length);
+    wpa_wipe(wpa_secret,sizeof(wpa_secret));
+    uint32_t started=l->wire->now_us(l->wire->context), last_probe=started;
+    uint8_t *packet=rx_packet;
+    uint8_t tx[512];
+    while (!l->error && !wpa.error && l->wire->now_us(l->wire->context)-started<3000000u) {
+        uint32_t size;
+        if (!clean_receive(l,packet,&size)) break;
+        if (size>=18u) {
+            const uint8_t *m=packet+18u;
+            if (size<=CLEAN_DETAIL_PACKET_BYTES && size>=42u && !(m[1]&64u) &&
+                wpa_equal(m+4u,mac,6u) && clean_frame_valid(m,size-18u)) {
+                badger_bytes_store_u32(detail+1088u,size);
+                badger_bytes_copy(detail+1104u,packet,size);
+            }
+            int reason=clean_station_departure(m,size-18u,mac,station_ap.bssid);
+            if (reason>=0) {
+                badger_bytes_store_u32(detail+568u,(uint32_t)reason);
+                badger_bytes_store_u32(detail+524u,5u);
+                wpa.error=WPA_FORMAT; break;
+            }
+            uint32_t length;
+            int result=clean_wpa_receive(&wpa,m,size-18u,tx,&length);
+            if (result<0) break;
+            if (result) {
+                if (!station_command(l,tx,length,5u|clean_tx_length_bits(length)|
+                    (1u<<18u)|(1u<<19u)|CLEAN_TX_ACK_REQUIRED)) break;
+                if (wpa.installed) ++wpa.m4; else ++wpa.m2;
+                if (wpa.stage==WPA_KEYS) wpa.stage=WPA_M4_SENT;
+            } else if (wpa.installed && clean_wpa_protected(&wpa,m,size-18u)>0) break;
+        }
+        uint32_t tick=l->wire->now_us(l->wire->context);
+        if (wpa.stage>=WPA_M4_SENT && tick-last_probe>=100000u) {
+            uint32_t length=clean_wpa_probe(&wpa,tx);
+            if (!length || !station_command(l,tx,length,5u|clean_tx_length_bits(length)|
+                (1u<<18u)|(1u<<19u)|CLEAN_TX_ACK_REQUIRED)) break;
+            last_probe=tick;
+        }
+    }
+    if (!wpa.error && wpa.stage!=WPA_PROTECTED) wpa.error=l->error?WPA_TRANSPORT:WPA_TIMEOUT;
+    badger_bytes_store_u32(detail+1640u,0x32575043u);
+    badger_bytes_store_u32(detail+1644u,wpa.stage);
+    badger_bytes_store_u32(detail+1648u,wpa.error);
+    badger_bytes_store_u32(detail+1652u,wpa.m1);
+    badger_bytes_store_u32(detail+1656u,wpa.m2);
+    badger_bytes_store_u32(detail+1660u,wpa.m3);
+    badger_bytes_store_u32(detail+1664u,wpa.m4);
+    badger_bytes_store_u32(detail+1668u,wpa.protected_rx);
+    badger_bytes_store_u32(detail+1672u,wpa.gtk_info);
+    wpa_wipe(&wpa,sizeof(wpa));
+}
+
 static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
+    if (nonce[14]==18u) {
+        badger_bytes_zero(detail+1640u,36u);
+        badger_bytes_store_u32(detail+1640u,0x32575043u);
+        badger_bytes_store_u32(detail+1648u,WPA_ASSOCIATION);
+    }
     badger_bytes_store_u32(detail + 520u, 0x31545341u);
     badger_bytes_store_u32(detail + 528u, 0xffffffffu);
     badger_bytes_store_u32(detail + 532u, 0xffffffffu);
@@ -276,6 +348,7 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     badger_bytes_store_u32(detail + 524u, 1u);
     uint16_t aid = 0u;
     for (uint8_t association = 0u; association < 2u; ++association) {
+        if (association && !receive_for(l,10000u,0u)) return;
         uint8_t frame[160];
         uint16_t sequence = (uint16_t)(clean_station_u16(nonce + 11u) + association);
         uint32_t length = association ?
@@ -302,7 +375,7 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
             uint32_t ack = badger_bytes_load_u32(status_bytes + 12u);
             badger_bytes_store_u32(detail + 548u, badger_bytes_load_u32(detail + 548u) + ack);
             status = station_wait(l, mac, association, &aid, ack ? 400000u : 100000u);
-            if (status != -1 || l->error || ack) break;
+            if (status != -1 || l->error) break;
         }
         badger_bytes_store_u32(detail + 528u + 4u*association, (uint32_t)status);
         badger_bytes_store_u32(detail + 524u, association ? 3u : 2u);
@@ -310,7 +383,8 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     }
     badger_bytes_store_u32(detail + 536u, aid);
     badger_bytes_store_u32(detail + 524u, 4u);
-    (void)receive_for(l, 2500000u, 0u);
+    if (nonce[14]==18u) station_wpa(l,mac);
+    else (void)receive_for(l, 2500000u, 0u);
 }
 
 static void run(const uint8_t nonce[16]) {
@@ -320,9 +394,21 @@ static void run(const uint8_t nonce[16]) {
     clean_loader_init(&l, wifi_board_wire(), service, 0);
     if (badger_schedule_bootsel(8000u) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
+    int secret_valid=1;
+    if (nonce[14]==18u) {
+        uint8_t digest[20];
+        badger_bytes_copy(wpa_secret,control.clean_secret,64u);
+        wpa_sha1_t sha;
+        wpa_sha1_init(&sha); wpa_sha1_update(&sha,wpa_secret,64u);
+        wpa_sha1_update(&sha,nonce,6u); wpa_sha1_update(&sha,nonce+15u,1u);
+        wpa_sha1_final(&sha,digest);
+        secret_valid=control.clean_secret_ready && wpa_equal(digest,nonce+6u,8u);
+        wpa_wipe(digest,sizeof(digest));
+    }
+    wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
-    if (nonce[14] > 17u) l.error = CLEAN_INPUT;
+    if (nonce[14] > 18u || !secret_valid) l.error = CLEAN_INPUT;
     detail[2000u] = nonce[14];
     badger_bytes_copy(peer_challenge, nonce, sizeof(peer_challenge));
     badger_bytes_copy(station_target, nonce, 6u);
@@ -336,9 +422,9 @@ static void run(const uint8_t nonce[16]) {
         clean_write(&l, CLEAN_MBOX + 24u, 2u) && clean_wait_state(&l, 9u, 100000u)) {
         l.stage = 7u;
         (void)receive_for(&l, nonce[14] == 13u || nonce[14] == 17u ? 2500000u : 700000u, 0u);
-        if (l.error == CLEAN_OK && nonce[14] == 16u) station_run(&l, nonce);
+        if (l.error == CLEAN_OK && station_mode()) station_run(&l, nonce);
         if (l.error == CLEAN_OK && nonce[14] != 0u && nonce[14] != 13u &&
-            nonce[14] != 16u && nonce[14] != 17u) {
+            nonce[14] != 16u && nonce[14] != 17u && nonce[14]!=18u) {
             uint8_t frame[96];
             uint32_t tx_length = 94u;
             const uint8_t *selected = detail + 1640u;
@@ -434,9 +520,9 @@ static void run(const uint8_t nonce[16]) {
     l.error = CLEAN_OK;
     int snapshot = clean_block(&l, CLEAN_MBOX, detail + 32u, 448u, 0u) &&
                    clean_block(&l, CLEAN_MULTI, detail + 480u, 40u, 0u);
-    if (snapshot && nonce[14] != 16u && nonce[14] != 17u)
+    if (snapshot && !station_mode() && nonce[14] != 17u)
         snapshot = clean_block(&l, CLEAN_MULTI + 40u, detail + 520u, 568u, 0u);
-    if (snapshot && nonce[14] == 16u) {
+    if (snapshot && station_mode()) {
         uint8_t status[sizeof(clean_unicast_status_t)];
         snapshot = clean_block(&l, CLEAN_UNICAST_ADDR, status, sizeof(status), 0u);
         if (snapshot) {
@@ -451,6 +537,7 @@ static void run(const uint8_t nonce[16]) {
     } else if (!snapshot && l.error == CLEAN_OK) l.error = CLEAN_READBACK;
     uint32_t elapsed = l.wire->now_us(l.wire->context) - l.started;
     wifi_wire_power_off(l.wire);
+    wpa_wipe(wpa_secret,sizeof(wpa_secret)); wpa_wipe(&wpa,sizeof(wpa));
     badger_bytes_store_u32(detail, CLEAN_DETAIL_MAGIC);
     badger_bytes_store_u32(detail + 4u, l.stage);
     badger_bytes_store_u32(detail + 8u, l.error);
@@ -468,6 +555,9 @@ static void run(const uint8_t nonce[16]) {
     live_usb_probe_finish(&control, generation, wire_report);
     live_usb_trace_finish(&control, generation, detail);
     screen(l.error ? "RADIO TEST FAILED" :
+           nonce[14] == 18u ?
+           (badger_bytes_load_u32(detail+1644u)==WPA_PROTECTED ?
+            "WPA2 / PROTECTED ECHO VERIFIED" : "WPA2 HANDSHAKE / DATA FAILED") :
            nonce[14] == 16u ?
            (clean_station_evidence(detail) ?
             "ASSOCIATED / WPA2 NOT AUTHORIZED" : "AP ASSOCIATION NOT CONFIRMED") :

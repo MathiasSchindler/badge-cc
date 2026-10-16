@@ -207,6 +207,8 @@ except for the trace-page selector described below:
 | Read link-state snapshot (link image only) | `0xc0` | `0x5c` | Exactly 64 IN bytes |
 | Start explicit open SoftAP (link image only, not UDP) | `0x40` | `0x65` | Exactly 64 OUT bytes, request test ID 4 |
 | Start explicit open station (link image only, not UDP) | `0x40` | `0x66` | Exactly 64 OUT bytes, request test ID 4 |
+| Provision PMK32 + fresh SNonce32 (clean-rx image only) | `0x40` | `0x67` | Exactly 64 private OUT bytes; zero value/index, configured and no inflight test |
+| Start WPA2 protected-echo AP fixture (link image only, not UDP) | `0x40` | `0x68` | Exactly 64 OUT bytes, request test ID 4; explicit fixture role |
 | Arm UDP benchmark (UDP image only) | `0x40` | `0x5d` | Exactly 64 OUT bytes, same test-ID-4 challenge as active link |
 | Read UDP progress (UDP image only) | `0xc0` | `0x5e` | Exactly 64 IN bytes |
 | Read frozen UDP detail page (UDP image only) | `0xc0` | `0x5f` | Exactly 64 IN bytes, `wValue` page 0-21 |
@@ -370,6 +372,34 @@ responses and match its `local_mac` to the AP's peer. It does not prove ACK
 timing, key exchange or data connectivity. The collector prints neither the
 full session challenge nor the temporary WPA2 passphrase, and reboots its
 AP into BOOTSEL on exit.
+
+For the clean-rx four-way-handshake/protected-data fixture, use:
+
+```sh
+build/host-tools/usb_wifi_link_host --ap-only AP_SERIAL --credentials-out PRIVATE_FILE
+# After ap-ready, on the clean-rx badge:
+build/clean-rx/badge/collector STATION_SERIAL evidence.bin 1 \
+  --ap-wpa2 AP_BSSID PRIVATE_FILE
+```
+
+The exporter exclusively creates a mode-0600 file (no symlink following)
+containing temporary SSID/passphrase lines; remove it after the experiment.
+Only explicit fixture role 4 enables the custom Ethernet echo, and only after
+vendor-firmware authorization. AP success additionally requires protected
+challenge RX and echo TX. The clean collector requires independent valid
+association evidence and successful CCMP verification of the fresh echo.
+Match both station MAC records; AP-only authorization is not sufficient.
+The [combined runner](../src/host/tools/usb_wifi_clean_wpa2_run.sh) handles
+private-file cleanup and the optional `--wrong-password` negative control.
+
+Provisioning command `0x67` is unavailable in default/vendor/UDP images and
+never publishes secret bytes in reports. It becomes ready only after the
+USB status ACK; aborted transfers, stall, reset and deconfiguration wipe it.
+The clean target validates the BSSID/channel/request hash binding and consumes
+the secret once. PMK/keys and temporary USB staging are wiped after use.
+See [the clean-rx workflow](../clean-rx/badge/README.md#experimental-wpa2-protected-exchange)
+for the deliberately limited support and hardware evidence. The normal paired
+WPA2 and UDP paths do not enable this echo fixture.
 
 `make usb-wifi-link` builds a separate TFT/USB AP-station control experiment.
 See [the paired runner and acceptance criteria](wifi.md#paired-apstation-control-experiment).

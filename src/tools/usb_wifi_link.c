@@ -42,6 +42,8 @@ static uint8_t display_ready;
 static uint8_t detail[WIFI_TRACE_SIZE];
 static wifi_link_snapshot_t snapshot;
 static wifi_view_t view = {.first_frame = 1u};
+static uint8_t fixture, fixture_data;
+static uint32_t fixture_rx, fixture_tx;
 #ifdef LIVE_USB_UDP
 static wifi_udp_t network;
 static wifi_udp_metrics_t metrics;
@@ -221,6 +223,8 @@ static void publish(void) {
     store(detail+128u,pio_profile[1]);
     store(detail+132u,pio_profile[2]);
     store(detail+136u,wifi_link_snapshot_view(&snapshot,&link.report)->associated);
+    store(detail+140u,fixture_rx);
+    store(detail+144u,fixture_tx);
     for (uint32_t i=0u;i<28u;++i) detail[64u+i]=firmware.last_rx_prefix[i];
     live_usb_link_details(&usb,generation,detail);
 #ifdef LIVE_USB_UDP
@@ -445,6 +449,8 @@ void bare_main(void) {
             wifi_firmware_stop();
             generation = next;
             for (uint32_t i = 0u; i < 16u; ++i) session_nonce[i] = nonce[i];
+            fixture=usb.probe_role==WIFI_LINK_FIXTURE_AP;
+            fixture_data=0u; fixture_rx=fixture_tx=0u;
             wifi_link_init(&link, &ops, usb.probe_role, session_nonce, mac);
             has_role = 1u;
             link.report.stage = WIFI_LINK_FIRMWARE;
@@ -485,6 +491,36 @@ void bare_main(void) {
                 active = 0u;
             }
             publish();
+        }
+        if (active && fixture && link.report.authorized) {
+            if (!fixture_data) {
+                if (!wifi_firmware_data_enable()) {
+                    link.report.stage=WIFI_LINK_FAILED; link.report.error=WIFI_LINK_RADIO_ERROR;
+                    wifi_firmware_stop(); active=0u; publish();
+                } else fixture_data=1u;
+            }
+            if (active && fixture_data) {
+                uint8_t frame[1514], interface;
+                uint32_t length;
+                int received=wifi_firmware_read_frame(frame,&length,&interface);
+                if (received<0) {
+                    link.report.stage=WIFI_LINK_FAILED; link.report.error=WIFI_LINK_RADIO_ERROR;
+                    wifi_firmware_stop(); active=0u; publish();
+                } else if (received && interface==1u && length>=38u &&
+                    badger_bytes_equal(frame,link.report.mac,6u) &&
+                    badger_bytes_equal(frame+6u,link.report.peer,6u) &&
+                    frame[12]==136u && frame[13]==181u &&
+                    badger_bytes_equal(frame+14u,(const uint8_t *)"U26WPA2",8u)) {
+                    ++fixture_rx;
+                    badger_bytes_copy(frame,link.report.peer,6u);
+                    badger_bytes_copy(frame+6u,link.report.mac,6u); frame[21]=1u;
+                    if (!wifi_firmware_send_frame(1u,frame,38u)) {
+                        link.report.stage=WIFI_LINK_FAILED; link.report.error=WIFI_LINK_RADIO_ERROR;
+                        wifi_firmware_stop(); active=0u;
+                    } else ++fixture_tx;
+                    publish();
+                }
+            }
         }
 #ifdef LIVE_USB_UDP
         uint32_t bench=live_usb_udp_take(&usb);

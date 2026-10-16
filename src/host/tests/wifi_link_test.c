@@ -495,7 +495,7 @@ static void test_bad_configuration(void) {
         if (which == 6u) invalid_mac[0] = 3u;
         if (which == 7u) invalid_mac[0] = 4u;
         wifi_link_init(&mock.link, which == 0u ? 0 : &selected_ops,
-                       which == 1u ? 4u : WIFI_LINK_AP,
+                       which == 1u ? 5u : WIFI_LINK_AP,
                        which == 2u ? 0 : nonce,
                        which == 3u ? 0 : which >= 5u ? invalid_mac : ap_mac);
         assert(mock.link.report.stage == WIFI_LINK_FAILED);

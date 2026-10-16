@@ -4,6 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include "../../usb/live_usb.h"
 #include "usb_live_transport.h"
@@ -430,7 +432,8 @@ static int paired_reports(libusb_device_handle *devices[2], char serials[2][17],
     return 0;
 }
 
-static int ap_only_reports(libusb_device_handle *device, const char *serial, int open_ap) {
+static int ap_only_reports(libusb_device_handle *device, const char *serial, int open_ap,
+                            const char *credentials) {
     uint8_t nonce[16], request[64], info[12], last[64] = {0}, last_peer[6] = {0};
     const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
     if (!read_nonce(nonce) ||
@@ -440,7 +443,21 @@ static int ap_only_reports(libusb_device_handle *device, const char *serial, int
         return 0;
     }
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_LINK_TEST_ID);
-    if (!transfer(device, 0x40u, open_ap ? LIVE_USB_LINK_OPEN_AP : LIVE_USB_LINK_AP,
+    if (credentials) {
+        char text[50], password[33];
+        for (uint32_t i=0u;i<16u;++i) snprintf(password+2u*i,3u,"%02x",nonce[i]);
+        int n=snprintf(text,sizeof(text),"U26LAB-%02x%02x%02x%02x\n%s\n",
+                       nonce[0],nonce[1],nonce[2],nonce[3],password);
+        int fd=open(credentials,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+        if (fd<0) { perror("Create private fixture credentials"); return 0; }
+        int ok=n>0 && n<(int)sizeof(text) && write(fd,text,(size_t)n)==n;
+        if (close(fd)) ok=0;
+        volatile char *p=text; for (uint32_t i=0u;i<sizeof(text);++i) p[i]=0;
+        p=password; for (uint32_t i=0u;i<sizeof(password);++i) p[i]=0;
+        if (!ok) { perror("Write fixture credentials"); if (unlink(credentials)) perror("Remove incomplete credentials"); return 0; }
+    }
+    if (!transfer(device, 0x40u, credentials ? LIVE_USB_LINK_WPA2_FIXTURE :
+                  open_ap ? LIVE_USB_LINK_OPEN_AP : LIVE_USB_LINK_AP,
                   request, sizeof(request))) return 0;
     unsigned ready = 0u, observations = 0u, stable = 0u, associated = 0u;
     for (unsigned attempt = 0u; attempt < 120u; ++attempt) {
@@ -493,16 +510,25 @@ static int ap_only_reports(libusb_device_handle *device, const char *serial, int
                 memcpy(last_peer, report.peer, 6u);
             } else stable = 0u;
             if (++observations >= 90u) {
+                uint32_t rx=0u, tx=0u;
+                if (credentials) {
+                    uint8_t detail[WIFI_TRACE_SIZE];
+                    if (!link_detail(device,serial,bytes,detail)) return 0;
+                    rx=usb_report_u32(detail+140u); tx=usb_report_u32(detail+144u);
+                }
+                int confirmed=stable>=20u && (!credentials || (report.authorized && rx && tx));
                 printf("{\"test\":\"ap-observation\",\"security\":\"%s\","
                        "\"association_observed\":%s,\"authorized\":%s,"
+                       "\"protected_rx\":%u,\"protected_tx\":%u,"
                        "\"stable_observations\":%u,\"peer\":\"",
                        open_ap ? "open" : "wpa2-psk-ccmp", stable >= 20u ? "true" : "false",
-                       report.authorized ? "true" : "false", stable);
+                       report.authorized ? "true" : "false",rx,tx,stable);
                 print_mac(last_peer);
                 puts("\"}");
                 fflush(stdout);
                 if (stable < 20u) fputs("AP did not retain a stable associated peer\n", stderr);
-                return stable >= 20u;
+                if (credentials && !confirmed) fputs("WPA2 authorization/protected fixture traffic missing\n",stderr);
+                return confirmed;
             }
         }
         usleep(100000u);
@@ -621,15 +647,16 @@ int main(int argc, char **argv) {
     char serials[2][17];
     int single_ap = argc >= 3 && strcmp(argv[1], "--ap-only") == 0;
     int open_ap = single_ap && argc == 4 && strcmp(argv[3], "--open") == 0;
+    const char *credentials=single_ap && argc==5 && strcmp(argv[3],"--credentials-out")==0?argv[4]:NULL;
     int open_pair = argc == 4 && strcmp(argv[1], "--open") == 0;
     const char *ap_serial = open_pair ? argv[2] : argc > 1 ? argv[1] : "";
     const char *station_serial = open_pair ? argv[3] : argc > 2 ? argv[2] : "";
-    if (single_ap ? ((argc != 3 && !open_ap) || !parse_serial(argv[2], serials[0])) :
+    if (single_ap ? ((argc != 3 && !open_ap && !credentials) || !parse_serial(argv[2], serials[0])) :
         ((!open_pair && argc != 3) || !parse_serial(ap_serial,serials[0]) ||
          !parse_serial(station_serial,serials[1]) ||
          strcmp(serials[0],serials[1]) == 0)) {
         fputs("Usage: usb_wifi_link_host [--open] AP_SERIAL STATION_SERIAL\n"
-              "       usb_wifi_link_host --ap-only AP_SERIAL [--open]\n",stderr); return 2;
+              "       usb_wifi_link_host --ap-only AP_SERIAL [--open|--credentials-out PRIVATE_FILE]\n",stderr); return 2;
     }
 #ifdef LIVE_USB_UDP
     if (single_ap || open_pair) {
@@ -664,7 +691,7 @@ int main(int argc, char **argv) {
         if (error != 0) { fprintf(stderr,"USB claim %s: %s\n",serials[role],libusb_error_name(error)); goto cleanup; }
         claimed[role] = 1;
     }
-    ok = single_ap ? ap_only_reports(devices[0], serials[0], open_ap) :
+    ok = single_ap ? ap_only_reports(devices[0], serials[0], open_ap, credentials) :
                      paired_reports(devices,serials,open_pair);
 #ifdef LIVE_USB_UDP
     if(ok && !single_ap)ok=udp_reports(devices,serials);

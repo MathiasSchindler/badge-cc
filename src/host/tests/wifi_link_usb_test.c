@@ -31,6 +31,8 @@ int main(void) {
     configure();
     setup(0x40u,LIVE_USB_WIFI_SUBMIT,0u,64u);
     assert(usb.phase==USB_PHASE_STALL);
+    setup(0x40u,LIVE_USB_CLEAN_SECRET,0u,64u);
+    assert(usb.phase==USB_PHASE_STALL);
     setup(0x40u,LIVE_USB_FW_SUBMIT,0u,64u);
     assert(usb.phase==USB_PHASE_STALL);
     uint8_t request[64], bytes[64], received_nonce[16];
@@ -156,7 +158,13 @@ int main(void) {
     live_usb_control_complete(&usb,0u,request,64u);
     live_usb_control_complete(&usb,1u,NULL,0u);
     assert(live_usb_probe_take(&usb,received_nonce) && usb.probe_role == WIFI_LINK_OPEN_STATION);
+    setup(0x40u,LIVE_USB_LINK_WPA2_FIXTURE,0u,64u);
+    live_usb_control_complete(&usb,0u,request,64u);
+    live_usb_control_complete(&usb,1u,NULL,0u);
+    assert(live_usb_probe_take(&usb,received_nonce) && usb.probe_role == WIFI_LINK_FIXTURE_AP);
 #else
+    setup(0x40u,LIVE_USB_LINK_WPA2_FIXTURE,0u,64u);
+    assert(usb.action == USB_ACTION_STALL);
     setup(0x40u,LIVE_USB_LINK_OPEN_AP,0u,64u);
     assert(usb.action == USB_ACTION_STALL);
     setup(0x40u,LIVE_USB_LINK_OPEN_STATION,0u,64u);

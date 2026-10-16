@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
 #include "../../src/shared/bytes.h"
@@ -9,6 +10,7 @@
 #include "loader.h"
 #include "frames.h"
 #include "station.h"
+#include "../wpa2_crypto.h"
 #include "../tx_diag.h"
 
 static int ap_bssid_decode(const char *text, uint8_t bssid[6]) {
@@ -184,7 +186,7 @@ static void deadline(int signum) {
 
 static int collect(libusb_device_handle *device, const char *path, uint8_t channel,
                    uint8_t tx, const uint8_t *challenge, const uint8_t *target,
-                   const char *serial) {
+                   const char *serial, const char *credentials) {
     uint8_t info[12], nonce[16], request[64], report[64], detail[WIFI_TRACE_SIZE];
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
     const uint8_t prefix[] = {'U','2','6','L',1,0,64,0};
@@ -201,6 +203,45 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (target != NULL) memcpy(nonce, target, 6u);
     nonce[15] = channel;
     nonce[14] = tx;
+    if (tx==18u) {
+        char ssid[34], password[65];
+        uint8_t secret[64], digest[20];
+        FILE *file=fopen(credentials,"r");
+        if (!file) { perror("Credentials"); return 0; }
+        struct stat permissions;
+        if (fstat(fileno(file),&permissions)!=0) {
+            perror("Credential permissions"); fclose(file); return 0;
+        }
+        if (!S_ISREG(permissions.st_mode) || (permissions.st_mode&0077u) ||
+            permissions.st_uid!=geteuid()) {
+            fputs("Credentials must be an owned, private regular file (chmod 600)\n",stderr);
+            fclose(file); return 0;
+        }
+        int valid=fgets(ssid,sizeof(ssid),file)!=NULL && fgets(password,sizeof(password),file)!=NULL &&
+                  fgetc(file)==EOF;
+        if (fclose(file)) valid=0;
+        uint32_t sn=valid?(uint32_t)strcspn(ssid,"\n"):0u;
+        uint32_t pn=valid?(uint32_t)strcspn(password,"\n"):0u;
+        valid=valid && sn<=32u && pn<=63u && ssid[sn]=='\n' && password[pn]=='\n' &&
+              wpa_pmk((const uint8_t *)password,pn,(const uint8_t *)ssid,sn,secret);
+        wpa_wipe(password,sizeof(password));
+        if (!valid) {
+            wpa_wipe(secret,sizeof(secret));
+            fputs("Expected SSID and an 8-63-byte passphrase, one line each\n",stderr); return 0;
+        }
+        FILE *rng=fopen("/dev/urandom","rb");
+        if (!rng) { perror("SNonce random source"); wpa_wipe(secret,sizeof(secret)); return 0; }
+        valid=fread(secret+32u,1u,32u,rng)==32u;
+        if (fclose(rng)) valid=0;
+        if (!valid) { fputs("SNonce read failed\n",stderr); wpa_wipe(secret,sizeof(secret)); return 0; }
+        wpa_sha1_t sha;
+        wpa_sha1_init(&sha); wpa_sha1_update(&sha,secret,64u);
+        wpa_sha1_update(&sha,nonce,6u); wpa_sha1_update(&sha,nonce+15u,1u);
+        wpa_sha1_final(&sha,digest); memcpy(nonce+6u,digest,8u);
+        valid=transfer(device,0x40u,LIVE_USB_CLEAN_SECRET,secret,64u);
+        wpa_wipe(secret,sizeof(secret)); wpa_wipe(digest,sizeof(digest));
+        if (!valid) return 0;
+    }
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_USB_TEST_ID);
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
     int got = 0;
@@ -253,18 +294,23 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(detail + 8u));
         return usb_report_u32(detail + 8u) == 0u;
     }
-    if (tx == 16u) {
+    if (tx == 16u || tx==18u) {
         int associated = clean_station_evidence(detail);
+        int authorized=tx==18u && associated && usb_report_u32(detail+1640u)==0x32575043u &&
+            usb_report_u32(detail+1644u)==4u && !usb_report_u32(detail+1648u) &&
+            usb_report_u32(detail+1668u)>0u;
         printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,\"stage\":%u,"
                "\"error\":%u,\"actual\":%u,\"fw_error\":%u,\"ap_profile\":%d,"
                "\"phase\":%u,\"authentication_status\":%d,\"association_status\":%d,"
                "\"aid\":%u,\"auth_attempts\":%u,\"assoc_attempts\":%u,"
                "\"tx_ack_received\":%u,\"ack_responses_scheduled\":%u,"
                "\"ack_schedule_errors\":%u,\"deauth_reason\":%u,"
-               "\"associated\":%s,\"wpa2_authorized\":false,"
+               "\"associated\":%s,\"wpa2_authorized\":%s,"
                "\"local_mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
                "\"own_rx_candidates\":%u,\"association_candidate_bytes\":%u,"
-               "\"eapol_m1_received\":%s,\"eapol_m1_count\":%u}\n",
+               "\"eapol_m1_received\":%s,\"eapol_m1_count\":%u,"
+               "\"wpa_stage\":%u,\"wpa_error\":%u,\"m2_sent\":%u,\"m3_validated\":%u,"
+               "\"m4_sent\":%u,\"protected_echoes\":%u,\"gtk_kde\":\"%06x\"}\n",
                serial, USB_REPORT_BUILD_ID, usb_report_u32(detail + 28u),
                usb_report_u32(detail + 4u), usb_report_u32(detail + 8u),
                usb_report_u32(detail + 16u), usb_report_u32(detail + 44u),
@@ -273,13 +319,18 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(detail + 536u), usb_report_u32(detail + 540u),
                usb_report_u32(detail + 544u), usb_report_u32(detail + 548u),
                usb_report_u32(detail + 552u), usb_report_u32(detail + 556u),
-               usb_report_u32(detail + 568u), associated ? "true" : "false",
+               usb_report_u32(detail + 568u), associated ? "true" : "false",authorized?"true":"false",
                detail[1972], detail[1973], detail[1974], detail[1975], detail[1976], detail[1977],
                usb_report_u32(detail + 1096u), usb_report_u32(detail + 796u),
-               clean_station_eapol_evidence(detail) ? "true" : "false",
-               usb_report_u32(detail + 576u));
+               (tx==18u?usb_report_u32(detail+1652u)>0u:clean_station_eapol_evidence(detail)) ? "true" : "false",
+               tx==18u?usb_report_u32(detail+1652u):usb_report_u32(detail + 576u),
+               tx==18u?usb_report_u32(detail+1644u):0u,tx==18u?usb_report_u32(detail+1648u):0u,
+               tx==18u?usb_report_u32(detail+1656u):0u,tx==18u?usb_report_u32(detail+1660u):0u,
+               tx==18u?usb_report_u32(detail+1664u):0u,tx==18u?usb_report_u32(detail+1668u):0u,
+               tx==18u?usb_report_u32(detail+1672u):0u);
         if (!associated) fputs("No validated successful association exchange\n", stderr);
-        return associated;
+        if (tx==18u && !authorized) fputs("WPA2 protected round trip not established\n",stderr);
+        return tx==18u?authorized:associated;
     }
     printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,\"stage\":%u,\"error\":%u,"
            "\"address\":\"%08x\",\"actual\":\"%08x\",\"verified_bytes\":%u,"
@@ -374,9 +425,10 @@ int main(int argc, char **argv) {
         return inspect(argv[2], argv[3]) ? 0 : 1;
     uint8_t challenge[14];
     uint8_t target[6];
-    int ap_mode = argc == 6 && (strcmp(argv[4], "--ap-auth") == 0 ||
+    int wpa_mode=argc==7 && strcmp(argv[4],"--ap-wpa2")==0;
+    int ap_mode = wpa_mode || (argc == 6 && (strcmp(argv[4], "--ap-auth") == 0 ||
                                 strcmp(argv[4], "--ap-assoc") == 0 ||
-                                strcmp(argv[4], "--ap-monitor") == 0);
+                                strcmp(argv[4], "--ap-monitor") == 0));
     if (ap_mode && !ap_bssid_decode(argv[5], target)) {
         fputs("AP BSSID must be a nonzero unicast address in XX:XX:XX:XX:XX:XX format\n", stderr);
         return 2;
@@ -409,6 +461,8 @@ int main(int argc, char **argv) {
               "--peer-rx|--peer-tx|--peer-tx-1m CHALLENGE_HEX_28\n", stderr);
         fputs("AP authentication only: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-auth|--ap-assoc|--ap-monitor XX:XX:XX:XX:XX:XX\n", stderr);
+        fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--ap-wpa2 XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE\n",stderr);
         return 2;
     }
     char *end;
@@ -450,8 +504,10 @@ int main(int argc, char **argv) {
     if (peer_mode) mode = peer_mode;
     if (ap_mode) mode = strcmp(argv[4], "--ap-assoc") == 0 ? 16u :
                         strcmp(argv[4], "--ap-monitor") == 0 ? 17u : 15u;
+    if (wpa_mode) mode=18u;
     if (status == 0) ok = collect(device, argv[2], (uint8_t)channel, mode,
-                                 peer_mode ? challenge : NULL, ap_mode ? target : NULL, argv[1]);
+                                 peer_mode ? challenge : NULL, ap_mode ? target : NULL, argv[1],
+                                 wpa_mode?argv[6]:NULL);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     int rebooted = transfer(device, 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);
     if (status == 0) libusb_release_interface(device, 0);
