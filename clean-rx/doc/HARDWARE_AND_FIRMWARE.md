@@ -58,7 +58,7 @@ The CYW43439 provides 512 KiB of contiguous SRAM mapped at `0x00000000..0x0007ff
 | `0x00000100..0x00013fff` | ~18 KiB | Firmware executable code, read-only tables, and PSM microcode image (`.text`, `.rodata`) |
 | `0x00014000..0x0001bfff` | ~2 KiB | Zero-initialized firmware state (`.bss`) |
 | `0x0001f000` | — | Initial Main Stack Pointer (`MSP`, growing downward) |
-| `0x00020000..0x000201cf` | 464 B | Host/Firmware Control Mailbox (`fw_mbox_t`), including credits and RX fault latch |
+| `0x00020000..0x000201df` | 480 B | Host/Firmware Control Mailbox (`fw_mbox_t`), including credits and RX fault latch |
 | `0x00020d80..0x000241a7` | 13,352 B | Multi-Frame Capture Ring (`fw_multi_t`, 8 frame slots x 1,664 B) |
 | `0x00026000..0x000261ff` | 512 B | D11 RX DMA Descriptor Ring (32 descriptors x 16 B, 8-KiB aligned) |
 | `0x00026200..0x0003387f` | 54,912 B | D11 RX DMA Packet Buffers (32 buffers x 1,716 B) |
@@ -162,18 +162,19 @@ Even after the Radio and PHY are calibrated, the D11 core requires four hardware
 
 ## 7. D11 PSM Microcode (`psm_ucode.c`)
 
-The D11 Programmable State Machine executes 301 64-bit Arch15 instructions
-(`2,408` bytes) loaded via the D11 object port (`0x18001160` word selector
-`0..601`, `0x18001164` 32-bit data). Six appended instructions preserve RX
-rejection evidence before rearm. Native identity tests restore the intended
+The D11 Programmable State Machine executes 314 64-bit Arch15 instructions
+(`2,512` bytes) loaded via the D11 object port (`0x18001160` word selector
+`0..627`, `0x18001164` 32-bit data). Fourteen appended instructions preserve RX
+rejection evidence and five enable correctly timed RX-buffer streaming.
+Native identity tests restore the intended
 patches in the original 295-instruction prefix and verify its original CRC.
 
-**These are software capture bounds, not qualified large-frame radio support.**
-The Ethernet-MTU test currently rejects large frames with an RX FIFO overflow
-at frame count 506 despite the programmed 1,608-byte limit. Exact bidirectional
-Data MPDUs were confirmed through 480 bytes in a 32-byte-step probe, but none of
-its 512..1,600-byte cases passed. See the
-[current qualification evidence](../../docs/micro-signal.md#ethernet-mtu-work-transport-ready-radio-qualification-still-blocked).
+**All 65 MPDU lengths 1,536..1,600 bytes are qualified bidirectionally at 11 Mbps
+CCK**, including 1,500-byte payloads in 1,536-byte Data + LLC/SNAP MPDUs.
+The former count-506 overflow was a missing RX-buffer streaming operation,
+not the advertised RX-FIFO size or SHM/SRAM capacity. Hardware EROM identifies
+D11 core revision 39; rev-40+ BMC register assumptions do not apply. See the
+[cause, causal control and qualification evidence](../../docs/micro-signal.md#ethernet-mtu-frames-rx-streaming-repair).
 The CCMP paths below describe existing experimental hooks, not qualified
 encrypted reception or WPA2 support.
 
@@ -192,12 +193,14 @@ encrypted reception or WPA2 support.
    - Polls `ext 14` (PLCP valid). When asserted, issues a 6-byte initial copy (`spr:0x02a = 6`, `spr:0x004 = 0x40`) and waits for `spr:0x00d` bit 12 and `spr:0x00c >= 6`.
    - The 6-byte PLCP header is written by RXE into `shm:0x201..0x203` (`shm:0x200` holds a duplicate of `shm:0x201`).
 3. **Variable-Length MPDU Streaming, Hardware AES-128-CCMP Decryption, & FCS Verification (`prefix_seen` -> `frame_wait`):**
-   - Reads `r2 = spr:0x02b & 0x0fff`, writes `spr:0x02a = r2`, and triggers `spr:0x004` continuation (`field 8, 6, 131, spr:0x004`). The intended MPDU destination is `shm:0x204..0x523`; the large-frame copy/receive sequence remains unqualified.
+   - Retains the original SHM continuation handshake: reads `r2 = spr:0x02b & 0x0fff`, writes `spr:0x02a = r2`, and triggers `spr:0x004` continuation (`field 8, 6, 131, spr:0x004`). This continuation value is not treated as a validated full MPDU length.
    - If `shm:0x615 != 0` (Hardware CCMP enabled) and the received Frame Control word (`shm:0x204`) has the Protected bit (`0x4000`) set:
      - Computes the CCMP IV byte offset (`30` for non-QoS Data when `FC` bit 7 is `0`, or `32` for QoS Data when `FC` bit 7 is `1`) and writes `spr:0x1e1` (`WEP_IVLOC`).
      - Streams the 8 words (16 bytes) of the Temporal Key (`TK`) from `shm:0x618..0x61f` into `spr:0x1e2` (`WEP_KEY`, with `spr:0x1e3 = 0x0110`) and triggers `spr:0x1e0 = 0x110b` (`WEP_CTL`: AES-128-CCMP hardware decrypt + MIC verify).
      - The experimental path requests in-place payload decryption in the relocated capture area and an 8-byte CCMP MIC check (`spr:0x00d` bit 3).
-   - In `frame_wait`, waits for `ext 6` (RX complete) and `spr:0x00c >= 14`, then polls `ext 3` (Good FCS) inside the loop. If `ext 3` asserts, branches to `capture`; if the loop expires or `ext 13`/`ext 5` fires, increments the corresponding discard counter (`shm:0x7a8..0x7ab`) and jumps to `rearm_flush`.
+   - In `frame_wait`, enables `spr:0x004` low bits `2` once the RXE count reaches 128 bytes, unless bit 1 is already set. This drains PHY staging into the RX buffer while the remaining frame arrives; SHM peeking alone does not do so.
+   - Retains the wait for `ext 6` (RX complete) and `spr:0x00c >= 14`, then polls `ext 3` (Good FCS). If `ext 3` asserts, branches to `capture`; if the loop expires or `ext 13`/`ext 5` fires, increments the corresponding discard counter (`shm:0x7a8..0x7ab`) and jumps to `rearm_flush`.
+   - Before the overflow/bad-PLCP branch rearms RXE, twelve words at `shm:0x620..0x62b` latch count, raw `0x56`, status, capture limit, phase, FIFO control, raw `0x54`, continuation value, PLCP and encoding/status. These are mirrored at mailbox offset 456.
 4. **24-Byte `d11rxhdr` Construction & RX FIFO Publication (`capture` -> `wait_arm_ack`):**
    - Populates the 12-word (24-byte) hardware receive header at `shm:0x7f4..0x7ff`:
      - `shm:0x7f4`: `RxFrameSize` (`spr:0x00c`, PLCP + MPDU length in bytes)

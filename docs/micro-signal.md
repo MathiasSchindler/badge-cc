@@ -17,11 +17,13 @@ indefinitely-running messenger or a complete 802.11 implementation.
 
 ## Build and install
 
-### Ethernet-MTU work: transport ready, radio qualification still blocked
+### Ethernet-MTU frames: RX streaming repair
 
 The current work targets a 1,500-byte Ethernet payload first, not the complete
-2,304-byte legacy MSDU range. **Do not treat the enlarged buffers as proof of
-large-frame radio support.** The full Ethernet-MTU milestone is not complete.
+2,304-byte legacy MSDU range. **All 65 MPDU lengths from 1,536 through 1,600
+bytes have now passed exact bidirectional OTA qualification at 11 Mbps CCK.**
+This is raw Data-frame support, not an Ethernet interface, association or IP
+stack.
 
 Shared limits in [frame_limits.h](../clean-rx/frame_limits.h) now provide:
 
@@ -39,13 +41,14 @@ The production-equivalent RF-free credit profile now checks all **1,593 payload
 lengths, 8..1,600 bytes**, interleaved with explicit boundary cases. It retains
 32-byte bursts, one genuine host credit, exact byte comparisons, and deferred
 acknowledgement until validation. Earlier small-length and 483/520-byte negative
-controls retain their original patterns:
+controls retain their original patterns.
 
 The five-minute run delivered **78,373 / 78,856 exact packets** on the two
 badges, with zero device errors, drops or stalls, using pattern 2, window 1 and
 DMA control `0x00060801`. This qualifies the enlarged SRAM/SDIO path, not RF.
 
-A final 180-second ordinary-messenger regression passed with 276 / 272 peer
+Before the RX-streaming repair, a 180-second ordinary-messenger regression
+passed with 276 / 272 peer
 events, zero device errors and no stalls, beyond the former 125-second failure
 point. It is not a loss-free RF benchmark: unrelated incoming traffic can still
 be dropped while the single host credit is occupied.
@@ -54,8 +57,8 @@ be dropped while the single host credit is occupied.
 make test-micro-signal micro-signal-transport-credit-test micro-signal-mtu-test
 ```
 
-`micro-signal-mtu-test.uf2` is an **experimental qualification image**, not a
-working MTU messenger. It sends broadcast 802.11 Data frames with LLC/SNAP,
+`micro-signal-mtu-test.uf2` is an **experimental qualification image**. It sends
+broadcast 802.11 Data frames with LLC/SNAP,
 experimental EtherType `0x88b5`, and 1,500..1,564 payload bytes. The 65 MPDU
 lengths are 1,536..1,600 bytes. Its receiver checks the entire canonical frame,
 fresh peer/session/sequence, deterministic payload and FCS. The host collector
@@ -63,34 +66,67 @@ only reports `mtu_frames_confirmed: true` if **both badges receive every one of
 the 65 lengths**. Use `--soak 300`; a short run may not cover the whole sweep.
 CCK PLCP generation includes the 11-Mbps length-extension service bit.
 
-Hardware investigation found a separate radio receive limit:
+#### Cause of the former 506-byte overflow
 
-- The original small-frame messenger still worked after relocating scratch
-  memory and DMA rings.
-- An exact-payload OTA size probe received Data MPDUs from 128 through 480 bytes,
-  in 32-byte steps, on both badges. None of its 512..1,600-byte cases arrived.
-- Rejected large frames latched RXE frame count `0x01fa` (506), status `0x9802`
-  or related values with **FIFO-overflow bit 15 set**, and actual scratch-limit
-  readback `0x0648` (1,608). Thus this is not just an undersized host array or an
-  ignored scratch-limit write.
-- Full TX template-RAM readback succeeded, and TXE/IFS reported completion.
-  Neither proves that a peer received a complete large MPDU.
-- Increasing the prefix timeout, bypassing its bit-12 wait, using a power-of-two
-  scratch size, starting FIFO publication early, changing the low FIFO mode
-  bits, and changing RXE storage configuration did not qualify large reception.
-  Those unsuccessful changes were reverted.
+The old PSM peeked/captured into SHM and waited for receive completion/FCS
+before committing the frame to the RX FIFO. **SHM peeking alone does not drain
+the finite PHY-side staging buffer.** Large frames exhausted that staging:
+the rejected RXE count stopped at `0x01fa` (506), with overflow bit 15 set,
+even though the SHM limit correctly read back as `0x0648` (1,608).
 
-The remaining work is to establish the correct RXE/FIFO buffering and copy
-sequence. Merely enlarging SRAM or relaxing error checks does not fix it.
-The actual MAC capability register (`0x1800115c`) reads `0xb0a08205` on both
-badges. The older public RX-FIFO size field would indicate twenty 512-byte
-units, not a 512-byte total FIFO; its precise applicability still needs
-verification. Register `0x18001190` is TSF CFP maximum duration, not MAC
-capability; its existing writes are unchanged.
-The PSM now preserves the rejecting frame count, raw copy-status word, RXE
-status and copy limit before rearm clears them. These four 16-bit words are
-appended at mailbox byte offset 456; previous mailbox fields and credits are
-unchanged. The historical `discard_plcp` counter also includes this overflow
+The repair enables `RXE_FIFOCTL1` bit 1 during reception, **after a stable
+128-byte prefix is available**, and only once per frame. This streams the
+incoming body into the RX buffer before staging fills. The 128-byte prefill
+leaves room for the supported MAC/CCMP prefix and margin before the observed
+overflow boundary; it is not a frame-size limit. The existing FCS/length
+checks, final 24-byte receive-header publication, DMA reclamation, flush and
+host-consumption credit are unchanged. Starting streaming immediately after
+the six-byte PLCP copy broke reception and is not used.
+
+The causal control changed only one PSM instruction to bypass the new streaming
+path, with otherwise identical controller binaries. In a paired 30-second run:
+
+| Receiver | Peer MTU events | Result |
+|---|---:|---|
+| Streaming enabled | 53 | Complete canonical payloads and valid FCS |
+| Streaming bypassed | 0 | Original count-506 overflow reproduced |
+
+The bypassed receiver still transmitted large frames successfully to the fixed
+badge. This independently separates the receive defect from TX template size,
+PLCP generation, host SRAM and SDIO transfer limits.
+
+With streaming enabled on both badges, the five-minute OTA run
+`rxe-mtu-stream-soak` delivered **466 / 461 peer events**, with every one of the
+65 lengths received at least seven times on each badge, zero device errors and
+no stalls. The SDIO drop counters still include unrelated incoming traffic
+while the single host credit is occupied; this is not a loss-free RF benchmark.
+
+A separate 120-second regression swept **47 Data MPDU sizes, 128..1,600 bytes
+in 32-byte steps**. Every size passed on both badges, including the former
+480/512-byte boundary, with **180 / 178 peer events**, zero device errors and
+no stalls. The temporary sweep builder and collector changes were removed;
+the normal qualification profile remains the 65 Ethernet-MTU sizes.
+
+After restoring the normal sources and rebuilding, a final **180-second
+ordinary-messenger regression** passed with **275 / 272 peer events**, zero
+device errors and no stalls. Both badges then received the normal messenger
+image; full **32,376-byte flash readbacks** matched the production binary.
+They were left in BOOTSEL, ready to boot the installed application.
+
+The hardware EROM identifies D11 **core revision 39** on both badges:
+component `0x4bf81201`, revision word `0x27004211`. The newer rev-40+ BMC register
+map is not applicable. MAC capability `0x1800115c = 0xb0a08205` advertises twenty
+512-byte RX-FIFO units, distinct from the small pre-FIFO staging area.
+`0x18001190` is TSF CFP maximum duration, not capability.
+
+The rejection snapshot now preserves twelve 16-bit words at mailbox byte offset
+456, extending the mailbox to 480 bytes without moving previous fields:
+RXE count, raw `0x56`, status, SHM limit, PSM phase, FIFO control, raw `0x54`,
+saved continuation value, three PLCP words, and RXE encoding/status.
+The `0x56 & 0x0fff` continuation value can be zero; replacing it with a
+PLCP-derived byte length did **not** repair reception and was reverted.
+Likewise, longer timeouts, larger scratch buffers, and premature DMA/publication
+were not fixes. The historical `discard_plcp` counter includes the overflow
 branch and must not be interpreted as exclusively bad over-air PLCP CRCs.
 
 The diagnostic badge's fixed 2-KiB report deliberately saves only a bounded
@@ -105,8 +141,8 @@ make micro-signal test-micro-signal
 ```
 
 The result is `build/universe26/uf2/micro-signal.uf2`. The current build is
-**64,000 bytes (62.5 KiB)**, containing a **31,908-byte** flash image, including
-the **20,652-byte** source-built Wi-Fi controller firmware. Size optimization,
+**65,024 bytes (63.5 KiB)**, containing a **32,376-byte** flash image, including
+the **21,032-byte** source-built Wi-Fi controller firmware. Size optimization,
 LTO and section garbage collection are enabled. The framebuffer uses RAM,
 not UF2 payload space.
 
@@ -749,9 +785,10 @@ setting was added to production.
 including FCS, while the traditional maximum MSDU is 2,304 bytes, before MAC
 framing overhead. Aggregation and later PHY generations have other limits;
 those are not claims about implemented CYW43439 features here.
-The source sender's current 504-byte MPDU ceiling is a software bound in this
-project, not the Wi-Fi standard's maximum. Supporting larger frames requires
-auditing the capture buffers, firmware/host protocol and validation together.
+At this historical stage the source sender's 504-byte MPDU ceiling was a
+software bound in this project, not the Wi-Fi standard's maximum. The
+[later MTU expansion and RX-streaming repair](#ethernet-mtu-frames-rx-streaming-repair)
+audit the capture buffers, firmware/host protocol and validation together.
 
 The 483/520-byte sizes in this investigation are whole **SDPCM transport
 packets**, including their 18-byte wrapper, not maximum radio frame lengths.
@@ -876,7 +913,8 @@ The preceding sections record historical experiments and their then-current
 settings. Current production instead combines **32-byte DMA bursts and one
 explicit host-consumption credit**, without sleeps or packet-size filtering.
 No 802.11 MPDU bytes, FCS, SDPCM lengths or padding rules are changed.
-The existing 504-byte MPDU software limit is not expanded by this repair.
+That transport repair alone did not expand the then-existing 504-byte MPDU
+software limit; the [later MTU work](#ethernet-mtu-frames-rx-streaming-repair) does.
 
 The public [DMA definitions at the investigated revision](https://github.com/RMerl/asuswrt-merlin.ng/blob/473402024dc5f6b79ba5f5a4b4b4a8a6d9437c52/release/src-rt-5.02axhnd/bcmdrivers/broadcom/net/wl/impl51/main/src/include/sbhnddma.h#L266)
 specify different defaults for SDIO and USB: burst encoding 1 (32 bytes)

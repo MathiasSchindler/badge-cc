@@ -202,10 +202,10 @@ typedef struct {
     uint32_t f2_counts;
     uint32_t f2_consumed;
     uint32_t f2_posted;
-    uint16_t rx_fifo_fault[4];
+    uint16_t rx_fifo_fault[CLEAN_RX_FAULT_WORDS];
 } fw_mbox_t;
 
-_Static_assert(sizeof(fw_mbox_t) == 464u, "Mailbox size");
+_Static_assert(sizeof(fw_mbox_t) == 480u, "Mailbox size");
 _Static_assert(__builtin_offsetof(fw_mbox_t, rx_fifo_fault) == 456u, "RX fault snapshot offset");
 
 static inline uint32_t mmio_read32(uint32_t addr) {

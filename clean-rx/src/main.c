@@ -582,7 +582,7 @@ static void snapshot_psm(uint32_t started, uint32_t polls) {
     for (uint32_t i = 0u; i < 16u; ++i) {
         MBOX->psm_mailbox[i] = shm_read16(0x600u + i);
         MBOX->psm_diag[i] = shm_read16(0x7a0u + i);
-        if (i < 4u) MBOX->rx_fifo_fault[i] = shm_read16(0x620u + i);
+        if (i < CLEAN_RX_FAULT_WORDS) MBOX->rx_fifo_fault[i] = shm_read16(0x620u + i);
     }
     sample_rxe8(MBOX->rxe_pre);
     MBOX->rx_polls = polls;
@@ -1029,7 +1029,7 @@ void cyw43_main(void) {
         MBOX->psm_mailbox[i] = shm_read16(0x600u + i);
     for (uint32_t i = 0u; i < 16u; ++i) {
         MBOX->psm_diag[i] = shm_read16(0x7a0u + i);
-        if (i < 4u) MBOX->rx_fifo_fault[i] = shm_read16(0x620u + i);
+        if (i < CLEAN_RX_FAULT_WORDS) MBOX->rx_fifo_fault[i] = shm_read16(0x620u + i);
     }
     if (MULTI->captured_frames > 0u) {
         for (uint32_t i = 0u; i < 96u; ++i)

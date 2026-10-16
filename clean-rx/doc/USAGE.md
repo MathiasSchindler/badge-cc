@@ -2,10 +2,12 @@
 
 This guide explains how an RP2350 host application loads, boots, and communicates with the open-source `cyw43_rx_fw.bin` transceiver firmware over the 4-pin gSPI bus.
 
-**Larger-frame qualification is incomplete.** The shared storage/transport
-ceiling is now 1,600 MPDU bytes, but hardware large-frame RX still encounters a
-separate FIFO overflow. See the current
-[Ethernet-MTU investigation](../../docs/micro-signal.md#ethernet-mtu-work-transport-ready-radio-qualification-still-blocked).
+**Ethernet-MTU raw frames are now qualified at 11 Mbps CCK.** Both badges
+received every MPDU length 1,536..1,600 bytes in a five-minute OTA run, including
+1,500-byte payloads. The count-506 overflow was repaired by enabling RX-buffer
+streaming after a stable prefix, before PHY staging fills. See the
+[RX-streaming repair and qualification](../../docs/micro-signal.md#ethernet-mtu-frames-rx-streaming-repair).
+This does not add association, an Ethernet/IP stack or the full 2,304-byte MSDU range.
 Use the shared limits and TX length helpers rather than copying old sizes or
 shifting a large length directly into command flags.
 
@@ -198,7 +200,7 @@ To boot `cyw43_rx_fw.bin` from cold power-on on the RP2350:
    - Disable SRAM bank standby by writing `0` to `SOCRAM + 0x10` (`0x18004010 = 0`) and `0` to `SOCRAM + 0x44` (`0x18004044 = 0`).
 
 ### Step 3: Load `cyw43_rx_fw.bin` and Configure the Mailbox
-1. Zero the mailbox (`0x00020000`, `464` bytes) and multi-frame capture ring (`0x00020d80`, `13352` bytes).
+1. Zero the mailbox (`0x00020000`, `480` bytes) and multi-frame capture ring (`0x00020d80`, `13352` bytes).
 2. Copy `cyw43_rx_fw.bin` (`cyw43_rx_fw_start..cyw43_rx_fw_end`) into CYW43439 SRAM starting at `0x00000000` using 64-byte aligned backplane writes.
 3. Configure the initial mailbox fields at `0x00020000` (`FW_MBOX_ADDR`):
    ```c
@@ -224,7 +226,7 @@ To boot `cyw43_rx_fw.bin` from cold power-on on the RP2350:
    ```c
    bp_write(0x00020000u + 24u, 4u, 1u); /* MBOX->host_cmd = 1 */
    ```
-5. Poll `MBOX->fw_state` (`0x00020004`) until it reaches `FW_STATE_PSM_READY` (`8`). At this point, the D11 core, Radio 20691, LCN20 PHY, and 301-instruction PSM microcode have completed initialization.
+5. Poll `MBOX->fw_state` (`0x00020004`) until it reaches `FW_STATE_PSM_READY` (`8`). At this point, the D11 core, Radio 20691, LCN20 PHY, and 314-instruction PSM microcode have completed initialization.
 6. Start active reception by writing `host_cmd = 2`:
    ```c
    bp_write(0x00020000u + 24u, 4u, 2u); /* MBOX->host_cmd = 2 (FW_STATE_RX_ACTIVE) */
@@ -241,7 +243,7 @@ Once `MBOX->fw_state == FW_STATE_RX_ACTIVE` (`9`), the RP2350 controls the trans
 | `2` | **Idle / Active RX** | Firmware is actively receiving frames and streaming them over gSPI Function 2. Look for `host_cmd == 2` to confirm completion of commands `4`, `5`, or `6`. |
 | `3` | **Stop Transceiver** | Cleanly stops MAC/PSM and D11 RX DMA, populates diagnostic snapshots in `MBOX`, and transitions `fw_state` to `FW_STATE_RX_DONE` (`10`). |
 | `4 \| (ch << 8)` | **Fast Channel Switch** | Tunes Radio 20691 and LCN20 PHY to 2.4 GHz channel `ch` (`1..14`) in ~3.5 ms without re-running cold calibration, then resumes reception. |
-| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..1606`, staged at `FW_TX_BUF_ADDR` (`0x00044400`), repeated `1..255` times. The extended bound is a storage/command limit, not qualified large-frame OTA support. Hardware CCMP hooks remain unqualified. |
+| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..1606`, staged at `FW_TX_BUF_ADDR` (`0x00044400`), repeated `1..255` times. Large raw Data frames through 1,600 MPDU bytes are qualified at 11 Mbps CCK; other rates and hardware CCMP remain unqualified. |
 | `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x00044400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
 
 ---

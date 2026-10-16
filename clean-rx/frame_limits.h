@@ -14,6 +14,8 @@
 #define CLEAN_SHM_FRAME 0x200u
 #define CLEAN_SHM_CAPTURE_LIMIT 0x616u
 #define CLEAN_SHM_RXE_LIMIT 0x617u
+#define CLEAN_RX_FAULT_WORDS 12u
+#define CLEAN_RX_STREAM_PREFIX_BYTES 128u
 
 #define CLEAN_D11_RING_ADDR 0x26000u
 #define CLEAN_D11_BUFFER_ADDR 0x26200u
@@ -28,6 +30,11 @@
 
 _Static_assert(CLEAN_SHM_FRAME + CLEAN_RAW_BYTES / 2u <= 0x600u,
                "Capture must not overlap PSM controls");
+_Static_assert(CLEAN_RX_STREAM_PREFIX_BYTES >= CLEAN_PLCP_BYTES + 36u + 8u &&
+               CLEAN_RX_STREAM_PREFIX_BYTES < 506u,
+               "Stream after the MAC/CCMP prefix and before PHY staging fills");
+_Static_assert(CLEAN_RX_FAULT_WORDS <= 16u && 984u + 2u * CLEAN_RX_FAULT_WORDS <= 1024u,
+               "RX fault snapshot must fit mailbox polling and MTU trace");
 _Static_assert(CLEAN_RX_PACKET_BYTES <= 0x7ffu, "gSPI 11-bit transfer size");
 _Static_assert(CLEAN_RX_PACKET_BYTES <= CLEAN_SDIO_BUFFER_BYTES, "SDIO slot size");
 _Static_assert(CLEAN_SDIO_BUFFER_ADDR + 32u * CLEAN_SDIO_BUFFER_BYTES <= CLEAN_TX_BUFFER_ADDR,

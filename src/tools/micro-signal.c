@@ -510,6 +510,21 @@ void bare_main(void) {
         if (recover) bootsel();
         radio_error();
     }
+#ifdef MICRO_SIGNAL_MTU_TEST
+    uint32_t erom;
+    if (!clean_read(&loader, 0x180000fcu, &erom)) radio_error();
+    if (erom < 0x18000000u || erom > 0x181fff00u || (erom & 3u) != 0u) {
+        loader.error = CLEAN_INPUT;
+        loader.actual = erom;
+        radio_error();
+    }
+    badger_bytes_store_u32(test_control.trace + 2940u, erom);
+    for (uint32_t i = 0u; i < 64u; ++i) {
+        uint32_t value;
+        if (!clean_read(&loader, erom + 4u * i, &value)) radio_error();
+        badger_bytes_store_u32(test_control.trace + 2944u + i * 4u, value);
+    }
+#endif
 #ifdef MICRO_SIGNAL_TRANSPORT_TEST
     line(52u, "SDIO TEST / NO RF", 0x5ecbu);
     transport_test();
@@ -703,8 +718,18 @@ void bare_main(void) {
                 if (!clean_read(&loader, rxe_registers[i], &value)) radio_error();
                 badger_bytes_store_u32(test_control.trace + 952u + i * 4u, value);
             }
-            if (!clean_block(&loader, CLEAN_MBOX + 456u, test_control.trace + 984u, 8u, 0u))
+            if (!clean_block(&loader, CLEAN_MBOX + 456u, test_control.trace + 984u,
+                             CLEAN_RX_FAULT_WORDS * 2u, 0u))
                 radio_error();
+            static const uint32_t fifo_registers[] = {
+                0x18001420u,0x18001424u,0x18001428u,0x1800142cu,
+                0x18001430u,0x18001438u,0x1800143cu,0x18001440u
+            };
+            for (uint32_t i = 0u; i < 8u; ++i) {
+                uint32_t value;
+                if (!clean_read(&loader, fifo_registers[i], &value)) radio_error();
+                badger_bytes_store_u32(test_control.trace + 2900u + i * 4u, value);
+            }
 #endif
 #endif
             if ((f2_counts >> 16u) != dropped || loader.rx_resyncs != resyncs) {

@@ -9,10 +9,10 @@
                        ((uint64_t)(b) << 13u) | (d))
 
 extern const uint32_t psm_ucode_byte_count;
-extern const uint8_t psm_ucode_bytes[2408];
+extern const uint8_t psm_ucode_bytes[2512];
 
 static uint64_t instruction(uint32_t pc) {
-    assert(pc < 301u);
+    assert(pc < 314u);
     uint64_t word = 0u;
     for (uint32_t i = 0u; i < 8u; ++i)
         word |= (uint64_t)psm_ucode_bytes[pc * 8u + i] << (8u * i);
@@ -32,11 +32,22 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
-    const uint32_t fault_regs[] = {0x100cu,0x102bu,0x100du,0x1002u};
-    for (uint32_t i = 0u; i < 4u; ++i)
+    restore(original, 191u, WORD(0x77fu,0x1780u,0x1780u,309u),
+            WORD(0x606u,0x1780u,0x1780u,194u));
+    assert(instruction(309u) == WORD(0x501u,0x1004u,0x1800u,312u));
+    assert(instruction(310u) ==
+           WORD(0xdau,0x100cu,0x1800u | CLEAN_RX_STREAM_PREFIX_BYTES,312u));
+    assert(instruction(311u) == WORD(0x310u,0x1802u,0x1004u,0x1004u));
+    assert(instruction(312u) == WORD(0x606u,0x1780u,0x1780u,194u));
+    assert(instruction(313u) == WORD(0x77fu,0x1780u,0x1780u,192u));
+    const uint32_t fault_regs[] = {0x100cu,0x102bu,0x100du,0x1002u,
+                                  0x607u,0x1004u,0x102au,0x7a2u,
+                                  CLEAN_SHM_FRAME + 1u,CLEAN_SHM_FRAME + 2u,
+                                  CLEAN_SHM_FRAME + 3u,0x100eu};
+    for (uint32_t i = 0u; i < CLEAN_RX_FAULT_WORDS; ++i)
         assert(instruction(295u + i) == WORD(0x3f0u,fault_regs[i],0x1800u,0x620u + i));
-    assert(instruction(299u) == WORD(0x1c0u,0x7abu,0x1801u,0x7abu));
-    assert(instruction(300u) == WORD(0x77fu,0x1780u,0x1780u,266u));
+    assert(instruction(307u) == WORD(0x1c0u,0x7abu,0x1801u,0x7abu));
+    assert(instruction(308u) == WORD(0x77fu,0x1780u,0x1780u,266u));
     restore(original, 257u, WORD(0x77fu,0x1780u,0x1780u,295u),
             WORD(0x1c0u,0x7abu,0x1801u,0x7abu));
     for (uint32_t pc = 65u; pc <= 285u; pc += 220u) {
@@ -114,6 +125,60 @@ static int flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t limit) {
     return 0;
 }
 
+static uint16_t stream_prefix(uint16_t rxctl, uint16_t count, int complete,
+                              uint32_t *writes, uint32_t *next) {
+    uint32_t pc = 191u;
+    *writes = 0u;
+    for (uint32_t step = 0u; step < 8u; ++step) {
+        if (pc == 192u || pc == 194u) {
+            *next = pc;
+            return rxctl;
+        }
+        uint64_t w = instruction(pc);
+        uint32_t op = (uint32_t)(w >> 39u);
+        uint32_t a = (uint32_t)(w >> 26u) & 0x1fffu;
+        uint32_t b = (uint32_t)(w >> 13u) & 0x1fffu;
+        uint32_t d = (uint32_t)w & 0x1fffu;
+        ++pc;
+        if (op == 0x77fu) pc = d;
+        else if (op == 0x501u) {
+            assert(a == 0x1004u && b == 0x1800u);
+            if ((rxctl & 2u) != 0u) pc = d;
+        } else if (op == 0xdau) {
+            assert(a == 0x100cu);
+            if (count < immediate(b)) pc = d;
+        } else if (op == 0x310u) {
+            assert(b == 0x1004u && d == 0x1004u);
+            rxctl = (uint16_t)((rxctl & ~3u) | (immediate(a) & 3u));
+            ++*writes;
+        } else {
+            assert(op == 0x606u && a == 0x1780u && b == 0x1780u);
+            if (!complete) pc = d;
+        }
+    }
+    assert(!"RX streaming prefix did not terminate");
+    return 0u;
+}
+
+static void streaming(void) {
+    for (uint32_t count = 0u; count <= CLEAN_RXE_BYTES; ++count) {
+        for (uint32_t state = 0u; state < 256u; ++state) {
+            uint16_t before = (uint16_t)(0x2800u | state);
+            int enable = (before & 2u) == 0u && count >= CLEAN_RX_STREAM_PREFIX_BYTES;
+            for (int complete = 0; complete <= 1; ++complete) {
+                uint32_t writes, next;
+                uint16_t after = stream_prefix(before, (uint16_t)count, complete, &writes, &next);
+                assert(after == (enable ? (uint16_t)((before & ~3u) | 2u) : before));
+                assert(writes == (uint32_t)enable);
+                assert(next == (complete ? 192u : 194u));
+                uint32_t again;
+                assert(stream_prefix(after, (uint16_t)count, complete, &again, &next) == after);
+                assert(again == 0u);
+            }
+        }
+    }
+}
+
 int main(void) {
     assert(psm_ucode_byte_count == sizeof(psm_ucode_bytes));
     assert(instruction(81u) == instruction(105u));
@@ -125,6 +190,7 @@ int main(void) {
     memcpy(original + 81u * 8u, old_counter, sizeof(old_counter));
     capture_layout(original);
     assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
+    streaming();
     for (uint16_t bits = 0u; bits < 32u; ++bits) {
         uint32_t delays[] = {0u, 254u, 255u, 256u, 4096u, 65534u, 65535u, 65536u};
         for (uint32_t i = 0u; i < sizeof(delays) / sizeof(delays[0]); ++i) {
@@ -134,6 +200,6 @@ int main(void) {
                    ((bits & 0x14u) == 0u || delays[i] < 255u));
         }
     }
-    puts("PSM: image identity, relocated capture, SHM length operands and startup flush OK");
+    puts("PSM: image identity, capture bounds, RX streaming and startup flush OK");
     return 0;
 }

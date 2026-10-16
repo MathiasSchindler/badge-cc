@@ -271,13 +271,22 @@ finish:
                 printf("%s\"%08x\"", word ? "," : "",
                        badger_bytes_load_u32(traces[i] + 2700u + word * 4u));
             putchar(']');
+            printf(",\"mtu_fifo_%u\":[", i);
+            for (uint32_t word = 0u; word < 8u; ++word)
+                printf("%s\"%08x\"", word ? "," : "",
+                       badger_bytes_load_u32(traces[i] + 2900u + word * 4u));
+            printf("],\"mtu_erom_%u\":[", i);
+            for (uint32_t word = 0u; word < 65u; ++word)
+                printf("%s\"%08x\"", word ? "," : "",
+                       badger_bytes_load_u32(traces[i] + 2940u + word * 4u));
+            putchar(']');
             printf(",\"mtu_rxe_%u\":[", i);
             for (uint32_t word = 0u; word < 7u; ++word)
                 printf("%s\"%08x\"", word ? "," : "",
                        badger_bytes_load_u32(traces[i] + 952u + word * 4u));
             putchar(']');
             printf(",\"mtu_rx_fault_%u\":[", i);
-            for (uint32_t word = 0u; word < 4u; ++word)
+            for (uint32_t word = 0u; word < CLEAN_RX_FAULT_WORDS; ++word)
                 printf("%s\"%04x\"", word ? "," : "", traces[i][984u + word * 2u] |
                        ((unsigned)traces[i][985u + word * 2u] << 8u));
             putchar(']');
