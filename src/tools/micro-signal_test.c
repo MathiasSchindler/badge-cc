@@ -1,5 +1,6 @@
 #include "micro-signal.h"
 #include "../../clean-rx/src/sdio_ring.h"
+#include "../../clean-rx/sdio_test.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -145,11 +146,50 @@ static void sdio_ring(void) {
     assert(clean_sdio_count(0xffff1234u, 1u) == 0xffff1234u);
 }
 
+static void sdio_patterns(void) {
+    uint8_t lengths[497] = {0};
+    for (uint32_t sequence = 1u; sequence <= 497u; ++sequence) {
+        uint32_t length = clean_sdio_test_length(sequence);
+        assert(length >= 8u && length <= 504u);
+        assert(++lengths[length - 8u] == 1u);
+        assert(length + 6u <= 510u);
+        assert(((length + 21u) & ~3u) <= 524u);
+        assert(clean_sdio_test_pattern_length(sequence, 0u) == length);
+        uint32_t transition = clean_sdio_test_pattern_length(sequence, 1u) + 18u;
+        assert(transition == ((sequence & 1u) ? 483u : 520u));
+        assert(((transition + 3u) & ~3u) == ((sequence & 1u) ? 484u : 520u));
+    }
+    assert(clean_sdio_test_length(6743u) == 502u);
+    assert(clean_sdio_test_length(927u) == 14u);
+    assert(clean_sdio_test_byte(0u, 0u) == 0u);
+    assert(clean_sdio_test_byte(1u, 0u) == 52u);
+    assert(clean_sdio_test_byte(1u, 503u) == 183u);
+    assert(clean_sdio_test_byte(927u, 0u) == 5u);
+    assert(clean_sdio_test_byte(6743u, 501u) == 189u);
+    assert(clean_sdio_test_byte(UINT32_MAX, UINT32_MAX) == 150u);
+}
+
+static void sdio_windows(void) {
+    static const uint32_t consumed[] = {0u, 32u, UINT32_MAX - 4u};
+    for (uint32_t base = 0u; base < 3u; ++base) {
+        for (uint32_t window = 0u; window <= 16u; ++window) {
+            for (uint32_t pending = 0u; pending <= 17u; ++pending) {
+                assert(clean_sdio_test_window_open(consumed[base] + pending,
+                                                   consumed[base], window) ==
+                       (window == 0u || pending < window));
+            }
+        }
+    }
+    assert(!clean_sdio_test_window_open(2u, 3u, 1u));
+}
+
 int main(void) {
     frames();
     duplicates();
     debounce();
     sdio_ring();
-    puts("micro-signal: framing, duplicates, debounce and SDIO wrap/backpressure OK");
+    sdio_patterns();
+    sdio_windows();
+    puts("micro-signal: framing, duplicates, debounce, SDIO ring, host windows and all 497 test lengths OK");
     return 0;
 }

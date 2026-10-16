@@ -2,6 +2,7 @@
 #include "usb_live_transport.h"
 #include "../../shared/bytes.h"
 #include "../../tools/diagnostics_logic.h"
+#include "../../../clean-rx/sdio_test.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <time.h>
@@ -31,7 +32,8 @@ static int monotonic_ms(uint64_t *value) {
 }
 
 int main(int argc, char **argv) {
-    int soak = (argc == 5 || argc == 6) && strcmp(argv[4], "--soak") == 0;
+    int transport = (argc == 5 || argc == 6) && strcmp(argv[4], "--transport") == 0;
+    int soak = (argc == 5 || argc == 6) && (strcmp(argv[4], "--soak") == 0 || transport);
     unsigned long seconds = 60u;
     if (soak && argc == 6) {
         char *end;
@@ -44,7 +46,7 @@ int main(int argc, char **argv) {
     }
     if ((argc != 4 && !soak) || strlen(argv[1]) != 16u || strlen(argv[2]) != 16u ||
         strcmp(argv[1], argv[2]) == 0) {
-        fputs("Usage: collect SERIAL_A SERIAL_B OUTPUT_PREFIX [--soak [SECONDS]]\n", stderr);
+        fputs("Usage: collect SERIAL_A SERIAL_B OUTPUT_PREFIX [--soak|--transport [SECONDS]]\n", stderr);
         return 2;
     }
     uint64_t started;
@@ -57,7 +59,7 @@ int main(int argc, char **argv) {
     }
     libusb_device_handle *devices[2] = {NULL, NULL};
     uint8_t records[2][64] = {{0}};
-    uint8_t traces[2][264] = {{0}};
+    uint8_t traces[2][1032] = {{0}};
     int ready[2] = {0,0}, ok = 0;
     uint32_t last_sequence[2] = {0u,0u};
     uint64_t progressed[2] = {0u,0u}, elapsed = 0u;
@@ -109,6 +111,23 @@ int main(int argc, char **argv) {
             /* Sequential USB snapshots may straddle the first repeat of a new event. */
             for (unsigned i = 0u; i < 2u; ++i) {
                 const uint8_t *own = records[i], *peer = records[1u-i];
+                if (transport) {
+                    uint32_t pacing = badger_bytes_load_u32(own + 48u);
+                    uint32_t window = badger_bytes_load_u32(own + 40u);
+                    uint32_t dma_control = badger_bytes_load_u32(own + 36u);
+                    uint32_t pattern = badger_bytes_load_u32(own + 32u);
+                    if (badger_bytes_load_u32(own + 28u) < 1000u ||
+                        badger_bytes_load_u32(own + 28u) < badger_bytes_load_u32(own + 24u) ||
+                        badger_bytes_load_u32(own + 28u) - badger_bytes_load_u32(own + 24u) > 16u ||
+                        badger_bytes_load_u32(own + 56u) <= 1200000u ||
+                        (pacing != 0u && pacing != CLEAN_SDIO_TEST_PACING_TICKS) ||
+                        pacing != badger_bytes_load_u32(peer + 48u) ||
+                        window > 16u || window != badger_bytes_load_u32(peer + 40u) ||
+                        (dma_control & 1u) == 0u || dma_control == 0xffffffffu ||
+                        dma_control != badger_bytes_load_u32(peer + 36u)) ok = 0;
+                    if (pattern > 1u || pattern != badger_bytes_load_u32(peer + 32u)) ok = 0;
+                    continue;
+                }
                 if (memcmp(own + 32u, peer + 12u, 8u) != 0 ||
                     badger_bytes_load_u32(own + 40u) != badger_bytes_load_u32(peer + 20u) ||
                     (!soak && (badger_bytes_load_u32(own + 44u) != 2u ||
@@ -119,12 +138,14 @@ int main(int argc, char **argv) {
                                   badger_bytes_load_u32(own + 44u))) ||
                     badger_bytes_load_u32(own + 56u) <= 1200000u) ok = 0;
             }
-            if (!ok) fputs("Received event does not match the other device's boot session\n", stderr);
+            if (!ok) fputs(transport ? "Transport counts, runtime, pacing, window, DMA or pattern failed validation\n" :
+                                      "Received event does not match the other device's boot session\n", stderr);
             break;
         }
         pause_poll();
     }
-    if (!ok) fputs("Paired button-event OTA confirmation failed or timed out\n", stderr);
+    if (!ok) fputs(transport ? "Transport confirmation failed or timed out\n" :
+                              "Paired button-event OTA confirmation failed or timed out\n", stderr);
 finish:
     if (soak && (first_stall[0] != 0u || first_stall[1] != 0u)) {
         fputs("Peer sequence stopped advancing for at least five seconds\n", stderr);
@@ -147,7 +168,7 @@ finish:
             }
         }
         if (devices[i] != NULL) {
-            for (uint16_t page = 0u; page < 11u; ++page) {
+            for (uint16_t page = 0u; page < 43u; ++page) {
                 uint8_t bytes[64];
                 int read = libusb_control_transfer(devices[i], 0xc0u, LIVE_USB_WIFI_TRACE,
                                                   page, 0u, bytes, sizeof(bytes), 1000u);
@@ -164,8 +185,9 @@ finish:
         }
     }
     libusb_exit(context);
-    printf("{\"bidirectional_button_event_confirmed\":%s,\"soak\":%s,\"elapsed_ms\":%llu",
-           ok ? "true" : "false", soak ? "true" : "false", (unsigned long long)elapsed);
+    printf("{\"bidirectional_button_event_confirmed\":%s,\"transport_confirmed\":%s,\"soak\":%s,\"elapsed_ms\":%llu",
+           ok && !transport ? "true" : "false", ok && transport ? "true" : "false",
+           soak ? "true" : "false", (unsigned long long)elapsed);
     for (unsigned i = 0u; i < 2u; ++i) {
         uint32_t error = badger_bytes_load_u32(records[i] + 4u);
         uint32_t f2_counts = error ? 0u : badger_bytes_load_u32(records[i] + 8u);
@@ -179,6 +201,38 @@ finish:
         for (uint32_t word = 0u; word < 16u; ++word)
             printf("%s\"%08x\"", word ? "," : "", badger_bytes_load_u32(traces[i] + word * 4u));
         putchar(']');
+        if (transport) {
+            printf(",\"transport_delay_ticks_%u\":%u", i,
+                   badger_bytes_load_u32(records[i] + 48u));
+            printf(",\"transport_window_%u\":%u", i,
+                   badger_bytes_load_u32(records[i] + 40u));
+            printf(",\"transport_dma_control_%u\":\"%08x\"", i,
+                   badger_bytes_load_u32(records[i] + 36u));
+            printf(",\"transport_pattern_%u\":%u", i,
+                   badger_bytes_load_u32(records[i] + 32u));
+            static const char *const groups[] = {
+                "transport_core", "transport_last_buffer", "transport_slot3", "transport_ring_prefix"
+            };
+            static const uint32_t offsets[] = {64u, 96u, 128u, 160u};
+            static const uint32_t counts[] = {8u, 8u, 8u, 24u};
+            for (uint32_t group = 0u; group < 4u; ++group) {
+                printf(",\"%s_%u\":[", groups[group], i);
+                for (uint32_t word = 0u; word < counts[group]; ++word)
+                    printf("%s\"%08x\"", word ? "," : "",
+                           badger_bytes_load_u32(traces[i] + offsets[group] + word * 4u));
+                putchar(']');
+            }
+            printf(",\"transport_history_%u\":[", i);
+            for (uint32_t word = 0u; word < 52u; ++word)
+                printf("%s\"%08x\"", word ? "," : "",
+                       badger_bytes_load_u32(traces[i] + 800u + word * 4u));
+            putchar(']');
+        }
+        if (error != 0u) {
+            printf(",\"failed_receive_%u\":\"", i);
+            for (uint32_t byte = 0u; byte < 544u; ++byte) printf("%02x", traces[i][256u + byte]);
+            putchar('"');
+        }
         printf(",\"first_stall_ms_%u\":%llu", i, (unsigned long long)first_stall[i]);
         uint32_t address = badger_bytes_load_u32(records[i] + 8u);
         if (error == 4u && address >= 0x38400u && address < 0x38460u) {
@@ -189,6 +243,7 @@ finish:
             putchar('"');
             continue;
         }
+        if (transport) continue;
         static const char *const names[] = {"psm_mailbox", "psm_diag", "rxe_sample", "rxe_post"};
         static const uint32_t offsets[] = {64u, 96u, 128u, 144u};
         for (uint32_t group = 0u; group < 4u; ++group) {

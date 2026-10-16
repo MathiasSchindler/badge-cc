@@ -25,6 +25,7 @@ void clean_loader_init(clean_loader_t *l, const wifi_wire_t *wire,
     l->window_valid = 0u;
     l->rx_checked = l->started;
     l->rx_resyncs = 0u;
+    l->rx_status = 0u;
     l->rx_stalled = l->rx_retries = 0u;
 }
 
@@ -115,6 +116,9 @@ int clean_wait_state(clean_loader_t *l, uint32_t expected, uint32_t timeout) {
 
 static int receive_resync(clean_loader_t *l, uint32_t actual) {
     l->actual = actual;
+#ifdef CLEAN_RX_STRICT_TEST
+    return fail(l, CLEAN_INPUT);
+#endif
     if (l->rx_retries >= 3u) return fail(l, CLEAN_INPUT);
     /* Terminate the incomplete read frame, not the running DMA descriptor ring. */
     if (!reg_write(l, 1u, 0x1000du, 1u, 1u) ||
@@ -130,7 +134,11 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
     *length = 0u;
     uint32_t status;
     if (!clean_service(l) || !reg_read(l, 0u, 8u, 4u, &status)) return 0;
+    l->rx_status = status;
     if (status == 0xffffffffu) return fail(l, CLEAN_BUS);
+#ifdef CLEAN_RX_STRICT_TEST
+    if (status & 2u) return receive_resync(l, status);
+#endif
     if ((status & 0x100u) == 0u) {
         uint32_t now = l->wire->now_us(l->wire->context);
         if (now - l->rx_checked < 100000u) return 1;
@@ -155,6 +163,16 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
         l->actual = (uint32_t)result;
         return fail(l, CLEAN_BUS);
     }
+#ifdef CLEAN_RX_STRICT_TEST
+    if (!reg_read(l, 0u, 8u, 4u, &status)) return 0;
+    if (status == 0xffffffffu) {
+        l->actual = status;
+        return fail(l, CLEAN_BUS);
+    }
+    if (status & 2u) {
+        return receive_resync(l, status);
+    }
+#endif
     uint32_t sdpcm = (uint32_t)packet[0] | ((uint32_t)packet[1] << 8u);
     uint32_t inverse = (uint32_t)packet[2] | ((uint32_t)packet[3] << 8u);
     if ((sdpcm ^ inverse) != 0xffffu || sdpcm < 18u || sdpcm > size || sdpcm > 522u ||

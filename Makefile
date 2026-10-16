@@ -179,12 +179,57 @@ MICRO_SIGNAL_SOURCES := $(TOOLS_DIR)/micro-signal.c $(TOOLS_DIR)/diagnostics_log
 	$(PLATFORM_DIR)/wifi_board.c $(PLATFORM_DIR)/wifi_pio.c \
 	$(RADIO_DIR)/wifi_gspi.c $(RADIO_DIR)/wifi_probe.c
 MICRO_SIGNAL_HEADERS := $(TOOLS_DIR)/micro-signal.h $(TOOLS_DIR)/diagnostics_logic.h \
-	clean-rx/badge/loader.h clean-rx/badge/frames.h clean-rx/tx_diag.h clean-rx/src/sdio_ring.h \
+	clean-rx/badge/loader.h clean-rx/badge/frames.h clean-rx/tx_diag.h clean-rx/src/sdio_ring.h clean-rx/sdio_test.h \
 	$(wildcard $(ARCH_DIR)/*.h $(SHARED_DIR)/*.h $(PLATFORM_DIR)/*.h $(RADIO_DIR)/*.h)
+MICRO_SIGNAL_TEST_USB := src/usb/live_usb_control.c src/usb/live_usb_hw.c \
+	$(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
 
 .PHONY: micro-signal micro-signal-self-test test-micro-signal
 micro-signal: $(UF2_DIR)/micro-signal.uf2
 micro-signal-self-test: $(UF2_DIR)/micro-signal-self-test.uf2
+.PHONY: micro-signal-transport-test micro-signal-transport-paced-test micro-signal-transport-window-test micro-signal-transport-window32-test
+micro-signal-transport-test: $(UF2_DIR)/micro-signal-transport-test.uf2 $(MICRO_SIGNAL_DIR)/collect
+micro-signal-transport-paced-test: $(UF2_DIR)/micro-signal-transport-paced-test.uf2 $(MICRO_SIGNAL_DIR)/collect
+micro-signal-transport-window-test: $(UF2_DIR)/micro-signal-transport-window-test.uf2 $(MICRO_SIGNAL_DIR)/collect
+micro-signal-transport-window32-test: $(UF2_DIR)/micro-signal-transport-window32-test.uf2 $(MICRO_SIGNAL_DIR)/collect
+
+$(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin: force
+	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-test \
+		EXTRA_CFLAGS=-DCLEAN_SDIO_SELF_TEST
+
+$(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin: force
+	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-paced-test \
+		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_PACED'
+
+$(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin: force
+	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window-test \
+		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION'
+
+$(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin: force
+	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window32-test \
+		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION -DCLEAN_SDIO_SELF_TEST_DMA32'
+
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-window-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-window32-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf: $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf: $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-window-test.elf: $(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-window32-test.elf: $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf $(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf \
+		$(MICRO_SIGNAL_DIR)/micro-signal-transport-window-test.elf $(MICRO_SIGNAL_DIR)/micro-signal-transport-window32-test.elf: \
+		$(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_HEADERS) \
+		$(MICRO_SIGNAL_TEST_USB) \
+		src/usb/live_usb.h src/usb/live_usb_hw.h $(ARCH_DIR)/memmap_flash.ld Makefile | $(MICRO_SIGNAL_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -flto -DMICRO_SIGNAL_SELF_TEST -DMICRO_SIGNAL_TRANSPORT_TEST \
+		-DCLEAN_RX_STRICT_TEST \
+		-DWIFI_TRACE_SIZE=1024u \
+		-DCLEAN_CONTROLLER_PATH='"$(abspath $(MICRO_SIGNAL_TRANSPORT_CONTROLLER))"' \
+		$(RP2350_LDFLAGS) $(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_TEST_USB) \
+		-Wl,-Map=$(@:.elf=.map) -o $@
+	@test -z "$$($(RP2350_NM) -u $@)"
+	$(RP2350_SIZE) $@
 
 $(MICRO_SIGNAL_CONTROLLER): force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx
@@ -192,9 +237,7 @@ $(MICRO_SIGNAL_CONTROLLER): force
 $(MICRO_SIGNAL_DIR):
 	mkdir -p $@
 
-$(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: MICRO_SIGNAL_FLAGS = -DMICRO_SIGNAL_SELF_TEST
-MICRO_SIGNAL_TEST_USB := src/usb/live_usb_control.c src/usb/live_usb_hw.c \
-	$(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
+$(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: MICRO_SIGNAL_FLAGS = -DMICRO_SIGNAL_SELF_TEST -DWIFI_TRACE_SIZE=1024u
 $(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: MICRO_SIGNAL_EXTRA_SOURCES = $(MICRO_SIGNAL_TEST_USB)
 $(MICRO_SIGNAL_DIR)/micro-signal-self-test.elf: $(MICRO_SIGNAL_TEST_USB) \
 	src/usb/live_usb.h src/usb/live_usb_hw.h
@@ -211,7 +254,9 @@ $(MICRO_SIGNAL_DIR)/micro-signal.elf $(MICRO_SIGNAL_DIR)/micro-signal-self-test.
 $(MICRO_SIGNAL_DIR)/%.bin: $(MICRO_SIGNAL_DIR)/%.elf
 	$(RP2350_OBJCOPY) -O binary $< $@
 
-$(UF2_DIR)/micro-signal.uf2 $(UF2_DIR)/micro-signal-self-test.uf2: \
+$(UF2_DIR)/micro-signal.uf2 $(UF2_DIR)/micro-signal-self-test.uf2 \
+		$(UF2_DIR)/micro-signal-transport-test.uf2 $(UF2_DIR)/micro-signal-transport-paced-test.uf2 \
+		$(UF2_DIR)/micro-signal-transport-window-test.uf2 $(UF2_DIR)/micro-signal-transport-window32-test.uf2: \
 		$(UF2_DIR)/%.uf2: $(MICRO_SIGNAL_DIR)/%.bin $(BIN2UF2) | $(UF2_DIR)
 	$(BIN2UF2) $< $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
 
@@ -226,6 +271,7 @@ test-micro-signal: $(MICRO_SIGNAL_DIR)/micro-signal-test
 
 micro-signal-self-test: $(MICRO_SIGNAL_DIR)/collect
 $(MICRO_SIGNAL_DIR)/collect: $(HOST_TOOLS_SRC_DIR)/micro_signal_collect.c \
+		clean-rx/sdio_test.h \
 		$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h $(TOOLS_DIR)/diagnostics_logic.c \
 		$(TOOLS_DIR)/diagnostics_logic.h $(SHARED_DIR)/bytes.h $(SHARED_DIR)/usb_report.h \
 		$(RADIO_DIR)/wifi_trace.h src/usb/live_usb.h | $(MICRO_SIGNAL_DIR)

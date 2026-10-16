@@ -80,6 +80,13 @@ build/clean-rx/badge/collector --inspect \
   build/clean-rx/badge/rx.bin ssid-data/ssid.txt
 ```
 
+For sustained-receive failures, the separate
+[RF-free transport test](../../docs/micro-signal.md#two-universe-investigation-and-rf-free-reproducer)
+uses the same loader and SDIO publisher without starting D11/PHY or sending RF.
+It preserves first-fault FIFO/DMA state before recovery and reproduces failures
+independently of the radio application. Production recovery is unchanged;
+the failure is not yet fixed.
+
 The channel argument accepts 1..11. `--inspect` reads only the `SSID:` field;
 it does not use or print the password. Binary captures contain received
 network identifiers and should remain local.

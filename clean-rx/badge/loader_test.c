@@ -7,8 +7,9 @@
 #include "../tx_diag.h"
 
 static uint32_t ticks, calls, blocks, state, base;
-static int cancel, mismatch, bus_error, terminate_error;
+static int cancel, mismatch, bus_error, terminate_error, f2_post_status;
 static uint32_t f2_status;
+static uint32_t f2_after_status;
 static uint32_t fifo_status, terminations;
 static uint8_t f2_packet[544];
 static uint8_t ram[0x80000u];
@@ -54,8 +55,10 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
     }
     if (function == 2u) {
         assert(tx_length == 4u && rx_length == ((count + 3u) & ~3u));
+        assert(cmd == (0x60000000u | count));
         assert(rx_length <= sizeof(f2_packet));
         memcpy(rx, f2_packet, rx_length);
+        if (f2_post_status) f2_status = f2_after_status;
         return WIFI_BUS_OK;
     }
     if (function == 1u && addr == 0x1000du) {
@@ -150,13 +153,70 @@ int main(void) {
     uint32_t packet_length;
     clean_loader_init(&l, &wire, service, NULL);
     assert(clean_receive(&l, packet, &packet_length) && packet_length == 0u);
+    assert(l.rx_status == f2_status);
     f2_status = 0x100u | (524u << 9u);
     f2_packet[0] = 10u; f2_packet[1] = 2u;
     f2_packet[2] = 245u; f2_packet[3] = 253u;
     f2_packet[5] = 2u; f2_packet[7] = 14u; f2_packet[14] = 0x20u;
     assert(clean_receive(&l, packet, &packet_length) && packet_length == 522u);
+    assert(l.rx_status == f2_status);
+    static const uint32_t sizes[] = {18u, 26u, 63u, 100u, 106u, 108u, 137u, 522u};
+    for (uint32_t i = 0u; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        uint32_t size = sizes[i];
+        f2_status = 0x100u | (size << 9u);
+        badger_bytes_store_u32(f2_packet, size | ((size ^ 0xffffu) << 16u));
+        assert(clean_receive(&l, packet, &packet_length) && packet_length == size);
+        assert(l.rx_status == f2_status && memcmp(packet, f2_packet, size) == 0);
+    }
     f2_packet[2] ^= 1u;
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+#ifdef CLEAN_RX_STRICT_TEST
+    static const uint32_t underflows[] = {2u, 0x102u, 0x100u | (63u << 9u) | 2u};
+    for (uint32_t i = 0u; i < sizeof(underflows) / sizeof(underflows[0]); ++i) {
+        clean_loader_init(&l, &wire, service, NULL);
+        f2_status = underflows[i];
+        uint32_t before = calls;
+        assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+        assert(l.rx_status == f2_status && l.actual == f2_status && packet_length == 0u);
+        assert(calls == before + 1u && l.rx_resyncs == 0u && terminations == 0u);
+    }
+    static const uint32_t postread[] = {0u, 2u, 0xffffffffu};
+    for (uint32_t i = 0u; i < sizeof(postread) / sizeof(postread[0]); ++i) {
+        clean_loader_init(&l, &wire, service, NULL);
+        f2_status = 0x100u | (63u << 9u);
+        badger_bytes_store_u32(f2_packet, 63u | ((63u ^ 0xffffu) << 16u));
+        f2_post_status = 1;
+        f2_after_status = postread[i];
+        uint32_t before_postread = calls;
+        int received = clean_receive(&l, packet, &packet_length);
+        if (postread[i] == 0u) {
+            assert(received && packet_length == 63u && l.error == CLEAN_OK);
+            assert(l.rx_status == (0x100u | (63u << 9u)));
+        } else {
+            assert(!received && packet_length == 0u && l.actual == postread[i]);
+            assert(l.rx_status == (0x100u | (63u << 9u)));
+            assert(l.error == (postread[i] == 2u ? CLEAN_INPUT : CLEAN_BUS));
+        }
+        assert(calls == before_postread + 3u && memcmp(packet, f2_packet, 63u) == 0);
+        assert(l.rx_resyncs == 0u && terminations == 0u);
+    }
+    f2_post_status = 0;
+    clean_loader_init(&l, &wire, service, NULL);
+    f2_status = 0x100u | (525u << 9u);
+    assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+    assert(l.rx_status == f2_status && l.actual == 525u);
+    assert(l.rx_resyncs == 0u && terminations == 0u);
+    clean_loader_init(&l, &wire, service, NULL);
+    f2_status = 0u;
+    fifo_status = 0x00800000u;
+    ticks += 100000u;
+    assert(clean_receive(&l, packet, &packet_length) && l.rx_stalled);
+    ticks += 100000u;
+    assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+    assert(l.rx_status == 0u && l.rx_resyncs == 0u && terminations == 0u);
+    puts("clean-rx strict test: first FIFO fault preserved without termination or retries");
+    return 0;
+#endif
     clean_loader_init(&l, &wire, service, NULL);
     f2_status = 0x100u | (525u << 9u);
     for (uint32_t retry = 1u; retry <= 3u; ++retry) {

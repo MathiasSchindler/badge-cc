@@ -1,4 +1,7 @@
 #include "micro-signal.h"
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+#include "../../clean-rx/sdio_test.h"
+#endif
 #include "../../clean-rx/badge/loader.h"
 #include "../arch/rp2350/bootrom_reboot.h"
 #include "../platform/badger/display.h"
@@ -219,6 +222,193 @@ static int transmit(uint8_t frame[96]) {
     return 1;
 }
 
+#ifdef MICRO_SIGNAL_SELF_TEST
+static void receive_evidence(const uint8_t packet[544]) {
+    badger_bytes_copy(test_control.trace + 256u, packet, 544u);
+    uint32_t actual = loader.actual, address = loader.address, error = loader.error;
+    loader.error = CLEAN_OK;
+    loader.started = now();
+    static const uint32_t registers[] = {
+        0x18002210u, 0x18002204u, 0x18002214u, 0x18002200u, 0x18002020u
+    };
+    for (uint32_t i = 0u; i < 5u; ++i) {
+        uint32_t value;
+        if (!clean_read(&loader, registers[i], &value)) break;
+        badger_bytes_store_u32(test_control.trace + 4u * i, value);
+    }
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+    static const uint32_t extra[] = {
+        0x18002000u, 0x18002004u, 0x18002118u, 0x18002128u,
+        0x18002134u, 0x18002138u, 0x180021e0u, 0x180001e0u
+    };
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        uint32_t value;
+        if (!clean_read(&loader, extra[i], &value)) break;
+        badger_bytes_store_u32(test_control.trace + 64u + 4u * i, value);
+    }
+    if (loader.error == CLEAN_OK &&
+        clean_block(&loader, 0x30000u, test_control.trace + 160u, 96u, 0u))
+        (void)clean_block(&loader, 0x30e00u, test_control.trace + 128u, 32u, 0u);
+    if (loader.error == CLEAN_OK) {
+        uint32_t producer = badger_bytes_load_u32(test_control.trace + 4u) & 0x1fffu;
+        if ((producer & 15u) != 0u || producer >= 512u) {
+            loader.error = CLEAN_INPUT;
+        } else {
+            uint32_t index = ((producer >> 4u) - 1u) & 31u, dma_length = 0u, buffer = 0u;
+            if (clean_read(&loader, 0x30000u + index * 16u + 4u, &dma_length) &&
+                clean_read(&loader, 0x30000u + index * 16u + 8u, &buffer)) {
+                dma_length &= 0x7fffu;
+                if (dma_length < 18u || dma_length > 524u ||
+                    buffer != 0x30200u + index * 1024u) {
+                    loader.error = CLEAN_INPUT;
+                } else {
+                    uint8_t stored[544];
+                    if (clean_block(&loader, buffer, stored, dma_length, 0u)) {
+                        badger_bytes_store_u32(test_control.trace + 96u, buffer);
+                        badger_bytes_store_u32(test_control.trace + 100u, dma_length);
+                        badger_bytes_store_u32(test_control.trace + 104u, diag_crc32(stored, dma_length));
+                        badger_bytes_store_u32(test_control.trace + 108u, diag_crc32(packet, dma_length));
+                        badger_bytes_copy(test_control.trace + 112u, stored + dma_length - 16u, 16u);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    uint32_t spi;
+    wifi_bus_result_t result = wifi_gspi_read(loader.wire, 0u, 8u, 4u, WIFI_ORDER_NORMAL32, &spi);
+    if (result == WIFI_BUS_OK) badger_bytes_store_u32(test_control.trace + 20u, spi);
+    else badger_bytes_store_u32(test_control.trace + 60u, (uint32_t)result);
+    result = wifi_gspi_read(loader.wire, 0u, 4u, 2u, WIFI_ORDER_NORMAL32, &spi);
+    if (result == WIFI_BUS_OK) badger_bytes_store_u32(test_control.trace + 32u, spi);
+    else badger_bytes_store_u32(test_control.trace + 60u, (uint32_t)result);
+    badger_bytes_store_u32(test_control.trace + 40u, loader.rx_resyncs);
+    badger_bytes_store_u32(test_control.trace + 48u, loader.rx_status);
+    if (loader.error != CLEAN_OK)
+        badger_bytes_store_u32(test_control.trace + 60u, loader.error);
+    loader.error = error;
+    loader.address = address;
+    loader.actual = actual;
+}
+#endif
+
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+static void transport_test(void) {
+    uint32_t sequence = 0u, start = now(), history = 0u;
+    if (!clean_read(&loader, CLEAN_MBOX + 8u, &evidence[12])) radio_error();
+    if (evidence[12] != 0u && evidence[12] != CLEAN_SDIO_TEST_PACING_TICKS) {
+        loader.error = CLEAN_CONTROLLER;
+        loader.actual = evidence[12];
+        radio_error();
+    }
+    if (!clean_read(&loader, CLEAN_MBOX + CLEAN_SDIO_TEST_WINDOW_OFFSET, &evidence[10]))
+        radio_error();
+    if (evidence[10] > 16u) {
+        loader.error = CLEAN_CONTROLLER;
+        loader.actual = evidence[10];
+        radio_error();
+    }
+    if (!clean_read(&loader, CLEAN_MBOX + CLEAN_SDIO_TEST_PATTERN_OFFSET, &evidence[8]))
+        radio_error();
+    if (evidence[8] > 1u) {
+        loader.error = CLEAN_CONTROLLER;
+        loader.actual = evidence[8];
+        radio_error();
+    }
+    if (!clean_read(&loader, 0x18002200u, &evidence[9])) radio_error();
+    if ((evidence[9] & 1u) == 0u || evidence[9] == 0xffffffffu) {
+        loader.error = CLEAN_CONTROLLER;
+        loader.actual = evidence[9];
+        radio_error();
+    }
+    while (1) {
+        loader.started = now();
+        uint8_t expected[96], checked[96];
+        for (uint32_t i = 0u; i < sizeof(expected); ++i)
+            expected[i] = clean_sdio_test_byte(sequence, i);
+        if (!clean_block(&loader, 0x38400u, expected, sizeof(expected), 1u) ||
+            !clean_block(&loader, 0x38400u, checked, sizeof(checked), 0u)) radio_error();
+        if (!badger_bytes_equal(expected, checked, sizeof(expected))) {
+            loader.error = CLEAN_READBACK;
+            loader.address = 0x38400u;
+            loader.actual = diag_crc32(checked, sizeof(checked));
+            badger_bytes_copy(test_control.trace + 64u, expected, sizeof(expected));
+            badger_bytes_copy(test_control.trace + 160u, checked, sizeof(checked));
+            radio_error();
+        }
+        uint32_t burst = 4u;
+        if (!clean_write(&loader, CLEAN_MBOX + 24u, 7u | (burst << 8u))) radio_error();
+        uint32_t pending = burst, deadline = now();
+        while (pending != 0u) {
+            uint8_t packet[544];
+            badger_bytes_zero(packet, sizeof(packet));
+            uint32_t size;
+            uint32_t old_resyncs = loader.rx_resyncs;
+            int result = clean_receive(&loader, packet, &size);
+            if (size != 0u || loader.rx_resyncs != old_resyncs || !result) {
+                uint8_t *entry = test_control.trace + 800u + (history++ % 13u) * 16u;
+                badger_bytes_store_u32(entry, sequence);
+                badger_bytes_store_u32(entry + 4u, loader.rx_status);
+                badger_bytes_store_u32(entry + 8u, badger_bytes_load_u32(packet));
+                badger_bytes_store_u32(entry + 12u, loader.rx_resyncs);
+            }
+            if (!result) {
+                receive_evidence(packet);
+                radio_error();
+            }
+            if (loader.rx_resyncs != old_resyncs) {
+                loader.error = CLEAN_INPUT;
+                loader.actual = loader.rx_status;
+                receive_evidence(packet);
+                radio_error();
+            }
+            if (size != 0u) {
+                ++sequence;
+                uint32_t length = clean_sdio_test_pattern_length(sequence, evidence[8]);
+                int matches = size == length + 18u && packet[4] == (uint8_t)(sequence - 1u);
+                for (uint32_t byte = 0u; byte < length && matches; ++byte)
+                    matches = packet[18u + byte] == clean_sdio_test_byte(sequence, byte);
+                if (!matches) {
+                    loader.error = CLEAN_INPUT;
+                    loader.actual = sequence;
+                    receive_evidence(packet);
+                    radio_error();
+                }
+                if (evidence[10] != 0u &&
+                    !clean_write(&loader, CLEAN_MBOX + CLEAN_SDIO_TEST_ACK_OFFSET, sequence))
+                    radio_error();
+                --pending;
+                evidence[7] = sequence;
+                evidence[11] = sequence;
+            }
+            if (now() - deadline > 1000000u) {
+                loader.error = CLEAN_TIMEOUT;
+                receive_evidence(packet);
+                radio_error();
+            }
+        }
+        uint32_t command, completed = now();
+        while (1) {
+            if (!clean_read(&loader, CLEAN_MBOX + 24u, &command)) radio_error();
+            if (command == 2u) break;
+            loader.actual = command;
+            if (command != (7u | (burst << 8u))) {
+                loader.error = CLEAN_CONTROLLER;
+                radio_error();
+            }
+            if (now() - completed >= 100000u) {
+                loader.error = CLEAN_TIMEOUT;
+                radio_error();
+            }
+        }
+        evidence[6] = sequence;
+        evidence[14] = now() - start;
+        if (!clean_read(&loader, CLEAN_MBOX + 444u, &evidence[2])) radio_error();
+        badger_bytes_store_u32(test_control.trace + 40u, loader.rx_resyncs);
+    }
+}
+#endif
+
 void bare_main(void) {
     badger_home_init();
     wifi_board_init();
@@ -241,6 +431,12 @@ void bare_main(void) {
 #ifdef MICRO_SIGNAL_SELF_TEST
     for (uint32_t i = 0u; i < 16u; ++i) evidence[i] = 0u;
     evidence[0] = 0x5447534du;
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+    evidence[8] = 0xffffffffu;
+    evidence[9] = 0xffffffffu;
+    evidence[10] = 0xffffffffu;
+    evidence[12] = 0xffffffffu;
+#endif
     if (badger_schedule_bootsel(8000u) != 0) {
         loader.error = CLEAN_INPUT;
         radio_error();
@@ -279,13 +475,22 @@ void bare_main(void) {
     test_started = now();
 #endif
     if (!clean_boot(&loader, clean_image, (uint32_t)(clean_image_end - clean_image),
-                    MICRO_SIGNAL_CHANNEL, outgoing.session | 1u, 1u) ||
+                    MICRO_SIGNAL_CHANNEL, outgoing.session | 1u,
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+                    0u) ||
+#else
+                    1u) ||
+#endif
         !clean_write(&loader, 0x18002024u, 0xf0u) ||
         !clean_write(&loader, CLEAN_MBOX + 24u, 2u) ||
         !clean_wait_state(&loader, 9u, 100000u)) {
         if (recover) bootsel();
         radio_error();
     }
+#ifdef MICRO_SIGNAL_TRANSPORT_TEST
+    line(52u, "SDIO TEST / NO RF", 0x5ecbu);
+    transport_test();
+#endif
     line(52u, "READY - BUTTONS 1 TO 5", 0x5ecbu);
     line(100u, "WAITING FOR PEER", 0xffffu);
     uint32_t sent = 0u, received = 0u, due = now(), state_due = now(), dropped = 0u;
@@ -327,8 +532,14 @@ void bare_main(void) {
             }
         }
         uint8_t packet[544];
+#ifdef MICRO_SIGNAL_SELF_TEST
+        badger_bytes_zero(packet, sizeof(packet));
+#endif
         uint32_t size;
         if (!clean_receive(&loader, packet, &size)) {
+#ifdef MICRO_SIGNAL_SELF_TEST
+            receive_evidence(packet);
+#endif
             if (recover) bootsel();
             radio_error();
         }

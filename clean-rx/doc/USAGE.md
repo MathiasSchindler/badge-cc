@@ -60,6 +60,22 @@ recovery counters and includes a minute-long paired regression.
 The collector now also accepts bounded 30..600-second runs; a five-minute pass
 was not repeatable. Malformed SDPCM headers still fail explicitly.
 
+There is also an RF-free transport reproducer:
+`make micro-signal-transport-test` builds a separate SDIO-only controller and
+RP2350 host. It reproduces stalled FIFO delivery and captured a genuine DMA
+data-FIFO underrun with payload corruption without initializing D11/PHY.
+The strict test loader stops before recovery writes; production recovery
+is unchanged. Two newer five-minute OTA runs on two Universe badges passed,
+but sustained reliability remains unresolved.
+See [the transport test and evidence](../../docs/micro-signal.md#two-universe-investigation-and-rf-free-reproducer)
+for commands, serial bindings and the distinction between the pristine stall
+and later underrun. Test command 7 is not part of the production controller ABI.
+The default reproducer now requests just four packets and stalls after three
+deliveries, before any ring wrap or descriptor reuse.
+[The assumption audit](../../docs/micro-signal.md#auditing-transport-assumptions)
+also records independent GPIO packet reads, intact descriptor readbacks and
+the tested SPI length contract. None of these results establishes a repair.
+
 SPI bulk backplane reads and writes must set the `0x8000` word-access address
 flag, as scalar backplane I/O does. The badge loader now enforces this mode
 for its aligned bursts, including TX staging and source-firmware loading.

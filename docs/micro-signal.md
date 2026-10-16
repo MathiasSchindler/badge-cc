@@ -10,8 +10,10 @@ at the physically verified **11 Mbps CCK** rate. No AP, credentials, IP stack,
 Pico SDK, target libc, vendor Wi-Fi executable, or USB connection is required.
 
 **Experimental:** the cold-start timeout has been repaired, but multi-minute
-tests still reproduce intermittent Function-2 receive framing failures. One
-five-minute run passed; its repeat failed. This is not yet a qualified
+tests still reproduce intermittent Function-2 receive framing failures.
+An RF-free transport test now reproduces failures without radio operation.
+Two recent five-minute runs on two Universe badges passed, but do not resolve
+the transport failure. This is not yet a qualified
 indefinitely-running messenger.
 
 ## Build and install
@@ -23,8 +25,8 @@ make micro-signal test-micro-signal
 ```
 
 The result is `build/universe26/uf2/micro-signal.uf2`. The current build is
-**63,488 bytes (62 KiB)**, containing a **31,588-byte** flash image, including
-the **20,500-byte** source-built Wi-Fi controller firmware. Size optimization,
+**63,488 bytes (62 KiB)**, containing a **31,572-byte** flash image, including
+the **20,484-byte** source-built Wi-Fi controller firmware. Size optimization,
 LTO and section garbage collection are enabled. The framebuffer uses RAM,
 not UF2 payload space.
 
@@ -252,3 +254,407 @@ Evidence is under `build/micro-signal/`: `startup-baseline-*`,
 `word-access-five-minutes*`, `word-access-repeat-five-minutes*`, and
 `conservative-five-minutes*`. Failed runs are retained and are not counted
 as successful qualification.
+
+### Two-Universe investigation and RF-free reproducer
+
+Further testing used Universe serials `08DA26F86E57F5EA` and
+`9BBF88DD17D66E7D`; the latter replaces the Tufty in this pair. The original
+program from the second badge is preserved separately as
+`build/clean-rx/badge/original-universe-9BBF88DD17D66E7D.bin`.
+
+The new transport-only profile cold-loads a separate controller executable.
+It performs PMU/HT and SDIO initialization, but **does not initialize D11/PHY
+or transmit radio frames**. Mailbox command 7 is compiled only into that test
+controller; it can publish 1..16 deterministic packets through the production
+SDIO sender. The RP2350 checks the SDPCM sequence, exact length and every
+payload byte, and verifies a 96-byte backplane staging write/readback between
+batches. The current host requests four packets per batch, exposing the stall
+in the first batch instead of waiting for the old variable-burst schedule.
+Payload lengths cover 8..504 bytes. The TFT is initialized once, not
+updated per packet. The production image contains none of this test protocol.
+
+```sh
+make micro-signal-transport-test
+build/picotool-usb/picotool load -v build/universe26/uf2/micro-signal-transport-test.uf2 --ser 08DA26F86E57F5EA
+build/picotool-usb/picotool load -v build/universe26/uf2/micro-signal-transport-test.uf2 --ser 9BBF88DD17D66E7D
+build/picotool-usb/picotool reboot --ser 08DA26F86E57F5EA
+build/picotool-usb/picotool reboot --ser 9BBF88DD17D66E7D
+build/micro-signal/collect 08DA26F86E57F5EA 9BBF88DD17D66E7D build/micro-signal/sdio-isolation --transport 60
+```
+
+As with the radio self-test, durations are 30..600 seconds and cleanup requests
+BOOTSEL. A passing transport trial requires at least 1,000 validated packets
+per badge, continuing progress and correct USB identity/CRC bindings. It sets
+`transport_confirmed`, never `bidirectional_button_event_confirmed`. In this
+mode the legacy `tx_frames`/`rx_events` JSON counters mean completed/accepted
+synthetic transport packets, not radio transmissions or button events.
+**The current four-packet-burst profile is a failing reproducer, not an expected
+passing acceptance test.**
+
+Diagnostic traces now preserve the full failed receive buffer, advertised SPI
+status, fault-time DMA/FIFO registers, and the last 13 receive attempts.
+The strict transport loader stops **before** read-frame termination or interrupt
+acknowledgement, preserving the original fault rather than modifying it during
+recovery. Normal production recovery is unchanged. Native tests verify both
+profiles and all 497 synthetic payload lengths, with fixed payload test vectors.
+
+Important observations, including earlier exploratory profiles:
+
+| Trial | Result |
+| --- | --- |
+| RF-free, single packet per batch, original DMA control | Failed after 20.950 s and 6,742 accepted packets; packet 6,743 had a valid header but its final four payload bytes were zero instead of the expected data |
+| Same captured fault | DMA status 0 `0x30000170` (stopped), status 1 `0x20000170` (data FIFO underrun), SDIO underrun interrupt; zero previous resynchronizations |
+| RF-free, strict variable bursts, before any recovery writes | Failed after 6.258 s and 927 accepted packets; SDIO reported FIFO data but SPI exposed no packet |
+| Same pristine stall | DMA status 0 `0x100001e0` (active), producer `0x10`, status 1 zero (no error); queued SRAM headers for packets 928 and 929 were intact across the ring's 31-to-0 boundary |
+| Final retained profile, original DMA control | Failed after 6.383 s and 998 accepted packets; DMA active at descriptor 5, producer at 9, active descriptor 7, no DMA error, FIFO data available but no SPI packet |
+
+The pristine stall repeated at the same accepted-packet count under multiple
+experimental configurations. It has **no DMA underrun yet**, so underrun is
+not established as the initiating fault in every failure. Conversely, the
+single-packet corruption captured an underrun without preceding recovery.
+The final retained profile reproduces the stall at a different packet count
+and away from the end-of-table descriptor; an immediate 31-to-0 ring crossing
+is therefore not required.
+This isolates a real failure in the controller/host SDIO/SPI transport without
+requiring RF, PSM reception, button traffic or per-packet display updates.
+It does not yet identify a single root cause or prove that every earlier OTA
+failure has exactly the same cause.
+
+Watermark programming, alternate DMA burst/address-extension controls, forced
+HT, exact rather than rounded DMA byte counts, pre-poll interrupt acknowledgement,
+and split Function-2 reads did not establish a fix. Split reads produced
+read-out-of-sync and are not supported by this path. **All these experimental
+behavior changes were reverted**; normal DMA control remains `0x000a0801`.
+The retained changes are the isolated test profile, fault evidence and tests.
+
+Two further real-radio trials with the original transport settings passed:
+
+| Trial | Duration | Universe A: TX / unique RX / F2 | Universe B: TX / unique RX / F2 |
+| --- | ---: | ---: | ---: |
+| `universe-pair-capture` | 300.001 s | 1,383 / 466 / 6,690 | 1,398 / 461 / 6,728 |
+| `universe-pair-repeat` | 300.018 s | 1,380 / 466 / 6,590 | 1,396 / 460 / 6,658 |
+
+Both trials had zero errors, drops and resynchronizations. These successes do
+not invalidate the failing RF-free reproducer or qualify indefinite operation.
+There is no demonstrated universal 125-second timer limit. The unresolved work
+is to distinguish short-frame/FIFO framing from queue publication and ring-wrap
+ownership using the preserved pre-recovery state.
+
+After testing, the ordinary 63,488-byte messenger UF2 was reinstalled on both
+Universe badges. Separate 31,572-byte flash readbacks matched the built binary
+byte for byte. Both were left in BOOTSEL, not running the stress test.
+
+Additional local evidence prefixes in `build/micro-signal/` are
+`sdio-single-baseline`, `sdio-single-watermark`, `sdio-single-dma32`,
+`sdio-bursts-dma32`, `sdio-bursts-forced-ht`, `sdio-first-resync`,
+`sdio-exact-length`, `sdio-irq-ack`, `sdio-pristine-stall` and `sdio-chunk64`.
+The final retained-profile reproduction is `sdio-final-reproducer`.
+Captures may contain ambient radio frames and should remain local.
+
+### Auditing transport assumptions
+
+A follow-up audit reduced the stall to **three accepted packets out of a
+single four-packet request**. It does not require hundreds of packets, a
+second batch, ring wrap, descriptor reuse, or a long-running timer.
+The retained default transport profile now reproduces this smaller case.
+
+The old variable schedule sent single packets through sequence 497, then
+pairs through 995. Its first three-packet batch completed at sequence 998;
+the next batch stalled. This explains why changing payload lengths still
+failed after 998 deliveries: that number identified the queueing schedule,
+not a special payload or cumulative byte offset.
+
+| Discriminating trial | Accepted before fault | Observation |
+| --- | ---: | --- |
+| Fixed 106-byte SDPCM, original variable bursts | 998 | Same trigger as varied lengths |
+| Fixed 108-byte SDPCM, original variable bursts | 998 | Four-byte alignment did not remove it |
+| Fixed 108-byte SDPCM, three packets from startup | 3 | Failure moved to the first few packets |
+| Publish each three-descriptor batch with one pointer update | 3 | Individual producer-doorbell writes were not required |
+| Remove staging write/readback between batches | 3 | Interleaved staging RAM traffic was not required |
+| GPIO-clocked Function-2 reads instead of PIO reads | 3 | Reproduced with an independent, slower packet-read implementation |
+| Original varied lengths, one six-packet batch | 3 | Restarting a second batch was not required |
+| Original varied lengths, one four-packet batch | 3 | Smallest single-batch failure tested; current retained profile |
+
+The GPIO experiment replaced only packet reads; Function-0/1 register access
+still used PIO. The staging experiment retained mailbox/register operations.
+Neither result excludes every possible SPI timing or register-access problem.
+
+In the four-packet trial, DMA status 0 was `0x20000020` (idle, current
+descriptor 2), producer `0x40` (four descriptors posted), and status 1
+`0x40` (no DMA error, active descriptor 4). SDIO still reported FIFO data,
+but SPI reported no packet. This is not a DMA-stopped/underrun state.
+The six-packet variant instead remained active at descriptor 2, with active
+descriptor 4 and producer 6. Both preserve the state before recovery.
+
+Fault-time readback verified the queued fourth packet's SDPCM header and the
+first six descriptors. The six-descriptor varied-length capture had valid descriptor
+byte counts 64, 100, 140, 176, 212 and 248, SOF/EOF flags, and the expected
+separate buffer addresses. No descriptor had yet been reused or reached EOT.
+This rules out overwrite-on-ring-wrap as a necessary explanation of this
+particular failure; it does not qualify every ring ownership case.
+
+The collector now emits `transport_core_N`, `transport_slot3_N`, and
+`transport_ring_prefix_N` alongside `transport_history_N`. The core array
+contains core control/status, CMD53 read count, read-out-of-sync count,
+read-wait count, read-termination count, SDIO clock status and ChipCommon clock
+status. The slot-3 array is the first 32 bytes of the fourth buffer; the ring
+prefix contains the first six 16-byte descriptors. These fixed prefixes are
+especially useful for the new startup reproducer, not a dynamic identification
+of the next descriptor in every possible long run. Transport output no longer
+mislabels those bytes as PSM snapshots.
+
+The audit also checked public contracts rather than changing registers blindly:
+
+- The [public SPI driver](https://github.com/georgerobotics/cyw43-driver/blob/main/src/cyw43_spi.c)
+  requests the advertised byte count and clocks a four-byte-rounded transfer.
+  Native loader tests now enforce the exact command and read shape for short,
+  odd, aligned, application-sized and maximum-sized packets.
+- [Linux DMA reclamation](https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/broadcom/brcm80211/brcmsmac/dma.c)
+  uses STATUS0's current-descriptor pointer for transmitted-buffer reclamation.
+  Switching to STATUS1's active/prefetch pointer without qualification would
+  not be a justified ownership fix.
+- A four-byte Function-1 read-frame count was **not** evidence of a required
+  SPI trailer. Requesting an extra word beyond the advertised packet produced
+  read-out-of-sync and DMA FIFO underrun after the first delivery. This also
+  demonstrates why an underrun alone does not prove producer starvation.
+- Adding eight-byte DMA padding produced a zero-length advertised packet after
+  the first delivery. Adding descriptor completion interrupts did not prevent
+  the three-packet stall. Neither behavior change was retained.
+- FIFO diagnostic-pointer reads returned zero and were not interpreted as a
+  verified empty-FIFO measurement. Those experimental accesses were removed.
+
+**No production transport behavior was changed by this follow-up audit.**
+All experimental fixed lengths, alternate clocks, padding, publication order
+and completion flags were reverted. The smaller failing profile, exact read
+tests and additional read-only fault evidence remain. A queue-depth/FIFO
+framing or endpoint-completion problem is now a better target than ring wrap,
+but its root cause and a sustained-reliability repair are still unproven.
+
+Local evidence prefixes are `assumptions-fixed106`, `assumptions-fixed108`,
+`assumptions-burst3`, `assumptions-atomic3`, `assumptions-no-staging`,
+`assumptions-bitbang-f2`, `assumptions-extra-word`, `assumptions-ioc`,
+`assumptions-dma-pad8`, `assumptions-burst3-descriptors`,
+`assumptions-minimal-variable`, `assumptions-six-at-once`, and
+`assumptions-four-at-once`.
+
+### Size and producer-pacing experiments
+
+Further RF-free trials used four packets per request on both Universe badges.
+Sizes below are **whole SDPCM packets**, not payload lengths. Fixed sizes were
+temporary experiments; the retained profiles use all 497 payload lengths.
+
+| SDPCM size / producer | Result on both badges |
+| --- | --- |
+| 32 bytes, unpaced | Stalled after two accepted packets |
+| 64, 128 or 192 bytes, unpaced | Stalled after three accepted packets |
+| 252, 256 or 512 bytes, unpaced | Passed separate 30-second trials with thousands of exact packets |
+| Varied lengths, 500,000 controller ticks after each publication | Passed 60.017 seconds; 8,552 / 8,559 accepted packets |
+| Retained paced build, varied lengths | Passed 300.052 seconds; 45,083 / 45,112 accepted packets, no errors, drops, resyncs or five-second progress stalls |
+| Retained unpaced build, immediately afterward | Both accepted only three packets; collector stopped after 4.184 seconds with the original stalled DMA/FIFO state |
+
+There is therefore **no universal three-packet capacity limit**, and neither
+four-byte nor 64-byte alignment alone explains the stall. Pacing demonstrates
+that the short packet formats can be delivered; it is not a qualified repair
+and does not establish which FIFO/endpoint interaction is wrong.
+
+Additional negative controls:
+
+- A forced raw Function-2 read after the missing advertisement did not recover
+  the fourth packet; it returned a few garbage bytes followed by zeros and
+  set data-unavailable/underflow status. A fully buffered packet behind a stale
+  availability flag is not established.
+- Moving the frame buffers to `0x40000` reproduced the three-packet stall.
+- Limiting publication using DMA consumer pointers did not establish host
+  consumption credits. A two-pending gate still stalled; a one-pending gate
+  deadlocked after posting only three descriptors, a different failure from
+  the original four-posted case.
+- Forcing HT in the SDIOD core's own clock-control register stuck on readback
+  (`0x000b0040` to `0x000b0042`) but still stalled after three deliveries.
+- Watermark 32 read back correctly, but the attempted separate device-control
+  enable bit `0x10` did **not** stick. That experiment explicitly failed its
+  readback check before publishing packets; it must not be counted as a
+  successfully enabled watermark configuration or a transport trial.
+- Public DMA header definitions encode prefetch control zero as **zero**
+  prefetch, not four descriptors. Changing that setting based on the latter
+  assumption would not be justified.
+
+All those behavior experiments were reverted. The normal controller, loader
+and messenger retain their original production settings.
+
+For repeatable comparisons, there are now two isolated build targets:
+
+```sh
+make micro-signal-transport-test micro-signal-transport-paced-test
+```
+
+The first remains the unpaced failing reproducer. The second builds
+`build/universe26/uf2/micro-signal-transport-paced-test.uf2` with a separate
+controller object directory and a bounded 500,000-controller-tick delay after
+each packet publication, including the last packet in a request. It performs
+the same exact payload checks and staging transfers. Use the same flash and
+`collect ... --transport SECONDS` commands shown above, substituting the paced
+UF2 when needed. **Neither profile initializes or tests the radio.**
+
+The controller reports its actual pacing interval in the test-only mailbox
+substage field. The host copies it into USB evidence word 12; the collector
+emits `transport_delay_ticks_N` and rejects unknown or mismatched profiles.
+Zero means unpaced, 500,000 means paced, and `0xffffffff` means the host has
+not yet obtained a profile. A paced pass must not be reported as an unpaced
+transport fix.
+
+Pacing also exposed and corrected a test-harness assumption: the last packet
+can arrive **before** the controller changes its request command back to 2.
+The host now allows its own request to remain pending for a bounded
+100,000-RP2350-tick completion wait, rejecting unrelated commands and timing
+out explicitly. Previously this legitimate ordering produced a false failure.
+This correction affects only the transport test, not the production app.
+
+Local evidence prefixes are `fourth-raw-read`, `fourth-relocated-buffers`,
+`fourth-small32`, `fourth-aligned64`, `fourth-aligned128`,
+`fourth-aligned192`, `fourth-boundary252`, `fourth-aligned256`,
+`fourth-large512`, `fourth-two-descriptor-gate`,
+`fourth-one-descriptor-gate`, `fourth-paced32`, `fourth-paced-variable`,
+`fourth-watermark-enabled`, `fourth-sdiod-forceht`, `fourth-paced-retained`
+and `fourth-unpaced-retained`.
+
+Both transport builds, ordinary production and the radio self-test build
+successfully. Native messenger/PSM tests, normal and strict loader tests, and
+ASan/UBSan runs of the messenger and both loader profiles pass. The ordinary
+31,572-byte production binary remains byte-identical to the pre-investigation
+reference. Its 63,488-byte UF2 was restored on both exact Universe serials;
+independent flash readbacks in `fourth-production-SERIAL.bin` matched the
+built binary. Both badges were left in BOOTSEL. The paced firmware is not
+installed as a production workaround.
+
+### Separating queue stalls from tail-word underruns
+
+Further controlled tests distinguish two failure modes; they do not yet prove
+two independent hardware root causes.
+
+| Comparison | Observation |
+| --- | --- |
+| Paced producer, host waits for command completion before draining any packets | Same three-of-four stall, despite all publications being spaced |
+| Unpaced publications, 500,000-tick backoff only in the controller's idle polling loop | Same three-of-four stall |
+| Two outstanding packets, using real host acknowledgements instead of DMA pointers | Underrun after 523 accepted packets |
+| One outstanding packet, varied lengths, no sleeps | Passed 60.017 s and 36,060 / 36,437 packets; a longer run failed at 78.849 s after 47,067 accepted packets |
+| Same one-packet window, immediate post-read error checks | Failed at 129.327 s; packet 78,311 had a valid 520-byte header but its final four bytes were zero |
+| Fixed 520-byte packets, one-packet window | Passed 60.023 s with 21,867 / 22,106 accepted packets |
+
+Pacing is therefore not simply a required interval between publications.
+Real host credits remove the immediate multi-packet trigger, but **one packet
+outstanding alone is not a sustained-reliability fix**. The long-run failures
+also demonstrate why a single passing minute is insufficient.
+
+The strict loader previously checked underflow only when packet availability
+was also asserted, and did not inspect status immediately after a packet read.
+It now stops on underflow even without an advertised packet, and checks status
+again immediately after the physical read, before returning a packet to the
+application. This catches the error before a test host acknowledges that packet.
+It still performs no termination or interrupt-acknowledgement recovery writes.
+The final profile retains the original advertised status in `rx_status` and
+the failing post-read status in `actual` (trace bytes 48 and 56). Earlier
+exploratory captures may contain the post-read status in both fields.
+Normal production receive/recovery behavior is unchanged.
+
+#### A fast reproducer for the corrupt tail
+
+Both the earlier packet 6,743 underrun and the new packet 78,311 underrun
+occurred on a **483-to-520-byte SDPCM transition**. Alternating just these two
+sizes, with a genuine one-packet host-credit window and no sleeps, makes the
+tail corruption much quicker to reproduce:
+
+| DMA burst / trial | Result |
+| --- | --- |
+| 64 bytes, first alternating trial | A accepted 365 packets; packet 366 lost its final four bytes |
+| 32 bytes, first comparison | Passed 60.005 s; 22,952 / 22,957 accepted packets |
+| 64 bytes, repeated with retained profile | B accepted 269 packets; packet 270 had the same fault |
+| 32 bytes, retained profile | Passed 300.045 s; 125,696 / 126,944 accepted packets; no errors, drops, resyncs or five-second stalls |
+| 64 bytes, final-source repeat | B accepted 685 packets before the same fault |
+| 32 bytes, final-source smoke test | Passed 30.021 s; 11,137 / 11,258 accepted packets |
+| 64 bytes, split-status capture check | B accepted 1,261 packets; packet 1,262 lost the same final four bytes |
+
+The actual DMA-control readbacks are `0x000a0801` for 64-byte bursts and
+`0x00060801` for 32-byte bursts. All other controller settings and the packet
+shapes/window are identical between these two retained profiles.
+
+Fault-time backplane reads checked the complete intended source packet in
+controller SRAM. For packet 366, the independently generated expected CRC and
+SRAM CRC were both `f3278836`, but the received CRC was `cca4c352`. The source
+tail was `f17f74dcb42403272489391194bfa9b1`; the received tail was
+`f17f74dcb42403272489391100000000`. DMA reported data FIFO underrun, with no
+previous receive resynchronization. This localizes the observed data loss
+after preparation of the source buffer, rather than to the payload generator.
+The exact silicon/clock-domain mechanism is still unproven.
+All four alternating-pattern corruption captures used ring slot 13, buffer
+`0x33600`. The pattern period and ring positions are correlated, so this is
+not proof of a bad RAM location. Varying buffer placement and initial FIFO
+phase remains a useful next discriminator.
+
+**The 32-byte setting is not a general transport fix.** Separate varied-length,
+four-at-once trials still stalled after three packets with both 32-byte
+(`0x00060801`) and 16-byte (`0x00020801`) bursts. Those experimental changes to
+the default profile were reverted. Production retains `0x000a0801`; the
+32-byte comparison is isolated to its explicitly named test build.
+
+#### Retained comparison profiles and evidence
+
+```sh
+make micro-signal-transport-window-test micro-signal-transport-window32-test
+```
+
+Both new UF2s use the alternating 483/520-byte pattern and a one-packet window.
+The first is a **failing corruption reproducer** with 64-byte bursts. The second
+uses 32-byte bursts for comparison. The original transport and paced targets
+continue to use all 497 payload lengths with no host-credit limit. All four
+profiles are RF-free and use the same `collect ... --transport SECONDS` command.
+
+The test-only controller reports its window and pattern in otherwise unused
+calibration words. The host validates them, and acknowledges a packet only
+after its complete payload has passed validation. The controller's credit wait
+is bounded to 20,000,000 polling iterations and explicitly reports firmware
+error `0x8a` on exhaustion. Compile-time assertions bind the acknowledgement,
+window and pattern fields to mailbox offsets 36, 40 and 44; production mailbox
+layout/semantics are unchanged.
+
+Additional JSON fields identify the actual comparison:
+
+- `transport_window_N`: zero means unrestricted, one means stop-and-wait.
+- `transport_pattern_N`: zero means varied; one means alternating 483/520-byte
+  whole packets (465/502-byte payloads).
+- `transport_dma_control_N`: the actual core register readback.
+
+The collector rejects mismatched window, pattern, pacing or DMA profiles.
+USB evidence words 8, 9 and 10 carry pattern, DMA control and window,
+respectively, only in transport mode.
+
+`transport_last_buffer_N` uses the formerly spare trace bytes 96..127.
+Its eight words contain the last posted buffer's address and DMA byte count,
+SRAM CRC, received-buffer CRC, and the SRAM tail's final 16 bytes. Capture
+validates the descriptor's buffer address and bounds before reading it.
+These values are valid only when the diagnostic capture-error word is zero.
+The last posted buffer is the faulting packet in the one-packet comparison,
+but is not necessarily the packet being received in an unrestricted queue.
+A zero receive buffer from a no-packet timeout must not itself be interpreted
+as proof of corrupted wire data.
+
+Native tests cover window limits 0..16, wraparound and future acknowledgements,
+both payload patterns, and strict pre-/post-read faults, including a vanished
+availability flag and an all-ones bus response. Normal/strict loader tests,
+ASan/UBSan checks and all four transport builds pass.
+
+Local evidence prefixes are `fifo-paced-deferred-drain`,
+`fifo-host-credit2-corrected`, `fifo-host-credit1`, `fifo-idle-backoff`,
+`fifo-window-retained`, `fifo-postread-unpaced`, `fifo-window-postread`,
+`fifo-fixed520-window`, `fifo-alternating483-520`, `fifo-alternating-dma32`,
+`fifo-transition-retained64`, `fifo-transition-retained32`,
+`fifo-unpaced-dma32`, `fifo-unpaced-dma16`, `fifo-final64`, `fifo-final32`
+and `fifo-status-split64`.
+The preliminary `fifo-host-credit2` trial used a wrong test-only acknowledgement
+offset and is excluded from hardware conclusions.
+
+Afterward, both exact Universe serials received the unchanged production
+messenger. Independent 31,572-byte flash readbacks in
+`fifo-production-SERIAL.bin` matched the built binary and the preceding
+production reference. Both were left in BOOTSEL. The normal UF2 remains
+63,488 bytes; neither the host-credit protocol nor the experimental burst
+setting was added to production.

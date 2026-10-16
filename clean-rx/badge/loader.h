@@ -20,6 +20,7 @@ typedef struct {
     uint32_t stage;
     uint32_t rx_checked;
     uint32_t rx_resyncs;
+    uint32_t rx_status;
     uint8_t window_valid;
     uint8_t rx_stalled;
     uint8_t rx_retries;

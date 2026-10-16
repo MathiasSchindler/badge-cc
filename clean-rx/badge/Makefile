@@ -62,8 +62,14 @@ $(BUILD)/collector: collector.c frames.h ../tx_diag.h $(BUILD)/build_id.h
 		$< $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
-test: $(BUILD)/loader_test
+test: $(BUILD)/loader_test $(BUILD)/loader_strict_test
 	$(BUILD)/loader_test
+	$(BUILD)/loader_strict_test
+
+$(BUILD)/loader_strict_test: loader_test.c loader.c loader.h frames.h ../tx_diag.h | $(BUILD)
+	cc -std=c11 -Wall -Wextra -Werror -O2 -DCLEAN_RX_STRICT_TEST loader_test.c loader.c \
+		$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
+		$(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/loader_test: loader_test.c loader.c loader.h frames.h ../tx_diag.h | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O2 loader_test.c loader.c \

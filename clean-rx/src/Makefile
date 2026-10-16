@@ -8,6 +8,7 @@ CFLAGS  := --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -std=c11 \
            -ffreestanding -nostdinc -fno-builtin \
            -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
            -ffunction-sections -fdata-sections -I.
+CFLAGS += $(EXTRA_CFLAGS)
 
 LDFLAGS := -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings -T cyw43.ld
 
@@ -32,7 +33,7 @@ $(BUILD):
 $(BUILD)/startup.o: startup.S | $(BUILD)
 	$(CC) --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -nostdinc -c $< -o $@
 
-$(BUILD)/%.o: %.c cyw43_hw.h types.h sdio_ring.h ../../src/shared/stdint.h ../tx_diag.h | $(BUILD)
+$(BUILD)/%.o: %.c cyw43_hw.h types.h sdio_ring.h ../../src/shared/stdint.h ../tx_diag.h ../sdio_test.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cyw43_rx_fw.elf: $(OBJS) cyw43.ld
