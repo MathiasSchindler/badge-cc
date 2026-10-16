@@ -74,7 +74,8 @@ static int control(void *context, uint32_t command, uint8_t set, uint8_t iface,
 static void init(mock_t *mock, uint8_t role) {
     memset(mock, 0, sizeof(*mock));
     wifi_link_ops_t ops = {.context = mock, .control = control};
-    wifi_link_init(&mock->link, &ops, role, nonce, role == WIFI_LINK_AP ? ap_mac : sta_mac);
+    wifi_link_init(&mock->link, &ops, role, nonce,
+                   role == WIFI_LINK_STATION || role == WIFI_LINK_OPEN_STATION ? sta_mac : ap_mac);
     mock->stage = WIFI_LINK_CONFIGURE;
     mock->radio_up = 1u;
     assert(mock->link.report.stage == WIFI_LINK_IDLE);
@@ -158,24 +159,26 @@ static void configure_expected(mock_t *mock) {
         memcpy(call->request + 20u, ssid, 15u);
         mac_set(mock, 1u);
         ioctl32(mock, 30u, 0u, 1u);
-        pair(mock, "bsscfg:wsec", 1u, 4u);
+        pair(mock, "bsscfg:wsec", 1u, mock->link.open_network ? 0u : 4u);
         var32(mock, "mfp", 1u, 0u);
-        pair(mock, "bsscfg:wpa_auth", 1u, 0x80u);
-        pmk(mock, 1u);
+        pair(mock, "bsscfg:wpa_auth", 1u, mock->link.open_network ? 0u : 0x80u);
+        if (!mock->link.open_network) pmk(mock, 1u);
         ioctl32(mock, 110u, 1u, 1u);
         var32(mock, "2g_mrate", 1u, 22u);
         ioctl32(mock, 78u, 1u, 1u);
         pair(mock, "bss", 1u, 1u);
     } else {
-        ioctl32(mock, 134u, 0u, 4u);
-        pair(mock, "bsscfg:sup_wpa", 0u, 1u);
-        pair(mock, "bsscfg:sup_wpa2_eapver", 0u, 0xffffffffu);
-        pair(mock, "bsscfg:sup_wpa_tmo", 0u, 5000u);
-        pmk(mock, 0u);
+        ioctl32(mock, 134u, 0u, mock->link.open_network ? 0u : 4u);
+        pair(mock, "bsscfg:sup_wpa", 0u, mock->link.open_network ? 0u : 1u);
+        if (!mock->link.open_network) {
+            pair(mock, "bsscfg:sup_wpa2_eapver", 0u, 0xffffffffu);
+            pair(mock, "bsscfg:sup_wpa_tmo", 0u, 5000u);
+            pmk(mock, 0u);
+        }
         ioctl32(mock, 20u, 0u, 1u);
         ioctl32(mock, 22u, 0u, 0u);
-        var32(mock, "mfp", 0u, 1u);
-        ioctl32(mock, 165u, 0u, 0x80u);
+        var32(mock, "mfp", 0u, mock->link.open_network ? 0u : 1u);
+        ioctl32(mock, 165u, 0u, mock->link.open_network ? 0u : 0x80u);
         call = var(mock, "join", 0u, 70u);
         store(call->request + 5u, 15u);
         memcpy(call->request + 9u, ssid, 15u);
@@ -331,6 +334,7 @@ static void test_wait_auth_and_disconnect(void) {
             uint32_t before = mock.used;
             assert(wifi_link_poll(&mock.link));
             assert(mock.used - before == 2u && mock.used == mock.count);
+            assert(mock.link.report.associated == !!(flags & 0x10u));
             if (flags == 0x30u) {
                 assert(mock.link.report.stage == WIFI_LINK_CONNECTED);
                 assert(mock.link.report.authorized == 1u && mock.link.report.peer_count == 1u);
@@ -344,6 +348,7 @@ static void test_wait_auth_and_disconnect(void) {
         association(&mock, 0u);
         assert(wifi_link_poll(&mock.link));
         pending(&mock, 0u);
+        assert(!mock.link.report.associated);
         for (unsigned i = 0u; i < 6u; ++i) assert(mock.link.report.peer[i] == 0u);
     }
     configured(&mock, WIFI_LINK_AP);
@@ -490,7 +495,7 @@ static void test_bad_configuration(void) {
         if (which == 6u) invalid_mac[0] = 3u;
         if (which == 7u) invalid_mac[0] = 4u;
         wifi_link_init(&mock.link, which == 0u ? 0 : &selected_ops,
-                       which == 1u ? 2u : WIFI_LINK_AP,
+                       which == 1u ? 4u : WIFI_LINK_AP,
                        which == 2u ? 0 : nonce,
                        which == 3u ? 0 : which >= 5u ? invalid_mac : ap_mac);
         assert(mock.link.report.stage == WIFI_LINK_FAILED);
@@ -513,6 +518,18 @@ static void test_bad_configuration(void) {
 }
 
 int main(void) {
+    mock_t open;
+    for (uint8_t role = WIFI_LINK_OPEN_AP; role <= WIFI_LINK_OPEN_STATION; ++role) {
+        configured(&open, role);
+        assert(open.link.open_network && open.link.report.role == role - WIFI_LINK_OPEN_AP);
+        assert(!open.link.password[0]);
+        association(&open, 1u);
+        auth(&open, 0x10u);
+        assert(wifi_link_poll(&open.link));
+        assert(open.link.report.stage == WIFI_LINK_CONNECTED && !open.link.report.authorized);
+        assert(open.link.report.associated);
+        assert(open.link.report.peer_count == 1u);
+    }
     test_identity_and_security();
     test_configuration_failures();
     test_wait_auth_and_disconnect();

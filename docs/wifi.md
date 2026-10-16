@@ -685,6 +685,41 @@ models remain unverified or unimplemented.
 
 ## Paired AP/station control experiment
 
+### Controlled clean-rx association results
+
+The same vendor image can now provide an explicitly open channel-1 SoftAP.
+Open operation is opt-in; the normal paired and UDP paths retain WPA2.
+See the [AP-only USB workflow](usb-live.md#paired-link-image).
+
+The all-vendor open control passed with both peers reporting the matching
+association for 20 consecutive host observations. Using vendor firmware on
+the AP and clean-rx on the station then passed three consecutive fresh open
+trials: successful authentication and association, AID 1, matching fresh
+station MACs on both endpoints, and 35–37 consecutive AP observations on
+the final retained build.
+Clean-rx also observed a bounded 2.5-million-tick post-association window.
+
+After that open qualification, three WPA2-PSK/CCMP trials also completed
+association with AID 1 and matching AP peer records (33–36 observations).
+Each captured complete, valid-FCS RSN EAPOL-Key message 1 frames from the
+selected AP. Both endpoints correctly remained **not WPA2-authorized**.
+No local AP password was read. Clean-rx still needs a supplicant, messages
+2–4, MIC/replay validation, key derivation/installation and protected data;
+these results do not establish encrypted connectivity, DHCP or IP.
+
+The investigation corrected station-mode loss of a captured/ACK-scheduled
+frame behind an occupied single-credit SDIO slot, and changed management
+retries to allow RX draining between attempts. It also renewed the bounded
+BOOTSEL watchdog when the diagnostic starts, rather than consuming its
+budget while waiting for USB, and extended host polling beyond the target's
+six-second diagnostic deadline. Full CSMA/CA and RF/SIFS-qualified return
+ACKs remain unfinished.
+
+The unchanged default all-vendor WPA2 control also passed, with both peers
+authorized for 20 consecutive observations.
+
+### Original default WPA2 paired workflow
+
 The two attached badges are now the development fixture for a separate
 `usb-wifi-link` image. This is an 802.11 association/authorization slice,
 not completion of the static-IP/UDP milestone:

@@ -1,6 +1,8 @@
 #include "loader.h"
 #include "build_id.h"
 #include "frames.h"
+#include "station.h"
+#include "../unicast.h"
 #include "../tx_diag.h"
 #include "../../src/shared/bytes.h"
 #include "../../src/usb/live_usb_hw.h"
@@ -18,6 +20,40 @@ static uint32_t generation;
 static uint8_t detail[WIFI_TRACE_SIZE];
 static badger_canvas_t canvas;
 static uint8_t peer_challenge[14];
+static clean_station_ap_t station_ap;
+static uint8_t station_target[6];
+static int station_ap_status;
+
+static void monitor_packet(const uint8_t *packet, uint32_t size) {
+    if (size < 32u || !clean_frame_valid(packet + 18u, size - 18u)) return;
+    const uint8_t *m = packet + 18u;
+    uint32_t n = size - 18u;
+    if (n >= 34u && m[0] == 0xb0u && clean_station_u16(m + 26u) == 1u &&
+        badger_bytes_equal(m + 4u, station_target, 6u) &&
+        badger_bytes_equal(m + 16u, station_target, 6u)) {
+        badger_bytes_copy(detail + 1972u, m + 10u, 6u);
+        badger_bytes_store_u32(detail + 540u, badger_bytes_load_u32(detail + 540u) + 1u);
+        badger_bytes_store_u32(detail + 596u, n < 192u ? n : 192u);
+        badger_bytes_copy(detail + 600u, m, n < 192u ? n : 192u);
+    } else if (n >= 28u && m[0] == 0u &&
+        badger_bytes_equal(m + 4u, station_target, 6u) &&
+        badger_bytes_equal(m + 10u, detail + 1972u, 6u)) {
+        badger_bytes_store_u32(detail + 544u, badger_bytes_load_u32(detail + 544u) + 1u);
+        badger_bytes_store_u32(detail + 796u, n < 192u ? n : 192u);
+        badger_bytes_copy(detail + 800u, m, n < 192u ? n : 192u);
+    } else if (clean_ack_reply(m, n, detail + 1972u)) {
+        badger_bytes_store_u32(detail + 548u, badger_bytes_load_u32(detail + 548u) + 1u);
+    } else if (clean_ack_reply(m, n, station_target)) {
+        badger_bytes_store_u32(detail + 556u, badger_bytes_load_u32(detail + 556u) + 1u);
+    } else if (n >= 28u && m[0] != 0x80u &&
+        badger_bytes_equal(m + 10u, station_target, 6u) &&
+        badger_bytes_equal(m + 4u, detail + 1972u, 6u)) {
+        badger_bytes_store_u32(detail + 552u, badger_bytes_load_u32(detail + 552u) + 1u);
+        badger_bytes_store_u32(detail + 1088u, size);
+        badger_bytes_copy(detail + 1104u, packet,
+            size < CLEAN_DETAIL_PACKET_BYTES ? size : CLEAN_DETAIL_PACKET_BYTES);
+    }
+}
 
 static void screen(const char *status, uint32_t packets, uint32_t error) {
     char number[12];
@@ -40,6 +76,11 @@ static void screen(const char *status, uint32_t packets, uint32_t error) {
 }
 
 static void beacon(const uint8_t *packet, uint32_t size) {
+    if (detail[2000u] == 16u && size >= 40u &&
+        badger_bytes_equal(packet + 34u, station_target, 6u)) {
+        station_ap_status = clean_station_beacon(packet + 18u, size - 18u,
+                                                 station_target, &station_ap);
+    }
     uint8_t entry[40];
     if (size < 18u || !clean_beacon_info(packet + 18u, size - 18u, entry, packet[16] & 15u))
         return;
@@ -58,6 +99,25 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
         uint32_t size;
         if (!clean_receive(l, packet, &size)) return 0;
         if (size != 0u) {
+            if (detail[2000u] == 17u) monitor_packet(packet, size);
+            if (detail[2000u] == 16u && size >= 18u &&
+                badger_bytes_load_u32(detail + 524u) == 4u) {
+                int reason = clean_station_departure(packet + 18u, size - 18u,
+                                                     detail + 1972u, detail + 1980u);
+                if (reason >= 0) {
+                    badger_bytes_store_u32(detail + 524u, 5u);
+                    badger_bytes_store_u32(detail + 568u, (uint32_t)reason);
+                    badger_bytes_store_u32(detail + 536u, 0u);
+                }
+                if (station_ap.secured && size <= CLEAN_DETAIL_PACKET_BYTES &&
+                    clean_station_eapol_m1(packet + 18u, size - 18u,
+                                           detail + 1972u, detail + 1980u)) {
+                    badger_bytes_store_u32(detail + 576u,
+                        badger_bytes_load_u32(detail + 576u) + 1u);
+                    badger_bytes_store_u32(detail + 1088u, size);
+                    badger_bytes_copy(detail + 1104u, packet, size);
+                }
+            }
             uint32_t packets = badger_bytes_load_u32(detail + 1636u);
             int peer = detail[2000u] == 13u && size >= 18u &&
                 clean_peer_reply(packet + 18u, size - 18u, peer_challenge);
@@ -72,7 +132,7 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 clean_ap_reply(packet + 18u, size - 18u, detail + 1972u,
                                detail + 1980u,
                                (after_tx >= 3u && after_tx <= 6u) ||
-                               (after_tx >= 8u && after_tx <= 10u));
+                               (after_tx >= 8u && after_tx <= 10u) || after_tx == 15u);
             int ack = after_tx && size >= 18u &&
                 clean_ack_reply(packet + 18u, size - 18u, detail + 1972u);
             int candidate = after_tx && size >= 32u &&
@@ -84,7 +144,8 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 badger_bytes_store_u32(detail + 1968u,
                     (uint32_t)packet[18] | ((uint32_t)packet[19] << 8u));
             }
-            if (packets == 0u || response || ack || peer ||
+            if (packets == 0u || response ||
+                (ack && !(after_tx == 15u && badger_bytes_load_u32(detail + 1960u))) || peer ||
                 (candidate && !badger_bytes_load_u32(detail + 1960u) &&
                  !badger_bytes_load_u32(detail + 1992u))) {
                 badger_bytes_store_u32(detail + 1088u, size);
@@ -121,40 +182,185 @@ static int service(void *unused) {
            control.probe_generation == generation;
 }
 
+static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd) {
+    uint8_t readback[160];
+    if (!clean_block(l, CLEAN_TX_BUFFER_ADDR, bytes, size, 1u) ||
+        !clean_block(l, CLEAN_TX_BUFFER_ADDR, readback, size, 0u)) return 0;
+    if (!badger_bytes_equal(bytes, readback, size)) {
+        l->error = CLEAN_READBACK;
+        l->address = CLEAN_TX_BUFFER_ADDR;
+        return 0;
+    }
+    if (!clean_write(l, CLEAN_MBOX + 24u, cmd)) return 0;
+    uint32_t started = l->wire->now_us(l->wire->context), command, state;
+    do {
+        if (!clean_read(l, CLEAN_MBOX + 24u, &command) ||
+            !clean_read(l, CLEAN_MBOX + 4u, &state)) return 0;
+        if (state != 9u) {
+            l->error = CLEAN_CONTROLLER; l->actual = state;
+            return 0;
+        }
+        if (command == 2u) return 1;
+        if (l->wire->now_us(l->wire->context) - started >= 100000u) {
+            l->error = CLEAN_TIMEOUT; l->address = CLEAN_MBOX + 24u;
+            return 0;
+        }
+    } while (1);
+}
+
+static int station_wait(clean_loader_t *l, const uint8_t mac[6], uint8_t association,
+                         uint16_t *aid, uint32_t duration) {
+    uint32_t started = l->wire->now_us(l->wire->context);
+    while (l->wire->now_us(l->wire->context) - started < duration) {
+        uint8_t packet[CLEAN_RX_PACKET_BYTES];
+        uint32_t size;
+        if (!clean_receive(l, packet, &size)) return -1;
+        if (size < 18u) continue;
+        clean_record_post_tx(detail, packet, size,
+            l->wire->now_us(l->wire->context) - started);
+        const uint8_t *m = packet + 18u;
+        uint32_t n = size - 18u;
+        if (n >= 24u && badger_bytes_equal(m + 4u, mac, 6u)) {
+            uint32_t candidates = badger_bytes_load_u32(detail + 1096u);
+            badger_bytes_store_u32(detail + 1040u + 4u * (candidates % 12u),
+                ((uint32_t)clean_frame_valid(m, n) << 31u) | (n << 8u) | m[0]);
+            badger_bytes_store_u32(detail + 1096u, candidates + 1u);
+            if (association && m[0] == 0x10u) {
+                uint32_t saved = n < 192u ? n : 192u;
+                badger_bytes_store_u32(detail + 796u, saved);
+                badger_bytes_copy(detail + 800u, m, saved);
+            }
+        }
+        if (n >= 14u && clean_frame_valid(m, n) &&
+            badger_bytes_equal(m + 4u, mac, 6u)) {
+            badger_bytes_store_u32(detail + 1088u, size);
+            badger_bytes_copy(detail + 1104u, packet,
+                size < CLEAN_DETAIL_PACKET_BYTES ? size : CLEAN_DETAIL_PACKET_BYTES);
+        }
+        int reason = clean_station_departure(m, n, mac, station_ap.bssid);
+        if (reason >= 0) {
+            badger_bytes_store_u32(detail + 568u, (uint32_t)reason);
+            return -2;
+        }
+        int status = clean_station_response(m, n, mac, station_ap.bssid, association, aid);
+        if (status < 0) continue;
+        uint32_t at = association ? 800u : 600u;
+        uint32_t saved = n < 192u ? n : 192u;
+        badger_bytes_store_u32(detail + at - 4u, saved);
+        badger_bytes_copy(detail + at, m, saved);
+        return status;
+    }
+    return -1;
+}
+
+static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
+    badger_bytes_store_u32(detail + 520u, 0x31545341u);
+    badger_bytes_store_u32(detail + 528u, 0xffffffffu);
+    badger_bytes_store_u32(detail + 532u, 0xffffffffu);
+    badger_bytes_store_u32(detail + 572u, (uint32_t)station_ap_status);
+    if (station_ap_status <= 0) {
+        l->error = CLEAN_INPUT; l->actual = (uint32_t)station_ap_status;
+        return;
+    }
+    uint8_t mac[6] = {2u, nonce[6], nonce[7], nonce[8], nonce[9], nonce[10]};
+    badger_bytes_copy(detail + 1972u, mac, 6u);
+    badger_bytes_copy(detail + 1980u, station_ap.bssid, 6u);
+    uint8_t config[16] = {0};
+    badger_bytes_copy(config, mac, 6u);
+    badger_bytes_copy(config + 6u, station_ap.bssid, 6u);
+    config[12] = (uint8_t)station_ap.basic_rates;
+    config[13] = (uint8_t)(station_ap.basic_rates >> 8u);
+    config[14] = (uint8_t)!!(station_ap.capability & 1024u);
+    config[15] = 1u;
+    if (!station_command(l, config, sizeof(config), 7u)) return;
+    badger_bytes_store_u32(detail + 524u, 1u);
+    uint16_t aid = 0u;
+    for (uint8_t association = 0u; association < 2u; ++association) {
+        uint8_t frame[160];
+        uint16_t sequence = (uint16_t)(clean_station_u16(nonce + 11u) + association);
+        uint32_t length = association ?
+            clean_station_associate(frame, sequence, mac, &station_ap) :
+            clean_station_auth(frame, sequence, mac, &station_ap);
+        badger_bytes_store_u32(detail + 1092u, 1u);
+        int status = -1;
+        for (uint32_t attempt = 0u; attempt < 4u; ++attempt) {
+            if (attempt) {
+                frame[7] |= 8u;
+                badger_bytes_store_u32(frame + length - 4u, diag_crc32(frame + 6u, length - 10u));
+            }
+            if (!station_command(l, frame, sizeof(frame), 5u | clean_tx_length_bits(length) |
+                (1u << 18u) | (1u << 19u) | CLEAN_TX_ACK_REQUIRED)) return;
+            uint8_t status_bytes[sizeof(clean_unicast_status_t)];
+            if (!clean_block(l, CLEAN_UNICAST_ADDR, status_bytes, sizeof(status_bytes), 0u)) return;
+            if (badger_bytes_load_u32(status_bytes) != CLEAN_UNICAST_MAGIC) {
+                l->error = CLEAN_READBACK; l->address = CLEAN_UNICAST_ADDR;
+                return;
+            }
+            uint32_t at = 540u + 4u * association;
+            badger_bytes_store_u32(detail + at, badger_bytes_load_u32(detail + at) +
+                                  badger_bytes_load_u32(status_bytes + 8u));
+            uint32_t ack = badger_bytes_load_u32(status_bytes + 12u);
+            badger_bytes_store_u32(detail + 548u, badger_bytes_load_u32(detail + 548u) + ack);
+            status = station_wait(l, mac, association, &aid, ack ? 400000u : 100000u);
+            if (status != -1 || l->error || ack) break;
+        }
+        badger_bytes_store_u32(detail + 528u + 4u*association, (uint32_t)status);
+        badger_bytes_store_u32(detail + 524u, association ? 3u : 2u);
+        if (status != 0 || l->error) return;
+    }
+    badger_bytes_store_u32(detail + 536u, aid);
+    badger_bytes_store_u32(detail + 524u, 4u);
+    (void)receive_for(l, 2500000u, 0u);
+}
+
 static void run(const uint8_t nonce[16]) {
     clean_loader_t l;
     wifi_board_init();
     wifi_board_select_pio(1u);
     clean_loader_init(&l, wifi_board_wire(), service, 0);
+    if (badger_schedule_bootsel(8000u) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
-    if (nonce[14] > 14u) l.error = CLEAN_INPUT;
+    if (nonce[14] > 17u) l.error = CLEAN_INPUT;
     detail[2000u] = nonce[14];
     badger_bytes_copy(peer_challenge, nonce, sizeof(peer_challenge));
+    badger_bytes_copy(station_target, nonce, 6u);
+    station_ap_status = 0;
     badger_bytes_store_u32(detail + 2004u, nonce[14] == 8u || nonce[14] == 10u);
     badger_bytes_store_u32(detail + 2008u, nonce[14] == 9u || nonce[14] == 10u);
     if (l.error == CLEAN_OK &&
         clean_boot(&l, clean_image, length, channel, badger_bytes_load_u32(nonce) | 1u,
-                   nonce[14] != 0u && nonce[14] != 2u && nonce[14] != 13u) &&
+                   nonce[14] != 0u && nonce[14] != 2u && nonce[14] != 13u && nonce[14] != 17u) &&
         clean_write(&l, 0x18002024u, 0xf0u) &&
         clean_write(&l, CLEAN_MBOX + 24u, 2u) && clean_wait_state(&l, 9u, 100000u)) {
         l.stage = 7u;
-        (void)receive_for(&l, nonce[14] == 13u ? 2500000u : 700000u, 0u);
-        if (l.error == CLEAN_OK && nonce[14] != 0u && nonce[14] != 13u) {
+        (void)receive_for(&l, nonce[14] == 13u || nonce[14] == 17u ? 2500000u : 700000u, 0u);
+        if (l.error == CLEAN_OK && nonce[14] == 16u) station_run(&l, nonce);
+        if (l.error == CLEAN_OK && nonce[14] != 0u && nonce[14] != 13u &&
+            nonce[14] != 16u && nonce[14] != 17u) {
             uint8_t frame[96];
             uint32_t tx_length = 94u;
-            uint8_t ssid_length = detail[1646u];
+            const uint8_t *selected = detail + 1640u;
+            if (nonce[14] == 15u) {
+                int index = clean_beacon_find(detail + 1640u,
+                    badger_bytes_load_u32(detail + 1632u), nonce);
+                if (index < 0) {
+                    l.error = CLEAN_INPUT;
+                    l.actual = 15u;
+                } else selected += 40u * (uint32_t)index;
+            }
+            uint8_t ssid_length = selected[6];
             if (nonce[14] < 12u && (badger_bytes_load_u32(detail + 1632u) == 0u ||
                 !clean_probe_request(frame, (uint16_t)badger_bytes_load_u32(nonce),
-                                     detail + 1648u, ssid_length))) {
+                                     selected + 8u, ssid_length))) {
                 l.error = CLEAN_INPUT;
             }
             /* Fresh local source MAC distinguishes an AP response from old traffic. */
             if (l.error == CLEAN_OK) {
-                badger_bytes_copy(detail + 1980u, detail + 1640u, 6u);
+                badger_bytes_copy(detail + 1980u, selected, 6u);
                 if ((nonce[14] >= 3u && nonce[14] <= 6u) ||
-                    (nonce[14] >= 8u && nonce[14] <= 10u))
+                    (nonce[14] >= 8u && nonce[14] <= 10u) || nonce[14] == 15u)
                     tx_length = clean_auth_request(frame, (uint16_t)badger_bytes_load_u32(nonce),
                                                    detail + 1980u, nonce[14] == 6u || nonce[14] >= 8u);
                 static const uint8_t broadcast[6] = {255u,255u,255u,255u,255u,255u};
@@ -163,13 +369,16 @@ static void run(const uint8_t nonce[16]) {
                         (uint16_t)badger_bytes_load_u32(nonce), detail + 1648u,
                         ssid_length, nonce[14] == 11u ? broadcast : detail + 1980u);
                 if (nonce[14] == 4u) clean_ofdm_plcp(frame);
+                if (nonce[14] == 15u &&
+                    !clean_ofdm_plcp_rate(frame, tx_length - CLEAN_PLCP_BYTES, 0u))
+                    l.error = CLEAN_INPUT;
                 if (nonce[14] == 5u) clean_cck_plcp(frame, 0x0au, 704u);
                 if (nonce[14] == 12u || nonce[14] == 14u)
                     clean_peer_request(frame, peer_challenge, nonce[14] == 14u);
                 if (tx_length == 0u) l.error = CLEAN_INPUT;
                 else {
                     frame[16] = 0x02u;
-                    badger_bytes_copy(frame + 17u, nonce, 5u);
+                    badger_bytes_copy(frame + 17u, nonce + (nonce[14] == 15u ? 6u : 0u), 5u);
                     badger_bytes_copy(detail + 1972u, frame + 16u, 6u);
                     badger_bytes_store_u32(frame + tx_length - 4u,
                                           diag_crc32(frame + 6u, tx_length - 10u));
@@ -191,7 +400,7 @@ static void run(const uint8_t nonce[16]) {
             if (l.error == CLEAN_OK &&
                 clean_write(&l, CLEAN_MBOX + 24u,
                             5u | (tx_length << 8u) | (1u << 19u) |
-                            (nonce[14] == 4u ? 1u << 18u : 0u) |
+                            (nonce[14] == 4u || nonce[14] == 15u ? 1u << 18u : 0u) |
                             (nonce[14] == 8u || nonce[14] == 10u ? CLEAN_TX_REARM_RX : 0u) |
                             (nonce[14] == 9u || nonce[14] == 10u ? CLEAN_TX_MATCH_SOURCE : 0u))) {
                 uint32_t started_tx = l.wire->now_us(l.wire->context);
@@ -224,8 +433,17 @@ static void run(const uint8_t nonce[16]) {
     /* Collect fault evidence even after a failed stage, still under a deadline. */
     l.error = CLEAN_OK;
     int snapshot = clean_block(&l, CLEAN_MBOX, detail + 32u, 448u, 0u) &&
-                   clean_block(&l, CLEAN_MULTI, detail + 480u, 40u, 0u) &&
-                   clean_block(&l, CLEAN_MULTI + 40u, detail + 520u, 568u, 0u);
+                   clean_block(&l, CLEAN_MULTI, detail + 480u, 40u, 0u);
+    if (snapshot && nonce[14] != 16u && nonce[14] != 17u)
+        snapshot = clean_block(&l, CLEAN_MULTI + 40u, detail + 520u, 568u, 0u);
+    if (snapshot && nonce[14] == 16u) {
+        uint8_t status[sizeof(clean_unicast_status_t)];
+        snapshot = clean_block(&l, CLEAN_UNICAST_ADDR, status, sizeof(status), 0u);
+        if (snapshot) {
+            badger_bytes_copy(detail + 552u, status + 16u, 8u);
+            badger_bytes_copy(detail + 1000u, status, sizeof(status));
+        }
+    }
     if (saved_error != CLEAN_OK) {
         l.error = saved_error;
         l.address = saved_addr;
@@ -250,6 +468,13 @@ static void run(const uint8_t nonce[16]) {
     live_usb_probe_finish(&control, generation, wire_report);
     live_usb_trace_finish(&control, generation, detail);
     screen(l.error ? "RADIO TEST FAILED" :
+           nonce[14] == 16u ?
+           (clean_station_evidence(detail) ?
+            "ASSOCIATED / WPA2 NOT AUTHORIZED" : "AP ASSOCIATION NOT CONFIRMED") :
+           nonce[14] == 15u ?
+           (clean_auth_response_status(detail) == 0 ? "AP AUTH OK / NOT CONNECTED" :
+            clean_auth_response_status(detail) > 0 ? "AP REJECTED AUTHENTICATION" :
+            "NO AP AUTHENTICATION REPLY") :
            clean_peer_received(detail, peer_challenge) ? "FRESH PEER FRAME RECEIVED" :
            clean_tx_confirmed(detail) ?
            "FRESH REPLY / TX CONFIRMED" :

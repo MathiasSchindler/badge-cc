@@ -8,7 +8,28 @@
 #include "../../src/tools/diagnostics_logic.h"
 #include "loader.h"
 #include "frames.h"
+#include "station.h"
 #include "../tx_diag.h"
+
+static int ap_bssid_decode(const char *text, uint8_t bssid[6]) {
+    static const char digits[] = "0123456789abcdef";
+    if (strlen(text) != 17u) return 0;
+    uint8_t nonzero = 0u;
+    for (unsigned i = 0u; i < 6u; ++i) {
+        unsigned value = 0u;
+        if (i && text[3u * i - 1u] != ':') return 0;
+        for (unsigned n = 0u; n < 2u; ++n) {
+            unsigned char c = (unsigned char)text[3u * i + n];
+            if (c >= 'A' && c <= 'F') c = (unsigned char)(c + ('a' - 'A'));
+            const char *digit = strchr(digits, c);
+            if (digit == NULL) return 0;
+            value = (value << 4u) | (unsigned)(digit - digits);
+        }
+        bssid[i] = (uint8_t)value;
+        nonzero |= bssid[i];
+    }
+    return nonzero && !(bssid[0] & 1u);
+}
 
 static int peer_challenge_decode(const char *hex, uint8_t challenge[14]) {
     if (strlen(hex) != 28u) {
@@ -162,7 +183,8 @@ static void deadline(int signum) {
 }
 
 static int collect(libusb_device_handle *device, const char *path, uint8_t channel,
-                   uint8_t tx, const uint8_t *challenge, const char *serial) {
+                   uint8_t tx, const uint8_t *challenge, const uint8_t *target,
+                   const char *serial) {
     uint8_t info[12], nonce[16], request[64], report[64], detail[WIFI_TRACE_SIZE];
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
     const uint8_t prefix[] = {'U','2','6','L',1,0,64,0};
@@ -176,12 +198,13 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (fclose(random) != 0) ok = 0;
     if (!ok) { fputs("Nonce read failed\n", stderr); return 0; }
     if (challenge != NULL) memcpy(nonce, challenge, 14u);
+    if (target != NULL) memcpy(nonce, target, 6u);
     nonce[15] = channel;
     nonce[14] = tx;
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_USB_TEST_ID);
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
     int got = 0;
-    for (unsigned attempt = 0u; attempt < 600u; ++attempt) {
+    for (unsigned attempt = 0u; attempt < 800u; ++attempt) {
         int count = libusb_control_transfer(device, 0xc0u, LIVE_USB_WIFI_REPORT, 0, 0,
                                             report, sizeof(report), 1000u);
         if (count == 64) { got = 1; break; }
@@ -220,6 +243,44 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+    if (tx == 17u) {
+        printf("{\"monitor_auth_requests\":%u,\"monitor_assoc_requests\":%u,"
+               "\"monitor_ap_acks\":%u,\"monitor_ap_responses\":%u,"
+               "\"monitor_acks_to_ap\":%u,\"error\":%u}\n",
+               usb_report_u32(detail + 540u), usb_report_u32(detail + 544u),
+               usb_report_u32(detail + 548u), usb_report_u32(detail + 552u),
+               usb_report_u32(detail + 556u),
+               usb_report_u32(detail + 8u));
+        return usb_report_u32(detail + 8u) == 0u;
+    }
+    if (tx == 16u) {
+        int associated = clean_station_evidence(detail);
+        printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,\"stage\":%u,"
+               "\"error\":%u,\"actual\":%u,\"fw_error\":%u,\"ap_profile\":%d,"
+               "\"phase\":%u,\"authentication_status\":%d,\"association_status\":%d,"
+               "\"aid\":%u,\"auth_attempts\":%u,\"assoc_attempts\":%u,"
+               "\"tx_ack_received\":%u,\"ack_responses_scheduled\":%u,"
+               "\"ack_schedule_errors\":%u,\"deauth_reason\":%u,"
+               "\"associated\":%s,\"wpa2_authorized\":false,"
+               "\"local_mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
+               "\"own_rx_candidates\":%u,\"association_candidate_bytes\":%u,"
+               "\"eapol_m1_received\":%s,\"eapol_m1_count\":%u}\n",
+               serial, USB_REPORT_BUILD_ID, usb_report_u32(detail + 28u),
+               usb_report_u32(detail + 4u), usb_report_u32(detail + 8u),
+               usb_report_u32(detail + 16u), usb_report_u32(detail + 44u),
+               (int32_t)usb_report_u32(detail + 572u), usb_report_u32(detail + 524u),
+               (int32_t)usb_report_u32(detail + 528u), (int32_t)usb_report_u32(detail + 532u),
+               usb_report_u32(detail + 536u), usb_report_u32(detail + 540u),
+               usb_report_u32(detail + 544u), usb_report_u32(detail + 548u),
+               usb_report_u32(detail + 552u), usb_report_u32(detail + 556u),
+               usb_report_u32(detail + 568u), associated ? "true" : "false",
+               detail[1972], detail[1973], detail[1974], detail[1975], detail[1976], detail[1977],
+               usb_report_u32(detail + 1096u), usb_report_u32(detail + 796u),
+               clean_station_eapol_evidence(detail) ? "true" : "false",
+               usb_report_u32(detail + 576u));
+        if (!associated) fputs("No validated successful association exchange\n", stderr);
+        return associated;
+    }
     printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,\"stage\":%u,\"error\":%u,"
            "\"address\":\"%08x\",\"actual\":\"%08x\",\"verified_bytes\":%u,"
            "\"elapsed_ticks\":%u,\"fw_magic\":\"%08x\",\"fw_state\":%u,"
@@ -262,7 +323,25 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     for (unsigned i = 0u; i < 14u; ++i) printf("%02x", nonce[i]);
     printf("\"");
     print_tx_diag(detail);
+    if (tx == 15u) {
+        printf(",\"requested_bssid\":\"");
+        for (unsigned i = 0u; i < 6u; ++i)
+            printf("%s%02x", i ? ":" : "", nonce[i]);
+        int auth_status = clean_auth_response_status(detail);
+        printf("\",\"authentication_response_received\":%s,\"authentication_status\":",
+               auth_status >= 0 ? "true" : "false");
+        if (auth_status >= 0) printf("%d", auth_status);
+        else fputs("null", stdout);
+        fputs(",\"associated\":false,\"wpa2_authorized\":false", stdout);
+    }
     puts("}");
+    if (tx == 15u) {
+        if (clean_auth_response_status(detail) != 0) {
+            fputs("AP authentication not confirmed: missing/rejected bound authentication response\n", stderr);
+            return 0;
+        }
+        return 1;
+    }
     if (tx == 2u)
         return usb_report_u32(detail + 8u) == CLEAN_CONTROLLER &&
                usb_report_u32(detail + 36u) == 255u &&
@@ -294,6 +373,14 @@ int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--inspect") == 0)
         return inspect(argv[2], argv[3]) ? 0 : 1;
     uint8_t challenge[14];
+    uint8_t target[6];
+    int ap_mode = argc == 6 && (strcmp(argv[4], "--ap-auth") == 0 ||
+                                strcmp(argv[4], "--ap-assoc") == 0 ||
+                                strcmp(argv[4], "--ap-monitor") == 0);
+    if (ap_mode && !ap_bssid_decode(argv[5], target)) {
+        fputs("AP BSSID must be a nonzero unicast address in XX:XX:XX:XX:XX:XX format\n", stderr);
+        return 2;
+    }
     uint8_t peer_mode = 0u;
     if (argc == 6 && (strcmp(argv[4], "--peer-rx") == 0 ||
                       strcmp(argv[4], "--peer-tx") == 0 ||
@@ -302,8 +389,8 @@ int main(int argc, char **argv) {
         peer_mode = strcmp(argv[4], "--peer-rx") == 0 ? 13u :
                     strcmp(argv[4], "--peer-tx-1m") == 0 ? 14u : 12u;
     }
-    if ((!peer_mode && argc != 4 && argc != 5) || strlen(argv[1]) != 16u ||
-        (argc == 6 && !peer_mode) ||
+    if ((!peer_mode && !ap_mode && argc != 4 && argc != 5) || strlen(argv[1]) != 16u ||
+        (argc == 6 && !peer_mode && !ap_mode) ||
         (argc == 5 && strcmp(argv[4], "--tx-auth-short") != 0 &&
                       strcmp(argv[4], "--tx-auth-rearm") != 0 &&
                       strcmp(argv[4], "--tx-auth-match") != 0 &&
@@ -320,6 +407,8 @@ int main(int argc, char **argv) {
               stderr);
         fputs("peer usage: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--peer-rx|--peer-tx|--peer-tx-1m CHALLENGE_HEX_28\n", stderr);
+        fputs("AP authentication only: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--ap-auth|--ap-assoc|--ap-monitor XX:XX:XX:XX:XX:XX\n", stderr);
         return 2;
     }
     char *end;
@@ -359,8 +448,10 @@ int main(int argc, char **argv) {
                               strcmp(argv[4], "--tx-probe-broadcast-1m") == 0 ? 11u :
                               strcmp(argv[4], "--tx-auth-short") == 0 ? 6u : 1u) : 0u;
     if (peer_mode) mode = peer_mode;
+    if (ap_mode) mode = strcmp(argv[4], "--ap-assoc") == 0 ? 16u :
+                        strcmp(argv[4], "--ap-monitor") == 0 ? 17u : 15u;
     if (status == 0) ok = collect(device, argv[2], (uint8_t)channel, mode,
-                                 peer_mode ? challenge : NULL, argv[1]);
+                                 peer_mode ? challenge : NULL, ap_mode ? target : NULL, argv[1]);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     int rebooted = transfer(device, 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);
     if (status == 0) libusb_release_interface(device, 0);

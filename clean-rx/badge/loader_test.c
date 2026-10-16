@@ -4,6 +4,8 @@
 #include "loader.h"
 #include "../../src/shared/bytes.h"
 #include "frames.h"
+#include "station.h"
+#include "../unicast.h"
 #include "../tx_diag.h"
 
 static uint32_t ticks, calls, blocks, state, base;
@@ -221,7 +223,171 @@ static void fragments(const wifi_wire_t *wire) {
     f2_status = 0u;
 }
 
+static void eapol_tests(uint8_t evidence[2048]);
+
+static void station_tests(void) {
+    const uint8_t mac[6] = {2u,1u,2u,3u,4u,5u};
+    const uint8_t peer[6] = {2u,6u,7u,8u,9u,10u};
+    for (uint32_t rate = 0u; rate < 12u; ++rate) {
+        assert(clean_ack_rate(0xfffu, rate) == (int)rate);
+        int fallback = clean_ack_rate(1u, rate);
+        assert(fallback >= 0 && fallback <= (int)rate);
+        if (rate >= 4u) assert(fallback == 4 || fallback == 6 || fallback == 8);
+        uint8_t plcp[6], expected[6];
+        uint16_t phy;
+        assert(clean_ack_template(plcp, rate, &phy));
+        if (rate >= 4u) assert(clean_ofdm_plcp_valid(plcp, 14u));
+        else {
+            static const uint8_t signal[4] = {10u,20u,55u,110u};
+            static const uint16_t duration[4] = {112u,56u,21u,11u};
+            clean_cck_plcp_service(expected, signal[rate], duration[rate],
+                                   (uint8_t)(rate == 3u ? 0x84u : 4u));
+            assert(!memcmp(plcp, expected, 6u));
+        }
+    }
+    assert(clean_ack_rate(0u, 0u) == -1 && clean_ack_rate(0x8000u, 0u) == -1);
+    assert(clean_ack_rate(1u, 12u) == -1);
+    clean_station_ap_t ap = {0}, parsed;
+    memcpy(ap.bssid, peer, 6u);
+    memcpy(ap.ssid, "test", 4u);
+    ap.ssid_length = 4u; ap.secured = 1u;
+    ap.rates = 0xfffu; ap.basic_rates = 0x15fu; ap.capability = 0x431u;
+    uint8_t frame[160], beacon[200] = {0};
+    uint32_t auth_len = clean_station_auth(frame, 0x123u, mac, &ap);
+    assert(auth_len == 40u && clean_frame_valid(frame + 6u, 34u));
+    assert(clean_ofdm_plcp_valid(frame, 34u));
+    assert(frame[28] == 0x30u && frame[29] == 0x12u && frame[32] == 1u);
+    uint32_t total = clean_station_associate(frame, 0x124u, mac, &ap);
+    assert(total <= sizeof(frame) && clean_frame_valid(frame + 6u, total - 6u));
+    assert(clean_ofdm_plcp_valid(frame, total - 6u));
+    assert(clean_station_u16(frame + 30u) == 0x431u && frame[32] == 10u);
+    uint32_t ies = total - 10u - 28u;
+    beacon[0] = 0x80u;
+    memset(beacon + 4u, 255, 6u);
+    memcpy(beacon + 10u, peer, 6u); memcpy(beacon + 16u, peer, 6u);
+    beacon[34] = 0x31u; beacon[35] = 4u;
+    memcpy(beacon + 36u, frame + 34u, ies);
+    uint32_t n = 40u + ies;
+    badger_bytes_store_u32(beacon + n - 4u, diag_crc32(beacon, n - 4u));
+    assert(clean_station_beacon(beacon, n, peer, &parsed) == CLEAN_AP_PSK_CCMP);
+    assert(parsed.basic_rates == ap.basic_rates && parsed.rates == ap.rates);
+    assert(parsed.ssid_length == 4u && !memcmp(parsed.ssid, "test", 4u));
+    for (uint32_t truncated = 0u; truncated < n; ++truncated)
+        assert(clean_station_beacon(beacon, truncated, peer, &parsed) == CLEAN_AP_INVALID);
+    uint8_t rsn[24] = {1u,0u,0u,15u,172u,4u,1u,0u,0u,15u,172u,4u,
+                       1u,0u,0u,15u,172u,2u,0u,0u};
+    assert(clean_station_rsn(rsn, 18u) == CLEAN_AP_PSK_CCMP);
+    assert(clean_station_rsn(rsn, 20u) == CLEAN_AP_PSK_CCMP);
+    for (uint32_t truncated = 0u; truncated < 18u; ++truncated)
+        assert(clean_station_rsn(rsn, truncated) == CLEAN_AP_INVALID);
+    assert(clean_station_rsn(rsn, 19u) == CLEAN_AP_INVALID);
+    rsn[18] = 64u;
+    assert(clean_station_rsn(rsn, 20u) == CLEAN_AP_UNSUPPORTED);
+    rsn[18] = 0u; rsn[17] = 8u;
+    assert(clean_station_rsn(rsn, 20u) == CLEAN_AP_UNSUPPORTED);
+    rsn[17] = 2u; rsn[20] = 1u;
+    assert(clean_station_rsn(rsn, 22u) == CLEAN_AP_INVALID);
+    uint8_t response[40] = {0};
+    memcpy(response + 4u, mac, 6u); memcpy(response + 10u, peer, 6u);
+    memcpy(response + 16u, peer, 6u);
+    response[0] = 0xb0u; response[26] = 2u;
+    badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
+    uint16_t aid = 0u;
+    assert(clean_station_response(response, 34u, mac, peer, 0u, &aid) == 0);
+    response[28] = 13u;
+    badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
+    assert(clean_station_response(response, 34u, mac, peer, 0u, &aid) == 13);
+    response[0] = 0x10u; response[26] = 0u; response[28] = 38u; response[29] = 0xc0u;
+    response[24] = 1u; response[30] = 1u; response[31] = 2u;
+    response[32] = 0x82u; response[33] = 0x84u;
+    badger_bytes_store_u32(response + 34u, diag_crc32(response, 34u));
+    assert(clean_station_response(response, 38u, mac, peer, 1u, &aid) == 0 && aid == 38u);
+    uint8_t evidence[2048] = {0};
+    evidence[2000] = 16u;
+    badger_bytes_store_u32(evidence + 4u, 8u);
+    badger_bytes_store_u32(evidence + 520u, 0x31545341u);
+    badger_bytes_store_u32(evidence + 524u, 4u);
+    badger_bytes_store_u32(evidence + 536u, 38u);
+    badger_bytes_store_u32(evidence + 596u, 34u);
+    badger_bytes_store_u32(evidence + 796u, 38u);
+    memcpy(evidence + 1972u, mac, 6u); memcpy(evidence + 1980u, peer, 6u);
+    memcpy(evidence + 800u, response, 38u);
+    response[0] = 0xb0u; response[24] = 0u; response[26] = 2u;
+    response[28] = response[29] = 0u;
+    badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
+    memcpy(evidence + 600u, response, 34u);
+    assert(clean_station_evidence(evidence));
+    eapol_tests(evidence);
+    evidence[800u + 4u] ^= 1u;
+    assert(!clean_station_evidence(evidence));
+    response[0] = 0x10u; response[26] = 0u; response[28] = 0xd8u; response[29] = 0xc7u;
+    badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
+    assert(clean_station_response(response, 34u, mac, peer, 1u, &aid) == -1);
+    response[28] = 38u; response[29] = 0u;
+    badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
+    assert(clean_station_response(response, 34u, mac, peer, 1u, &aid) == -1);
+}
+
+static void eapol_tests(uint8_t evidence[2048]) {
+    const uint8_t mac[6] = {2u,1u,2u,3u,4u,5u}, peer[6] = {2u,6u,7u,8u,9u,10u};
+    for (uint32_t qos = 0u; qos < 2u; ++qos) {
+        uint8_t frame[160] = {0};
+        uint32_t header = qos ? 26u : 24u, length = header + 111u;
+        frame[0] = qos ? 0x88u : 8u; frame[1] = 2u;
+        memcpy(frame + 4u, mac, 6u);
+        memcpy(frame + 10u, peer, 6u); memcpy(frame + 16u, peer, 6u);
+        const uint8_t snap[8] = {170u,170u,3u,0u,0u,0u,136u,142u};
+        memcpy(frame + header, snap, sizeof(snap));
+        uint8_t *e = frame + header + 8u;
+        e[0] = 2u; e[1] = 3u; e[3] = 95u; e[4] = 2u; e[6] = 0x8au; e[8] = 16u;
+        e[16] = 1u; e[17] = 2u;
+        badger_bytes_store_u32(frame + length - 4u, diag_crc32(frame, length - 4u));
+        assert(clean_station_eapol_m1(frame, length, mac, peer));
+        memcpy(evidence + 1122u, frame, length);
+        badger_bytes_store_u32(evidence + 1088u, length + 18u);
+        badger_bytes_store_u32(evidence + 572u, CLEAN_AP_PSK_CCMP);
+        badger_bytes_store_u32(evidence + 576u, 1u);
+        assert(clean_station_eapol_evidence(evidence));
+        badger_bytes_store_u32(evidence + 576u, 0u);
+        assert(!clean_station_eapol_evidence(evidence));
+        badger_bytes_store_u32(evidence + 576u, 1u);
+        badger_bytes_store_u32(evidence + 572u, CLEAN_AP_OPEN);
+        assert(!clean_station_eapol_evidence(evidence));
+        badger_bytes_store_u32(evidence + 572u, CLEAN_AP_PSK_CCMP);
+        badger_bytes_store_u32(evidence + 1088u, 529u);
+        assert(!clean_station_eapol_evidence(evidence));
+        badger_bytes_store_u32(evidence + 1088u, length + 18u);
+        badger_bytes_store_u32(evidence + 524u, 5u);
+        assert(!clean_station_eapol_evidence(evidence));
+        badger_bytes_store_u32(evidence + 524u, 4u);
+        evidence[1122u + length - 1u] ^= 1u;
+        assert(!clean_station_eapol_evidence(evidence));
+        evidence[1122u + length - 1u] ^= 1u;
+        for (uint32_t bit = 0u; bit < 16u; ++bit) {
+            uint32_t at = header + (bit < 8u ? 14u : 13u);
+            frame[at] ^= (uint8_t)(1u << (bit & 7u));
+            badger_bytes_store_u32(frame + length - 4u, diag_crc32(frame, length - 4u));
+            assert(!clean_station_eapol_m1(frame, length, mac, peer));
+            frame[at] ^= (uint8_t)(1u << (bit & 7u));
+        }
+        badger_bytes_store_u32(frame + length - 4u, diag_crc32(frame, length - 4u));
+        for (uint32_t n = 0u; n < length; ++n) assert(!clean_station_eapol_m1(frame, n, mac, peer));
+        const uint32_t invalid[] = {4u,10u,16u,header,header+9u,header+11u,
+                                    header+12u,header+14u,header+16u,header+89u,header+105u};
+        for (uint32_t i = 0u; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+            frame[invalid[i]] ^= 1u;
+            badger_bytes_store_u32(frame + length - 4u, diag_crc32(frame, length - 4u));
+            assert(!clean_station_eapol_m1(frame, length, mac, peer));
+            frame[invalid[i]] ^= 1u;
+        }
+        badger_bytes_store_u32(frame + length - 4u, diag_crc32(frame, length - 4u));
+        frame[length - 1u] ^= 1u;
+        assert(!clean_station_eapol_m1(frame, length, mac, peer));
+    }
+}
+
 int main(void) {
+    station_tests();
     wifi_wire_t wire = {.now_us = now, .transfer = mock_transfer,
         .write = write_signal, .data_output = output, .read_data = read_signal};
     fragments(&wire);
@@ -517,6 +683,16 @@ int main(void) {
     assert(!clean_probe_request(probe, 0u, bytes, 33u));
     assert(!clean_probe_request(probe, 0u, NULL, 1u));
     const uint8_t ap[6] = {2u,3u,4u,5u,6u,7u}, station[6] = {2u,8u,9u,10u,11u,12u};
+    uint8_t entries[320] = {0};
+    memcpy(entries + 7u * 40u, ap, 6u);
+    assert(clean_beacon_find(entries, 8u, ap) == 7);
+    assert(clean_beacon_find(entries, 7u, ap) == -1);
+    assert(clean_beacon_find(entries, 0u, ap) == -1);
+    assert(clean_beacon_find(entries, 9u, ap) == -1);
+    assert(clean_beacon_find(entries, 8u, station) == -1);
+    assert(clean_beacon_find(entries, 8u, entries) == -1);
+    entries[0] = 1u;
+    assert(clean_beacon_find(entries, 8u, entries) == -1);
     uint8_t compact[96];
     assert(clean_compact_probe_request(compact, 0x123u, NULL, 0u, ap) == 52u);
     assert(clean_frame_valid(compact + 6u, 46u));
@@ -541,6 +717,10 @@ int main(void) {
            short_auth[2] == 0x10u && short_auth[3] == 1u);
     assert(short_auth[6] == 0xb0u && short_auth[32] == 1u);
     for (unsigned i = 40u; i < sizeof(short_auth); ++i) assert(short_auth[i] == 0u);
+    assert(clean_ofdm_plcp_rate(short_auth, 34u, 0u));
+    assert(clean_ofdm_plcp_valid(short_auth, 34u));
+    assert(short_auth[0] == 0x4bu && short_auth[1] == 4u && short_auth[2] == 2u);
+    assert(clean_frame_valid(short_auth + 6u, 34u));
     assert(clean_auth_request(probe, 0x123u, ap, 0u) == 94u);
     assert(clean_frame_valid(probe + 6u, 88u));
     assert(probe[6] == 0xb0u && probe[30] == 0u && probe[32] == 1u);
@@ -629,6 +809,7 @@ int main(void) {
     assert(!clean_peer_received(peer_evidence, challenge));
     badger_bytes_store_u32(evidence + 1992u, 1u);
     assert(clean_tx_confirmed(evidence));
+    assert(clean_auth_response_status(evidence) == -1);
     static const uint32_t lengths[] = {40u,51u,52u,84u,85u,94u};
     for (unsigned i = 0u; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
         badger_bytes_store_u32(evidence + 1988u, lengths[i]);
@@ -659,6 +840,19 @@ int main(void) {
     memcpy(evidence + 1980u, ap, 6u);
     memcpy(evidence + 1122u, probe + 6u, 88u);
     assert(clean_tx_confirmed(evidence));
+    assert(clean_auth_response_status(evidence) == 0);
+    evidence[1122u + 84u] ^= 1u;
+    assert(clean_auth_response_status(evidence) == -1);
+    evidence[1122u + 84u] ^= 1u;
+    evidence[1980u] ^= 1u;
+    assert(clean_auth_response_status(evidence) == -1);
+    evidence[1980u] ^= 1u;
+    evidence[1122u + 28u] = 13u;
+    badger_bytes_store_u32(evidence + 1122u + 84u, diag_crc32(evidence + 1122u, 84u));
+    assert(clean_auth_response_status(evidence) == 13);
+    evidence[1122u + 26u] = 1u;
+    badger_bytes_store_u32(evidence + 1122u + 84u, diag_crc32(evidence + 1122u, 84u));
+    assert(clean_auth_response_status(evidence) == -1);
     badger_bytes_store_u32(evidence + 8u, 5u);
     assert(!clean_tx_confirmed(evidence));
     uint8_t frame[48] = {0x80u}, entry[40];

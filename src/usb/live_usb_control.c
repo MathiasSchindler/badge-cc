@@ -265,6 +265,9 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
                              || request == LIVE_USB_WIFI_SUBMIT || request == LIVE_USB_WIFI_PIO_SUBMIT
 #else
                              || request == LIVE_USB_LINK_AP || request == LIVE_USB_LINK_STATION
+#ifndef LIVE_USB_UDP
+                             || request == LIVE_USB_LINK_OPEN_AP || request == LIVE_USB_LINK_OPEN_STATION
+#endif
 #endif
 #endif
 #ifdef LIVE_USB_FIRMWARE
@@ -278,9 +281,12 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
             if (request == LIVE_USB_FW_SUBMIT) control->incoming_test = WIFI_FW_TEST_ID;
 #endif
 #ifdef LIVE_USB_LINK
-            if (request == LIVE_USB_LINK_AP || request == LIVE_USB_LINK_STATION) {
+            if (request == LIVE_USB_LINK_AP || request == LIVE_USB_LINK_STATION ||
+                request == LIVE_USB_LINK_OPEN_AP || request == LIVE_USB_LINK_OPEN_STATION) {
                 control->incoming_test = WIFI_LINK_TEST_ID;
-                control->probe_role = request == LIVE_USB_LINK_AP ? WIFI_LINK_AP : WIFI_LINK_STATION;
+                control->probe_role = request == LIVE_USB_LINK_OPEN_AP ? WIFI_LINK_OPEN_AP :
+                                      request == LIVE_USB_LINK_OPEN_STATION ? WIFI_LINK_OPEN_STATION :
+                                      request == LIVE_USB_LINK_AP ? WIFI_LINK_AP : WIFI_LINK_STATION;
             }
 #endif
             control->report_valid = 0u;

@@ -314,15 +314,21 @@ static void print_link(const char *serial, const wifi_link_report_t *report) {
     printf("\",\"peer\":\""); print_mac(report->peer); printf("\"}\n"); fflush(stdout);
 }
 
-static void link_diagnostic(libusb_device_handle *device, const char *serial, const uint8_t report[64]) {
-    uint8_t detail[WIFI_TRACE_SIZE];
+static int link_detail(libusb_device_handle *device, const char *serial,
+                        const uint8_t report[64], uint8_t detail[WIFI_TRACE_SIZE]) {
     for (uint8_t page=0u;page<WIFI_TRACE_PAGES;++page) {
         uint8_t packet[64];
         int length=libusb_control_transfer(device,0xc0u,LIVE_USB_WIFI_TRACE,page,0u,packet,64u,1000u);
         if (length!=64 || wifi_trace_page_decode(detail,packet,64u,report,page)!=USB_RECORD_OK) {
-            fprintf(stderr,"Failed link diagnostic page %u for %s\n",page,serial); return;
+            fprintf(stderr,"Failed link diagnostic page %u for %s\n",page,serial); return 0;
         }
     }
+    return 1;
+}
+
+static void link_diagnostic(libusb_device_handle *device, const char *serial, const uint8_t report[64]) {
+    uint8_t detail[WIFI_TRACE_SIZE];
+    if (!link_detail(device, serial, report, detail)) return;
     if (usb_report_u32(detail)!=0x314b4e4cu || detail[6]>31u) {
         fputs("Invalid link diagnostic format\n",stderr); return;
     }
@@ -355,13 +361,13 @@ static void link_diagnostic(libusb_device_handle *device, const char *serial, co
     fflush(stdout);
 }
 
-static int paired_reports(libusb_device_handle *devices[2], char serials[2][17]) {
+static int paired_reports(libusb_device_handle *devices[2], char serials[2][17], int open_network) {
     uint8_t *nonce=paired_nonce;
     uint8_t request[64];
     if (!read_nonce(nonce)) return 0;
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_LINK_TEST_ID);
-    printf("{\"test\":\"wifi-link-session\",\"ssid\":\"U26LAB-%02x%02x%02x%02x\"}\n",
-           nonce[0],nonce[1],nonce[2],nonce[3]);
+    printf("{\"test\":\"wifi-link-session\",\"security\":\"%s\",\"ssid\":\"U26LAB-%02x%02x%02x%02x\"}\n",
+           open_network ? "open" : "wpa2-psk-ccmp", nonce[0],nonce[1],nonce[2],nonce[3]);
     for (unsigned role = 0u; role < 2u; ++role) {
         uint8_t info[12];
         const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
@@ -372,6 +378,7 @@ static int paired_reports(libusb_device_handle *devices[2], char serials[2][17])
     }
     for (unsigned role = 0u; role < 2u; ++role) {
         uint8_t command = role == 0u ? LIVE_USB_LINK_AP : LIVE_USB_LINK_STATION;
+        if (open_network) command = role == 0u ? LIVE_USB_LINK_OPEN_AP : LIVE_USB_LINK_OPEN_STATION;
         if (!transfer(devices[role],0x40u,command,request,sizeof(request))) return 0;
     }
     uint8_t last[2][64] = {{0}};
@@ -404,7 +411,8 @@ static int paired_reports(libusb_device_handle *devices[2], char serials[2][17])
             if (reports[role].stage == WIFI_LINK_FAILED) {
                 link_diagnostic(devices[role],serials[role],bytes); return 0;
             }
-            if (reports[role].stage != WIFI_LINK_CONNECTED || !reports[role].authorized) complete = 0;
+            if (reports[role].stage != WIFI_LINK_CONNECTED ||
+                (!open_network && !reports[role].authorized)) complete = 0;
         }
         if (complete && memcmp(reports[0].mac,reports[1].peer,6u) == 0 &&
             memcmp(reports[1].mac,reports[0].peer,6u) == 0 &&
@@ -419,6 +427,87 @@ static int paired_reports(libusb_device_handle *devices[2], char serials[2][17])
         usleep(100000u);
     }
     fputs("No matching stable association before paired host deadline\n",stderr);
+    return 0;
+}
+
+static int ap_only_reports(libusb_device_handle *device, const char *serial, int open_ap) {
+    uint8_t nonce[16], request[64], info[12], last[64] = {0}, last_peer[6] = {0};
+    const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
+    if (!read_nonce(nonce) ||
+        !transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
+    if (memcmp(info, prefix, sizeof(prefix)) || usb_report_u32(info + 8u) != USB_REPORT_BUILD_ID) {
+        fputs("AP protocol/build mismatch\n", stderr);
+        return 0;
+    }
+    usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_LINK_TEST_ID);
+    if (!transfer(device, 0x40u, open_ap ? LIVE_USB_LINK_OPEN_AP : LIVE_USB_LINK_AP,
+                  request, sizeof(request))) return 0;
+    unsigned ready = 0u, observations = 0u, stable = 0u, associated = 0u;
+    for (unsigned attempt = 0u; attempt < 120u; ++attempt) {
+        uint8_t bytes[64];
+        int length = libusb_control_transfer(device, 0xc0u, LIVE_USB_LINK_REPORT, 0u, 0u,
+                                             bytes, sizeof(bytes), 1000u);
+        if (length == LIBUSB_ERROR_PIPE) { usleep(100000u); continue; }
+        if (length != 64) {
+            fprintf(stderr, "AP report transfer failed: %d\n", length);
+            return 0;
+        }
+        wifi_link_report_t report;
+        usb_record_result_t result = wifi_link_report_decode(bytes, USB_REPORT_BUILD_ID,
+                                                              nonce, WIFI_LINK_AP, &report);
+        if (result != USB_RECORD_OK) {
+            fprintf(stderr, "Rejected AP report: %s\n", usb_report_result_name(result));
+            return 0;
+        }
+        if (memcmp(last, bytes, sizeof(last))) {
+            print_link(serial, &report);
+            memcpy(last, bytes, sizeof(last));
+        }
+        if (report.stage == WIFI_LINK_FAILED) {
+            link_diagnostic(device, serial, bytes);
+            return 0;
+        }
+        if (!ready && (report.stage == WIFI_LINK_WAIT_PEER || report.stage == WIFI_LINK_CONNECTED)) {
+            ready = 1u;
+            printf("{\"test\":\"ap-ready\",\"security\":\"%s\",\"channel\":1,"
+                   "\"ssid\":\"U26LAB-%02x%02x%02x%02x\",\"bssid\":\"",
+                   open_ap ? "open" : "wpa2-psk-ccmp", nonce[0], nonce[1], nonce[2], nonce[3]);
+            print_mac(report.mac);
+            puts("\"}");
+            fflush(stdout);
+        }
+        if (ready) {
+            if (report.peer_count != 1u || memcmp(last_peer, report.peer, 6u)) associated = 0u;
+            if (!associated && report.peer_count == 1u) {
+                uint8_t detail[WIFI_TRACE_SIZE];
+                if (!link_detail(device, serial, bytes, detail)) return 0;
+                if (usb_report_u32(detail) != 0x314b4e4cu ||
+                    usb_report_u32(detail + 136u) > 1u) {
+                    fputs("Invalid AP association diagnostic\n", stderr);
+                    return 0;
+                }
+                associated = usb_report_u32(detail + 136u);
+            }
+            if (associated && report.peer_count == 1u) {
+                stable = memcmp(last_peer, report.peer, 6u) ? 1u : stable + 1u;
+                memcpy(last_peer, report.peer, 6u);
+            } else stable = 0u;
+            if (++observations >= 90u) {
+                printf("{\"test\":\"ap-observation\",\"security\":\"%s\","
+                       "\"association_observed\":%s,\"authorized\":%s,"
+                       "\"stable_observations\":%u,\"peer\":\"",
+                       open_ap ? "open" : "wpa2-psk-ccmp", stable >= 20u ? "true" : "false",
+                       report.authorized ? "true" : "false", stable);
+                print_mac(last_peer);
+                puts("\"}");
+                fflush(stdout);
+                if (stable < 20u) fputs("AP did not retain a stable associated peer\n", stderr);
+                return stable >= 20u;
+            }
+        }
+        usleep(100000u);
+    }
+    fputs("AP configuration/observation deadline\n", stderr);
     return 0;
 }
 
@@ -530,10 +619,24 @@ static int udp_reports(libusb_device_handle *devices[2], char serials[2][17]) {
 
 int main(int argc, char **argv) {
     char serials[2][17];
-    if (argc != 3 || !parse_serial(argv[1],serials[0]) || !parse_serial(argv[2],serials[1]) ||
-        strcmp(serials[0],serials[1]) == 0) {
-        fputs("Usage: usb_wifi_link_host AP_SERIAL STATION_SERIAL (distinct chip serials)\n",stderr); return 2;
+    int single_ap = argc >= 3 && strcmp(argv[1], "--ap-only") == 0;
+    int open_ap = single_ap && argc == 4 && strcmp(argv[3], "--open") == 0;
+    int open_pair = argc == 4 && strcmp(argv[1], "--open") == 0;
+    const char *ap_serial = open_pair ? argv[2] : argc > 1 ? argv[1] : "";
+    const char *station_serial = open_pair ? argv[3] : argc > 2 ? argv[2] : "";
+    if (single_ap ? ((argc != 3 && !open_ap) || !parse_serial(argv[2], serials[0])) :
+        ((!open_pair && argc != 3) || !parse_serial(ap_serial,serials[0]) ||
+         !parse_serial(station_serial,serials[1]) ||
+         strcmp(serials[0],serials[1]) == 0)) {
+        fputs("Usage: usb_wifi_link_host [--open] AP_SERIAL STATION_SERIAL\n"
+              "       usb_wifi_link_host --ap-only AP_SERIAL [--open]\n",stderr); return 2;
     }
+#ifdef LIVE_USB_UDP
+    if (single_ap || open_pair) {
+        fputs("UDP experiments require the default paired WPA2 mode\n", stderr);
+        return 2;
+    }
+#endif
     if (signal(SIGALRM,collector_deadline) == SIG_ERR) { perror("Collector deadline"); return 1; }
 #ifdef LIVE_USB_UDP
     alarm(90u);
@@ -544,14 +647,15 @@ int main(int argc, char **argv) {
     int error = libusb_init(&context);
     if (error != 0) { fprintf(stderr,"USB init: %s\n",libusb_error_name(error)); return 1; }
     libusb_device_handle *devices[2] = {NULL,NULL};
+    unsigned roles = single_ap ? 1u : 2u;
     int claimed[2] = {0,0}, ok = 0;
-    for (unsigned attempt = 0u; attempt < 50u && (!devices[0] || !devices[1]); ++attempt) {
-        for (unsigned role = 0u; role < 2u; ++role) {
+    for (unsigned attempt = 0u; attempt < 50u && (!devices[0] || (!single_ap && !devices[1])); ++attempt) {
+        for (unsigned role = 0u; role < roles; ++role) {
             if (!devices[role]) devices[role] = find_badge(context,serials[role]);
         }
-        if (!devices[0] || !devices[1]) usleep(100000u);
+        if (!devices[0] || (!single_ap && !devices[1])) usleep(100000u);
     }
-    for (unsigned role = 0u; role < 2u; ++role) {
+    for (unsigned role = 0u; role < roles; ++role) {
         if (!devices[role]) { fprintf(stderr,"No live interface for %s\n",serials[role]); goto cleanup; }
         int configuration = 0;
         error = libusb_get_configuration(devices[role],&configuration);
@@ -560,9 +664,10 @@ int main(int argc, char **argv) {
         if (error != 0) { fprintf(stderr,"USB claim %s: %s\n",serials[role],libusb_error_name(error)); goto cleanup; }
         claimed[role] = 1;
     }
-    ok = paired_reports(devices,serials);
+    ok = single_ap ? ap_only_reports(devices[0], serials[0], open_ap) :
+                     paired_reports(devices,serials,open_pair);
 #ifdef LIVE_USB_UDP
-    if(ok)ok=udp_reports(devices,serials);
+    if(ok && !single_ap)ok=udp_reports(devices,serials);
 #endif
 cleanup:
     for (unsigned role = 0u; role < 2u; ++role) {

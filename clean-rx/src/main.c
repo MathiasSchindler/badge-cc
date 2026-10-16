@@ -2,12 +2,14 @@
 #include "sdio_ring.h"
 #include "../tx_diag.h"
 #include "../phy_rates.h"
+#include "../unicast.h"
 #ifdef CLEAN_SDIO_SELF_TEST
 #include "../sdio_test.h"
 #endif
 
 #define MBOX  ((volatile fw_mbox_t *)FW_MBOX_ADDR)
 #define MULTI ((volatile fw_multi_t *)FW_MULTI_ADDR)
+#define UNICAST ((volatile clean_unicast_status_t *)CLEAN_UNICAST_ADDR)
 
 _Static_assert(__builtin_offsetof(fw_mbox_t, rx_input) + 32u == CLEAN_TX_DIAG_OFFSET,
                "TX diagnostic trace offset");
@@ -31,6 +33,7 @@ static uint32_t sdio_tx_posted;
 #endif
 static uint8_t  sdpcm_seq;
 static uint8_t rx_after_explicit_tx;
+static uint8_t station_enabled;
 static clean_tx_diag_t tx_diag;
 
 static void publish_tx_diag(void) {
@@ -457,6 +460,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     const volatile uint8_t *tx_buf = (const volatile uint8_t *)FW_TX_BUF_ADDR;
     uint16_t phyctl1 = 0x1a02u;
     uint32_t ofdm_airtime = 0u;
+    uint32_t station = shm_read16(CLEAN_ACK_ENABLE);
     if (is_ofdm) {
         int rate = clean_ofdm_rate_index(tx_buf[0]);
         if (rate < 0 || !clean_ofdm_plcp_valid(tx_buf, total_len - CLEAN_PLCP_BYTES))
@@ -591,7 +595,21 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     MBOX->vco_status = ((uint32_t)st_50e_seen << 16u) | st_690_seen;
     MBOX->fw_substage = tx_conditions;
     uint32_t phy_drained = 1u;
-    if (is_ofdm) {
+    if (station) {
+        uint32_t active_seen = tx_diag.phy_debug_first & 2u;
+        uint32_t wait = mmio_read32(D11_BASE + 0x1cu);
+        phy_drained = 0u;
+        for (uint32_t poll = 0u; poll < 200000u; ++poll) {
+            uint32_t active = mmio_read32(D11_BASE + 0x158u) & 2u;
+            active_seen |= active;
+            if (active_seen && !active) { phy_drained = 1u; break; }
+            if (mmio_read32(D11_BASE + 0x1cu) - wait >= 5000u) break;
+        }
+        mmio_write16(0x18001502u, 0u);
+        mmio_write16(0x18001568u, 0u);
+        phy_tx_set_automatic();
+    }
+    if (is_ofdm && !station) {
         /* MAC completion precedes the OFDM PHY tail. Retain TX enable for a
          * complete PPDU after MAC drain, including the ERP signal extension. */
         uint32_t drain_start = mmio_read32(D11_BASE + 0x1cu);
@@ -609,17 +627,18 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     tx_diag.phy_error = mmio_read16(D11_BASE + 0x3eeu);
     tx_diag.psm_debug = mmio_read32(D11_BASE + 0x154u);
 
-    mmio_write16(0x18001502u, 0x0000u);
-    mmio_write16(0x18001568u, 0x0000u);
-    mmio_write16(0x180017c0u, 0x8300u);
-    mmio_write16(0x180017d0u, 0x0300u);
-
-    mmio_write32(D11_MACCONTROL, 0x84020400u);
-    (void)mmio_read32(D11_MACCONTROL);
-    phy_tx_set_inhibit(1);
+    if (!station) {
+        mmio_write16(0x18001502u, 0x0000u);
+        mmio_write16(0x18001568u, 0x0000u);
+        mmio_write16(0x180017c0u, 0x8300u);
+        mmio_write16(0x180017d0u, 0x0300u);
+        mmio_write32(D11_MACCONTROL, 0x84020400u);
+        (void)mmio_read32(D11_MACCONTROL);
+        phy_tx_set_inhibit(1);
+    }
     MBOX->rc_dacbuf = 0x55550000u | total_len;
     if (!phy_drained) return fail(0x82u, D11_BASE + 0x1cu, ofdm_airtime);
-    if (is_ofdm && tx_diag.phy_error != 0u)
+    if (is_ofdm && !station && tx_diag.phy_error != 0u)
         return fail(0x82u, D11_BASE + 0x3eeu, tx_diag.phy_error);
     return tx_conditions == 7u || fail(0x82u, 0x1800150eu, MBOX->vco_status);
 }
@@ -915,9 +934,24 @@ void cyw43_main(void) {
     for (; scanner_mode || polls < 1800000u; ++polls) {
         if ((polls & 4095u) == 0u) snapshot_psm(rx_start, polls);
         uint32_t cmd = MBOX->host_cmd;
-        if (cmd == 3u)
+        if (station_enabled && shm_read16(CLEAN_ACK_ERROR)) {
+            fail(0x87u, CLEAN_ACK_ERROR, shm_read16(CLEAN_ACK_ERROR));
             break;
+        }
+        if (cmd == 3u) {
+            if (station_enabled) {
+                UNICAST->ack_sent = shm_read16(CLEAN_ACK_SENT);
+                UNICAST->ack_error = shm_read16(CLEAN_ACK_ERROR);
+                UNICAST->ack_txe_status = shm_read16(0x635u);
+                UNICAST->ack_ifs_status = shm_read16(0x636u);
+            }
+            break;
+        }
         if ((cmd & 0xffu) == 4u) {
+            if (station_enabled) {
+                fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+                break;
+            }
             uint32_t new_ch = (cmd >> 8u) & 0xffu;
             if (new_ch >= 1u && new_ch <= 14u) {
                 mmio_write32(D11_MACCONTROL, 0x84020400u);
@@ -946,7 +980,22 @@ void cyw43_main(void) {
             uint32_t is_ofdm = (cmd >> 18u) & 1u;
             uint32_t tx_cnt  = (cmd >> 19u) & 0xffu;
             if (tx_cnt == 0u) tx_cnt = 1u;
+            uint32_t reliable = (cmd & CLEAN_TX_ACK_REQUIRED) != 0u;
             const volatile uint8_t *frame = (const volatile uint8_t *)FW_TX_BUF_ADDR;
+            if (station_enabled && (cmd & (CLEAN_TX_REARM_RX | CLEAN_TX_MATCH_SOURCE))) {
+                fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+                break;
+            }
+            if (reliable && (!station_enabled || tx_cnt > 8u ||
+                !is_ofdm || tx_len < 34u || tx_len > CLEAN_TX_BYTES ||
+                (frame[10] & 1u) || (frame[6] & 0x0fu) != 0u ||
+                (frame[7] & 7u) || (frame[28] & 15u) ||
+                ((uint16_t)frame[16] | ((uint16_t)frame[17] << 8u)) != shm_read16(0x612u) ||
+                ((uint16_t)frame[18] | ((uint16_t)frame[19] << 8u)) != shm_read16(0x613u) ||
+                ((uint16_t)frame[20] | ((uint16_t)frame[21] << 8u)) != shm_read16(0x614u))) {
+                fail(0x85u, FW_TX_BUF_ADDR, tx_len);
+                break;
+            }
             if ((cmd & CLEAN_TX_MATCH_SOURCE) &&
                 (tx_len < 34u || tx_len > CLEAN_TX_BYTES || (frame[6] & 0x0fu) != 0u ||
                  (frame[7] & 3u) != 0u || (frame[16] & 1u) != 0u)) {
@@ -960,16 +1009,68 @@ void cyw43_main(void) {
                 d11_set_addrmatch(0u, frame + 16u);
                 d11_set_addrmatch(3u, frame + 22u);
             }
+            if (reliable) {
+                UNICAST->magic = CLEAN_UNICAST_MAGIC;
+                UNICAST->result = CLEAN_UNICAST_IDLE;
+                UNICAST->attempts = 0u;
+                UNICAST->ack_received = 0u;
+                UNICAST->started_us = mmio_read32(D11_BASE + 0x1cu);
+            }
             for (uint32_t t = 0u; t < tx_cnt; ++t) {
+                if (reliable) {
+                    /* Freeze the sequence number, change only Retry and its FCS. */
+                    if (t) {
+                        volatile uint8_t *retry = (volatile uint8_t *)FW_TX_BUF_ADDR;
+                        retry[7] |= 8u;
+                        uint32_t crc = 0xffffffffu;
+                        for (uint32_t i = 6u; i < tx_len - 4u; ++i) {
+                            crc ^= retry[i];
+                            for (uint32_t bit = 0u; bit < 8u; ++bit)
+                                crc = (crc >> 1u) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+                        }
+                        crc = ~crc;
+                        for (uint32_t i = 0u; i < 4u; ++i)
+                            retry[tx_len - 4u + i] = (uint8_t)(crc >> (8u * i));
+                    }
+                    shm_write16(CLEAN_ACK_SEEN, 0u);
+                    shm_write16(CLEAN_ACK_WAITING, 1u);
+                    UNICAST->attempts = t + 1u;
+                }
                 if (!d11_transmit_template_frame(tx_len, is_ofdm, channel, mac_en & ~2u))
                     break;
+                if (reliable) {
+                    mmio_write32(D11_MACCONTROL, mac_en);
+                    uint32_t wait = mmio_read32(D11_BASE + 0x1cu);
+                    uint32_t ack = 0u;
+                    for (uint32_t poll = 0u; poll < 200000u; ++poll) {
+                        ack = shm_read16(CLEAN_ACK_SEEN);
+                        if (ack || mmio_read32(D11_BASE + 0x1cu) - wait >= 1500u) break;
+                    }
+                    shm_write16(CLEAN_ACK_WAITING, 0u);
+                    if (ack) {
+                        UNICAST->ack_received = 1u;
+                        UNICAST->result = CLEAN_UNICAST_ACKED;
+                        break;
+                    }
+                    UNICAST->result = CLEAN_UNICAST_TIMEOUT;
+                    /* Preserve a management reply even when its preceding ACK
+                     * was missed. It must be validated by the station machine. */
+                    if (shm_read16(0x601u) == PSM_STATE_CAPTURED) break;
+                    mmio_write32(D11_MACCONTROL, 0x84020400u);
+                }
                 if (t + 1u < tx_cnt)
                     (void)delay_ticks(180u * 1500u);
+            }
+            if (reliable) {
+                UNICAST->finished_us = mmio_read32(D11_BASE + 0x1cu);
+                UNICAST->ack_sent = shm_read16(CLEAN_ACK_SENT);
+                UNICAST->ack_error = shm_read16(CLEAN_ACK_ERROR);
             }
             if (MBOX->fw_state == FW_STATE_ERROR) break;
             if (cmd & CLEAN_TX_REARM_RX) {
                 if (!d11_restart_rx_psm(channel)) break;
-            } else if (shm_read16(0x601u) == PSM_STATE_CAPTURED || shm_read16(0x601u) == PSM_STATE_FAULT)
+            } else if (!reliable && (shm_read16(0x601u) == PSM_STATE_CAPTURED ||
+                       shm_read16(0x601u) == PSM_STATE_FAULT))
                 shm_write16(0x601u, 0u);
             rx_after_explicit_tx = 1u;
             mmio_write32(D11_MACCONTROL, mac_en);
@@ -982,7 +1083,61 @@ void cyw43_main(void) {
             __asm__ volatile("dsb" ::: "memory");
             continue;
         }
+        if ((cmd & 0xffu) == 7u) {
+            const volatile uint8_t *p = (const volatile uint8_t *)FW_TX_BUF_ADDR;
+            uint16_t basic = (uint16_t)((uint16_t)p[12] | ((uint16_t)p[13] << 8u));
+            uint8_t nonzero = 0u, peer = 0u;
+            for (uint32_t i = 0u; i < 6u; ++i) { nonzero |= p[i]; peer |= p[6u + i]; }
+            if (!(flags & CFG_TX_ENABLE) || !nonzero || !peer || (p[0] & 1u) ||
+                (p[6] & 1u) || clean_ack_rate(basic, 0u) < 0 || p[14] > 1u || p[15] != 1u) {
+                fail(0x85u, FW_TX_BUF_ADDR, basic);
+                break;
+            }
+            mmio_write32(D11_MACCONTROL, 0x84020400u);
+            (void)mmio_read32(D11_MACCONTROL);
+            for (uint32_t i = 0u; i < 3u; ++i)
+                shm_write16(0x612u + i, (uint16_t)((uint16_t)p[2u*i] |
+                            ((uint16_t)p[2u*i + 1u] << 8u)));
+            d11_set_addrmatch(0u, p);
+            d11_set_addrmatch(3u, p + 6u);
+            for (uint32_t i = 0u; i < 3u; ++i)
+                shm_write16(CLEAN_ACK_PEER + i, (uint16_t)((uint16_t)p[6u + 2u*i] |
+                            ((uint16_t)p[7u + 2u*i] << 8u)));
+            for (uint32_t i = 0u; i < 12u; ++i) {
+                uint8_t plcp[6];
+                uint16_t phyctl1;
+                if (!clean_ack_template(plcp, (uint32_t)clean_ack_rate(basic, i), &phyctl1)) {
+                    fail(0x85u, FW_TX_BUF_ADDR, i);
+                    break;
+                }
+                for (uint32_t w = 0u; w < 3u; ++w)
+                    shm_write16(CLEAN_ACK_TABLE + 4u*i + w,
+                        (uint16_t)((uint16_t)plcp[2u*w] | ((uint16_t)plcp[2u*w + 1u] << 8u)));
+                shm_write16(CLEAN_ACK_TABLE + 4u*i + 3u, phyctl1);
+            }
+            if (MBOX->fw_state == FW_STATE_ERROR) break;
+            shm_write16(CLEAN_ACK_WAITING, 0u);
+            shm_write16(CLEAN_ACK_SEEN, 0u);
+            shm_write16(CLEAN_ACK_SENT, 0u);
+            shm_write16(CLEAN_ACK_ERROR, 0u);
+            shm_write16(CLEAN_ACK_ENABLE, 1u);
+            station_enabled = 1u;
+            UNICAST->magic = CLEAN_UNICAST_MAGIC;
+            UNICAST->result = CLEAN_UNICAST_IDLE;
+            phy_tx_hw_configure(channel);
+            phy_tx_set_inhibit(0);
+            phy_tx_set_automatic();
+            if (shm_read16(0x601u) == PSM_STATE_CAPTURED) shm_write16(0x601u, 0u);
+            mmio_write32(D11_MACCONTROL, mac_en);
+            MBOX->host_cmd = 2u;
+            __asm__ volatile("dsb" ::: "memory");
+            continue;
+        }
         if ((cmd & 0xffu) == 6u) {
+            if (station_enabled) {
+                fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+                break;
+            }
             /* Install 128-bit AES-CCMP Temporal Key (TK) from FW_TX_BUF_ADDR into SHM 0x618..0x61f and enable HW CCMP */
             const volatile uint8_t *key_buf = (const volatile uint8_t *)FW_TX_BUF_ADDR;
             mmio_write32(D11_MACCONTROL, 0x84020400u);
@@ -1002,11 +1157,26 @@ void cyw43_main(void) {
         }
         uint16_t st = shm_read16(0x601u);
         if (st == PSM_STATE_FAULT) {
+            if (station_enabled) {
+                fail(0x88u, 0x601u, st);
+                break;
+            }
             if (!d11_restart_rx_psm(channel)) break;
             mmio_write32(D11_MACCONTROL, mac_en);
             continue;
         }
         if (st == PSM_STATE_CAPTURED) {
+            if (station_enabled) {
+                int credit = clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
+                                                          SDIO_TX_WINDOW);
+                if (credit < 0) {
+                    fail(0x8cu, FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET, MBOX->f2_consumed);
+                    break;
+                }
+                /* The PSM may already have ACKed this frame. Keep its capture
+                 * reserved instead of discarding it behind an occupied F2 slot. */
+                if (!credit) continue;
+            }
             uint32_t total = MULTI->captured_frames;
             uint32_t idx = total & (FW_MAX_FRAMES - 1u);
             volatile fw_frame_slot_t *slot = &MULTI->frames[idx];
@@ -1016,7 +1186,7 @@ void cyw43_main(void) {
             uint16_t ra_word1 = shm_read16(CLEAN_SHM_FRAME + 7u);
             uint16_t ra_word2 = shm_read16(CLEAN_SHM_FRAME + 8u);
             uint32_t frame_type = (fc_word >> 2u) & 3u;
-            if ((flags & CFG_TX_ENABLE) && rxe_len >= 30u &&
+            if ((flags & CFG_TX_ENABLE) && !station_enabled && rxe_len >= 30u &&
                 (frame_type == 0u || frame_type == 2u) &&
                 ra_word0 == shm_read16(0x612u) &&
                 ra_word1 == shm_read16(0x613u) &&
@@ -1065,6 +1235,7 @@ void cyw43_main(void) {
 
     mmio_write32(D11_MACCONTROL, 0x04020400u);
     (void)mmio_read32(D11_MACCONTROL);
+    phy_tx_set_inhibit(1);
     MULTI->dma_status0 = mmio_read32(D11_RX_DMA_STATUS0);
     MULTI->dma_status1 = mmio_read32(D11_RX_DMA_STATUS1);
     (void)delay_ticks(20000u);

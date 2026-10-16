@@ -16,7 +16,7 @@ SOURCES := main.c loader.c \
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
-HEADERS := ../tx_diag.h ../frame_limits.h ../phy_rates.h ../src/sdio_ring.h $(wildcard *.h $(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
+HEADERS := ../tx_diag.h ../frame_limits.h ../phy_rates.h ../unicast.h ../src/sdio_ring.h $(wildcard *.h $(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 
 .PHONY: all controller force test
 all: $(BUILD)/clean_rx.uf2 $(BUILD)/collector
@@ -57,7 +57,7 @@ $(ROOT)/build/host-tools/bin2uf2:
 $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
 
-$(BUILD)/collector: collector.c frames.h ../tx_diag.h $(BUILD)/build_id.h
+$(BUILD)/collector: collector.c frames.h station.h ../tx_diag.h $(BUILD)/build_id.h
 	cc -std=c11 -Wall -Wextra -Werror -O2 -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
 		$< $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
@@ -66,12 +66,12 @@ test: $(BUILD)/loader_test $(BUILD)/loader_strict_test
 	$(BUILD)/loader_test
 	$(BUILD)/loader_strict_test
 
-$(BUILD)/loader_strict_test: loader_test.c loader.c loader.h frames.h ../tx_diag.h ../frame_limits.h ../phy_rates.h ../src/sdio_ring.h | $(BUILD)
+$(BUILD)/loader_strict_test: loader_test.c loader.c loader.h frames.h station.h ../unicast.h ../tx_diag.h ../frame_limits.h ../phy_rates.h ../src/sdio_ring.h | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O2 -DCLEAN_RX_STRICT_TEST loader_test.c loader.c \
 		$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 		$(ROOT)/src/tools/diagnostics_logic.c -o $@
 
-$(BUILD)/loader_test: loader_test.c loader.c loader.h frames.h ../tx_diag.h ../frame_limits.h ../phy_rates.h ../src/sdio_ring.h | $(BUILD)
+$(BUILD)/loader_test: loader_test.c loader.c loader.h frames.h station.h ../unicast.h ../tx_diag.h ../frame_limits.h ../phy_rates.h ../src/sdio_ring.h | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O2 loader_test.c loader.c \
 		$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 		$(ROOT)/src/tools/diagnostics_logic.c -o $@

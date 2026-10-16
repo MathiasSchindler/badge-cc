@@ -46,6 +46,7 @@ static int peer_mac(const wifi_link_t *link, const uint8_t *mac) {
 
 static int fail(wifi_link_t *link, wifi_link_error_t error) {
     link->report.authorized = 0u;
+    link->report.associated = 0u;
     link->report.error = error;
     link->report.stage = WIFI_LINK_FAILED;
     return 0;
@@ -55,6 +56,7 @@ static void waiting(wifi_link_t *link) {
     link->report.stage = WIFI_LINK_WAIT_PEER;
     link->report.error = WIFI_LINK_OK;
     link->report.authorized = 0u;
+    link->report.associated = 0u;
     link->report.peer_count = 0u;
     clear(link->report.peer, 6u);
 }
@@ -127,10 +129,10 @@ static int configure_ap(wifi_link_t *link) {
     if (!command(link, CMD_SET_VAR, 1u, 0u, size + 40u, sizeof(link->reply), 0) ||
         !set_mac(link, 1u) ||
         !scalar(link, CMD_CHANNEL, 1u, 0u) ||
-        !var_pair(link, "bsscfg:wsec", 1u, 4u) ||
+        !var_pair(link, "bsscfg:wsec", 1u, link->open_network ? 0u : 4u) ||
         !var_scalar(link, "mfp", 0u, 1u) ||
-        !var_pair(link, "bsscfg:wpa_auth", 1u, 0x80u) ||
-        !passphrase(link, 1u) ||
+        !var_pair(link, "bsscfg:wpa_auth", 1u, link->open_network ? 0u : 0x80u) ||
+        (!link->open_network && !passphrase(link, 1u)) ||
         !scalar(link, CMD_GMODE, 1u, 1u) ||
         !var_scalar(link, "2g_mrate", 22u, 1u) ||
         !scalar(link, CMD_DTIM, 1u, 1u)) return 0;
@@ -138,17 +140,18 @@ static int configure_ap(wifi_link_t *link) {
 }
 
 static int configure_station(wifi_link_t *link) {
-    if (!scalar(link, CMD_WSEC, 4u, 0u) ||
-        !var_pair(link, "bsscfg:sup_wpa", 0u, 1u) ||
-        !var_pair(link, "bsscfg:sup_wpa2_eapver", 0u, 0xffffffffu) ||
-        !var_pair(link, "bsscfg:sup_wpa_tmo", 0u, 5000u) ||
-        !passphrase(link, 0u) ||
+    if (!scalar(link, CMD_WSEC, link->open_network ? 0u : 4u, 0u) ||
+        !var_pair(link, "bsscfg:sup_wpa", 0u, link->open_network ? 0u : 1u) ||
+        (!link->open_network &&
+         (!var_pair(link, "bsscfg:sup_wpa2_eapver", 0u, 0xffffffffu) ||
+          !var_pair(link, "bsscfg:sup_wpa_tmo", 0u, 5000u) ||
+          !passphrase(link, 0u))) ||
         !scalar(link, CMD_INFRA, 1u, 0u) ||
         !scalar(link, CMD_AUTH, 0u, 0u) ||
-        !var_scalar(link, "mfp", 1u, 0u) ||
-        !scalar(link, CMD_WPA_AUTH, 0x80u, 0u)) return 0;
+        !var_scalar(link, "mfp", link->open_network ? 0u : 1u, 0u) ||
+        !scalar(link, CMD_WPA_AUTH, link->open_network ? 0u : 0x80u, 0u)) return 0;
 
-    /* Extended join: firmware scans channel 1 and completes WPA2 asynchronously. */
+    /* Extended join scans channel 1; WPA2 completes asynchronously when enabled. */
     uint32_t size = variable(link, "join");
     uint8_t *join = link->buffer + size;
     store(join, 15u);
@@ -166,10 +169,12 @@ void wifi_link_init(wifi_link_t *link, const wifi_link_ops_t *ops, uint8_t role,
     if (link == 0) return;
     clear((uint8_t *)link, sizeof(*link));
     link->report.role = role;
-    if (ops == 0 || ops->control == 0 || nonce == 0 || mac == 0 || role > WIFI_LINK_STATION) {
+    if (ops == 0 || ops->control == 0 || nonce == 0 || mac == 0 || role > WIFI_LINK_OPEN_STATION) {
         fail(link, WIFI_LINK_BAD_CONFIG);
         return;
     }
+    link->open_network = role >= WIFI_LINK_OPEN_AP;
+    if (link->open_network) link->report.role = role == WIFI_LINK_OPEN_AP ? WIFI_LINK_AP : WIFI_LINK_STATION;
     link->ops = *ops;
     copy(link->report.mac, mac, 6u);
     if ((mac[0] & 3u) != 2u) {
@@ -180,8 +185,10 @@ void wifi_link_init(wifi_link_t *link, const wifi_link_ops_t *ops, uint8_t role,
     const char prefix[] = "U26LAB-";
     for (uint32_t i = 0u; i < 7u; ++i) link->ssid[i] = prefix[i];
     for (uint32_t i = 0u; i < 16u; ++i) {
-        link->password[2u * i] = hex[nonce[i] >> 4u];
-        link->password[2u * i + 1u] = hex[nonce[i] & 15u];
+        if (!link->open_network) {
+            link->password[2u * i] = hex[nonce[i] >> 4u];
+            link->password[2u * i + 1u] = hex[nonce[i] & 15u];
+        }
         if (i < 4u) {
             link->ssid[7u + 2u * i] = hex[nonce[i] >> 4u];
             link->ssid[8u + 2u * i] = hex[nonce[i] & 15u];
@@ -257,8 +264,9 @@ static int authorization(wifi_link_t *link, uint8_t iface) {
         !equal_mac(link->reply + 16u, link->report.peer))
         return fail(link, WIFI_LINK_BAD_REPLY);
     uint32_t flags = read32(link->reply + 8u);
-    if ((flags & (STA_ASSOC | STA_AUTHORIZED)) == (STA_ASSOC | STA_AUTHORIZED)) {
-        link->report.authorized = 1u;
+    link->report.associated = (flags & STA_ASSOC) != 0u;
+    if (link->report.associated && (link->open_network || (flags & STA_AUTHORIZED))) {
+        link->report.authorized = (flags & STA_AUTHORIZED) != 0u;
         link->report.stage = WIFI_LINK_CONNECTED;
     }
     return 1;

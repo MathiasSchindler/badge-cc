@@ -131,7 +131,8 @@ static void prepare_draw(int force) {
     diag_decimal(number, (int32_t)report->peer_count);
     draw_text(8, 158, "PEERS", 1u, 0x9cf3u);
     draw_text(47, 153, number, 2u, color);
-    draw_text(88, 158, report->authorized ? "WPA2 AUTHORIZED" : "AUTH NOT CONFIRMED", 1u, color);
+    draw_text(88, 158, link.open_network ? "OPEN / NO ENCRYPTION" :
+              report->authorized ? "WPA2 AUTHORIZED" : "AUTH NOT CONFIRMED", 1u, color);
     if (report->error != WIFI_LINK_OK) {
         draw_text(8, 182, wifi_link_error_name(report->error), 1u, color);
         diag_hex(number, report->controller_status, 8u);
@@ -219,6 +220,7 @@ static void publish(void) {
     store(detail+124u,pio_profile[0]);
     store(detail+128u,pio_profile[1]);
     store(detail+132u,pio_profile[2]);
+    store(detail+136u,wifi_link_snapshot_view(&snapshot,&link.report)->associated);
     for (uint32_t i=0u;i<28u;++i) detail[64u+i]=firmware.last_rx_prefix[i];
     live_usb_link_details(&usb,generation,detail);
 #ifdef LIVE_USB_UDP

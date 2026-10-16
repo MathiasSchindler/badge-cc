@@ -4,15 +4,16 @@
 #include <string.h>
 #include "../../src/tools/diagnostics_logic.h"
 #include "../frame_limits.h"
+#include "psm_ack.h"
 
 #define WORD(op,a,b,d) (((uint64_t)(op) << 39u) | ((uint64_t)(a) << 26u) | \
                        ((uint64_t)(b) << 13u) | (d))
 
 extern const uint32_t psm_ucode_byte_count;
-extern const uint8_t psm_ucode_bytes[2512];
+extern const uint8_t psm_ucode_bytes[ACK_PROGRAM_END * 8u];
 
 static uint64_t instruction(uint32_t pc) {
-    assert(pc < 314u);
+    assert(pc < ACK_PROGRAM_END);
     uint64_t word = 0u;
     for (uint32_t i = 0u; i < 8u; ++i)
         word |= (uint64_t)psm_ucode_bytes[pc * 8u + i] << (8u * i);
@@ -32,6 +33,8 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+    restore(original, 197u, WORD(0x77fu,0x1780u,0x1780u,ACK_ENTER),
+            WORD(0x3f0u,0x180fu,0x1800u,0x607u));
     restore(original, 191u, WORD(0x77fu,0x1780u,0x1780u,309u),
             WORD(0x606u,0x1780u,0x1780u,194u));
     assert(instruction(309u) == WORD(0x501u,0x1004u,0x1800u,312u));
@@ -179,6 +182,107 @@ static void streaming(void) {
     }
 }
 
+static uint16_t ack_operand(const uint16_t regs[0x1800], uint32_t operand) {
+    return operand >= 0x1800u ? immediate(operand) : regs[operand];
+}
+
+static void ack_run(uint16_t regs[0x1800], int tx_now) {
+    uint32_t pc = ACK_ENTER;
+    for (uint32_t step = 0u; step < 10000u; ++step) {
+        if (pc == 198u) return;
+        assert(pc >= ACK_ENTER && pc < ACK_PROGRAM_END);
+        uint64_t w = instruction(pc++);
+        uint32_t op = (uint32_t)(w >> 39u);
+        uint32_t a = (uint32_t)(w >> 26u) & 0x1fffu;
+        uint32_t b = (uint32_t)(w >> 13u) & 0x1fffu;
+        uint32_t d = (uint32_t)w & 0x1fffu;
+        uint16_t av = ack_operand(regs, a), bv = ack_operand(regs, b);
+        if (op == 0x3f0u) regs[d] = av;
+        else if (op == 0x378u) regs[d] = (uint16_t)((av << 8u) | (bv & 255u));
+        else if (op == 0x77fu) pc = d;
+        else if (op == 0xd0u) { if (av == bv) pc = d; }
+        else if (op == 0xd1u) { if (av != bv) pc = d; }
+        else if (op == 0xdau) { if (av < bv) pc = d; }
+        else if (op == 0x1c0u) regs[d] = (uint16_t)(av + bv);
+        else if (op == 0x1d0u) regs[d] = (uint16_t)(av - bv);
+        else if ((op & 0xf00u) == 0x400u || (op & 0xf00u) == 0x500u) {
+            if (((av >> (op & 15u)) & 1u) == (op >> 8u == 5u)) pc = d;
+        } else if (op == 0x230u || op == 0x270u) {
+            regs[d] = (uint16_t)(av & (op == 0x230u ? 15u : 255u));
+        } else if (op == 0x304u || op == 0x308u) {
+            uint16_t mask = (uint16_t)(1u << (op & 15u));
+            regs[d] = (uint16_t)((bv & ~mask) | ((av << (op & 15u)) & mask));
+        } else {
+            assert(op == 0x7a0u);
+            if (tx_now) pc = d;
+        }
+    }
+    assert(!"ACK path failed to terminate");
+}
+
+static void acknowledgements(void) {
+    uint16_t regs[0x1800], base_regs[0x1800] = {0};
+    base_regs[CLEAN_ACK_ENABLE] = 1u;
+    base_regs[0x100c] = 40u;
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        base_regs[0x612u + i] = (uint16_t)(0x1002u + i);
+        base_regs[CLEAN_SHM_FRAME + 6u + i] = base_regs[0x612u + i];
+        base_regs[CLEAN_SHM_FRAME + 9u + i] = (uint16_t)(0x2002u + i);
+        base_regs[CLEAN_ACK_PEER + i] = base_regs[CLEAN_SHM_FRAME + 9u + i];
+    }
+    static const uint8_t cck[4] = {10u,20u,55u,110u};
+    for (uint32_t rate = 0u; rate < 12u; ++rate) {
+        memcpy(regs, base_regs, sizeof(regs));
+        uint8_t plcp[6];
+        uint16_t phy;
+        int response = clean_ack_rate(0xfffu, rate);
+        assert(clean_ack_template(plcp, (uint32_t)response, &phy));
+        for (uint32_t i = 0u; i < 3u; ++i)
+            regs[CLEAN_ACK_TABLE + 4u*rate + i] =
+                (uint16_t)(plcp[2u*i] | ((uint16_t)plcp[2u*i + 1u] << 8u));
+        regs[CLEAN_ACK_TABLE + 4u*rate + 3u] = phy;
+        regs[CLEAN_SHM_FRAME + 4u] = 0x08b0u;
+        regs[0x100e] = rate >= 4u ? 0x2000u : 0u;
+        regs[CLEAN_SHM_FRAME + 1u] = rate >= 4u ?
+            (uint16_t)(0xf0u | clean_ofdm_rates[rate - 4u].signal) : cck[rate];
+        ack_run(regs, 1);
+        assert(regs[CLEAN_ACK_SENT] == 1u && !regs[CLEAN_ACK_ERROR]);
+        assert(regs[0x108a] == phy && regs[0x1086] == (rate >= 4u ? 0x41u : 0x40u));
+        assert(regs[0x10b5] == 16u && regs[0x10b4] == 0x0826u);
+        assert(regs[0x1080] == 0x4021u && regs[0x1084] == 255u);
+        assert(regs[0x10e3] == 0xd4u && regs[0x10e4] == 0u);
+        for (uint32_t i = 0u; i < 3u; ++i)
+            assert(regs[0x10e5u + i] == base_regs[CLEAN_SHM_FRAME + 9u + i]);
+        for (uint32_t i = 0u; i < 8u; ++i) assert(regs[0x10c0u + i] == 65535u);
+    }
+    for (uint32_t kind = 0u; kind < 10u; ++kind) {
+        memcpy(regs, base_regs, sizeof(regs));
+        regs[CLEAN_SHM_FRAME + 1u] = 10u;
+        if (kind == 0u) regs[CLEAN_ACK_ENABLE] = 0u;
+        if (kind == 1u) regs[CLEAN_SHM_FRAME + 6u] ^= 1u;
+        if (kind == 2u) regs[CLEAN_SHM_FRAME + 4u] = 0xd4u;
+        if (kind == 3u) regs[CLEAN_SHM_FRAME + 4u] = 0x88u;
+        if (kind == 4u) regs[CLEAN_SHM_FRAME + 4u] = 0x0400u;
+        if (kind == 5u) regs[CLEAN_SHM_FRAME + 15u] = 1u;
+        if (kind == 6u) regs[0x100c] = 33u;
+        if (kind == 7u) regs[CLEAN_SHM_FRAME + 1u] = 0u;
+        if (kind == 8u) regs[CLEAN_SHM_FRAME + 4u] = 0xe0u;
+        if (kind == 9u) regs[CLEAN_SHM_FRAME + 9u] ^= 1u;
+        ack_run(regs, 1);
+        assert(!regs[CLEAN_ACK_SENT] && !regs[CLEAN_ACK_SEEN]);
+    }
+    memcpy(regs, base_regs, sizeof(regs));
+    regs[CLEAN_SHM_FRAME + 1u] = 10u;
+    ack_run(regs, 0);
+    assert(!regs[CLEAN_ACK_SENT] && regs[CLEAN_ACK_ERROR] == 1u && !regs[0x1080]);
+    memcpy(regs, base_regs, sizeof(regs));
+    regs[CLEAN_SHM_FRAME + 4u] = 0xd4u;
+    regs[0x100c] = 20u;
+    regs[CLEAN_ACK_WAITING] = 1u;
+    ack_run(regs, 1);
+    assert(regs[CLEAN_ACK_SEEN] == 1u && !regs[CLEAN_ACK_SENT]);
+}
+
 int main(void) {
     assert(psm_ucode_byte_count == sizeof(psm_ucode_bytes));
     assert(instruction(81u) == instruction(105u));
@@ -191,6 +295,7 @@ int main(void) {
     capture_layout(original);
     assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
     streaming();
+    acknowledgements();
     for (uint16_t bits = 0u; bits < 32u; ++bits) {
         uint32_t delays[] = {0u, 254u, 255u, 256u, 4096u, 65534u, 65535u, 65536u};
         for (uint32_t i = 0u; i < sizeof(delays) / sizeof(delays[0]); ++i) {

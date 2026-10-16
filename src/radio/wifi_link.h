@@ -6,6 +6,8 @@
 #define WIFI_LINK_TEST_ID 4u
 #define WIFI_LINK_AP 0u
 #define WIFI_LINK_STATION 1u
+#define WIFI_LINK_OPEN_AP 2u
+#define WIFI_LINK_OPEN_STATION 3u
 
 typedef enum {
     WIFI_LINK_IDLE, WIFI_LINK_FIRMWARE, WIFI_LINK_CONFIGURE,
@@ -23,6 +25,7 @@ typedef struct {
     wifi_link_stage_t stage;
     wifi_link_error_t error;
     uint8_t authorized;
+    uint8_t associated;
     uint32_t last_command;
     uint32_t controller_status;
     uint32_t peer_count;
@@ -40,6 +43,7 @@ typedef struct {
 typedef struct {
     wifi_link_report_t report;
     wifi_link_ops_t ops;
+    uint8_t open_network;
     char ssid[24];
     char password[33];
     uint8_t buffer[512];

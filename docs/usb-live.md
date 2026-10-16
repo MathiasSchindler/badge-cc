@@ -205,6 +205,8 @@ except for the trace-page selector described below:
 | Start paired SoftAP (link image only) | `0x40` | `0x5a` | Exactly 64 OUT bytes, request test ID 4 |
 | Start paired station (link image only) | `0x40` | `0x5b` | Exactly 64 OUT bytes, request test ID 4 |
 | Read link-state snapshot (link image only) | `0xc0` | `0x5c` | Exactly 64 IN bytes |
+| Start explicit open SoftAP (link image only, not UDP) | `0x40` | `0x65` | Exactly 64 OUT bytes, request test ID 4 |
+| Start explicit open station (link image only, not UDP) | `0x40` | `0x66` | Exactly 64 OUT bytes, request test ID 4 |
 | Arm UDP benchmark (UDP image only) | `0x40` | `0x5d` | Exactly 64 OUT bytes, same test-ID-4 challenge as active link |
 | Read UDP progress (UDP image only) | `0xc0` | `0x5e` | Exactly 64 IN bytes |
 | Read frozen UDP detail page (UDP image only) | `0xc0` | `0x5f` | Exactly 64 IN bytes, `wValue` page 0-21 |
@@ -332,6 +334,42 @@ is no arbitrary address or memory access command. These pages only expose
 fixed diagnostic fields, not network credentials.
 
 ### Paired link image
+
+The default AP/station commands remain WPA2-PSK/CCMP. The link image also
+accepts explicit open-network commands `0x65`/`0x66`; these set WSEC and
+WPA authentication to zero and never install a passphrase. The UDP image
+rejects both commands. Open mode uses the normal AP/station roles in bound
+reports, but `CONNECTED` means associated, not encrypted or WPA2-authorized.
+The TFT explicitly says `OPEN / NO ENCRYPTION`.
+
+With the link image already loaded and running on both badges:
+
+```sh
+build/host-tools/usb_wifi_link_host --open AP_SERIAL STATION_SERIAL
+```
+
+For a vendor AP observed independently of a clean-rx station:
+
+```sh
+build/host-tools/usb_wifi_link_host --ap-only AP_SERIAL --open
+# Omit --open for a WPA2-PSK/CCMP AP, once open association is qualified.
+```
+
+The AP-only collector emits `ap-ready` with the actual BSSID, temporary SSID,
+security mode and fixed channel 1. Start clean-rx only after that record.
+It observes 90 host samples at 100 ms intervals after readiness and requires
+at least 20 consecutive associated-peer samples at the end. Association is
+read from the vendor's validated `sta_info` flags, exported at diagnostic
+offset 136 through the same committed snapshot as the report. This supplements
+the unchanged 64-byte report format; a WPA2 AP can have an associated peer
+while its report remains `WAIT PEER` and `authorized:false`.
+
+AP-only success proves only the AP's association observation. A combined
+experiment must independently require clean-rx's saved valid-FCS successful
+responses and match its `local_mac` to the AP's peer. It does not prove ACK
+timing, key exchange or data connectivity. The collector prints neither the
+full session challenge nor the temporary WPA2 passphrase, and reboots its
+AP into BOOTSEL on exit.
 
 `make usb-wifi-link` builds a separate TFT/USB AP-station control experiment.
 See [the paired runner and acceptance criteria](wifi.md#paired-apstation-control-experiment).

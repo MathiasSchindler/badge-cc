@@ -653,6 +653,13 @@ void phy_tx_set_inhibit(int inhibit) {
     }
 }
 
+void phy_tx_set_automatic(void) {
+    /* Release only the TX overrides owned by phy_tx_set_inhibit. D11/PHY
+     * sequencing, rather than a forced-on transmitter, owns RX/TX turnaround. */
+    phy_reg_mod(0x44cu, 0x4000u, 0u);
+    phy_reg_mod(0x938u, 0x0800u, 0u);
+}
+
 void phy_tx_hw_configure(uint32_t channel) {
     mmio_write32(GCI_CONTROL_REG1, 0x00f0ff08u);
     mmio_write32(GCI_OUTPUT_REG1, (mmio_read32(GCI_OUTPUT_REG1) & ~0x00f00000u) | 0x00100000u);

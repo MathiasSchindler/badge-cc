@@ -11,6 +11,16 @@ static inline int clean_frame_valid(const uint8_t *mpdu, uint32_t length) {
            diag_crc32(mpdu, length - 4u) == badger_bytes_load_u32(mpdu + length - 4u);
 }
 
+static inline int clean_beacon_find(const uint8_t entries[320], uint32_t count,
+                                    const uint8_t bssid[6]) {
+    uint8_t nonzero = 0u;
+    for (uint32_t i = 0u; i < 6u; ++i) nonzero |= bssid[i];
+    if (count > 8u || !nonzero || (bssid[0] & 1u)) return -1;
+    for (uint32_t i = 0u; i < count; ++i)
+        if (badger_bytes_equal(entries + 40u * i, bssid, 6u)) return (int)i;
+    return -1;
+}
+
 static inline int clean_beacon_info(const uint8_t *mpdu, uint32_t length,
                                     uint8_t entry[40], uint8_t channel) {
     if (length < 40u || mpdu[0] != 0x80u || mpdu[1] != 0u ||
@@ -233,6 +243,16 @@ static inline int clean_tx_confirmed(const uint8_t detail[2048]) {
            (badger_bytes_load_u32(detail + 1960u) != 0u &&
             (clean_ap_reply(mpdu, size - 18u, detail + 1972u, detail + 1980u, 0u) ||
              clean_ap_reply(mpdu, size - 18u, detail + 1972u, detail + 1980u, 1u)));
+}
+
+static inline int clean_auth_response_status(const uint8_t detail[2048]) {
+    uint32_t size = badger_bytes_load_u32(detail + 1088u);
+    const uint8_t *mpdu = detail + 1122u;
+    if (!clean_tx_confirmed(detail) ||
+        badger_bytes_load_u32(detail + 1960u) == 0u || mpdu[0] != 0xb0u ||
+        !clean_ap_reply(mpdu, size - 18u, detail + 1972u, detail + 1980u, 1u))
+        return -1;
+    return (int)((uint32_t)mpdu[28] | ((uint32_t)mpdu[29] << 8u));
 }
 
 #endif

@@ -55,6 +55,7 @@ usb_record_result_t wifi_link_report_decode(const uint8_t bytes[64], uint32_t bu
     report->stage = (wifi_link_stage_t)bytes[33];
     report->error = (wifi_link_error_t)bytes[34];
     report->authorized = bytes[35];
+    report->associated = report->stage == WIFI_LINK_CONNECTED;
     report->last_command = usb_report_u32(bytes+36u);
     report->controller_status = usb_report_u32(bytes+40u);
     report->peer_count = usb_report_u32(bytes+44u);

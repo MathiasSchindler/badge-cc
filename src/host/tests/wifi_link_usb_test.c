@@ -147,6 +147,21 @@ int main(void) {
     live_usb_control_complete(&usb,1u,NULL,0u);
     generation=live_usb_probe_take(&usb,received_nonce);
     assert(generation && usb.probe_role==WIFI_LINK_STATION);
+#ifndef LIVE_USB_UDP
+    setup(0x40u,LIVE_USB_LINK_OPEN_AP,0u,64u);
+    live_usb_control_complete(&usb,0u,request,64u);
+    live_usb_control_complete(&usb,1u,NULL,0u);
+    assert(live_usb_probe_take(&usb,received_nonce) && usb.probe_role == WIFI_LINK_OPEN_AP);
+    setup(0x40u,LIVE_USB_LINK_OPEN_STATION,0u,64u);
+    live_usb_control_complete(&usb,0u,request,64u);
+    live_usb_control_complete(&usb,1u,NULL,0u);
+    assert(live_usb_probe_take(&usb,received_nonce) && usb.probe_role == WIFI_LINK_OPEN_STATION);
+#else
+    setup(0x40u,LIVE_USB_LINK_OPEN_AP,0u,64u);
+    assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u,LIVE_USB_LINK_OPEN_STATION,0u,64u);
+    assert(usb.action == USB_ACTION_STALL);
+#endif
     live_usb_control_reset(&usb);
     configure();
     live_usb_link_publish(&usb,generation,bytes);

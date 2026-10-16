@@ -6,8 +6,8 @@ project-owned USB control endpoint. Neither processor links libc, the Pico
 SDK, a downloaded vendor executable, NVRAM, or CLM. The controller still
 reads its on-chip ROM calibration tables.
 
-This is a bounded radio test, not a WiFi connection manager. It does not
-associate, implement a WPA2 handshake, or replace the default networking
+This is a bounded radio test, not a WiFi connection manager. It includes an
+experimental association trial but does not implement a WPA2 handshake or replace the default networking
 targets. Host USB collection uses the repository's existing libusb dependency.
 
 **Current qualification:** cold RX and single-frame **11 Mbps CCK OTA TX** are
@@ -21,7 +21,134 @@ Use `make micro-signal-g` for the normal fixed-6-Mbps button application or
 application still uses its original CCK challenge protocol.
 The 1 Mbps experiments have not passed; do not generalize the qualification
 to other CCK rates, automatic ACK timing, complete 802.11g MAC operation,
-association or WPA2 connectivity.
+general-purpose station reliability or WPA2-authorized connectivity.
+
+## Experimental association and ACK work
+
+```sh
+build/clean-rx/badge/collector SERIAL evidence.bin CHANNEL \
+  --ap-assoc XX:XX:XX:XX:XX:XX
+```
+
+This mode is **not yet a reliable station implementation**. It pins one BSSID,
+requires a complete valid-FCS beacon from that AP, parses SSID/capabilities,
+supported/basic legacy rates and RSN, and rejects unsupported basic rates,
+WEP-only networks, unsupported RSN suites and mandatory protected management
+frames. It supports an open BSS or selects WPA2-PSK/CCMP for the association
+request; selecting RSN suites does not implement the subsequent key exchange.
+Only APs advertising legacy 6 Mbps are candidates. No password is read.
+
+The trial installs its fresh MAC in both SHM and hardware address matching.
+It sends exact-length 6 Mbps authentication and association requests, validates
+response addresses, FCS, authentication transaction, status, association IEs
+and AID (1..2007), and observes a 2.5-million-tick post-association window. A bound
+deauthentication/disassociation clears the associated result.
+Collector success independently revalidates both saved responses. It always
+reports `wpa2_authorized:false`; there is no EAPOL supplicant, DHCP or IP stack.
+It now recognizes and saves complete valid-FCS RSN EAPOL-Key message 1
+frames, including address, LLC/SNAP, descriptor/key-info, body/key-data length
+and zero-MIC validation. `eapol_m1_received` independently revalidates the
+saved frame; this is handshake-start evidence, not authorization.
+An association rejection, missing response or radio error is a failed trial,
+not an authenticated connection.
+
+Controller command 7 explicitly opts into this experimental profile using a
+16-byte TX-buffer configuration: local MAC, peer BSSID, little-endian basic
+rate mask (four CCK followed by eight OFDM rates), short-slot flag, enable=1.
+It is never enabled by ordinary RX or Micro Signal. Command 5 bit 31 requests
+ACK-aware management transmission, with an attempt bound of 1..8. Sequence is
+preserved across attempts; retransmissions set Retry and recompute FCS. A PSM
+ACK indication is accepted only during the active wait, with valid hardware
+FCS, exact ACK length and matching receiver address. A management response
+may prove delivery even if its preceding ACK was missed; it is not counted as
+an ACK. Status is a separate 40-byte record at SRAM `0x201e0`.
+
+The appended PSM scheduler runs only after the existing final GoodFCS gate.
+It selects a basic response rate in the received modulation class, submits a
+peer-bound ACK with hardware FCS generation, and excludes groups, control responses,
+fragments, QoS frames and Action No Ack. `ack_responses_scheduled` counts
+template submissions, **not verified over-the-air ACKs**. A bounded scheduler
+timeout fails the controller explicitly. Station channel switching, key
+installation and destructive RX rearming are rejected instead of silently
+losing the profile. A station RX fault stops rather than restarting with a
+different MAC/configuration.
+
+Station mode retains a captured frame until the host's single SDIO credit
+opens instead of discarding a frame for which the PSM may already have
+scheduled an ACK. The host makes at most four management attempts, retaining
+the sequence and setting Retry with a new FCS. Between unacknowledged requests
+it listens/drains RX for 100,000 ticks; an ACKed request gets a 400,000-tick
+response window. The independent BOOTSEL watchdog is renewed once at diagnostic
+start for eight seconds, and host report polling allows eight seconds rather
+than racing the target's six-second deadline.
+
+Controlled vendor-SoftAP results superseding the earlier mesh failures below:
+
+- All-vendor open control: both peers matched for 20 host observations.
+- Clean-rx/open AP: three consecutive trials, valid successful responses,
+  AID 1, and the exact fresh station MAC independently associated at the AP
+  for 35–37 consecutive observations on the final retained build.
+- Clean-rx/WPA2-PSK/CCMP AP: three consecutive successful associations,
+  AID 1, matching AP records for 33–36 observations, and valid saved EAPOL
+  message 1 frames. Neither endpoint claimed WPA2 authorization.
+- Default all-vendor WPA2 remained functional, including authorization on
+  both peers. The source-built station still has no supplicant/key exchange.
+
+For setup, use the [explicit open AP collector](../../docs/usb-live.md#paired-link-image).
+Correlate `local_mac` in the clean-rx JSON with the AP observer's peer; an
+AP-only success is not by itself a passing combined experiment.
+Association-mode diagnostic offset 1096 counts own-address RX candidates;
+1040..1087 holds the last twelve `(valid_FCS << 31) | (length << 8) | subtype`
+records. Offset 796/800 preserves the last association candidate even if it
+fails validation, without making it success evidence. Offset 576 counts
+validated EAPOL M1 frames; the last complete one is saved in the existing
+post-TX packet area at 1104 with its length at 1088.
+
+Hardware results and remaining blockers:
+
+- One local mesh AP trial completed authentication and association with
+  status 0, AID 38, and received ACK indications for both requests. Repeated
+  trials were intermittent; this is not sustained association qualification.
+  The earlier build's three fresh trials all authenticated (one attempt and
+  one received ACK each) but timed out on association after four attempts.
+- An independent second badge captured the authentication request and AP
+  responses, but did not establish valid return ACKs from our scheduler.
+- Leaving the existing forced-TX PHY overrides enabled prevents subsequent
+  reception. Releasing those overrides restored RX and enabled association
+  progress. Explicit station TX waits for PHY TX-active to fall instead of
+  imposing the broadcast path's extra full-PPDU delay.
+- A legacy PSM-to-PHY write-bridge experiment timed out; an independent
+  Cortex readback showed the requested RF override was not written. That
+  experiment was removed. The current scheduler is not SIFS/RF-qualified.
+- Complete CCA/NAV/backoff, robust retries under incoming traffic, duplicate
+  delivery suppression, QoS/fragment handling, automatic response preamble
+  selection and sustained associated operation remain unfinished. Do not
+  use this profile as a reliable unicast/data MAC.
+
+For independent, TX-disabled capture on a second authorized badge:
+
+```sh
+build/clean-rx/badge/collector SECOND_SERIAL monitor.bin CHANNEL \
+  --ap-monitor XX:XX:XX:XX:XX:XX
+```
+
+Start this before the station trial. The 2.5-million-tick window records
+valid-FCS authentication/association requests and AP responses for the learned
+fresh station MAC. ACKs addressed to the AP are counted separately; other
+clients can also generate those ACKs, so that count alone is not attribution
+or SIFS timing proof. Monitoring is lossy under load and absence is not proof
+that no RF transmission occurred.
+
+Native tests cover bounded RSN/beacon and EAPOL M1 parsing, rates, ACK PLCP, frame FCS, request
+construction, response/AID validation, evidence binding and execution of the
+appended PSM branch program. They do not establish physical RF behavior.
+Normal/strict loader and PSM tests, Micro Signal tests and the loader's
+AddressSanitizer/UndefinedBehaviorSanitizer run passed. Earlier default-path
+qualification also passed a 60-second paired OFDM regression: all eight rates at all six
+MPDU sizes (88 through 2,332 bytes) were received with valid FCS on both badges.
+Both original 6 Mbps messenger applications were restored, with complete
+33,604-byte flash readbacks matching their separate backups; both badges
+were left in BOOTSEL.
 
 ## Build and test
 
@@ -128,6 +255,27 @@ Additional collector modes require a new load/execute and recovery:
   request addressed to the first validated beacon's BSSID.
 - `--tx-auth-1m`: the padded authentication request at 1 Mbps CCK.
 - `--tx-auth-ofdm`: the padded authentication request at 6 Mbps OFDM.
+- `--ap-auth XX:XX:XX:XX:XX:XX`: a **BSSID-pinned, exact-length 6 Mbps
+  OFDM authentication test**, with a 40-byte template (6-byte PLCP,
+  30-byte open-system authentication request and 4-byte FCS). The selected
+  BSSID must appear among the eight retained valid-FCS beacons on the
+  requested channel; otherwise the test fails without submitting a TX
+  command. It never falls back to another AP. The fresh station MAC is
+  independent of the requested BSSID. Example:
+
+  ```sh
+  build/clean-rx/badge/collector SERIAL evidence.bin CHANNEL \
+    --ap-auth XX:XX:XX:XX:XX:XX
+  ```
+
+  Collector success requires a valid-FCS authentication transaction 2 with
+  algorithm 0, status 0 and the expected receiver, transmitter and BSSID;
+  an ACK alone or a rejection is not success. JSON reports the requested
+  BSSID, `authentication_response_received`, and `authentication_status`
+  (`null` when absent), plus `associated:false` and
+  `wpa2_authorized:false`. The TFT explicitly says that successful AP
+  authentication is **not connected**. This mode does not read a password,
+  send an association request or implement an EAPOL handshake.
 - `--tx-auth-short`: an exact-length 40-byte template at 1 Mbps CCK:
   6-byte PLCP, 30-byte authentication request, and 4-byte MPDU FCS.
 - `--tx-auth-rearm`: the short authentication request followed by an explicit
@@ -163,8 +311,35 @@ or WPA2 connectivity.
 `--inspect` reports separate probe/authentication/ACK FCS checks and
 `tx_over_air_confirmed`. Its exit status checks the saved SRAM and Function-2
 frames' FCS, not TX confirmation. Read the JSON boolean for the latter.
-The AP chosen for TX is still the first validated beacon, not an SSID selected
-from the credential file. Only use these modes where that AP is authorized.
+Except for the explicitly BSSID-pinned `--ap-auth` mode, the AP chosen for TX
+is still the first validated beacon, not an SSID selected from the credential
+file. Only use these modes where that AP is authorized.
+
+### Local secured mesh-network trial, 2026-10-16
+
+Using only the source-built firmware on one Universe badge, passive scans
+identified three BSSIDs for the configured local SSID, on channels 1, 6 and
+11. Saved beacons from all three advertise WPA2-PSK with CCMP. No credentials
+are embedded in the diagnostic image.
+
+Three fresh-MAC, BSSID-pinned 6 Mbps authentication trials per AP received
+successful status-0 replies in **1/3, 1/3 and 3/3 trials**, respectively.
+The successful replies independently pass the saved-frame FCS, address,
+algorithm and transaction checks. The missing replies are not evidence of
+an AP rejection; timing/ACK and receive-path reliability remain unqualified.
+These local captures remain under `build/clean-rx/badge/kerbel-*` and should
+not be uploaded: they contain local network identifiers.
+
+**No secured connection was established.** Open-system authentication is only
+the first management exchange; it does not validate a WPA2 password. This
+firmware still needs association/RSN negotiation, an EAPOL four-way
+handshake with MIC/replay validation, verified key installation/CCMP and
+reliable unicast ACK/retry timing. There is no DHCP lease or working IP link
+from this test. Multiple APs sharing an SSID are handled by choosing a
+specific infrastructure BSSID; this does not test mesh backhaul or roaming.
+The tested badge's original 33,604-byte Micro Signal 6 Mbps application was
+restored and its full flash readback matched; it was left in BOOTSEL.
+The second attached badge was not modified.
 
 `CFG_TX_ENABLE` now gates both explicit TX commands and automatic ACKs in
 the controller. With TX enabled, automatic ACKs remain available for frames

@@ -269,6 +269,7 @@ int phy_tune_channel_2g(uint32_t channel, uint32_t *vco_status_out, uint32_t *dc
 int phy_fast_switch_channel_2g(uint32_t channel, uint32_t *vco_status_out);
 void phy_tx_hw_configure(uint32_t channel);
 void phy_tx_set_inhibit(int inhibit);
+void phy_tx_set_automatic(void);
 
 extern const uint8_t psm_ucode_bytes[];
 extern const uint32_t psm_ucode_byte_count;
