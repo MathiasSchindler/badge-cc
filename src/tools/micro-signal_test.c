@@ -181,6 +181,14 @@ static void sdio_windows(void) {
         }
     }
     assert(!clean_sdio_test_window_open(2u, 3u, 1u));
+    assert(clean_sdio_credit_available(0u, 0u, 1u) == 1);
+    assert(clean_sdio_credit_available(1u, 0u, 1u) == 0);
+    assert(clean_sdio_credit_available(2u, 0u, 1u) == -1);
+    assert(clean_sdio_credit_available(0u, 1u, 1u) == -1);
+    assert(clean_sdio_credit_available(0u, 0xffffffffu, 1u) == 0);
+    assert(clean_sdio_credit_available(0u, 0u, 17u) == -1);
+    assert(((CLEAN_SDIO_DMA_CONTROL >> 18u) & 7u) == 1u);
+    assert((CLEAN_SDIO_DMA_CONTROL & 0x801u) == 0x801u);
 }
 
 int main(void) {

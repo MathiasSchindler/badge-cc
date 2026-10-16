@@ -3,6 +3,19 @@
 
 #include "../../src/shared/stdint.h"
 
+#define CLEAN_SDIO_DMA_CONTROL 0x00060801u
+#define CLEAN_SDIO_WINDOW 1u
+#define CLEAN_SDIO_ACK_OFFSET 448u
+#define CLEAN_SDIO_POSTED_OFFSET 452u
+
+static inline int clean_sdio_credit_available(uint32_t posted, uint32_t consumed,
+                                               uint32_t window) {
+    if (window == 0u) return 1;
+    uint32_t pending = posted - consumed;
+    if (window > 16u || pending > window) return -1;
+    return pending < window;
+}
+
 /* The ring is 8-KiB aligned; STATUS0 reports the current descriptor's low bits. */
 static inline int clean_sdio_available(uint32_t producer, uint32_t status) {
     uint32_t offset = status & 0x1fffu;

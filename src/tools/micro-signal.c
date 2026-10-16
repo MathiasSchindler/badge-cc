@@ -308,6 +308,7 @@ static void transport_test(void) {
         loader.actual = evidence[10];
         radio_error();
     }
+    loader.rx_credit = (uint8_t)evidence[10];
     if (!clean_read(&loader, CLEAN_MBOX + CLEAN_SDIO_TEST_PATTERN_OFFSET, &evidence[8]))
         radio_error();
     if (evidence[8] > 1u) {
@@ -374,9 +375,14 @@ static void transport_test(void) {
                     receive_evidence(packet);
                     radio_error();
                 }
+                if (sequence == 1u) {
+                    badger_bytes_store_u32(test_control.trace + 24u, size);
+                    badger_bytes_store_u32(test_control.trace + 28u, diag_crc32(packet, size));
+                }
                 if (evidence[10] != 0u &&
                     !clean_write(&loader, CLEAN_MBOX + CLEAN_SDIO_TEST_ACK_OFFSET, sequence))
                     radio_error();
+                loader.rx_consumed = sequence;
                 --pending;
                 evidence[7] = sequence;
                 evidence[11] = sequence;

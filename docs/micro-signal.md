@@ -9,12 +9,11 @@ starts continuous reception on **channel 6**, and sends broadcast button events
 at the physically verified **11 Mbps CCK** rate. No AP, credentials, IP stack,
 Pico SDK, target libc, vendor Wi-Fi executable, or USB connection is required.
 
-**Experimental:** the cold-start timeout has been repaired, but multi-minute
-tests still reproduce intermittent Function-2 receive framing failures.
-An RF-free transport test now reproduces failures without radio operation.
-Two recent five-minute runs on two Universe badges passed, but do not resolve
-the transport failure. This is not yet a qualified
-indefinitely-running messenger.
+**Experimental:** production now uses 32-byte SDIO DMA bursts and an explicit
+host-consumption credit. The earlier 64-byte/unrestricted configurations remain
+available as RF-free negative controls. See the transport repair section below
+for the protocol and qualification evidence. This is not yet a qualified
+indefinitely-running messenger or a complete 802.11 implementation.
 
 ## Build and install
 
@@ -25,8 +24,8 @@ make micro-signal test-micro-signal
 ```
 
 The result is `build/universe26/uf2/micro-signal.uf2`. The current build is
-**63,488 bytes (62 KiB)**, containing a **31,572-byte** flash image, including
-the **20,484-byte** source-built Wi-Fi controller firmware. Size optimization,
+**64,000 bytes (62.5 KiB)**, containing a **31,908-byte** flash image, including
+the **20,652-byte** source-built Wi-Fi controller firmware. Size optimization,
 LTO and section garbage collection are enabled. The framebuffer uses RAM,
 not UF2 payload space.
 
@@ -67,13 +66,14 @@ does not repeat it; a debounced release allows another press. Simultaneous
 presses enter an eight-event FIFO. If it fills, excess presses are discarded
 with an `INPUT QUEUE FULL` warning, rather than generating unbounded traffic.
 
-If the radio receive queue fills, new frames are dropped without overwriting
-pending buffers. `RX D n R m` reports dropped radio frames and SPI receive-frame
-resynchronizations, respectively. These are separate from the button FIFO.
-Invalid SPI lengths or underflow can terminate the affected read frame and
-resume reception, with the recovery counted on screen. Three consecutive
-resynchronizations without a valid packet exhaust the recovery budget; another
-fault stops with `RADIO ERROR`. Malformed SDPCM packet headers remain fatal.
+Only one packet may await host consumption in the radio-to-host transport.
+New frames arriving while its credit is occupied are counted as drops, not
+allowed to overwrite the pending buffer or overfill the device FIFO.
+`RX D n R m` reports transport drops and SPI receive-frame resynchronizations,
+respectively. These are separate from the button FIFO. The credited production
+protocol stops on an invalid length, header or FIFO underrun before releasing
+credit; it does not terminate/retry a frame whose consumption is uncertain.
+The legacy uncredited test path retains its previous bounded recovery logic.
 
 Hold the rear **HOME/BOOT** input until the board returns to BOOTSEL.
 RESET alone restarts the installed app. If the app is unresponsive, use the
@@ -587,8 +587,8 @@ after preparation of the source buffer, rather than to the payload generator.
 The exact silicon/clock-domain mechanism is still unproven.
 All four alternating-pattern corruption captures used ring slot 13, buffer
 `0x33600`. The pattern period and ring positions are correlated, so this is
-not proof of a bad RAM location. Varying buffer placement and initial FIFO
-phase remains a useful next discriminator.
+not proof of a bad RAM location. The subsequent placement/phase experiments
+below distinguish those explanations.
 
 **The 32-byte setting is not a general transport fix.** Separate varied-length,
 four-at-once trials still stalled after three packets with both 32-byte
@@ -612,9 +612,10 @@ The test-only controller reports its window and pattern in otherwise unused
 calibration words. The host validates them, and acknowledges a packet only
 after its complete payload has passed validation. The controller's credit wait
 is bounded to 20,000,000 polling iterations and explicitly reports firmware
-error `0x8a` on exhaustion. Compile-time assertions bind the acknowledgement,
-window and pattern fields to mailbox offsets 36, 40 and 44; production mailbox
-layout/semantics are unchanged.
+error `0x8a` on exhaustion. These historical trials used acknowledgement,
+window and pattern offsets 36, 40 and 44 without changing production's mailbox.
+The production repair below moves the acknowledgement to offset 448;
+window/pattern metadata remain at 40/44 in test builds only.
 
 Additional JSON fields identify the actual comparison:
 
@@ -658,3 +659,281 @@ messenger. Independent 31,572-byte flash readbacks in
 production reference. Both were left in BOOTSEL. The normal UF2 remains
 63,488 bytes; neither the host-credit protocol nor the experimental burst
 setting was added to production.
+
+### Separating RAM placement, descriptor position and byte-stream phase
+
+#### Packet sizes are not a Wi-Fi restriction
+
+802.11 permits variable frame lengths: an ACK control frame is only 14 bytes
+including FCS, while the traditional maximum MSDU is 2,304 bytes, before MAC
+framing overhead. Aggregation and later PHY generations have other limits;
+those are not claims about implemented CYW43439 features here.
+The source sender's current 504-byte MPDU ceiling is a software bound in this
+project, not the Wi-Fi standard's maximum. Supporting larger frames requires
+auditing the capture buffers, firmware/host protocol and validation together.
+
+The 483/520-byte sizes in this investigation are whole **SDPCM transport
+packets**, including their 18-byte wrapper, not maximum radio frame lengths.
+The reproducer never initializes the radio. Valid lengths must not be
+excluded just because a DMA configuration mishandles their alignment.
+
+#### Controlled relocation and priming
+
+All following negative controls retained one outstanding packet, 64-byte DMA
+bursts and alternating 483/520-byte SDPCM packets, except for the named
+single change. Changing the first packet only primes the transport; every
+subsequent packet resumes the original pattern.
+
+| Evidence prefix | First SDPCM size | Failing packet | Descriptor slot | Actual source buffer |
+| --- | ---: | ---: | ---: | --- |
+| `phase-baseline` | 483 | 686 | 13 | `0x33600` |
+| `phase-relocated40000` | 483 | 174 | 13 | `0x43400` |
+| `phase-prime128` | 128 | 2,372 | 3 | `0x30e00` |
+| `phase-prime192` | 192 | 356 | 3 | `0x30e00` |
+| `phase-prime164` | 164 | 1,454 | 13 | `0x33600` |
+| `phase-prime484` | 484 | 2,030 | 13 | `0x33600` |
+
+Moving the entire buffer pool from `0x30200` to `0x40000` moved the actual
+faulting source address without removing the fault. Priming with 128 bytes
+moved the failure to slot 3. Thus neither the original RAM address nor
+descriptor 13 is necessary.
+
+Before the 128-byte trial, counting complete four-byte-rounded DMA lengths
+predicted slot 3; subtracting a four-byte hardware tag per frame predicted
+slot 15. The observed slot was 3. Priming with 192 bytes, exactly 64 more,
+also failed at slot 3. Priming with 164 bytes, 320 fewer rounded bytes than
+the original 484, preserved slot 13. Advertising 484 rather than 483 bytes,
+without changing the rounded DMA length or physical read length, also
+preserved slot 13.
+
+For each of the six captures, an independent check regenerated the payload
+and checked the actual first-packet CRC, source-buffer CRC, received CRC and
+byte differences. All faulting packets were 520 bytes with correct SRAM
+contents; only received offsets 516..519 differed, becoming zero. All six
+shared this condition:
+
+```text
+sum(round_up_to_4(SDPCM_length), through the failing packet) % 64 == 52
+```
+
+For an even failing sequence N and first-packet size P, this is:
+
+```text
+((N / 2) * 1004 + round_up_to_4(P) - 484) % 64 == 52
+descriptor_slot = (N - 1) & 31
+```
+
+This explains the apparent bad-slot correlation as cumulative byte phase.
+It is an observed condition at failure, **not a claim that every visit to
+phase 52 fails**, and does not identify the precise FIFO/clock-domain logic.
+Both the DMA byte counts and physical Function-2 reads are rounded to four
+bytes here; these experiments alone do not distinguish their contributions.
+
+A positive comparison changed the pattern to 480/520 bytes, leaving 64-byte
+bursts enabled. Both lengths are divisible by eight, so their cumulative
+byte count cannot reach phase 52 (which is four modulo eight). It passed
+60.041 seconds, accepting 24,112 / 24,371 exact packets with no errors,
+drops or resynchronizations. This supports the phase model, but is neither
+long-run qualification nor a justification for restricting valid lengths.
+The retained comparison profile is restored to **483/520**, not 480/520.
+
+#### Independent reader and clock controls
+
+An experimental Function-2 reader used the existing generic GPIO bit-banging
+implementation instead of the PIO/FIFO reader, allowing full packet lengths
+only in the strict test build. Register/mailbox operations were unchanged.
+This deliberately much slower reader reproduced the same underrun:
+
+| Evidence prefix | Packet reader / clock setting | Result |
+| --- | --- | --- |
+| `phase-gpio-packet-read` | GPIO, original clock setting | B failed on packet 14 after 4.320 s |
+| `phase-gpio-forceht` | GPIO, HT force set and read back as `0x000b0042` | Passed 60.024 s; 1,071 / 1,082 accepted packets |
+| `phase-gpio-htoff-control` | GPIO, HT force explicitly cleared/read back as `0x000b0040`, same setup reads/writes | B failed on packet 206 after 14.477 s |
+| `phase-pio-forceht` | Normal PIO, HT force set/read back as `0x000b0042` | A failed on packet 2,446 after 9.776 s |
+
+The negative controls again used descriptor 13 and cumulative phase 52.
+Source CRC and received data distinguish an intact SRAM tail from its loss
+in transit. The independent GPIO reproduction rules out an exclusively
+PIO-specific receive/assembly bug and shows that simply using a much slower
+packet clock is not sufficient. The GPIO/HT positive comparison is limited
+to roughly a thousand packets per badge; the PIO/HT failure explicitly
+disproves forced HT as a general repair for this tail-word fault.
+None of this establishes a silicon erratum or proves that 64-byte bursts
+are unsupported by the core.
+
+The separate unrestricted four-packet queue stall remains unresolved.
+The earlier 32-byte-burst success is still a bounded comparison, not a
+general fix. Do not conflate the two failure modes or ship size filtering,
+silent corruption recovery or arbitrary DMA padding as a solution.
+
+#### Retained evidence and validation
+
+Transport traces now record the **first fully validated packet's** actual
+SDPCM size and whole-packet CRC at bytes 24 and 28, before acknowledging it.
+These are `diagnostic_N` words 6 and 7 and distinguish actual priming traffic
+from intended build settings. They remain zero if no first packet validates.
+The experimental clock trials additionally used otherwise spare trace byte
+36 for clock readback; that instrumentation is not in retained builds.
+
+All relocation, priming, alignment, GPIO-reader and forced-clock behavior
+changes were reverted. Only the first-packet diagnostic fields are retained
+in code, and compile out of the production messenger. Evidence JSON,
+per-board binary snapshots and image SHA256 records are retained locally
+under the table prefixes in `build/micro-signal/`; the aligned positive
+comparison is `phase-aligned480-520`.
+
+Focused native tests, normal/strict loader tests and their ASan/UBSan runs
+passed. Production, radio self-test and all four RF-free profiles built.
+The normal binary remained byte-identical to both preceding production
+references. Both exact Universe serials received that production image;
+full 31,572-byte flash readbacks in `phase-production-SERIAL.bin` matched
+the binary. Both were left in BOOTSEL. The normal UF2 remains 63,488 bytes.
+
+### Production transport repair
+
+The preceding sections record historical experiments and their then-current
+settings. Current production instead combines **32-byte DMA bursts and one
+explicit host-consumption credit**, without sleeps or packet-size filtering.
+No 802.11 MPDU bytes, FCS, SDPCM lengths or padding rules are changed.
+The existing 504-byte MPDU software limit is not expanded by this repair.
+
+The public [DMA definitions at the investigated revision](https://github.com/RMerl/asuswrt-merlin.ng/blob/473402024dc5f6b79ba5f5a4b4b4a8a6d9437c52/release/src-rt-5.02axhnd/bcmdrivers/broadcom/net/wl/impl51/main/src/include/sbhnddma.h#L266)
+specify different defaults for SDIO and USB: burst encoding 1 (32 bytes)
+versus encoding 2 (64 bytes). Production previously used the latter.
+The controller now uses `CLEAN_SDIO_DMA_CONTROL`, `0x00060801`, and verifies
+the complete control-register readback before publishing any packets.
+Readback failure reports controller error `0x8b`. This is a documented
+bus-specific configuration choice, not proof that every 64-byte configuration
+is unsupported or that a particular silicon erratum has been identified.
+
+Two ownership questions must be kept separate:
+
+1. DMA's current-descriptor pointer protects descriptor/source-buffer reuse.
+2. It does **not** acknowledge that the RP2350 has consumed an SPI packet or
+   supply sufficient FIFO packet credits.
+
+Production retains the existing ring ownership checks and additionally allows
+only one published, unconsumed packet. New radio arrivals while that credit
+is occupied increment the existing drop counter rather than accumulating
+unread FIFO frames. This is bounded backpressure, not a blocking sleep in
+the radio receive loop. The test producer can instead wait boundedly for
+credit, allowing exact, lossless synthetic-stream verification.
+
+The mailbox grows from 448 to **456 bytes**, preserving every old field:
+
+| Offset | Owner | Meaning |
+| ---: | --- | --- |
+| 444 | Controller | Existing saturating 16-bit posted/drop diagnostic counters |
+| 448 | Host | Full-width count of consumed transport packets |
+| 452 | Controller | Full-width count of published transport packets |
+
+The new counters wrap modulo 2^32; saturation of the old diagnostic counter
+does not affect credits. An impossible credit difference stops the controller
+with error `0x8c`. Static size/offset assertions protect the protocol.
+Rebuild matching controller and RP2350 images together; old hosts do not
+implement these credits. Calibration fields retain their production meanings.
+
+The normal loader acknowledges a packet only after its entire advertised
+transfer, an immediate SPI-status check and SDPCM validation. Underflow,
+malformed input, a bus error or failed acknowledgement stops explicitly;
+the local consumed counter advances only after a successful acknowledgement.
+It never terminates an uncertain frame and guesses that credit was returned.
+Strict RF-free tests continue to defer their acknowledgement until every
+payload byte is also verified.
+
+When no packet is advertised, credited reception checks the actual published
+counter rather than interpreting SDIOD interrupt bit 23 as FIFO occupancy.
+An empty queue is normal even if that interrupt remains set. A published
+packet that remains unavailable across the bounded stall checks is an error;
+no frame-termination recovery writes are made. Legacy uncredited diagnostics
+retain their previous behavior for comparison.
+
+#### Reproducing the comparison
+
+```sh
+make micro-signal-transport-credit-test micro-signal-transport-window32-test
+```
+
+The new credit target uses production's 32-byte bursts and one-packet credit
+with all **497 payload lengths, 8..504 bytes**, including nonaligned lengths.
+The host still requests four packets per batch; the controller publishes
+subsequent packets only as real consumption returns credit. Window and DMA
+metadata are read back and checked by the collector, not inferred from names.
+The window32 target uses the exact 483/520-byte corruption pattern.
+Both use `collect ... --transport SECONDS`.
+
+The unrestricted `micro-signal-transport-test` and the 64-byte
+`micro-signal-transport-window-test` remain deliberately unsafe negative
+controls. The paced target also retains its earlier experimental settings.
+They are not production images or expected passing acceptance tests.
+
+Native tests cover occupied/available/invalid credits, 32-bit wraparound,
+all payload lengths, no acknowledgement on bad headers or pre-/post-read
+underflow, acknowledgement write failures, empty queues with latched IRQs,
+impossible publication counts and genuinely stalled credited packets.
+Normal and strict tests preserve the first error without destructive recovery.
+All new protocol definitions are shared by controller, host and tests.
+
+#### Repair qualification on the two Universe badges
+
+Serials are A `08DA26F86E57F5EA` and B `9BBF88DD17D66E7D`.
+The deliberately unsafe controls were rerun with the new diagnostic code,
+so passing results cannot be explained by accidentally removing the failing
+traffic or ignoring errors:
+
+| Evidence prefix | Settings | Result |
+| --- | --- | --- |
+| `repair-legacy-unpaced-control` | 64-byte bursts, no host credits, four varied packets per request | Both stopped after three accepted packets, 4.217 s |
+| `repair-credit-transition64-control` | One credit, 64-byte bursts, 483/520-byte pattern | A failed on packet 3,726 after 12.915 s, same stopped DMA/underrun signature |
+| `repair-credit-transition32` | One credit, 32-byte bursts, same 483/520-byte pattern | Passed 60.011 s; 23,050 / 23,307 accepted packets |
+| `repair-credit-varied-smoke` | One credit, 32-byte bursts, all 497 payload lengths | Passed 60.001 s; 35,523 / 35,866 accepted packets |
+| `repair-credit-varied-five-minutes` | Same varied-length production transport configuration | Passed 300.021 s; 183,933 / 185,696 accepted packets |
+
+The passing RF-free trials had no errors, drops, resynchronizations or
+five-second stalls. The long trial continued well beyond saturation of
+the diagnostic posted counter at 65,535, using full-width credits correctly.
+It covers odd lengths and many ring/SDPCM-sequence wraps without changing
+packet contents or inserting pacing delays. It is not RF confirmation.
+
+An additional diagnostic `repair-burst-align64` enabled the documented
+burst-alignment bit with 64-byte bursts; packet 494 still reported an underrun.
+That experimental setting was reverted, not included in production.
+The exact internal silicon mechanism remains unproven; the repair removes
+the unsafe production configuration/queuing assumptions rather than masking
+corrupt packets or asserting that SRAM itself is defective.
+
+The real-radio `repair-radio-five-minutes` trial then passed **300.009 s**
+with the production controller and credited loader, using the larger USB
+self-test application:
+
+| Device | TX frames | Unique peer events | F2 published | Counted transport drops | Resyncs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A | 1,381 | 465 | 6,573 | 87 | 0 |
+| B | 1,395 | 461 | 6,502 | 93 | 0 |
+
+Both had zero errors and no five-second peer-sequence stalls; the collector
+confirmed the current peer identities/sessions and bidirectional button
+events. The transport drops are intentional, visible backpressure when the
+one-packet credit is occupied, not hidden lossless-delivery claims. This
+configuration prioritizes correctness over maximum receive throughput.
+RF-free tests report `transport_confirmed`; this RF trial instead reports
+`bidirectional_button_event_confirmed`, with `transport_confirmed` false.
+
+Native tests and ASan/UBSan passed for the application and normal/strict
+loaders. Production, radio self-test, all five transport profiles and the
+separate badge diagnostic built successfully. Consolidating the window into
+a shared definition preserved the qualified controller/production/self-test
+binaries byte for byte, verified against saved SHA256 identities.
+
+Both badges then received the corrected **normal** messenger, not the USB
+stress image. Full 31,908-byte flash readbacks in
+`repair-production-SERIAL.bin` matched the built binary. Both were left in
+BOOTSEL, ready to reboot and test buttons. The UF2 is **64,000 bytes**, just
+512 bytes larger than the preceding image; the controller is 20,652 bytes.
+There are still no target SDK/libc/vendor executable dependencies.
+
+These bounded passes address the demonstrated production transport failures;
+they are not multi-hour qualification, proof of lossless RF delivery, support
+for additional PHY rates or an expansion to the standard's maximum frame
+size. All captures, negative controls, per-image hashes and original program
+backups remain local.

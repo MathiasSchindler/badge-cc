@@ -2,6 +2,7 @@
 #define CLEAN_RX_LOADER_H
 
 #include "../../src/radio/wifi_gspi.h"
+#include "../src/sdio_ring.h"
 
 #define CLEAN_MBOX 0x20000u
 #define CLEAN_MULTI 0x20d80u
@@ -21,9 +22,11 @@ typedef struct {
     uint32_t rx_checked;
     uint32_t rx_resyncs;
     uint32_t rx_status;
+    uint32_t rx_consumed;
     uint8_t window_valid;
     uint8_t rx_stalled;
     uint8_t rx_retries;
+    uint8_t rx_credit;
 } clean_loader_t;
 
 enum {

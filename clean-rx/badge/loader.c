@@ -26,6 +26,8 @@ void clean_loader_init(clean_loader_t *l, const wifi_wire_t *wire,
     l->rx_checked = l->started;
     l->rx_resyncs = 0u;
     l->rx_status = 0u;
+    l->rx_consumed = 0u;
+    l->rx_credit = 0u;
     l->rx_stalled = l->rx_retries = 0u;
 }
 
@@ -116,6 +118,7 @@ int clean_wait_state(clean_loader_t *l, uint32_t expected, uint32_t timeout) {
 
 static int receive_resync(clean_loader_t *l, uint32_t actual) {
     l->actual = actual;
+    if (l->rx_credit) return fail(l, CLEAN_INPUT);
 #ifdef CLEAN_RX_STRICT_TEST
     return fail(l, CLEAN_INPUT);
 #endif
@@ -136,6 +139,7 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
     if (!clean_service(l) || !reg_read(l, 0u, 8u, 4u, &status)) return 0;
     l->rx_status = status;
     if (status == 0xffffffffu) return fail(l, CLEAN_BUS);
+    if (l->rx_credit && (status & 2u)) return receive_resync(l, status);
 #ifdef CLEAN_RX_STRICT_TEST
     if (status & 2u) return receive_resync(l, status);
 #endif
@@ -143,9 +147,21 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
         uint32_t now = l->wire->now_us(l->wire->context);
         if (now - l->rx_checked < 100000u) return 1;
         l->rx_checked = now;
-        uint32_t fifo;
-        if (!clean_read(l, 0x18002020u, &fifo)) return 0;
-        if ((fifo & 0x00800000u) == 0u) l->rx_stalled = 0u;
+        uint32_t pending;
+        if (l->rx_credit) {
+            uint32_t posted;
+            if (!clean_read(l, CLEAN_MBOX + CLEAN_SDIO_POSTED_OFFSET, &posted)) return 0;
+            pending = posted - l->rx_consumed;
+            if (pending > l->rx_credit) {
+                l->actual = posted;
+                return fail(l, CLEAN_CONTROLLER);
+            }
+        } else {
+            uint32_t fifo;
+            if (!clean_read(l, 0x18002020u, &fifo)) return 0;
+            pending = fifo & 0x00800000u;
+        }
+        if (pending == 0u) l->rx_stalled = 0u;
         else if (l->rx_stalled) return receive_resync(l, status);
         else l->rx_stalled = 1u;
         return 1;
@@ -164,15 +180,20 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
         return fail(l, CLEAN_BUS);
     }
 #ifdef CLEAN_RX_STRICT_TEST
-    if (!reg_read(l, 0u, 8u, 4u, &status)) return 0;
-    if (status == 0xffffffffu) {
-        l->actual = status;
-        return fail(l, CLEAN_BUS);
-    }
-    if (status & 2u) {
-        return receive_resync(l, status);
-    }
+    const int check_status = 1;
+#else
+    const int check_status = l->rx_credit;
 #endif
+    if (check_status) {
+        if (!reg_read(l, 0u, 8u, 4u, &status)) return 0;
+        if (status == 0xffffffffu) {
+            l->actual = status;
+            return fail(l, CLEAN_BUS);
+        }
+        if (status & 2u) {
+            return receive_resync(l, status);
+        }
+    }
     uint32_t sdpcm = (uint32_t)packet[0] | ((uint32_t)packet[1] << 8u);
     uint32_t inverse = (uint32_t)packet[2] | ((uint32_t)packet[3] << 8u);
     if ((sdpcm ^ inverse) != 0xffffu || sdpcm < 18u || sdpcm > size || sdpcm > 522u ||
@@ -181,6 +202,13 @@ int clean_receive(clean_loader_t *l, uint8_t packet[544], uint32_t *length) {
         return fail(l, CLEAN_INPUT);
     }
     *length = sdpcm;
+#ifndef CLEAN_RX_STRICT_TEST
+    if (l->rx_credit) {
+        uint32_t consumed = l->rx_consumed + 1u;
+        if (!clean_write(l, CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, consumed)) return 0;
+        l->rx_consumed = consumed;
+    }
+#endif
     l->rx_retries = 0u;
     l->rx_checked = l->wire->now_us(l->wire->context);
     return 1;
@@ -251,5 +279,7 @@ int clean_boot(clean_loader_t *l, const uint8_t *image, uint32_t length,
     if (!clean_write(l, CLEAN_MBOX + 24u, 1u) ||
         !clean_wait_state(l, 8u, 2000000u)) return 0;
     l->stage = 6u;
+    l->rx_consumed = 0u;
+    l->rx_credit = CLEAN_SDIO_WINDOW;
     return 1;
 }

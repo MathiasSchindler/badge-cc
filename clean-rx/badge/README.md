@@ -84,8 +84,20 @@ For sustained-receive failures, the separate
 [RF-free transport test](../../docs/micro-signal.md#two-universe-investigation-and-rf-free-reproducer)
 uses the same loader and SDIO publisher without starting D11/PHY or sending RF.
 It preserves first-fault FIFO/DMA state before recovery and reproduces failures
-independently of the radio application. Production recovery is unchanged;
-the failure is not yet fixed.
+independently of the radio application. Production now uses 32-byte SDIO DMA
+bursts and one explicit host-consumption credit. The matching loader checks
+post-read status and acknowledges only structurally valid, fully read packets.
+It stops on faults without terminating a frame or guessing a credit.
+New arrivals while credit is occupied are counted as drops.
+
+The mailbox is now 456 bytes: offsets 0..447 are unchanged, offset 448 is the
+host-written full-width consumed counter, and offset 452 is the controller's
+full-width published counter. These counters wrap modulo 2^32 independently
+of the older saturating diagnostic counts at offset 444. Controller comparison
+images must implement this updated protocol; rebuild the host and controller
+together. The diagnostic snapshot still captures the original 448-byte prefix.
+See the [transport repair](../../docs/micro-signal.md#production-transport-repair)
+for negative controls, limitations and hardware qualification.
 
 The channel argument accepts 1..11. `--inspect` reads only the `SSID:` field;
 it does not use or print the password. Binary captures contain received

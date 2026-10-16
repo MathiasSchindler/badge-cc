@@ -2,9 +2,10 @@
 #define CLEAN_RX_SDIO_TEST_H
 
 #include "../src/shared/stdint.h"
+#include "src/sdio_ring.h"
 
 #define CLEAN_SDIO_TEST_PACING_TICKS 500000u
-#define CLEAN_SDIO_TEST_ACK_OFFSET 36u
+#define CLEAN_SDIO_TEST_ACK_OFFSET CLEAN_SDIO_ACK_OFFSET
 #define CLEAN_SDIO_TEST_WINDOW_OFFSET 40u
 #define CLEAN_SDIO_TEST_PATTERN_OFFSET 44u
 
@@ -17,7 +18,7 @@
 
 static inline int clean_sdio_test_window_open(uint32_t posted, uint32_t consumed,
                                               uint32_t window) {
-    return window == 0u || posted - consumed < window;
+    return clean_sdio_credit_available(posted, consumed, window) > 0;
 }
 
 static inline uint32_t clean_sdio_test_length(uint32_t sequence) {

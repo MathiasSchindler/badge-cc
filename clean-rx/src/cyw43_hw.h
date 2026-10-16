@@ -192,9 +192,11 @@ typedef struct {
     uint8_t  rx_snapshot[96];
     uint8_t  rx_input[180];
     uint32_t f2_counts;
+    uint32_t f2_consumed;
+    uint32_t f2_posted;
 } fw_mbox_t;
 
-_Static_assert(sizeof(fw_mbox_t) == 448u, "Mailbox is 448 bytes");
+_Static_assert(sizeof(fw_mbox_t) == 456u, "Mailbox is 456 bytes");
 
 static inline uint32_t mmio_read32(uint32_t addr) {
     return *(volatile uint32_t *)(uintptr_t)addr;

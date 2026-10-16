@@ -13,10 +13,21 @@ _Static_assert(__builtin_offsetof(fw_mbox_t, rx_input) + 32u == CLEAN_TX_DIAG_OF
 _Static_assert(sizeof(clean_tx_diag_t) <= sizeof(((fw_mbox_t *)0)->rx_input),
                "TX diagnostic fits mailbox");
 _Static_assert(__builtin_offsetof(fw_mbox_t, f2_counts) == 444u, "F2 counter offset");
+_Static_assert(__builtin_offsetof(fw_mbox_t, f2_consumed) == CLEAN_SDIO_ACK_OFFSET,
+               "F2 host-consumption offset");
+_Static_assert(__builtin_offsetof(fw_mbox_t, f2_posted) == CLEAN_SDIO_POSTED_OFFSET,
+               "F2 publication offset");
 
 static uint32_t dma_consumer;
 static uint32_t dma_producer;
 static uint32_t sdio_tx_idx;
+static uint32_t sdio_tx_posted;
+
+#ifdef CLEAN_SDIO_SELF_TEST
+#define SDIO_TX_WINDOW CLEAN_SDIO_SELF_TEST_WINDOW
+#else
+#define SDIO_TX_WINDOW CLEAN_SDIO_WINDOW
+#endif
 static uint8_t  sdpcm_seq;
 static uint8_t rx_after_explicit_tx;
 static clean_tx_diag_t tx_diag;
@@ -251,12 +262,22 @@ static int sdio_f2_init(void) {
     mmio_write32(SDIOD_TX_DMA_ADDRHIGH, 0u);
     mmio_write32(SDIOD_TX_DMA_PTR, FW_SDIO_TX_RING_ADDR);
     sdio_tx_idx = 0u;
+    sdio_tx_posted = 0u;
     MBOX->f2_counts = 0u;
-#if defined(CLEAN_SDIO_SELF_TEST) && defined(CLEAN_SDIO_SELF_TEST_DMA32)
-    mmio_write32(SDIOD_TX_DMA_CTL, 0x00060801u);
-#else
+    MBOX->f2_consumed = 0u;
+    MBOX->f2_posted = 0u;
+#if defined(CLEAN_SDIO_SELF_TEST) && !defined(CLEAN_SDIO_SELF_TEST_DMA32)
     mmio_write32(SDIOD_TX_DMA_CTL, 0x000a0801u);
+#else
+    mmio_write32(SDIOD_TX_DMA_CTL, CLEAN_SDIO_DMA_CONTROL);
 #endif
+    uint32_t control = mmio_read32(SDIOD_TX_DMA_CTL);
+#if defined(CLEAN_SDIO_SELF_TEST) && !defined(CLEAN_SDIO_SELF_TEST_DMA32)
+    if (control != 0x000a0801u)
+#else
+    if (control != CLEAN_SDIO_DMA_CONTROL)
+#endif
+        return fail(0x8bu, SDIOD_TX_DMA_CTL, control);
     return 1;
 }
 
@@ -267,6 +288,16 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t ch
     uint32_t sdpcm_len = 18u + mpdu_len;
     uint32_t dma_len = (sdpcm_len + 3u) & ~3u;
 
+    int credit = clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
+                                              SDIO_TX_WINDOW);
+    if (credit < 0) {
+        (void)fail(0x8cu, FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET, MBOX->f2_consumed);
+        return;
+    }
+    if (!credit) {
+        MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 1u);
+        return;
+    }
     uint32_t status = mmio_read32(SDIOD_TX_DMA_STATUS0);
     int available = clean_sdio_available(sdio_tx_idx, status);
     if (available < 0) {
@@ -318,6 +349,8 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t ch
     __asm__ volatile("dsb" ::: "memory");
 
     sdio_tx_idx = (idx + 1u) & 31u;
+    ++sdio_tx_posted;
+    MBOX->f2_posted = sdio_tx_posted;
     mmio_write32(SDIOD_TX_DMA_PTR, FW_SDIO_TX_RING_ADDR + sdio_tx_idx * 16u);
     MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 0u);
 }
@@ -677,7 +710,7 @@ void cyw43_main(void) {
     }
 
 #ifdef CLEAN_SDIO_SELF_TEST
-    _Static_assert(__builtin_offsetof(fw_mbox_t, rc_lpf) == CLEAN_SDIO_TEST_ACK_OFFSET,
+    _Static_assert(__builtin_offsetof(fw_mbox_t, f2_consumed) == CLEAN_SDIO_TEST_ACK_OFFSET,
                    "Transport acknowledgement offset");
     _Static_assert(__builtin_offsetof(fw_mbox_t, rc_adc) == CLEAN_SDIO_TEST_WINDOW_OFFSET,
                    "Transport window offset");
@@ -712,11 +745,11 @@ void cyw43_main(void) {
         for (uint32_t i = 0u; i < count; ++i) {
 #if CLEAN_SDIO_SELF_TEST_WINDOW > 0u
             uint32_t waits = 0u;
-            while (!clean_sdio_test_window_open(sequence, MBOX->rc_lpf,
+            while (!clean_sdio_test_window_open(sequence, MBOX->f2_consumed,
                                                 CLEAN_SDIO_SELF_TEST_WINDOW) &&
                    waits < 20000000u) ++waits;
             if (waits == 20000000u) {
-                (void)fail(0x8au, FW_MBOX_ADDR + CLEAN_SDIO_TEST_ACK_OFFSET, MBOX->rc_lpf);
+                (void)fail(0x8au, FW_MBOX_ADDR + CLEAN_SDIO_TEST_ACK_OFFSET, MBOX->f2_consumed);
                 return;
             }
 #endif

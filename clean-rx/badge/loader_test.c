@@ -7,7 +7,7 @@
 #include "../tx_diag.h"
 
 static uint32_t ticks, calls, blocks, state, base;
-static int cancel, mismatch, bus_error, terminate_error, f2_post_status;
+static int cancel, mismatch, bus_error, terminate_error, f2_post_status, ack_error;
 static uint32_t f2_status;
 static uint32_t f2_after_status;
 static uint32_t fifo_status, terminations;
@@ -79,6 +79,8 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
     }
     uint32_t absolute = base | (addr & 0x7fffu);
     assert(addr & 0x8000u);
+    if (ack_error && (cmd >> 31u) && absolute == CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET)
+        return WIFI_BUS_TRANSFER_TIMEOUT;
     if (!(cmd >> 31u) && count == 4u &&
         (absolute == CLEAN_MBOX + 4u || absolute == 0x18002020u)) {
         assert(rx_length == 4u + WIFI_GSPI_BACKPLANE_PAD);
@@ -170,6 +172,89 @@ int main(void) {
     }
     f2_packet[2] ^= 1u;
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+    for (uint32_t i = 0u; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        clean_loader_init(&l, &wire, service, NULL);
+        l.rx_credit = 1u;
+        uint32_t size = sizes[i];
+        badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, 0u);
+        f2_status = 0x100u | (size << 9u);
+        badger_bytes_store_u32(f2_packet, size | ((size ^ 0xffffu) << 16u));
+        assert(clean_receive(&l, packet, &packet_length) && packet_length == size);
+#ifdef CLEAN_RX_STRICT_TEST
+        assert(l.rx_consumed == 0u);
+        assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 0u);
+#else
+        assert(l.rx_consumed == 1u);
+        assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 1u);
+#endif
+    }
+    clean_loader_init(&l, &wire, service, NULL);
+    l.rx_credit = 1u;
+    f2_status = 0u;
+    fifo_status = 0x00800000u;
+    badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_POSTED_OFFSET, 0u);
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        ticks += 100001u;
+        assert(clean_receive(&l, packet, &packet_length) && packet_length == 0u);
+        assert(!l.rx_stalled && l.rx_resyncs == 0u);
+    }
+    badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_POSTED_OFFSET, 1u);
+    ticks += 100001u;
+    assert(clean_receive(&l, packet, &packet_length) && l.rx_stalled);
+    ticks += 100001u;
+    assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+    assert(l.rx_resyncs == 0u && terminations == 0u);
+    clean_loader_init(&l, &wire, service, NULL);
+    l.rx_credit = 1u;
+    badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_POSTED_OFFSET, 2u);
+    ticks += 100001u;
+    assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_CONTROLLER);
+    assert(l.actual == 2u && terminations == 0u);
+    clean_loader_init(&l, &wire, service, NULL);
+    l.rx_credit = 1u;
+    f2_status = 2u;
+    assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+    assert(l.rx_consumed == 0u && l.rx_resyncs == 0u && terminations == 0u);
+    static const uint32_t credit_postread[] = {2u, 0xffffffffu};
+    for (uint32_t i = 0u; i < 2u; ++i) {
+        clean_loader_init(&l, &wire, service, NULL);
+        l.rx_credit = 1u;
+        f2_status = 0x100u | (63u << 9u);
+        badger_bytes_store_u32(f2_packet, 63u | ((63u ^ 0xffffu) << 16u));
+        badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, 0u);
+        f2_post_status = 1;
+        f2_after_status = credit_postread[i];
+        assert(!clean_receive(&l, packet, &packet_length));
+        assert(l.error == (i == 0u ? CLEAN_INPUT : CLEAN_BUS));
+        assert(l.actual == credit_postread[i] && l.rx_consumed == 0u);
+        assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 0u);
+        assert(l.rx_resyncs == 0u && terminations == 0u);
+    }
+    f2_post_status = 0;
+    clean_loader_init(&l, &wire, service, NULL);
+    l.rx_credit = 1u;
+    f2_status = 0x100u | (63u << 9u);
+    f2_packet[2] ^= 1u;
+    assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
+    assert(l.rx_consumed == 0u);
+    assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 0u);
+    f2_packet[2] ^= 1u;
+#ifndef CLEAN_RX_STRICT_TEST
+    clean_loader_init(&l, &wire, service, NULL);
+    l.rx_credit = 1u;
+    l.rx_consumed = 0xffffffffu;
+    f2_status = 0x100u | (63u << 9u);
+    assert(clean_receive(&l, packet, &packet_length) && l.rx_consumed == 0u);
+    assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 0u);
+    clean_loader_init(&l, &wire, service, NULL);
+    l.rx_credit = 1u;
+    ack_error = 1;
+    assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_BUS);
+    assert(l.rx_consumed == 0u);
+    ack_error = 0;
+#endif
+    badger_bytes_store_u32(f2_packet, 522u | ((522u ^ 0xffffu) << 16u));
+    f2_packet[2] ^= 1u;
 #ifdef CLEAN_RX_STRICT_TEST
     static const uint32_t underflows[] = {2u, 0x102u, 0x100u | (63u << 9u) | 2u};
     for (uint32_t i = 0u; i < sizeof(underflows) / sizeof(underflows[0]); ++i) {

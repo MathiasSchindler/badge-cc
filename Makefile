@@ -187,11 +187,12 @@ MICRO_SIGNAL_TEST_USB := src/usb/live_usb_control.c src/usb/live_usb_hw.c \
 .PHONY: micro-signal micro-signal-self-test test-micro-signal
 micro-signal: $(UF2_DIR)/micro-signal.uf2
 micro-signal-self-test: $(UF2_DIR)/micro-signal-self-test.uf2
-.PHONY: micro-signal-transport-test micro-signal-transport-paced-test micro-signal-transport-window-test micro-signal-transport-window32-test
+.PHONY: micro-signal-transport-test micro-signal-transport-paced-test micro-signal-transport-window-test micro-signal-transport-window32-test micro-signal-transport-credit-test
 micro-signal-transport-test: $(UF2_DIR)/micro-signal-transport-test.uf2 $(MICRO_SIGNAL_DIR)/collect
 micro-signal-transport-paced-test: $(UF2_DIR)/micro-signal-transport-paced-test.uf2 $(MICRO_SIGNAL_DIR)/collect
 micro-signal-transport-window-test: $(UF2_DIR)/micro-signal-transport-window-test.uf2 $(MICRO_SIGNAL_DIR)/collect
 micro-signal-transport-window32-test: $(UF2_DIR)/micro-signal-transport-window32-test.uf2 $(MICRO_SIGNAL_DIR)/collect
+micro-signal-transport-credit-test: $(UF2_DIR)/micro-signal-transport-credit-test.uf2 $(MICRO_SIGNAL_DIR)/collect
 
 $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-test \
@@ -209,16 +210,23 @@ $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window32-test \
 		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION -DCLEAN_SDIO_SELF_TEST_DMA32'
 
+$(BUILD_DIR)/clean-rx-sdio-credit-test/cyw43_rx_fw.bin: force
+	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-credit-test \
+		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_WINDOW=CLEAN_SDIO_WINDOW -DCLEAN_SDIO_SELF_TEST_DMA32'
+
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-window-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-window32-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-credit-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-credit-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf: $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf: $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-window-test.elf: $(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-window32-test.elf: $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin
+$(MICRO_SIGNAL_DIR)/micro-signal-transport-credit-test.elf: $(BUILD_DIR)/clean-rx-sdio-credit-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf $(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf \
-		$(MICRO_SIGNAL_DIR)/micro-signal-transport-window-test.elf $(MICRO_SIGNAL_DIR)/micro-signal-transport-window32-test.elf: \
+		$(MICRO_SIGNAL_DIR)/micro-signal-transport-window-test.elf $(MICRO_SIGNAL_DIR)/micro-signal-transport-window32-test.elf \
+		$(MICRO_SIGNAL_DIR)/micro-signal-transport-credit-test.elf: \
 		$(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_HEADERS) \
 		$(MICRO_SIGNAL_TEST_USB) \
 		src/usb/live_usb.h src/usb/live_usb_hw.h $(ARCH_DIR)/memmap_flash.ld Makefile | $(MICRO_SIGNAL_DIR)
@@ -256,7 +264,8 @@ $(MICRO_SIGNAL_DIR)/%.bin: $(MICRO_SIGNAL_DIR)/%.elf
 
 $(UF2_DIR)/micro-signal.uf2 $(UF2_DIR)/micro-signal-self-test.uf2 \
 		$(UF2_DIR)/micro-signal-transport-test.uf2 $(UF2_DIR)/micro-signal-transport-paced-test.uf2 \
-		$(UF2_DIR)/micro-signal-transport-window-test.uf2 $(UF2_DIR)/micro-signal-transport-window32-test.uf2: \
+		$(UF2_DIR)/micro-signal-transport-window-test.uf2 $(UF2_DIR)/micro-signal-transport-window32-test.uf2 \
+		$(UF2_DIR)/micro-signal-transport-credit-test.uf2: \
 		$(UF2_DIR)/%.uf2: $(MICRO_SIGNAL_DIR)/%.bin $(BIN2UF2) | $(UF2_DIR)
 	$(BIN2UF2) $< $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
 
@@ -271,7 +280,7 @@ test-micro-signal: $(MICRO_SIGNAL_DIR)/micro-signal-test
 
 micro-signal-self-test: $(MICRO_SIGNAL_DIR)/collect
 $(MICRO_SIGNAL_DIR)/collect: $(HOST_TOOLS_SRC_DIR)/micro_signal_collect.c \
-		clean-rx/sdio_test.h \
+		clean-rx/sdio_test.h clean-rx/src/sdio_ring.h \
 		$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h $(TOOLS_DIR)/diagnostics_logic.c \
 		$(TOOLS_DIR)/diagnostics_logic.h $(SHARED_DIR)/bytes.h $(SHARED_DIR)/usb_report.h \
 		$(RADIO_DIR)/wifi_trace.h src/usb/live_usb.h | $(MICRO_SIGNAL_DIR)
