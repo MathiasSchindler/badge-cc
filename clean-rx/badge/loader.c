@@ -167,42 +167,119 @@ int clean_receive(clean_loader_t *l, uint8_t packet[CLEAN_RX_PACKET_BYTES], uint
         return 1;
     }
     l->rx_stalled = 0u;
-    uint32_t size = (status >> 9u) & 0x7ffu;
-    if (size < 18u || size > CLEAN_RX_PACKET_BYTES) {
-        return receive_resync(l, size);
-    }
-    if (status & 2u) return receive_resync(l, status);
-    uint8_t command[4];
-    badger_bytes_store_u32(command, 0x60000000u | size);
-    wifi_bus_result_t result = l->wire->transfer(l->wire, command, 4u, packet, (size + 3u) & ~3u);
-    if (result != WIFI_BUS_OK) {
-        l->actual = (uint32_t)result;
-        return fail(l, CLEAN_BUS);
-    }
-#ifdef CLEAN_RX_STRICT_TEST
-    const int check_status = 1;
-#else
-    const int check_status = l->rx_credit;
-#endif
-    if (check_status) {
-        if (!reg_read(l, 0u, 8u, 4u, &status)) return 0;
-        if (status == 0xffffffffu) {
-            l->actual = status;
-            return fail(l, CLEAN_BUS);
+    uint32_t assembled = 0u, total = 0u, sdpcm = 0u;
+    for (uint32_t part = 0u; part < 2u; ++part) {
+        if (!clean_service(l)) return 0;
+        uint32_t size = (status >> 9u) & 0x7ffu;
+        if (size < 18u || size > CLEAN_F2_PACKET_BYTES) {
+            if (part == 0u) return receive_resync(l, size);
+            l->actual = size;
+            return fail(l, CLEAN_INPUT);
         }
         if (status & 2u) {
+            if (part != 0u) {
+                l->actual = status;
+                return fail(l, CLEAN_INPUT);
+            }
             return receive_resync(l, status);
         }
+        uint8_t physical[CLEAN_F2_PACKET_BYTES];
+        uint8_t command[4];
+        badger_bytes_store_u32(command, 0x60000000u | size);
+        wifi_bus_result_t result = l->wire->transfer(l->wire, command, 4u,
+                                                    physical, (size + 3u) & ~3u);
+        if (result != WIFI_BUS_OK) {
+            l->actual = (uint32_t)result;
+            return fail(l, CLEAN_BUS);
+        }
+        if (part == 0u) badger_bytes_copy(packet, physical, (size + 3u) & ~3u);
+#ifdef CLEAN_RX_STRICT_TEST
+        const int check_status = 1;
+#else
+        const int check_status = l->rx_credit || physical[14] == 0x21u;
+#endif
+        if (check_status) {
+            if (!reg_read(l, 0u, 8u, 4u, &status)) return 0;
+            if (status == 0xffffffffu) {
+                l->actual = status;
+                return fail(l, CLEAN_BUS);
+            }
+            if (status & 2u) {
+                if (part != 0u || physical[14] == 0x21u) {
+                    l->actual = status;
+                    return fail(l, CLEAN_INPUT);
+                }
+                return receive_resync(l, status);
+            }
+        }
+        uint32_t physical_len = (uint32_t)physical[0] | ((uint32_t)physical[1] << 8u);
+        uint32_t inverse = (uint32_t)physical[2] | ((uint32_t)physical[3] << 8u);
+        if ((physical_len ^ inverse) != 0xffffu || physical_len < 18u ||
+            physical_len > size || size > ((physical_len + 3u) & ~3u) ||
+            physical[5] != 2u || physical[7] != 14u ||
+            (physical[14] != 0x20u && physical[14] != 0x21u)) {
+            l->actual = badger_bytes_load_u32(physical);
+            return fail(l, CLEAN_INPUT);
+        }
+        if (physical[14] == 0x20u) {
+            if (part != 0u) {
+                l->actual = physical[14];
+                return fail(l, CLEAN_INPUT);
+            }
+            badger_bytes_copy(packet, physical, physical_len);
+            sdpcm = physical_len;
+            break;
+        }
+        if (physical_len < CLEAN_F2_FRAGMENT_HEADER) {
+            l->actual = physical_len;
+            return fail(l, CLEAN_INPUT);
+        }
+        uint32_t mpdu = (uint32_t)physical[18] | ((uint32_t)physical[19] << 8u);
+        uint32_t offset = (uint32_t)physical[20] | ((uint32_t)physical[21] << 8u);
+        if (mpdu + 18u <= CLEAN_F2_PACKET_BYTES || mpdu > CLEAN_MPDU_BYTES ||
+            offset != assembled || offset >= mpdu ||
+            (part != 0u && (total != mpdu ||
+             !badger_bytes_equal(packet + 4u, physical + 4u, 14u)))) {
+            l->actual = mpdu | (offset << 16u);
+            return fail(l, CLEAN_INPUT);
+        }
+        uint32_t payload = mpdu - offset;
+        if (payload > CLEAN_F2_FRAGMENT_BYTES) payload = CLEAN_F2_FRAGMENT_BYTES;
+        if (physical_len != CLEAN_F2_FRAGMENT_HEADER + payload) {
+            l->actual = physical_len;
+            return fail(l, CLEAN_INPUT);
+        }
+        if (part == 0u) badger_bytes_copy(packet, physical, 18u);
+        total = mpdu;
+        badger_bytes_copy(packet + 18u + offset, physical + CLEAN_F2_FRAGMENT_HEADER, payload);
+        assembled += payload;
+        if (assembled == total) {
+            sdpcm = 18u + total;
+            badger_bytes_store_u32(packet, sdpcm | ((sdpcm ^ 0xffffu) << 16u));
+            packet[14] = 0x20u;
+            break;
+        }
+        uint32_t started = l->wire->now_us(l->wire->context);
+        while ((status & 0x100u) == 0u) {
+            if (!clean_service(l) || !reg_read(l, 0u, 8u, 4u, &status)) return 0;
+            if (status == 0xffffffffu) {
+                l->actual = status;
+                return fail(l, CLEAN_BUS);
+            }
+            if (status & 2u) {
+                l->actual = status;
+                return fail(l, CLEAN_INPUT);
+            }
+            if (l->wire->now_us(l->wire->context) - started >= 100000u) {
+                l->actual = status;
+                return fail(l, CLEAN_TIMEOUT);
+            }
+        }
     }
-    uint32_t sdpcm = (uint32_t)packet[0] | ((uint32_t)packet[1] << 8u);
-    uint32_t inverse = (uint32_t)packet[2] | ((uint32_t)packet[3] << 8u);
-    if ((sdpcm ^ inverse) != 0xffffu || sdpcm < 18u || sdpcm > size ||
-        sdpcm > CLEAN_SDPCM_BYTES || size > ((sdpcm + 3u) & ~3u) ||
-        packet[5] != 2u || packet[7] != 14u || packet[14] != 0x20u) {
-        l->actual = badger_bytes_load_u32(packet);
+    if (sdpcm == 0u) {
+        l->actual = assembled;
         return fail(l, CLEAN_INPUT);
     }
-    *length = sdpcm;
 #ifndef CLEAN_RX_STRICT_TEST
     if (l->rx_credit) {
         uint32_t consumed = l->rx_consumed + 1u;
@@ -212,6 +289,7 @@ int clean_receive(clean_loader_t *l, uint8_t packet[CLEAN_RX_PACKET_BYTES], uint
 #endif
     l->rx_retries = 0u;
     l->rx_checked = l->wire->now_us(l->wire->context);
+    *length = sdpcm;
     return 1;
 }
 

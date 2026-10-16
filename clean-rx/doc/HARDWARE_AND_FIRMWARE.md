@@ -21,7 +21,7 @@ RECEIVE PATH:
   -> Radio 20691 (RF synthesizer, LNA, mixer, TIA, LPF, ADC)
   -> LCN20 PHY (AGC, DC offset cancellation, Farrow resampler, CCK + OFDM demodulator)
   -> D11 Receive Engine (RXE)
-       |-- Copies PLCP + MPDU bytes into D11 Shared Memory (SHM 0x200..0x523)
+       |-- Copies PLCP + MPDU bytes into D11 Shared Memory (SHM 0x100..0x5b3)
        +-- Publishes 24-byte receive header (SHM 0x7f4..0x7ff) to D11 RX FIFO
   -> D11 PSM Microcode (Arch15 64-bit engine)
        |-- Waits for PLCP valid (ext 14), RX complete (ext 6), and Good FCS (ext 3)
@@ -30,11 +30,11 @@ RECEIVE PATH:
   -> ARM Cortex-M3 Firmware
        |-- Inspects RA against station MAC (SHM 0x612..0x614) and transmits 802.11 ACK if unicast
        |-- Reclaims D11 RX DMA descriptor (0x18001220..0x18001234)
-       |-- Reads MPDU from SHM (0x200..0x523) and records frame slot in SRAM (0x00020d80)
-       +-- Wraps MPDU in an 18-byte SDPCM + BDC header and posts to SDIOD Function 2 TX DMA (0x18002200)
+       |-- Reads MPDU from SHM (0x100..0x5b3) and records frame slot in SRAM (0x00020d80)
+       +-- Frames MPDU as one F2 packet or two explicit fragments and posts to SDIOD TX DMA (0x18002200)
 
 TRANSMIT PATH:
-Host TX Staging Buffer (0x00044400) or Unicast Auto-ACK Generator
+Host TX Staging Buffer (0x0004a400) or Unicast Auto-ACK Generator
   -> ARM Cortex-M3 Firmware (d11_transmit_template_frame / d11_transmit_ack_frame)
        |-- Pauses MAC/PSM, configures LCN20 PHY TX Farrow resampler & TX IIR filters
        |-- Enables Radio 20691 2.4 GHz PA and releases LCN20 PHY TX overrides (phy_tx_set_inhibit(0))
@@ -59,12 +59,12 @@ The CYW43439 provides 512 KiB of contiguous SRAM mapped at `0x00000000..0x0007ff
 | `0x00014000..0x0001bfff` | ~2 KiB | Zero-initialized firmware state (`.bss`) |
 | `0x0001f000` | — | Initial Main Stack Pointer (`MSP`, growing downward) |
 | `0x00020000..0x000201df` | 480 B | Host/Firmware Control Mailbox (`fw_mbox_t`), including credits and RX fault latch |
-| `0x00020d80..0x000241a7` | 13,352 B | Multi-Frame Capture Ring (`fw_multi_t`, 8 frame slots x 1,664 B) |
+| `0x00020d80..0x00025aa7` | 19,752 B | Multi-Frame Capture Ring (`fw_multi_t`, 8 frame slots x 2,464 B) |
 | `0x00026000..0x000261ff` | 512 B | D11 RX DMA Descriptor Ring (32 descriptors x 16 B, 8-KiB aligned) |
-| `0x00026200..0x0003387f` | 54,912 B | D11 RX DMA Packet Buffers (32 buffers x 1,716 B) |
-| `0x00034000..0x000341ff` | 512 B | SDIOD Function 2 TX DMA Descriptor Ring (32 descriptors x 16 B, 8-KiB aligned) |
-| `0x00034200..0x000441ff` | 65,536 B | SDIOD Function 2 TX DMA Packet Buffers (32 buffers x 2,048 B) |
-| `0x00044400..0x00044a47` | 1,608 B | 802.11 Transmit Frame & Crypto Key Staging Buffer (`FW_TX_BUF_ADDR`, 64-byte aligned) |
+| `0x00026200..0x000395ff` | 78,848 B | D11 RX DMA Packet Buffers (32 buffers x 2,464 B) |
+| `0x0003a000..0x0003a1ff` | 512 B | SDIOD Function 2 TX DMA Descriptor Ring (32 descriptors x 16 B, 8-KiB aligned) |
+| `0x0003a200..0x0004a1ff` | 65,536 B | SDIOD Function 2 TX DMA Packet Buffers (32 buffers x 2,048 B) |
+| `0x0004a400..0x0004ad67` | 2,408 B | 802.11 Transmit Frame & Crypto Key Staging Buffer (`FW_TX_BUF_ADDR`, 64-byte aligned) |
 | `0x1e09020c..0x1e090a07` | 2,044 B | On-chip ROM calibration dataset (TIA, gain tables, and common PHY tables) |
 
 ---
@@ -154,7 +154,7 @@ Even after the Radio and PHY are calibrated, the D11 core requires four hardware
 2. **PSM External Condition Masks (`BRED0` `0x180014a0 = 0xf3f1`, `BRPO0` `0x180014b0 = 0xfdef`):**
    - Configures edge-detection (`BRED0..3`) and polarity (`BRPO0..3`) for the D11 PSM external branch conditions (`ext 3` Good FCS, `ext 5` Bad PLCP, `ext 6` RX complete, `ext 11` RX FIFO busy, `ext 13` FIFO full, `ext 14` PLCP valid).
 3. **RXE Scratch & Header Framing (`0x18001402..0x180014fe`):**
-   - Sets RXE SHM scratch base `0x18001402 = 0x0200` (`spr:0x001`), scratch byte capacity `0x18001404 = 0x0648` (`1,608` bytes, `spr:0x002`), RXE control `0x18001448 = 0x0c02` (`spr:0x024`), and RXE framing `0x18001450 = 0x4e01`, `0x18001452 = 0x015b`, `0x180014e4 = 0x0090`.
+   - Sets RXE SHM scratch base `0x18001402 = 0x0100` (`spr:0x001`), scratch byte capacity `0x18001404 = 0x0968` (`2,408` bytes, `spr:0x002`), RXE control `0x18001448 = 0x0c02` (`spr:0x024`), and RXE framing `0x18001450 = 0x4e01`, `0x18001452 = 0x015b`, `0x180014e4 = 0x0090`.
 4. **Radio 20691 LPF Bandwidth Scaling (`Radio 0xa3, 0x71..0x77`):**
    - Scales the Radio 20691 baseband filter registers `0x72..0x76` by the RC-calibrated `rc_lpf` multiplier (`(coeff * rc_lpf) >> 15`).
 
@@ -169,12 +169,17 @@ rejection evidence and five enable correctly timed RX-buffer streaming.
 Native identity tests restore the intended
 patches in the original 295-instruction prefix and verify its original CRC.
 
-**All 65 MPDU lengths 1,536..1,600 bytes are qualified bidirectionally at 11 Mbps
-CCK**, including 1,500-byte payloads in 1,536-byte Data + LLC/SNAP MPDUs.
+**All 65 MPDU lengths 2,268..2,332 bytes are qualified bidirectionally at 11 Mbps
+CCK**, including a full 2,304-byte MSDU in a basic 2,332-byte Data MPDU.
+A five-minute run delivered 462 / 461 peer events, with every length received
+on each badge and zero device errors or stalls. Earlier 1,536..1,600-byte
+Ethernet-MTU qualification is recorded separately.
 The former count-506 overflow was a missing RX-buffer streaming operation,
 not the advertised RX-FIFO size or SHM/SRAM capacity. Hardware EROM identifies
 D11 core revision 39; rev-40+ BMC register assumptions do not apply. See the
 [cause, causal control and qualification evidence](../../docs/micro-signal.md#ethernet-mtu-frames-rx-streaming-repair).
+The [full-MSDU transport and qualification](../../docs/micro-signal.md#full-2304-byte-msdus)
+distinguish the qualified frame types from the 2,400-byte raw buffer capacity.
 The CCMP paths below describe existing experimental hooks, not qualified
 encrypted reception or WPA2 support.
 
@@ -182,7 +187,7 @@ encrypted reception or WPA2 support.
 1. **Initialization & RXE Flush (`entry` -> `mac_start`):**
    - Zeroes SHM mailbox (`0x600..0x60f`), diagnostics (`0x7a0..0x7af`), and `d11rxhdr` (`0x7f4..0x7ff`).
    - Verifies the 32-bit session generation token in `shm:0x60c..0x60d`.
-   - Sets `spr:0x001 = 0x200` (SHM base) and loads `spr:0x002` from ARM-written `shm:0x616` (1,608-byte capture capacity). Length checks use `shm:0x617` (1,606-byte RXE ceiling), avoiding signed 11-bit PSM immediate overflow.
+   - Sets `spr:0x001 = 0x100` (SHM base) and loads `spr:0x002` from ARM-written `shm:0x616` (2,408-byte capture capacity). Length checks use `shm:0x617` (2,406-byte RXE ceiling), avoiding signed 11-bit PSM immediate overflow.
    - Requests PHY/MAC core access (`spr:0x078` bit 5 = `1`, waits for bit 13 = `1`).
    - Flushes RXE (`spr:0x02a = 0`, `spr:0x024 = 0x0c02`, `spr:0x004 = 0x14`, waits for `spr:0x004` bits 2 and 4 to clear), drains stale external conditions (`ext 3, 5, 6, 11, 13, 14`), writes `shm:0x601 = 13` (`PSM_STATE_READY`), and waits for `MACCONTROL` `EN_MAC` (`ext 36`).
    - Initial flush uses a bounded 65,535-iteration countdown. The former 255-poll
@@ -191,7 +196,7 @@ encrypted reception or WPA2 support.
      counter load; completion/fault branches and the ARM deadline remain intact.
 2. **PLCP Detection & Prefix Copy (`event_start` -> `prefix_seen`):**
    - Polls `ext 14` (PLCP valid). When asserted, issues a 6-byte initial copy (`spr:0x02a = 6`, `spr:0x004 = 0x40`) and waits for `spr:0x00d` bit 12 and `spr:0x00c >= 6`.
-   - The 6-byte PLCP header is written by RXE into `shm:0x201..0x203` (`shm:0x200` holds a duplicate of `shm:0x201`).
+   - The 6-byte PLCP header is written by RXE into `shm:0x101..0x103` (`shm:0x100` holds a duplicate of `shm:0x101`).
 3. **Variable-Length MPDU Streaming, Hardware AES-128-CCMP Decryption, & FCS Verification (`prefix_seen` -> `frame_wait`):**
    - Retains the original SHM continuation handshake: reads `r2 = spr:0x02b & 0x0fff`, writes `spr:0x02a = r2`, and triggers `spr:0x004` continuation (`field 8, 6, 131, spr:0x004`). This continuation value is not treated as a validated full MPDU length.
    - If `shm:0x615 != 0` (Hardware CCMP enabled) and the received Frame Control word (`shm:0x204`) has the Protected bit (`0x4000`) set:
@@ -205,7 +210,7 @@ encrypted reception or WPA2 support.
    - Populates the 12-word (24-byte) hardware receive header at `shm:0x7f4..0x7ff`:
      - `shm:0x7f4`: `RxFrameSize` (`spr:0x00c`, PLCP + MPDU length in bytes)
      - `shm:0x7f6..0x7f9`: `PhyRxStatus_0..3` (`spr:0x009, 0x00a, 0x01a, 0x01b`)
-     - `shm:0x7fa..0x7fc`: 6-byte PLCP header (`shm:0x201..0x203`)
+     - `shm:0x7fa..0x7fc`: 6-byte PLCP header (`shm:0x101..0x103`)
      - `shm:0x7fe`: `0xda15` marker; `shm:0x7ff`: active 2.4 GHz channel (`shm:0x609`)
    - Publishes the header to the D11 RX FIFO (`spr:0x078` bit 7 = `1`, `spr:0x007 = 0x7f4`, `spr:0x008 = 12`, `spr:0x004` low bits = `1`), waits for `ext 11` (FIFO busy) to assert and clear, resets `spr:0x004` low bits = `0`, sets `shm:0x601 = 14` (`PSM_STATE_CAPTURED`), and waits for the Cortex-M3 to acknowledge by clearing `shm:0x601 = 0` before flushing and rearming for the next frame.
 
@@ -214,22 +219,23 @@ encrypted reception or WPA2 support.
 ## 8. D11 RX DMA and SDIOD Function 2 SDPCM Streaming (`main.c`)
 
 ### 8.1 D11 RX DMA Ring (`0x18001220..0x18001234`)
-After PSM reaches `PSM_STATE_READY` (ensuring the initial RXE flush is complete), `rx_dma_init()` configures the 32-descriptor ring at `0x00026000` with 1,716-byte buffers at `0x00026200` and enables `D11_RX_DMA_CTL = 0x0004084d` (parity check disabled `0x800`, 38-byte receive offset `38 << 1`, enable `1`). On each frame, `rx_dma_poll_and_reclaim()` reads the DMA-delivered 24-byte `d11rxhdr` from the buffer, clears the buffer, and advances `D11_RX_DMA_PTR`.
+After PSM reaches `PSM_STATE_READY` (ensuring the initial RXE flush is complete), `rx_dma_init()` configures the 32-descriptor ring at `0x00026000` with 2,464-byte buffers at `0x00026200` and enables `D11_RX_DMA_CTL = 0x0004084d` (parity check disabled `0x800`, 38-byte receive offset `38 << 1`, enable `1`). On each frame, `rx_dma_poll_and_reclaim()` reads the DMA-delivered 24-byte `d11rxhdr` from the buffer, clears the buffer, and advances `D11_RX_DMA_PTR`.
 
 ### 8.2 SDIOD Function 2 TX DMA Ring (`0x18002200..0x18002214`)
 `sdio_f2_init()` configures the 32-descriptor SDIOD Function 2 TX DMA ring at
-`0x00034000` with 2,048-byte packet buffers at `0x00034200` and enables
+`0x0003a000` with 2,048-byte packet buffers at `0x0003a200` and enables
 `SDIOD_TX_DMA_CTL = 0x00060801` (32-byte bursts).
 
-Production publication allows one unconsumed packet. Full-width consumed and
+Production publication allows one unconsumed logical frame. Full-width consumed and
 published counters are at mailbox byte offsets 448 and 452. The host grants a
-credit only after reading and validating the complete packet; neither DMA
+credit only after reading and validating the complete frame; neither DMA
 descriptor completion nor a guessed FIFO state is consumption. The receive
-buffer is 1,620 bytes for four-byte-rounded transfers of SDPCM packets up to
-1,618 bytes. Historical negative-control profiles deliberately retain their
+buffer is 2,420 bytes for a reconstructed SDPCM packet up to 2,418 bytes.
+Physical F2 packets never exceed 2,044 bytes. Historical negative-control profiles deliberately retain their
 unsafe burst/window choices.
 
-For every captured frame, `sdio_f2_send_frame()` constructs an 18-byte **SDPCM + BDC header** followed by the received 802.11 MPDU:
+For frames up to 2,026 MPDU bytes, `sdio_f2_send_frame()` constructs an 18-byte
+**SDPCM + BDC header** followed by the received 802.11 MPDU:
 
 | Byte Offset | Field | Value / Description |
 |---|---|---|
@@ -249,6 +255,23 @@ For every captured frame, `sdio_f2_send_frame()` constructs an 18-byte **SDPCM +
 | `18..` | `mpdu` | Complete IEEE 802.11 MPDU (including 4-byte FCS) |
 
 Posting the descriptor (`ctrl1 = 0xc0000000` for `SOF | EOF`) and advancing `SDIOD_TX_DMA_PTR` (`0x18002204`) causes the SDIOD hardware to assert `packet available` (bit 8) and report the packet length in bits `9..19` of the gSPI Function 0 status register (`0x0008`), allowing the host microcontroller to clock the packet out directly over gSPI Function 2.
+
+Larger MPDUs use two independently framed physical F2 packets. Each has the
+same header metadata and logical sequence, except that `bdc_flags = 0x21`
+marks this project's fragment extension. Bytes 18..19 hold the complete MPDU
+length, bytes 20..21 the MPDU byte offset, both little-endian; payload begins
+at byte 22. The first fragment contains exactly 1,536 MPDU bytes and the
+second contains the remainder. Physical length/complement fields describe
+each fragment, not the reconstructed frame.
+
+Both descriptors are checked for space and populated before one producer-pointer
+update publishes the pair. Posted/consumed counters count logical frames, not
+fragments. The host checks both headers, metadata identity, exact offsets and
+payload lengths, with a 100-ms continuation deadline. It reconstructs the
+original 18-byte wrapper and releases one credit only after complete validation.
+Cancellation, bus errors, missing/reordered fragments and malformed lengths
+fail without acknowledging a partial frame. These are host-transport fragments,
+not over-air 802.11 fragmentation.
 
 ---
 
@@ -274,11 +297,11 @@ Before entering active reception, `phy_tx_hw_configure()` configures the analog 
 
 ### 9.3 D11 Template RAM, Hardware AES-128-CCMP Encryption, and Transmit Engine (`TXE`) Operation (`d11_transmit_template_frame`)
 To install a 128-bit AES-CCMP Temporal Key (`TK`) into the D11 Hardware Crypto Engine (`cmd = 6 | (enable << 8)` in `MBOX->host_cmd`):
-1. The host writes the 16-byte `TK` into `FW_TX_BUF_ADDR` (`0x00044400`) and issues `host_cmd = 6 | (1 << 8)`.
+1. The host writes the 16-byte `TK` into `FW_TX_BUF_ADDR` (`0x0004a400`) and issues `host_cmd = 6 | (1 << 8)`.
 2. The firmware copies the 8 16-bit key words into `SHM 0x618..0x61f` and sets `SHM 0x615 = 1`.
 
 To transmit a raw or hardware-encrypted 802.11 frame (`cmd = 5 | clean_tx_length_bits(total_len) | (is_ofdm << 18) | (tx_cnt << 19)` in `MBOX->host_cmd`; helper in `tx_diag.h`):
-1. The host writes the 6-byte PLCP header followed by the IEEE 802.11 MPDU (including 8-byte CCMP IV and 8-byte zero MIC placeholder if `FC & 0x4000`, plus 4-byte FCS) into `FW_TX_BUF_ADDR` (`0x00044400`). The staging limit is 1,606 bytes, physically padded to 1,608; this is not proof of successful large-frame OTA TX.
+1. The host writes the 6-byte PLCP header followed by the IEEE 802.11 MPDU (including 8-byte CCMP IV and 8-byte zero MIC placeholder if `FC & 0x4000`, plus 4-byte FCS) into `FW_TX_BUF_ADDR` (`0x0004a400`). The staging limit is 2,406 bytes, physically padded to 2,408; buffer capacity alone is not proof of OTA qualification for each frame type.
 2. The firmware pauses MAC and PSM (`0x18001120 = 0x84020400`), calls `phy_tx_hw_configure(channel)` and `phy_tx_set_inhibit(0)`, writes `D11_TPL_WR_PTR = 0` (`0x18001130`), and streams the frame in 32-bit little-endian words to `D11_TPL_WR_DATA` (`0x18001134`).
 3. The firmware enables `MACCONTROL` with PSM paused (`mac_en & ~2`) and configures the D11 TXE and Hardware Crypto registers:
    - `0x18001570 = 0x0000`, `0x18001572 = total_len << 4`, `0x18001568 = 0x0000`
@@ -298,7 +321,7 @@ At startup, the firmware stores the local 6-byte unicast MAC address in `SHM 0x6
 - Default / AP role (`CFG_STA_ROLE == 0`): `02:9b:bf:88:dd:7d` (`0x9b02, 0x88bf, 0x7ddd`)
 - Station role (`CFG_STA_ROLE != 0`): `02:08:da:57:f5:ea` (`0x0802, 0x57da, 0xeaf5`)
 
-Whenever `PSM_STATE_CAPTURED` (`14`) is reached on a valid Management (`frame_type == 0`) or Data (`frame_type == 2`) frame whose Receiver Address (`RA`, `SHM 0x6a6..0x6a8`) matches `SHM 0x612..0x614`, the firmware extracts the Transmitter Address (`TA`, `SHM 0x6a9..0x6ab`) and calls `d11_transmit_ack_frame(ta, channel, mac_en & ~2)`:
+Whenever `PSM_STATE_CAPTURED` (`14`) is reached on a valid Management (`frame_type == 0`) or Data (`frame_type == 2`) frame whose Receiver Address (`RA`, `SHM 0x106..0x108`) matches `SHM 0x612..0x614`, the firmware extracts the Transmitter Address (`TA`, `SHM 0x109..0x10b`) and calls `d11_transmit_ack_frame(ta, channel, mac_en & ~2)`:
 - Constructs a 20-byte 11 Mbps CCK `ACK` template (`6e 84 0b 00 d0 9b` PLCP + `d4 00 00 00` Frame Control / Duration + 6-byte `RA = ta` + 4-byte IEEE 802.11 CRC-32 FCS).
 - Loads the 5 words into D11 Template RAM (`0x18001130 / 0x18001134`), fires D11 TXE, increments the ACK counter in `SHM 0x7af`, and immediately rearms the receiver.
 

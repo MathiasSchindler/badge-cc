@@ -271,16 +271,20 @@ static void receive_evidence(const uint8_t packet[CLEAN_RX_PACKET_BYTES]) {
             if (clean_read(&loader, CLEAN_SDIO_RING_ADDR + index * 16u + 4u, &dma_length) &&
                 clean_read(&loader, CLEAN_SDIO_RING_ADDR + index * 16u + 8u, &buffer)) {
                 dma_length &= 0x7fffu;
-                if (dma_length < 18u || dma_length > CLEAN_RX_PACKET_BYTES ||
+                if (dma_length < 18u || dma_length > CLEAN_F2_PACKET_BYTES ||
                     buffer != CLEAN_SDIO_BUFFER_ADDR + index * CLEAN_SDIO_BUFFER_BYTES) {
                     loader.error = CLEAN_INPUT;
                 } else {
-                    uint8_t stored[CLEAN_RX_PACKET_BYTES];
+                    uint8_t stored[CLEAN_F2_PACKET_BYTES];
                     if (clean_block(&loader, buffer, stored, dma_length, 0u)) {
                         badger_bytes_store_u32(test_control.trace + 96u, buffer);
                         badger_bytes_store_u32(test_control.trace + 100u, dma_length);
                         badger_bytes_store_u32(test_control.trace + 104u, diag_crc32(stored, dma_length));
                         badger_bytes_store_u32(test_control.trace + 108u, diag_crc32(packet, dma_length));
+                        badger_bytes_store_u32(test_control.trace + CLEAN_TRANSPORT_COMPARE_OFFSET,
+                                               stored[14] == 0x20u &&
+                                               badger_bytes_load_u32(stored) ==
+                                               badger_bytes_load_u32(packet));
                         badger_bytes_copy(test_control.trace + 112u, stored + dma_length - 16u, 16u);
                     }
                 }
@@ -518,11 +522,11 @@ void bare_main(void) {
         loader.actual = erom;
         radio_error();
     }
-    badger_bytes_store_u32(test_control.trace + 2940u, erom);
+    badger_bytes_store_u32(test_control.trace + CLEAN_MTU_EROM_OFFSET, erom);
     for (uint32_t i = 0u; i < 64u; ++i) {
         uint32_t value;
         if (!clean_read(&loader, erom + 4u * i, &value)) radio_error();
-        badger_bytes_store_u32(test_control.trace + 2944u + i * 4u, value);
+        badger_bytes_store_u32(test_control.trace + CLEAN_MTU_EROM_OFFSET + 4u + i * 4u, value);
     }
 #endif
 #ifdef MICRO_SIGNAL_TRANSPORT_TEST
@@ -619,7 +623,8 @@ void bare_main(void) {
 #ifdef MICRO_SIGNAL_SELF_TEST
             evidence[7] = received;
 #ifdef MICRO_SIGNAL_MTU_TEST
-            uint8_t *coverage = test_control.trace + 800u + (size - 18u - 1536u) * 2u;
+            uint8_t *coverage = test_control.trace + 800u +
+                                (size - 18u - CLEAN_MTU_MIN_BYTES) * 2u;
             uint32_t seen = coverage[0] | ((uint32_t)coverage[1] << 8u);
             if (seen < 65535u) ++seen;
             coverage[0] = (uint8_t)seen;
@@ -707,7 +712,8 @@ void bare_main(void) {
                 !clean_block(&loader, CLEAN_MBOX + 60u, test_control.trace + 160u, 12u, 0u))
                 radio_error();
 #ifdef MICRO_SIGNAL_MTU_TEST
-            if (!clean_block(&loader, CLEAN_MBOX + 264u, test_control.trace + 2700u, 180u, 0u))
+            if (!clean_block(&loader, CLEAN_MBOX + 264u,
+                             test_control.trace + CLEAN_MTU_TX_DIAG_OFFSET, 180u, 0u))
                 radio_error();
             static const uint32_t rxe_registers[] = {
                 0x18001400u,0x18001404u,0x1800140cu,0x18001450u,0x18001454u,
@@ -728,7 +734,7 @@ void bare_main(void) {
             for (uint32_t i = 0u; i < 8u; ++i) {
                 uint32_t value;
                 if (!clean_read(&loader, fifo_registers[i], &value)) radio_error();
-                badger_bytes_store_u32(test_control.trace + 2900u + i * 4u, value);
+                badger_bytes_store_u32(test_control.trace + CLEAN_MTU_FIFO_OFFSET + i * 4u, value);
             }
 #endif
 #endif

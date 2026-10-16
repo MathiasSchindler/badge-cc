@@ -31,7 +31,9 @@ static inline uint32_t clean_sdio_test_pattern_length(uint32_t sequence, uint32_
         static const uint16_t boundaries[] = {
             8u,14u,15u,16u,31u,32u,33u,465u,502u,504u,505u,511u,512u,513u,
             1005u,1006u,1007u,1008u,1023u,1024u,1025u,1499u,1500u,1501u,
-            1535u,1536u,1537u,1597u,1598u,1599u,1600u
+            1535u,1536u,1537u,1597u,1598u,1599u,1600u,
+            2025u,2026u,2027u,2028u,2047u,2048u,2049u,
+            2303u,2304u,2305u,2331u,2332u,2333u,2397u,2398u,2399u,2400u
         };
         return (sequence & 1u) ? boundaries[(sequence >> 1u) %
                 (sizeof(boundaries) / sizeof(boundaries[0]))] :

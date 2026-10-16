@@ -12,6 +12,11 @@ static uint32_t f2_status;
 static uint32_t f2_after_status;
 static uint32_t fifo_status, terminations;
 static uint8_t f2_packet[CLEAN_RX_PACKET_BYTES];
+static uint8_t f2_next[CLEAN_F2_PACKET_BYTES];
+static uint32_t f2_next_size, f2_reads;
+static int f2_second_error, f2_cancel_next;
+static int f2_check_credit;
+static uint32_t f2_expected_credit;
 static uint8_t ram[0x80000u];
 
 static uint32_t now(void *context) {
@@ -54,11 +59,20 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
         return WIFI_BUS_OK;
     }
     if (function == 2u) {
+        if (f2_check_credit)
+            assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) ==
+                   f2_expected_credit);
+        if (f2_reads++ == 1u && f2_second_error) return WIFI_BUS_TRANSFER_TIMEOUT;
         assert(tx_length == 4u && rx_length == ((count + 3u) & ~3u));
         assert(cmd == (0x60000000u | count));
         assert(rx_length <= sizeof(f2_packet));
         memcpy(rx, f2_packet, rx_length);
-        if (f2_post_status) f2_status = f2_after_status;
+        if (f2_next_size != 0u) {
+            memcpy(f2_packet, f2_next, sizeof(f2_next));
+            f2_status = 0x100u | (f2_next_size << 9u);
+            f2_next_size = 0u;
+        } else if (f2_post_status) f2_status = f2_after_status;
+        if (f2_cancel_next) cancel = 1;
         return WIFI_BUS_OK;
     }
     if (function == 1u && addr == 0x1000du) {
@@ -104,9 +118,114 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
     return WIFI_BUS_OK;
 }
 
+static uint32_t fragment(uint8_t *packet, uint32_t mpdu, uint32_t offset) {
+    uint32_t count = mpdu - offset;
+    if (count > CLEAN_F2_FRAGMENT_BYTES) count = CLEAN_F2_FRAGMENT_BYTES;
+    uint32_t length = CLEAN_F2_FRAGMENT_HEADER + count;
+    memset(packet, 0, (length + 3u) & ~3u);
+    badger_bytes_store_u32(packet, length | ((length ^ 0xffffu) << 16u));
+    packet[4] = (uint8_t)mpdu;
+    packet[5] = 2u;
+    packet[7] = 14u;
+    packet[14] = 0x21u;
+    packet[18] = (uint8_t)mpdu;
+    packet[19] = (uint8_t)(mpdu >> 8u);
+    packet[20] = (uint8_t)offset;
+    packet[21] = (uint8_t)(offset >> 8u);
+    for (uint32_t i = 0u; i < count; ++i)
+        packet[CLEAN_F2_FRAGMENT_HEADER + i] = (uint8_t)((offset + i) * 37u);
+    return length;
+}
+
+static void fragments(const wifi_wire_t *wire) {
+    clean_loader_t l;
+    uint8_t packet[CLEAN_RX_PACKET_BYTES];
+    uint32_t length;
+    f2_post_status = 1;
+    f2_after_status = 0u;
+    f2_check_credit = 1;
+    f2_expected_credit = 1234u;
+    for (uint32_t mpdu = CLEAN_F2_PACKET_BYTES - 17u; mpdu <= CLEAN_MPDU_BYTES; ++mpdu) {
+        for (uint32_t rounded = 0u; rounded < 2u; ++rounded) {
+            clean_loader_init(&l, wire, service, NULL);
+            l.rx_credit = 1u;
+            l.rx_consumed = (mpdu & 1u) ? UINT32_MAX : 0u;
+            badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, 1234u);
+            uint32_t first = fragment(f2_packet, mpdu, 0u);
+            f2_next_size = fragment(f2_next, mpdu, CLEAN_F2_FRAGMENT_BYTES);
+            if (rounded) {
+                first = (first + 3u) & ~3u;
+                f2_next_size = (f2_next_size + 3u) & ~3u;
+            }
+            f2_status = 0x100u | (first << 9u);
+            f2_reads = 0u;
+            assert(clean_receive(&l, packet, &length) && length == mpdu + 18u);
+            assert(f2_reads == 2u && packet[14] == 0x20u);
+            assert(badger_bytes_load_u32(packet) ==
+                   (length | ((length ^ 0xffffu) << 16u)));
+            for (uint32_t i = 0u; i < mpdu; ++i)
+                assert(packet[18u + i] == (uint8_t)(i * 37u));
+#ifdef CLEAN_RX_STRICT_TEST
+            assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 1234u);
+#else
+            uint32_t consumed = (mpdu & 1u) ? 0u : 1u;
+            assert(l.rx_consumed == consumed);
+            assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == consumed);
+#endif
+        }
+    }
+    for (uint32_t fault = 0u; fault < 17u; ++fault) {
+        f2_expected_credit = 0u;
+        f2_after_status = 0u;
+        clean_loader_init(&l, wire, service, NULL);
+        l.rx_credit = 1u;
+        badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, 0u);
+        uint32_t first = fragment(f2_packet, CLEAN_MPDU_BYTES, 0u);
+        f2_next_size = fragment(f2_next, CLEAN_MPDU_BYTES, CLEAN_F2_FRAGMENT_BYTES);
+        f2_status = 0x100u | (first << 9u);
+        f2_reads = 0u;
+        if (fault == 0u) f2_packet[2] ^= 1u;
+        if (fault == 1u) f2_packet[20] = 1u;
+        if (fault == 2u) f2_next[20] ^= 1u;
+        if (fault == 3u) f2_next[4] ^= 1u;
+        if (fault == 4u) f2_next[18] ^= 1u;
+        if (fault == 5u) f2_next[14] = 0x20u;
+        if (fault == 6u) f2_second_error = 1;
+        if (fault == 7u) f2_next_size = 0u;
+        if (fault == 8u) f2_cancel_next = 1;
+        if (fault == 9u) { f2_packet[18] = 0xffu; f2_packet[19] = 0xffu; }
+        if (fault == 10u) f2_next[2] ^= 1u;
+        if (fault == 11u) f2_next[15] ^= 1u;
+        if (fault == 12u) {
+            uint32_t truncated = CLEAN_F2_FRAGMENT_HEADER - 1u;
+            badger_bytes_store_u32(f2_packet,
+                                   truncated | ((truncated ^ 0xffffu) << 16u));
+        }
+        if (fault == 13u || fault == 15u) f2_after_status = 2u;
+        if (fault == 14u) f2_after_status = 0xffffffffu;
+        if (fault == 15u) l.rx_credit = 0u;
+        if (fault == 16u)
+            f2_next_size = fragment(f2_next, CLEAN_MPDU_BYTES, 0u);
+        assert(!clean_receive(&l, packet, &length) && length == 0u);
+        assert(l.error == (fault == 6u || fault == 14u ? CLEAN_BUS :
+                           fault == 7u ? CLEAN_TIMEOUT :
+                           fault == 8u ? CLEAN_CANCELLED : CLEAN_INPUT));
+        assert(l.rx_consumed == 0u && l.rx_resyncs == 0u);
+        assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 0u);
+        cancel = f2_second_error = f2_cancel_next = 0;
+        f2_next_size = 0u;
+    }
+    f2_post_status = 0;
+    f2_after_status = 0u;
+    f2_check_credit = 0;
+    f2_status = 0u;
+}
+
 int main(void) {
     wifi_wire_t wire = {.now_us = now, .transfer = mock_transfer,
         .write = write_signal, .data_output = output, .read_data = read_signal};
+    fragments(&wire);
+    calls = blocks = 0u;
     clean_loader_t l;
     uint8_t bytes[128], readback[128];
     for (unsigned i = 0u; i < sizeof(bytes); ++i) bytes[i] = (uint8_t)i;
@@ -165,7 +284,7 @@ int main(void) {
     static const uint32_t sizes[] = {
         18u,26u,63u,100u,106u,108u,137u,522u,523u,524u,525u,
         1023u,1024u,1025u,0x551u,1500u,1535u,1536u,1537u,
-        CLEAN_SDPCM_BYTES - 1u,CLEAN_SDPCM_BYTES
+        CLEAN_F2_PACKET_BYTES - 1u,CLEAN_F2_PACKET_BYTES
     };
     for (uint32_t i = 0u; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
         uint32_t size = sizes[i];
@@ -176,7 +295,7 @@ int main(void) {
     }
     f2_packet[2] ^= 1u;
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
-    for (uint32_t size = 18u; size <= CLEAN_SDPCM_BYTES; ++size) {
+    for (uint32_t size = 18u; size <= CLEAN_F2_PACKET_BYTES; ++size) {
         for (uint32_t rounded = 0u; rounded < 2u; ++rounded) {
             clean_loader_init(&l, &wire, service, NULL);
             uint32_t advertised = rounded ? (size + 3u) & ~3u : size;
@@ -301,9 +420,9 @@ int main(void) {
     }
     f2_post_status = 0;
     clean_loader_init(&l, &wire, service, NULL);
-    f2_status = 0x100u | ((CLEAN_RX_PACKET_BYTES + 1u) << 9u);
+    f2_status = 0x100u | ((CLEAN_F2_PACKET_BYTES + 1u) << 9u);
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
-    assert(l.rx_status == f2_status && l.actual == CLEAN_RX_PACKET_BYTES + 1u);
+    assert(l.rx_status == f2_status && l.actual == CLEAN_F2_PACKET_BYTES + 1u);
     assert(l.rx_resyncs == 0u && terminations == 0u);
     clean_loader_init(&l, &wire, service, NULL);
     f2_status = 0u;
@@ -317,13 +436,13 @@ int main(void) {
     return 0;
 #endif
     clean_loader_init(&l, &wire, service, NULL);
-    f2_status = 0x100u | ((CLEAN_RX_PACKET_BYTES + 1u) << 9u);
+    f2_status = 0x100u | ((CLEAN_F2_PACKET_BYTES + 1u) << 9u);
     for (uint32_t retry = 1u; retry <= 3u; ++retry) {
         assert(clean_receive(&l, packet, &packet_length) && packet_length == 0u);
         assert(l.rx_resyncs == retry && terminations == retry && l.error == CLEAN_OK);
     }
     assert(!clean_receive(&l, packet, &packet_length) && l.error == CLEAN_INPUT);
-    assert(l.actual == CLEAN_RX_PACKET_BYTES + 1u && terminations == 3u);
+    assert(l.actual == CLEAN_F2_PACKET_BYTES + 1u && terminations == 3u);
     clean_loader_init(&l, &wire, service, NULL);
     f2_status = 0x100u;
     assert(clean_receive(&l, packet, &packet_length) && l.rx_resyncs == 1u);
@@ -607,6 +726,6 @@ int main(void) {
     assert(badger_bytes_load_u32(evidence + 2024u) == 3u);
     assert(badger_bytes_load_u32(evidence + 2032u) == 1u);
     assert(!clean_tx_confirmed(evidence));
-    puts("clean-rx loader: boundary splitting, readback, invalid inputs, cancellation, deadlines and states pass");
+    puts("clean-rx loader: fragments, credits, faults, boundary splitting, readback, cancellation, deadlines and states pass");
     return 0;
 }

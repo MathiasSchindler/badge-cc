@@ -127,6 +127,9 @@ int main(int argc, char **argv) {
                         (dma_control & 1u) == 0u || dma_control == 0xffffffffu ||
                         dma_control != badger_bytes_load_u32(peer + 36u)) ok = 0;
                     if (pattern > 2u || pattern != badger_bytes_load_u32(peer + 32u)) ok = 0;
+                    if (pattern == 2u &&
+                        badger_bytes_load_u32(own + 28u) < 2u * (CLEAN_MPDU_BYTES - 7u))
+                        ok = 0;
                     continue;
                 }
                 if (memcmp(own + 32u, peer + 12u, 8u) != 0 ||
@@ -193,10 +196,10 @@ finish:
     if (mtu) {
         for (unsigned i = 0u; i < 2u; ++i) {
             if (badger_bytes_load_u32(records[i]) != 0x5554534du) ok = 0;
-            for (unsigned length = 0u; length <= CLEAN_MPDU_BYTES - 1536u; ++length) {
+            for (unsigned length = 0u; length < CLEAN_MTU_LENGTHS; ++length) {
                 if (traces[i][800u + length * 2u] == 0u &&
                     traces[i][801u + length * 2u] == 0u) {
-                    fprintf(stderr, "Badge %u did not receive MPDU length %u\n", i, 1536u + length);
+                    fprintf(stderr, "Badge %u did not receive MPDU length %u\n", i, CLEAN_MTU_MIN_BYTES + length);
                     ok = 0;
                 }
             }
@@ -229,6 +232,9 @@ finish:
                    badger_bytes_load_u32(records[i] + 36u));
             printf(",\"transport_pattern_%u\":%u", i,
                    badger_bytes_load_u32(records[i] + 32u));
+            printf(",\"transport_last_buffer_comparable_%u\":%s", i,
+                   badger_bytes_load_u32(traces[i] + CLEAN_TRANSPORT_COMPARE_OFFSET) ?
+                   "true" : "false");
             static const char *const groups[] = {
                 "transport_core", "transport_last_buffer", "transport_slot3", "transport_ring_prefix"
             };
@@ -269,16 +275,16 @@ finish:
             printf(",\"mtu_tx_diag_%u\":[", i);
             for (uint32_t word = 0u; word < 45u; ++word)
                 printf("%s\"%08x\"", word ? "," : "",
-                       badger_bytes_load_u32(traces[i] + 2700u + word * 4u));
+                       badger_bytes_load_u32(traces[i] + CLEAN_MTU_TX_DIAG_OFFSET + word * 4u));
             putchar(']');
             printf(",\"mtu_fifo_%u\":[", i);
             for (uint32_t word = 0u; word < 8u; ++word)
                 printf("%s\"%08x\"", word ? "," : "",
-                       badger_bytes_load_u32(traces[i] + 2900u + word * 4u));
+                       badger_bytes_load_u32(traces[i] + CLEAN_MTU_FIFO_OFFSET + word * 4u));
             printf("],\"mtu_erom_%u\":[", i);
             for (uint32_t word = 0u; word < 65u; ++word)
                 printf("%s\"%08x\"", word ? "," : "",
-                       badger_bytes_load_u32(traces[i] + 2940u + word * 4u));
+                       badger_bytes_load_u32(traces[i] + CLEAN_MTU_EROM_OFFSET + word * 4u));
             putchar(']');
             printf(",\"mtu_rxe_%u\":[", i);
             for (uint32_t word = 0u; word < 7u; ++word)
@@ -291,7 +297,7 @@ finish:
                        ((unsigned)traces[i][985u + word * 2u] << 8u));
             putchar(']');
             printf(",\"mtu_coverage_%u\":[", i);
-            for (uint32_t length = 0u; length <= CLEAN_MPDU_BYTES - 1536u; ++length)
+            for (uint32_t length = 0u; length < CLEAN_MTU_LENGTHS; ++length)
                 printf("%s%u", length ? "," : "", traces[i][800u + length * 2u] |
                        ((unsigned)traces[i][801u + length * 2u] << 8u));
             printf("],\"mtu_capture_length_%u\":%u,\"mtu_capture_fcs_valid_%u\":%u",

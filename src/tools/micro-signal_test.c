@@ -26,10 +26,10 @@ static uint32_t independent_crc(const uint8_t *bytes, uint32_t length) {
 static void mtu_frames(void) {
     micro_signal_event_t input = sample(), output;
     uint8_t frame[CLEAN_TX_STORAGE_BYTES];
-    for (uint32_t sequence = 1u; sequence <= 65u; ++sequence) {
+    for (uint32_t sequence = 1u; sequence <= CLEAN_MTU_LENGTHS; ++sequence) {
         input.sequence = sequence;
         uint32_t length = micro_mtu_frame(frame, &input) - CLEAN_PLCP_BYTES;
-        assert(length == 1535u + sequence);
+        assert(length == CLEAN_MTU_MIN_BYTES - 1u + sequence);
         uint32_t duration = frame[2] | ((uint32_t)frame[3] << 8u);
         uint32_t decoded_length = (duration * 11u - ((frame[1] & 0x80u) ? 8u : 0u)) / 8u;
         assert(decoded_length == length);
@@ -241,6 +241,6 @@ int main(void) {
     sdio_ring();
     sdio_patterns();
     sdio_windows();
-    puts("micro-signal: small/MTU framing, TX length extension, duplicates, debounce, credits and 1593 transport lengths OK");
+    puts("micro-signal: small/full-MSDU framing, TX length extension, duplicates, debounce, credits and all transport lengths OK");
     return 0;
 }

@@ -4,9 +4,9 @@
 #include "micro-signal.h"
 #include "../../clean-rx/sdio_test.h"
 
-/* Broadcast Data + LLC/SNAP + 1500..1564 payload bytes + FCS. */
+/* Broadcast Data with 2240..2304-byte MSDUs, including LLC/SNAP, plus header/FCS. */
 static inline uint32_t micro_mtu_length(const micro_signal_event_t *event) {
-    return 1536u + (event->sequence - 1u) % (CLEAN_MPDU_BYTES - 1536u + 1u);
+    return CLEAN_MTU_MIN_BYTES + (event->sequence - 1u) % CLEAN_MTU_LENGTHS;
 }
 
 static inline uint32_t micro_mtu_frame(uint8_t frame[CLEAN_TX_STORAGE_BYTES],
@@ -30,7 +30,7 @@ static inline uint32_t micro_mtu_frame(uint8_t frame[CLEAN_TX_STORAGE_BYTES],
 
 static inline int micro_mtu_decode(const uint8_t *mpdu, uint32_t length,
                                    micro_signal_event_t *event) {
-    if (length < 1536u || !clean_frame_valid(mpdu, length)) return 0;
+    if (length < CLEAN_MTU_MIN_BYTES || !clean_frame_valid(mpdu, length)) return 0;
     micro_signal_event_t candidate;
     if (!micro_signal_decode(mpdu + 32u, 88u, &candidate) ||
         micro_mtu_length(&candidate) != length) return 0;

@@ -2,14 +2,22 @@
 
 This guide explains how an RP2350 host application loads, boots, and communicates with the open-source `cyw43_rx_fw.bin` transceiver firmware over the 4-pin gSPI bus.
 
-**Ethernet-MTU raw frames are now qualified at 11 Mbps CCK.** Both badges
-received every MPDU length 1,536..1,600 bytes in a five-minute OTA run, including
-1,500-byte payloads. The count-506 overflow was repaired by enabling RX-buffer
-streaming after a stable prefix, before PHY staging fills. See the
-[RX-streaming repair and qualification](../../docs/micro-signal.md#ethernet-mtu-frames-rx-streaming-repair).
-This does not add association, an Ethernet/IP stack or the full 2,304-byte MSDU range.
+**Full 2,304-byte MSDUs now fit the raw-frame path at 11 Mbps CCK.** A basic
+24-byte Data header plus that MSDU and four-byte FCS is a 2,332-byte MPDU.
+The qualification profile sweeps 2,268..2,332 MPDU bytes, with exact payload
+and FCS checks. Shared storage supports MPDUs through 2,400 bytes, but buffer
+capacity does not qualify every header, encryption mode or PHY rate.
+See [full-MSDU implementation and qualification](../../docs/micro-signal.md#full-2304-byte-msdus).
+This does not add association or an Ethernet/IP stack.
 Use the shared limits and TX length helpers rather than copying old sizes or
 shifting a large length directly into command flags.
+
+MPDUs through 2,026 bytes retain one original F2 packet. Larger ones use two
+independently framed F2 packets, each fitting the gSPI length field; the loader
+reassembles one complete SDPCM packet before releasing one logical-frame credit.
+The `0x21` fragment marker, total length and offset are project-specific and
+require a matching host and controller. This is not over-air fragmentation.
+See the [physical packet format](HARDWARE_AND_FIRMWARE.md#82-sdiod-function-2-tx-dma-ring-0x180022000x18002214).
 
 The repository now includes a working [freestanding badge host](../badge/README.md)
 with build commands and physical results from 2026-10-14 and 2026-10-15.
@@ -20,9 +28,10 @@ TX rates, automatic ACK timing and WPA2 connectivity remain unqualified.
 For a persistent, no-USB application using this loader and radio interface, see
 [Micro Signal](../../docs/micro-signal.md): the same small UF2 on both boards
 sends debounced button presses and displays received peer events.
-Its startup timeout repair passed 80 controlled cold radio boots, but repeated
-multi-minute tests still expose intermittent Function-2 framing failures.
-See its qualification results before relying on sustained operation.
+Its startup timeout repair passed 80 controlled cold radio boots. Later
+32-byte DMA bursts and explicit host credits repaired the reproduced sustained
+transport failures; see current qualification results before relying on
+indefinite operation.
 `CFG_TX_ENABLE` must be set for explicit TX or automatic
 ACKs; a command-5 request with TX disabled reports firmware error `0x81`.
 Incomplete TXE/IFS completion reports `0x82`; an invalid TX length reports
@@ -41,7 +50,8 @@ including when using a compatible reference image for comparison.
 During explicit TX, the controller uses the mailbox's 180-byte `rx_input`
 diagnostic area for `clean_tx_diag_t` (`TXD3`, defined in `../tx_diag.h`),
 instead of the final RX SHM snapshot. The host trace offset is 296; the mailbox
-layout and total 448-byte size are unchanged. RX-only and disabled-TX-rejection
+previous field offsets are unchanged; the current mailbox is 480 bytes.
+RX-only and disabled-TX-rejection
 trials retain the original snapshot. Diagnostic readbacks happen before the
 trigger, and timing records distinguish TX completion from MAC RX re-enable.
 PHYDEBUG is additionally sampled immediately after triggering TX. Its bit 2
@@ -55,27 +65,30 @@ the hardware consumer advances. A full queue drops new frames instead of
 resetting live DMA or overwriting pending buffers. The old mailbox's final
 four padding bytes now expose `f2_counts` at offset 444: low 16 bits count
 published frames, high 16 bits count full-queue drops, both saturating.
-Existing mailbox offsets and the 448-byte size are unchanged. Initialization
+Existing mailbox offsets are unchanged; credits and the fault latch extend the
+current mailbox to 480 bytes. Initialization
 clears the producer pointer before enabling DMA and publishes RX_ACTIVE only
 after the RX path is ready.
 
-The badge loader counts SPI read-frame resynchronizations in `rx_resyncs`.
+In uncredited legacy profiles, the badge loader counts SPI read-frame
+resynchronizations in `rx_resyncs`.
 It terminates a read frame on invalid advertised lengths or underflow, or when
 SDIO reports FIFO data but SPI exposes no complete packet across two separated
 checks. It permits at most three consecutive resynchronizations without a
 valid SDPCM packet; persistent faults and malformed headers still fail.
 [Micro Signal](../../docs/micro-signal.md#sustained-rx-repair) displays drop and
 recovery counters and includes a minute-long paired regression.
-The collector now also accepts bounded 30..600-second runs; a five-minute pass
-was not repeatable. Malformed SDPCM headers still fail explicitly.
+The collector accepts bounded 30..600-second runs. Before the credit/DMA repair,
+a five-minute pass was not repeatable. Credited production and fragment faults
+fail explicitly without terminating/retrying a partial frame.
 
 There is also an RF-free transport reproducer:
 `make micro-signal-transport-test` builds a separate SDIO-only controller and
 RP2350 host. It reproduces stalled FIFO delivery and captured a genuine DMA
 data-FIFO underrun with payload corruption without initializing D11/PHY.
-The strict test loader stops before recovery writes; production recovery
-is unchanged. Two newer five-minute OTA runs on two Universe badges passed,
-but sustained reliability remains unresolved.
+The strict test loader stops before recovery writes, as does credited
+production. Historical unrestricted/64-byte controls retain their old behavior;
+later credit/DMA and full-MSDU qualification results supersede these failures.
 See [the transport test and evidence](../../docs/micro-signal.md#two-universe-investigation-and-rf-free-reproducer)
 for commands, serial bindings and the distinction between the pristine stall
 and later underrun. Test command 7 is not part of the production controller ABI.
@@ -83,7 +96,7 @@ The default reproducer now requests just four packets and stalls after three
 deliveries, before any ring wrap or descriptor reuse.
 [The assumption audit](../../docs/micro-signal.md#auditing-transport-assumptions)
 also records independent GPIO packet reads, intact descriptor readbacks and
-the tested SPI length contract. None of these results establishes a repair.
+the tested SPI length contract. Those historical assumption-audit results alone did not establish a repair.
 
 SPI bulk backplane reads and writes must set the `0x8000` word-access address
 flag, as scalar backplane I/O does. The badge loader now enforces this mode
@@ -200,7 +213,7 @@ To boot `cyw43_rx_fw.bin` from cold power-on on the RP2350:
    - Disable SRAM bank standby by writing `0` to `SOCRAM + 0x10` (`0x18004010 = 0`) and `0` to `SOCRAM + 0x44` (`0x18004044 = 0`).
 
 ### Step 3: Load `cyw43_rx_fw.bin` and Configure the Mailbox
-1. Zero the mailbox (`0x00020000`, `480` bytes) and multi-frame capture ring (`0x00020d80`, `13352` bytes).
+1. Zero the mailbox (`0x00020000`, `480` bytes) and multi-frame capture ring (`0x00020d80`, `19752` bytes).
 2. Copy `cyw43_rx_fw.bin` (`cyw43_rx_fw_start..cyw43_rx_fw_end`) into CYW43439 SRAM starting at `0x00000000` using 64-byte aligned backplane writes.
 3. Configure the initial mailbox fields at `0x00020000` (`FW_MBOX_ADDR`):
    ```c
@@ -243,8 +256,8 @@ Once `MBOX->fw_state == FW_STATE_RX_ACTIVE` (`9`), the RP2350 controls the trans
 | `2` | **Idle / Active RX** | Firmware is actively receiving frames and streaming them over gSPI Function 2. Look for `host_cmd == 2` to confirm completion of commands `4`, `5`, or `6`. |
 | `3` | **Stop Transceiver** | Cleanly stops MAC/PSM and D11 RX DMA, populates diagnostic snapshots in `MBOX`, and transitions `fw_state` to `FW_STATE_RX_DONE` (`10`). |
 | `4 \| (ch << 8)` | **Fast Channel Switch** | Tunes Radio 20691 and LCN20 PHY to 2.4 GHz channel `ch` (`1..14`) in ~3.5 ms without re-running cold calibration, then resumes reception. |
-| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..1606`, staged at `FW_TX_BUF_ADDR` (`0x00044400`), repeated `1..255` times. Large raw Data frames through 1,600 MPDU bytes are qualified at 11 Mbps CCK; other rates and hardware CCMP remain unqualified. |
-| `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x00044400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
+| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..2406`, staged at `FW_TX_BUF_ADDR` (`0x0004a400`), repeated `1..255` times. The full-MSDU qualification profile reaches 2,332 MPDU bytes at 11 Mbps CCK; other rates and hardware CCMP remain unqualified. |
+| `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x0004a400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
 
 ---
 
@@ -329,10 +342,10 @@ To transmit an 802.11 frame from the RP2350:
    Badge diagnostics test both padded 94-byte templates and an exact-length
    40-byte authentication template (including PLCP). Neither length has
    established AP reception in the current cold-source test.
-2. Write the frame into `FW_TX_BUF_ADDR` (`0x00044400`) using 32-bit backplane writes:
+2. Write the frame into `FW_TX_BUF_ADDR` (`0x0004a400`) using 32-bit backplane writes:
    ```c
    for (uint32_t off = 0u; off < total_len; off += 4u) {
-       bp_write(0x00044400u + off, 4u, load_le32(frame + off));
+       bp_write(0x0004a400u + off, 4u, load_le32(frame + off));
    }
    ```
 3. Trigger transmission via `MBOX->host_cmd` (`0x00020018`):
@@ -354,10 +367,10 @@ The CYW43439 D11 core includes a dedicated hardware `AES-128-CCMP` engine driven
 1. **4-Way EAPOL Handshake:**
    - Associate with the AP using an RSN Information Element advertising `CCMP-128` (`00-0F-AC:4`) and exchange `EAPOL-Key` Messages `1/4..4/4` as normal unencrypted 802.11 Data / QoS Data frames (`FC = 0x0108` or `0x0188`).
 2. **Install the 128-bit Temporal Key (`TK`):**
-   - After deriving `PTK = PRF-384(PMK, "Pairwise key expansion", min(AA,SPA) || max(AA,SPA) || min(ANonce,SNonce) || max(ANonce,SNonce))`, write the 16-byte `TK` (`PTK[32..47]`) to `FW_TX_BUF_ADDR` (`0x00044400`) and issue `host_cmd = 6 | (1 << 8)`:
+   - After deriving `PTK = PRF-384(PMK, "Pairwise key expansion", min(AA,SPA) || max(AA,SPA) || min(ANonce,SNonce) || max(ANonce,SNonce))`, write the 16-byte `TK` (`PTK[32..47]`) to `FW_TX_BUF_ADDR` (`0x0004a400`) and issue `host_cmd = 6 | (1 << 8)`:
      ```c
      for (uint32_t off = 0u; off < 16u; off += 4u) {
-         bp_write(0x00044400u + off, 4u, load_le32(tk + off));
+         bp_write(0x0004a400u + off, 4u, load_le32(tk + off));
      }
      bp_write(0x00020018u, 4u, 6u | (1u << 8u));
      while (bp_read32(0x00020018u) != 2u) { /* wait for key install */ }

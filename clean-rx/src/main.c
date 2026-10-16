@@ -291,7 +291,7 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t ch
     if (rxe_len < 14u || rxe_len > CLEAN_RXE_BYTES) return;
     uint32_t mpdu_len = rxe_len - 6u;
     uint32_t sdpcm_len = 18u + mpdu_len;
-    uint32_t dma_len = (sdpcm_len + 3u) & ~3u;
+    uint32_t fragments = sdpcm_len > CLEAN_F2_PACKET_BYTES ? 2u : 1u;
 
     int credit = clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
                                               SDIO_TX_WINDOW);
@@ -304,56 +304,76 @@ static void sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t ch
         return;
     }
     uint32_t status = mmio_read32(SDIOD_TX_DMA_STATUS0);
-    int available = clean_sdio_available(sdio_tx_idx, status);
-    if (available < 0) {
-        (void)fail(0x86u, SDIOD_TX_DMA_STATUS0, status);
-        return;
+    for (uint32_t part = 0u; part < fragments; ++part) {
+        int available = clean_sdio_available((sdio_tx_idx + part) & 31u, status);
+        if (available < 0) {
+            (void)fail(0x86u, SDIOD_TX_DMA_STATUS0, status);
+            return;
+        }
+        if (!available) {
+            MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 1u);
+            return;
+        }
     }
-    if (!available) {
-        MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 1u);
-        return;
+
+    uint8_t sequence = sdpcm_seq++;
+    for (uint32_t part = 0u; part < fragments; ++part) {
+        uint32_t offset = part * CLEAN_F2_FRAGMENT_BYTES;
+        uint32_t payload = mpdu_len - offset;
+        if (fragments > 1u && payload > CLEAN_F2_FRAGMENT_BYTES)
+            payload = CLEAN_F2_FRAGMENT_BYTES;
+        uint32_t header = fragments > 1u ? CLEAN_F2_FRAGMENT_HEADER : 18u;
+        uint32_t physical_len = header + payload;
+        uint32_t dma_len = (physical_len + 3u) & ~3u;
+        uint32_t idx = sdio_tx_idx;
+        uint32_t buf_addr = FW_SDIO_TX_BUF_ADDR + idx * FW_SDIO_TX_BUF_BYTES;
+        volatile uint8_t *pkt = (volatile uint8_t *)(uintptr_t)buf_addr;
+        for (uint32_t i = 0u; i < dma_len; ++i)
+            pkt[i] = 0u;
+
+        /* 12-byte SDPCM header + 2-byte pad */
+        pkt[0] = (uint8_t)physical_len;
+        pkt[1] = (uint8_t)(physical_len >> 8u);
+        pkt[2] = (uint8_t)~physical_len;
+        pkt[3] = (uint8_t)(~physical_len >> 8u);
+        pkt[4] = sequence;
+        pkt[5] = 2u; /* Channel 2 = Data */
+        pkt[6] = 0u;
+        pkt[7] = 14u; /* Data offset = 14 */
+        pkt[8] = 0u;
+        pkt[9] = 8u; /* Credit */
+        pkt[10] = 0u;
+        pkt[11] = 0u;
+        pkt[12] = (uint8_t)CLEAN_RX_PHASE_MAGIC | (uint8_t)(rx_after_explicit_tx << 7u);
+        pkt[13] = (uint8_t)(CLEAN_RX_PHASE_MAGIC >> 8u);
+
+        /* 4-byte BDC header at offset 14 */
+        pkt[14] = fragments > 1u ? 0x21u : 0x20u;
+        pkt[15] = slot->raw[2]; /* PLCP[0] rate/SIGNAL byte */
+        uint8_t is_ofdm = (uint8_t)((slot->dma_hdr[4] & 1u) || ((slot->rxe_status2 >> 9u) & 3u));
+        pkt[16] = (uint8_t)((channel & 0xfu) | (is_ofdm ? 0x10u : 0u));
+        pkt[17] = 0u;
+
+        if (fragments > 1u) {
+            pkt[18] = (uint8_t)mpdu_len;
+            pkt[19] = (uint8_t)(mpdu_len >> 8u);
+            pkt[20] = (uint8_t)offset;
+            pkt[21] = (uint8_t)(offset >> 8u);
+        }
+        for (uint32_t i = 0u; i < payload; ++i)
+            pkt[header + i] = slot->raw[8u + offset + i];
+        __asm__ volatile("dsb" ::: "memory");
+
+        volatile uint32_t *ring = (volatile uint32_t *)FW_SDIO_TX_RING_ADDR;
+        ring[4u * idx + 0u] = clean_sdio_flags(idx);
+        ring[4u * idx + 1u] = dma_len & 0x7fffu;
+        ring[4u * idx + 2u] = buf_addr;
+        ring[4u * idx + 3u] = 0u;
+        __asm__ volatile("dsb" ::: "memory");
+
+        sdio_tx_idx = (idx + 1u) & 31u;
     }
-
-    uint32_t idx = sdio_tx_idx;
-    uint32_t buf_addr = FW_SDIO_TX_BUF_ADDR + idx * FW_SDIO_TX_BUF_BYTES;
-    volatile uint8_t *pkt = (volatile uint8_t *)(uintptr_t)buf_addr;
-    for (uint32_t i = 0u; i < dma_len; ++i) pkt[i] = 0u;
-
-    /* 12-byte SDPCM header + 2-byte pad */
-    pkt[0] = (uint8_t)sdpcm_len;
-    pkt[1] = (uint8_t)(sdpcm_len >> 8u);
-    pkt[2] = (uint8_t)~sdpcm_len;
-    pkt[3] = (uint8_t)(~sdpcm_len >> 8u);
-    pkt[4] = sdpcm_seq++;
-    pkt[5] = 2u;  /* Channel 2 = Data */
-    pkt[6] = 0u;
-    pkt[7] = 14u; /* Data offset = 14 */
-    pkt[8] = 0u;
-    pkt[9] = 8u;  /* Credit */
-    pkt[10] = 0u;
-    pkt[11] = 0u;
-    pkt[12] = (uint8_t)CLEAN_RX_PHASE_MAGIC | (uint8_t)(rx_after_explicit_tx << 7u);
-    pkt[13] = (uint8_t)(CLEAN_RX_PHASE_MAGIC >> 8u);
-
-    /* 4-byte BDC header at offset 14 */
-    pkt[14] = 0x20u;
-    pkt[15] = slot->raw[2]; /* PLCP[0] rate/SIGNAL byte */
-    uint8_t is_ofdm = (uint8_t)((slot->dma_hdr[4] & 1u) || ((slot->rxe_status2 >> 9u) & 3u));
-    pkt[16] = (uint8_t)((channel & 0xfu) | (is_ofdm ? 0x10u : 0u));
-    pkt[17] = 0u;
-
-    for (uint32_t i = 0u; i < mpdu_len; ++i)
-        pkt[18u + i] = slot->raw[8u + i];
-    __asm__ volatile("dsb" ::: "memory");
-
-    volatile uint32_t *ring = (volatile uint32_t *)FW_SDIO_TX_RING_ADDR;
-    ring[4u * idx + 0u] = clean_sdio_flags(idx);
-    ring[4u * idx + 1u] = dma_len & 0x7fffu;
-    ring[4u * idx + 2u] = buf_addr;
-    ring[4u * idx + 3u] = 0u;
-    __asm__ volatile("dsb" ::: "memory");
-
-    sdio_tx_idx = (idx + 1u) & 31u;
+    /* Both physical packets are ready before publishing one logical-frame credit. */
     ++sdio_tx_posted;
     MBOX->f2_posted = sdio_tx_posted;
     mmio_write32(SDIOD_TX_DMA_PTR, FW_SDIO_TX_RING_ADDR + sdio_tx_idx * 16u);

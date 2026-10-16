@@ -17,15 +17,95 @@ indefinitely-running messenger or a complete 802.11 implementation.
 
 ## Build and install
 
+### Full 2,304-byte MSDUs
+
+The raw-frame buffers now allow **2,400-byte MPDUs**, including FCS. A basic
+unencrypted Data frame carrying a full **2,304-byte MSDU** is **2,332 MPDU
+bytes**: 24-byte MAC header + MSDU + 4-byte FCS. LLC/SNAP, when present, is
+part of the MSDU, not an additional eight bytes outside that limit. The extra
+raw-buffer capacity leaves room for larger headers; it does not qualify
+encryption, QoS, four-address operation or aggregation.
+
+The shared layout now provides:
+
+- 2,408-byte capture scratch at SHM word addresses `0x100..0x5b3`, below
+  controls at `0x600`; the PSM's existing 128-byte streaming gate is retained.
+- Eight 2,464-byte capture slots and 32 D11 DMA slots of 2,464 bytes each.
+- SDIO ring at `0x3a000`, 2-KiB physical packet slots at `0x3a200`, and
+  2,408-byte TX staging at `0x4a400`.
+- A 2,420-byte host receive buffer for reconstructed SDPCM packets up to
+  2,418 bytes. This is **not** one oversized gSPI transfer.
+
+**Large host transfers use explicit F2 fragments.** MPDUs up to 2,026 bytes
+retain the original 18-byte wrapper and one physical packet. Larger MPDUs
+use two complete physical packets, each with a 22-byte header and at most
+1,536 payload bytes. The project-specific `0x21` fragment marker carries
+the full MPDU length and exact byte offset. The controller populates both
+descriptors before publishing the pair. The loader verifies matching metadata,
+offsets and lengths, reconstructs the original wrapper, and releases just
+**one logical-frame credit** after complete transport validation. A missing
+continuation times out after 100 ms; malformed, reordered, cancelled and
+bus-failed transfers never acknowledge a partial frame.
+
+These are **host-transport fragments, not 802.11 fragmentation over the air**.
+Each radio transmission remains one complete MPDU. An initial trial splitting
+a FIFO packet across gSPI reads did not pass hardware testing, so that approach
+was removed. Every physical packet in the implemented path is read in full.
+
+The five-minute RF-free run `msdu-transport-soak` checked **50,231 / 50,566
+exact packets** on the two badges. Its deterministic pattern covers every one
+of the **2,393 MPDU-payload lengths from 8 through 2,400 bytes**, interleaved
+with boundaries including the 2,026/2,027-byte fragmentation transition.
+There were zero device errors, drops or stalls. The collector requires a
+complete sweep, not merely a plausible packet count.
+
+`micro-signal-mtu-test.uf2` now sweeps all **65 MPDU lengths 2,268..2,332**:
+24-byte Data header, LLC/SNAP and application data forming a 2,240..2,304-byte
+MSDU, then FCS. Both receivers verify the complete canonical payload and FCS,
+fresh session/sequence and every length's coverage. Its one-minute OTA probe
+passed with **84 / 83 peer events**, all 65 lengths received on both badges
+and zero device errors or stalls.
+
+The five-minute run `msdu-ota-soak` then passed with **462 / 461 peer events**:
+all 65 lengths were received at least six times on the first badge and seven
+times on the second, with zero device errors or stalls. Unlike the RF-free
+test, this is not a loss-free RF claim: unrelated incoming traffic can be
+dropped while the host credit is occupied.
+
+After the final error-path and diagnostic changes, fresh one-minute runs passed
+the complete RF-free length sweep (**9,568 / 9,649 checked packets**) and all
+65 full-MSDU OTA lengths (**84 / 84 peer events**). A final **180-second
+ordinary-messenger regression** then passed with **275 / 273 peer events**,
+zero device errors and no stalls. Both badges received the normal messenger;
+full **33,100-byte flash readbacks** matched the production binary. Both were
+left in BOOTSEL, ready to boot the installed application.
+
+```sh
+make test-micro-signal micro-signal micro-signal-self-test \
+     micro-signal-transport-credit-test micro-signal-mtu-test
+```
+
+Use the paired collector with `--transport 300` for the RF-free image and
+`--soak 300` for the full-MSDU OTA image. Native and sanitizer tests cover all
+fragmented lengths with rounded/unrounded packet sizes, credit wraparound,
+credit retention during both reads, inconsistent metadata, corrupt headers,
+missing/reordered fragments, cancellation and bus failures.
+Failure captures retain the entire receive-buffer allocation, including any
+assembled prefix. Their
+`transport_last_buffer` group describes the last **physical** descriptor;
+source/received CRC comparisons are meaningful only when
+`transport_last_buffer_comparable` is true. A fragment's physical bytes must
+not be compared directly with the reconstructed logical frame.
+
 ### Ethernet-MTU frames: RX streaming repair
 
-The current work targets a 1,500-byte Ethernet payload first, not the complete
-2,304-byte legacy MSDU range. **All 65 MPDU lengths from 1,536 through 1,600
+This historical first stage targeted a 1,500-byte Ethernet payload before the
+full-MSDU expansion above. **All 65 MPDU lengths from 1,536 through 1,600
 bytes have now passed exact bidirectional OTA qualification at 11 Mbps CCK.**
 This is raw Data-frame support, not an Ethernet interface, association or IP
 stack.
 
-Shared limits in [frame_limits.h](../clean-rx/frame_limits.h) now provide:
+At that stage, [frame_limits.h](../clean-rx/frame_limits.h) provided:
 
 - 1,600-byte MPDU storage, including FCS; 1,606-byte TX input including PLCP.
 - 1,608 bytes of RX scratch at SHM word addresses `0x200..0x523`, separate from
@@ -37,7 +117,7 @@ Shared limits in [frame_limits.h](../clean-rx/frame_limits.h) now provide:
   command bits 8..17; length bits 10..11 use formerly unused bits 29..30.
   OFDM, repeat count and diagnostic flags retain their positions.
 
-The production-equivalent RF-free credit profile now checks all **1,593 payload
+The initial production-equivalent RF-free credit profile checked all **1,593 payload
 lengths, 8..1,600 bytes**, interleaved with explicit boundary cases. It retains
 32-byte bursts, one genuine host credit, exact byte comparisons, and deferred
 acknowledgement until validation. Earlier small-length and 483/520-byte negative
@@ -57,7 +137,7 @@ be dropped while the single host credit is occupied.
 make test-micro-signal micro-signal-transport-credit-test micro-signal-mtu-test
 ```
 
-`micro-signal-mtu-test.uf2` is an **experimental qualification image**. It sends
+The initial `micro-signal-mtu-test.uf2` **experimental qualification image** sent
 broadcast 802.11 Data frames with LLC/SNAP,
 experimental EtherType `0x88b5`, and 1,500..1,564 payload bytes. The 65 MPDU
 lengths are 1,536..1,600 bytes. Its receiver checks the entire canonical frame,
@@ -105,7 +185,7 @@ A separate 120-second regression swept **47 Data MPDU sizes, 128..1,600 bytes
 in 32-byte steps**. Every size passed on both badges, including the former
 480/512-byte boundary, with **180 / 178 peer events**, zero device errors and
 no stalls. The temporary sweep builder and collector changes were removed;
-the normal qualification profile remains the 65 Ethernet-MTU sizes.
+the qualification profile at that stage retained the 65 Ethernet-MTU sizes.
 
 After restoring the normal sources and rebuilding, a final **180-second
 ordinary-messenger regression** passed with **275 / 272 peer events**, zero
@@ -141,8 +221,8 @@ make micro-signal test-micro-signal
 ```
 
 The result is `build/universe26/uf2/micro-signal.uf2`. The current build is
-**65,024 bytes (63.5 KiB)**, containing a **32,376-byte** flash image, including
-the **21,032-byte** source-built Wi-Fi controller firmware. Size optimization,
+**66,560 bytes (65 KiB)**, containing a **33,100-byte** flash image, including
+the **21,224-byte** source-built Wi-Fi controller firmware. Size optimization,
 LTO and section garbage collection are enabled. The framebuffer uses RAM,
 not UF2 payload space.
 
