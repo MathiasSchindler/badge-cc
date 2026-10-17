@@ -15,6 +15,43 @@
 #define CLEAN_CTS_ALLOWED 0x638u
 #define CLEAN_ACK_CONSUMED 0x639u
 #define CLEAN_RESPONSE_INTERNAL_ACK 4u
+#ifndef CLEAN_RX_HT_RESPONSE
+#define CLEAN_RX_HT_RESPONSE 0
+#endif
+#define CLEAN_QOS_RESPONSE_POLICY 0x6bau
+#define CLEAN_HT_ACK_TABLE 0x6c0u
+#define CLEAN_HT_ACK_RECORD_WORDS 6u
+#define CLEAN_HT_RESPONSE_CMD 14u
+#define CLEAN_ACK_RX_SHM 0x6f0u
+#define CLEAN_ACK_RX_WORDS 14u
+#define CLEAN_ACK_RX_ADDR (CLEAN_RX_LAYOUT_ADDR + 4u * CLEAN_RX_LAYOUT_WORDS)
+#define CLEAN_ACK_RX_MAGIC 0x32524b41u
+#define CLEAN_ACK_RX_DETAIL 720u
+
+typedef struct {
+    uint32_t magic;
+    uint16_t count, time_lo, time_hi, phy, mpdu[7], plcp[3];
+} clean_ack_rx_t;
+
+_Static_assert(sizeof(clean_ack_rx_t) == 32u &&
+               CLEAN_ACK_RX_ADDR + sizeof(clean_ack_rx_t) <= 0x20d80u,
+               "ACK evidence must fit between layout manifest and capture slots");
+
+_Static_assert(CLEAN_RX_HT_RESPONSE == 0 ||
+               (CLEAN_RX_HT_RESPONSE == 1 && CLEAN_RX_HT_RX),
+               "HT responses require the extended receive build");
+_Static_assert(CLEAN_QOS_RESPONSE_POLICY >= CLEAN_HT_EARLY_SHM + CLEAN_HT_EARLY_WORDS &&
+               CLEAN_QOS_RESPONSE_POLICY < CLEAN_HT_ACK_TABLE &&
+               CLEAN_HT_ACK_TABLE + 8u * CLEAN_HT_ACK_RECORD_WORDS <= CLEAN_ACK_RX_SHM &&
+               CLEAN_ACK_RX_SHM + CLEAN_ACK_RX_WORDS <= 0x7a0u,
+               "HT response controls must not overlap captures, traces or statistics");
+
+static inline int clean_ht_response_policy(uint32_t command, uint32_t enabled,
+                                          uint32_t profile) {
+    if (!enabled || profile != 3u || (command & 255u) != CLEAN_HT_RESPONSE_CMD ||
+        (command >> 8u) > 3u) return -1;
+    return (int)(command >> 8u);
+}
 
 typedef struct {
     uint8_t active, ended;
@@ -41,6 +78,11 @@ static inline int clean_tx_tail_poll(clean_tx_tail_t *s, int active) {
 #define CLEAN_DCF_ENABLE 0x680u
 #define CLEAN_DCF_REQUEST 0x681u
 #define CLEAN_DCF_SLOTS 0x682u
+#define CLEAN_DCF_TRACE_SHM 0x6bbu
+#define CLEAN_DCF_TRACE_ADDR 0x203b0u
+#define CLEAN_DCF_TRACE_MAGIC 0x31464344u
+#define CLEAN_DCF_TRACE_DETAIL 976u
+#define CLEAN_DCF_MAX_SLOTS 1023u
 #define CLEAN_DCF_EIFS 0x683u
 #define CLEAN_DCF_EIFS_UNTIL 0x684u
 #define CLEAN_DCF_EIFS_US 0x685u
@@ -85,6 +127,18 @@ typedef struct {
     uint32_t ack_sent, ack_error, started_us, finished_us;
     uint32_t ack_txe_status, ack_ifs_status;
 } clean_unicast_status_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t draw, before, after, clock;
+} clean_dcf_trace_t;
+
+_Static_assert(CLEAN_DCF_TRACE_SHM > CLEAN_QOS_RESPONSE_POLICY &&
+               CLEAN_DCF_TRACE_SHM + 5u <= CLEAN_HT_ACK_TABLE &&
+               sizeof(clean_dcf_trace_t) == 12u &&
+               CLEAN_DCF_TRACE_ADDR + sizeof(clean_dcf_trace_t) <= CLEAN_RX_LAYOUT_ADDR &&
+               CLEAN_DCF_TRACE_DETAIL + sizeof(clean_dcf_trace_t) <= 1000u,
+               "DCF counter evidence must not overlap control or evidence regions");
 
 typedef struct {
     uint32_t magic, profile, cw, slots, nav_until, deferrals, control_acks, timeouts;
@@ -138,6 +192,18 @@ static inline int clean_ack_template(uint8_t plcp[6], uint32_t rate, uint16_t *p
     }
     *phyctl1 = clean_cck_rates[rate].phyctl1;
     return clean_cck_plcp_rate(plcp, 14u, rate);
+}
+
+static inline int clean_ht_ack_rate(uint16_t basic, uint32_t mcs) {
+    static const uint8_t reference[8] = {12u,24u,36u,48u,72u,96u,108u,108u};
+    static const uint8_t rates[12] = {2u,4u,11u,22u,12u,18u,24u,36u,48u,72u,96u,108u};
+    if (mcs >= 8u || !basic || (basic & 0xf000u)) return -1;
+    int selected = -1;
+    for (uint32_t i = 0u; i < 12u; ++i)
+        if ((basic & (1u << i)) && rates[i] <= reference[mcs] &&
+            (selected < 0 || rates[i] > rates[(uint32_t)selected])) selected = (int)i;
+    if (selected >= 0) return selected;
+    return clean_ack_rate(0x150u, mcs == 0u ? 4u : mcs < 3u ? 6u : 8u);
 }
 
 static inline uint32_t clean_ack_airtime_us(uint16_t basic, uint32_t received) {

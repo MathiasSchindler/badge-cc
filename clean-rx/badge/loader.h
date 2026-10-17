@@ -48,6 +48,7 @@ int clean_boot(clean_loader_t *loader, const uint8_t *image, uint32_t length,
                uint32_t channel, uint32_t generation, uint8_t tx_enabled);
 int clean_wait_state(clean_loader_t *loader, uint32_t expected, uint32_t timeout);
 int clean_service(clean_loader_t *loader);
+int clean_check_layout(clean_loader_t *loader);
 int clean_receive(clean_loader_t *loader, uint8_t packet[CLEAN_RX_PACKET_BYTES], uint32_t *length);
 
 #endif

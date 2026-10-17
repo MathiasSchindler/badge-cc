@@ -4,11 +4,13 @@
 #include "frames.h"
 #include "../src/unicast.h"
 #include "../src/mac.h"
+#include "ht_station.h"
 
 typedef struct {
     uint8_t bssid[6], ssid[32], ssid_length, secured, erp;
     uint8_t rsn[128], rsn_length;
     uint16_t capability, rates, basic_rates;
+    clean_ht_peer_t ht;
 } clean_station_ap_t;
 
 enum {
@@ -79,6 +81,7 @@ static inline int clean_station_beacon(const uint8_t *m, uint32_t n,
         uint32_t id = m[at], size = m[at + 1u];
         at += 2u;
         if (size > n - 4u - at) return CLEAN_AP_INVALID;
+        clean_ht_peer_ie(&parsed.ht, id, m + at, size);
         if (id == 0u) {
             if (ssid++ || !size || size > 32u) return CLEAN_AP_INVALID;
             parsed.ssid_length = (uint8_t)size;

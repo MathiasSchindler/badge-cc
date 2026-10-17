@@ -16,12 +16,24 @@ _Static_assert(CLEAN_STATION_PROTECTED_DETAIL + 32u <= CLEAN_STATION_TRACE_DETAI
                CLEAN_STATION_TRACE_DETAIL + sizeof(clean_mac_trace_status_t) <= 1960u,
                "MAC trace must fit before peer diagnostics");
 
-static inline void clean_station_rx_report_at(const clean_mac_rx_t *s, uint8_t *detail,
-                                               uint32_t offset) {
-    const uint32_t words[] = {CLEAN_STATION_MAC_MAGIC, s->delivered, s->duplicates,
+static inline void clean_station_qos_report_at(const clean_mac_rx_t *s,
+        const clean_qos_rx_t *qos, uint8_t *detail, uint32_t offset) {
+    uint32_t words[] = {CLEAN_STATION_MAC_MAGIC, s->delivered, s->duplicates,
         s->fragments, s->malformed, s->unsupported, s->expired, s->fragment_errors};
+    if (qos) for (uint32_t i = 0u; i < 16u; ++i) {
+        const clean_mac_rx_t *q = &qos->tid[i];
+        words[1] += q->delivered; words[2] += q->duplicates;
+        words[3] += q->fragments; words[4] += q->malformed;
+        words[5] += q->unsupported; words[6] += q->expired;
+        words[7] += q->fragment_errors;
+    }
     for (uint32_t i = 0u; i < sizeof(words) / sizeof(words[0]); ++i)
         badger_bytes_store_u32(detail + offset + 4u * i, words[i]);
+}
+
+static inline void clean_station_rx_report_at(const clean_mac_rx_t *s, uint8_t *detail,
+                                               uint32_t offset) {
+    clean_station_qos_report_at(s, 0, detail, offset);
 }
 
 static inline void clean_station_rx_report(const clean_mac_rx_t *s, uint8_t *detail) {

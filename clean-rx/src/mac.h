@@ -37,7 +37,7 @@ enum {
 
 typedef struct {
     clean_mac_history_t history[CLEAN_MAC_RX_HISTORY];
-    uint8_t frame[24u + CLEAN_MSDU_BYTES + 4u];
+    uint8_t frame[26u + CLEAN_MSDU_BYTES + 4u];
     uint32_t started_us, length;
     uint16_t sequence;
     uint8_t active, next_fragment;
@@ -46,6 +46,7 @@ typedef struct {
 } clean_mac_rx_t;
 
 void clean_mac_rx_init(clean_mac_rx_t *s);
+void clean_mac_rx_expire(clean_mac_rx_t *s, uint32_t now);
 /* FCS-bearing, pinned-peer, non-QoS MPDUs. DELIVER uses the original input for
  * fragment zero, or s->frame/s->length for a completed fragmented MSDU.
  * Protected frames bypass this cache: authenticate/decrypt before delivery. */
@@ -55,10 +56,40 @@ int clean_mac_rx(clean_mac_rx_t *s, const uint8_t *mpdu, uint32_t length,
  * replace the CCMP body with plaintext and append a reconstructed FCS. */
 int clean_mac_rx_authenticated(clean_mac_rx_t *s, const uint8_t *mpdu,
                                uint32_t length, uint32_t now);
+
+typedef struct {
+    clean_mac_rx_t tid[16];
+} clean_qos_rx_t;
+
+void clean_qos_rx_init(clean_qos_rx_t *s);
+void clean_qos_rx_expire(clean_qos_rx_t *s, uint32_t now);
+/* Pinned-peer, three-address QoS Data/Null with normal/No Ack policy.
+ * Fragment output resides in tid[MPDU TID].frame; unfragmented delivery
+ * uses the original input. Block ACK/HT Control require separate support. */
+int clean_qos_rx(clean_qos_rx_t *s, const uint8_t *mpdu, uint32_t length, uint32_t now);
+/* Authenticated plaintext with Protected retained and reconstructed FCS.
+ * Protected A-MSDUs remain disabled until negotiated crypto handling exists. */
+int clean_qos_rx_authenticated(clean_qos_rx_t *s, const uint8_t *mpdu,
+                               uint32_t length, uint32_t now);
 uint32_t clean_mac_fcs(const volatile uint8_t *bytes, uint32_t length);
 int clean_mac_valid(const volatile uint8_t *mpdu, uint32_t length);
 int clean_mac_retry(volatile uint8_t *mpdu, uint32_t length);
 int clean_mac_nav_duration(const volatile uint8_t *mpdu, uint32_t length,
                            const uint8_t own[6]);
+
+typedef struct {
+    const volatile uint8_t *body;
+    uint32_t length, offset;
+} clean_amsdu_t;
+
+typedef struct {
+    const volatile uint8_t *destination, *source, *payload;
+    uint16_t length;
+} clean_amsdu_subframe_t;
+
+/* Validate the whole plaintext aggregate before exposing any subframe.
+ * The caller retains immutable storage and performs peer/MIC/replay checks. */
+int clean_amsdu_open(clean_amsdu_t *s, const volatile uint8_t *body, uint32_t length);
+int clean_amsdu_next(clean_amsdu_t *s, clean_amsdu_subframe_t *subframe);
 
 #endif

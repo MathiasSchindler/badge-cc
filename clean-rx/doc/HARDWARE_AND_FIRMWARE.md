@@ -59,6 +59,7 @@ The CYW43439 provides 512 KiB of contiguous SRAM mapped at `0x00000000..0x0007ff
 | `0x00014000..0x0001bfff` | ~2 KiB | Zero-initialized firmware state (`.bss`) |
 | `0x0001f000` | — | Initial Main Stack Pointer (`MSP`, growing downward) |
 | `0x00020000..0x000201df` | 480 B | Host/Firmware Control Mailbox (`fw_mbox_t`), including credits and RX fault latch |
+| `0x000203c0..0x000203df` | 32 B | RX layout manifest, checked by the badge before starting RX |
 | `0x00020d80..0x00025aa7` | 19,752 B | Multi-Frame Capture Ring (`fw_multi_t`, 8 frame slots x 2,464 B) |
 | `0x00026000..0x000261ff` | 512 B | D11 RX DMA Descriptor Ring (32 descriptors x 16 B, 8-KiB aligned) |
 | `0x00026200..0x000395ff` | 78,848 B | D11 RX DMA Packet Buffers (32 buffers x 2,464 B) |
@@ -66,6 +67,28 @@ The CYW43439 provides 512 KiB of contiguous SRAM mapped at `0x00000000..0x0007ff
 | `0x0003a200..0x0004a1ff` | 65,536 B | SDIOD Function 2 TX DMA Packet Buffers (32 buffers x 2,048 B) |
 | `0x0004a400..0x0004ad67` | 2,408 B | 802.11 Transmit Frame & Crypto Key Staging Buffer (`FW_TX_BUF_ADDR`, 64-byte aligned) |
 | `0x1e09020c..0x1e090a07` | 2,044 B | On-chip ROM calibration dataset (TIA, gain tables, and common PHY tables) |
+
+The table above describes the **default** layout. The opt-in
+`CLEAN_RX_HT_RX=1` profile retains mailbox/diagnostic addresses but expands
+raw storage to 3,896-byte MPDUs. Capture SHM moves to word indices
+`0x800..0xf9f`; MAC/PSM are halted before testing bank readback/aliasing,
+and failure is explicit (`0x8e`). The eight capture slots end at SRAM
+`0x28967`; D11 descriptors/buffers move to `0x30000`/`0x30200`, with
+32 x 3,968-byte buffers ending at `0x4f1ff`. SDIO descriptors/buffers
+move to `0x52000`/`0x52200`, ending at `0x621ff`, and TX staging moves
+to `0x64000`. Compile-time bounds cover all regions.
+
+The manifest contains magic `0x3159414c`, MPDU capacity, SHM base, D11
+ring, SDIO ring, TX staging, maximum fragment count and D11 buffer size.
+Both ordinary and transport-test firmware publish it. A missing or
+mismatched manifest fails host boot with `CLEAN_INPUT`, reporting the
+field address/value; older controller images must be rebuilt with the
+updated loader. The extended host/controller must use matching
+`CLEAN_RX_HT_RX` flags. Up to three physical F2 packets make one logical
+receive and consume only one host credit after complete validation.
+
+See [HT receive-profile instructions](HT20_IMPLEMENTATION.md#extended-receive-profile-and-minimum-a-msdu-diagnostic)
+for the bounded 3,839-byte A-MSDU fixture and its remaining station gates.
 
 ---
 
@@ -421,6 +444,39 @@ about 16.4 ms to 32.8 ms leaves the count unchanged. Missing GoodFCS and
 ACK are consequences; the exact initiating PHY/RXE fault remains unknown.
 No speculative PHY writes, Locked Clocks changes or expanded wait budgets
 are retained. See [evidence and controls](../../todo.md#c1-all-legacy-dssscck-rates).
+
+#### HT20 target, not enabled operation
+
+The [D1 HT20 implementation map](HT20_IMPLEMENTATION.md) ties the
+datasheet's mixed-mode MCS0-MCS7 target to TX format/rate controls, PLCP
+framing, RXE/PSM status, host metadata, association and HT MAC requirements.
+Bounded fresh captures now verify selector `+0x50c = 0x42` and all eight
+HT20 MCS PHYCTL1 words in both directions. Mixed-mode `+0x510/+0x512`
+take separate RATE (`0xb`) and protection LENGTH (`3*Nsym+9`), not
+serialized L-SIG words. The previous packed-word assumption lost the
+length bits on readback and prevented successful HT TX. An isolated
+zero-template-CRC experiment also confirmed hardware HT-SIG CRC
+regeneration in this path.
+
+Same-capture diagnostics establish six HT-SIG bytes, RXE length six plus
+PSDU length, and terminal PHY format bits 2 at all eight rates for the
+88-byte probes. Early PHY bits may be stale and are not a format decision.
+The one-frame tests had losses and one controller-captured fresh frame
+was absent from F2 delivery; no reliability, large-frame or independent
+implementation qualification is claimed. Default firmware rejects the
+fixed HT TX diagnostic. Normal RX metadata still marks nonlegacy
+formats unsupported; PSM responses reject them, and station association
+remains legacy-only. Neither the PMU
+"HT clock" nor calibrated legacy OFDM implies enabled 802.11n operation.
+
+D2 adds a separate `CLEAN_RX_HT_DATA=1` image with a versioned, bounded
+broadcast payload command, validated HT20/MCS RX metadata, and retention of
+unposted captures across F2 backpressure. Its non-QoS MPDU limit is 2,332
+bytes, independent of the 2,400-byte raw storage limit. HT/WMM beacon
+profiling records peer capability/operation and all four EDCA AC parameters,
+but real EDCA/QoS, HT protection and negotiated HT association remain gates.
+Legacy associations remain unchanged. See the
+[D2 API and qualification limits](HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
 
 ### 9.4 Unicast MAC Filter and Automatic 802.11 `ACK` Transmission (`d11_transmit_ack_frame`)
 At startup, the firmware stores the local 6-byte unicast MAC address in `SHM 0x612..0x614`:

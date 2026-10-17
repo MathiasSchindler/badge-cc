@@ -156,34 +156,50 @@ static int rx_error(clean_mac_rx_t *s, int result) {
     return result;
 }
 
-static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now,
-                    int authenticated) {
+void clean_mac_rx_expire(clean_mac_rx_t *s, uint32_t now) {
     if (s->active && now - s->started_us >= CLEAN_MAC_RX_LIFETIME_US) {
         clean_mac_history_t *h = &s->history[s->sequence & (CLEAN_MAC_RX_HISTORY - 1u)];
         if (!h->delivered && h->sequence == s->sequence && h->subtype == s->frame[0] &&
             h->protected_frame == (s->frame[1] & 64u)) h->valid = 0u;
         s->active = 0u;
+        s->length = 0u;
+        for (uint32_t i = 0u; i < sizeof(s->frame); ++i) s->frame[i] = 0u;
         ++s->expired;
     }
+}
+
+static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now,
+                    int authenticated, int qos) {
+    clean_mac_rx_expire(s, now);
+    uint32_t header = qos ? 26u : 24u;
     if (!clean_mac_valid(m, n) || n < 28u || (m[0] & 3u))
         return rx_error(s, CLEAN_MAC_INVALID);
-    if (m[0] != 0u && m[0] != 0x10u && m[0] != 0x20u && m[0] != 0x30u &&
+    if (qos ? (m[0] != 0x88u && m[0] != 0xc8u) :
+       (m[0] != 0u && m[0] != 0x10u && m[0] != 0x20u && m[0] != 0x30u &&
         m[0] != 0x40u && m[0] != 0x50u && m[0] != 0x80u && m[0] != 0x90u &&
         m[0] != 0xa0u && m[0] != 0xb0u && m[0] != 0xc0u && m[0] != 0xd0u &&
-        m[0] != 8u && m[0] != 0x48u)
+        m[0] != 8u && m[0] != 0x48u))
         return rx_error(s, CLEAN_MAC_UNSUPPORTED);
+    if (n < header + 4u) return rx_error(s, CLEAN_MAC_INVALID);
     if ((m[1] & 3u) == 3u || (m[1] & 128u) || (m[4] & 1u))
         return rx_error(s, CLEAN_MAC_UNSUPPORTED);
     if (!(m[0] & 12u) && (m[1] & 3u)) return rx_error(s, CLEAN_MAC_INVALID);
     if ((m[1] & 64u) && !authenticated) return CLEAN_MAC_PROTECTED;
-    if (authenticated && (!(m[1] & 64u) || m[0] != 8u))
+    if (authenticated && (!(m[1] & 64u) || m[0] != (qos ? 0x88u : 8u)))
         return rx_error(s, CLEAN_MAC_INVALID);
     uint16_t seq = (uint16_t)(u16(m + 22u) >> 4u);
     uint8_t frag = m[22] & 15u, more = m[1] & 4u;
-    uint32_t payload = n - 28u;
-    if (m[0] == 0x48u && (payload || frag || more))
+    uint32_t payload = n - header - 4u;
+    int aggregate = qos && (m[24] & 128u);
+    if (qos && ((m[24] & 0x60u) >= 0x40u || (aggregate && authenticated)))
+        return rx_error(s, CLEAN_MAC_UNSUPPORTED);
+    if ((m[0] == 0x48u || m[0] == 0xc8u) && (payload || frag || more || aggregate))
         return rx_error(s, CLEAN_MAC_INVALID);
-    if (payload > CLEAN_MSDU_BYTES || (more && (!payload || frag == 15u)))
+    if (aggregate) {
+        clean_amsdu_t assembly;
+        if (frag || more || !clean_amsdu_open(&assembly, m + header, payload))
+            return rx_error(s, CLEAN_MAC_INVALID);
+    } else if (payload > CLEAN_MSDU_BYTES || (more && (!payload || frag == 15u)))
         return rx_error(s, CLEAN_MAC_INVALID);
     clean_mac_history_t *h = &s->history[seq & (CLEAN_MAC_RX_HISTORY - 1u)];
     uint8_t protected_frame = m[1] & 64u;
@@ -200,11 +216,13 @@ static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now
             return rx_error(s, CLEAN_MAC_FRAGMENT_ORDER);
         if ((m[0] != s->frame[0]) || ((m[1] ^ s->frame[1]) & 0xc3u))
             return rx_error(s, CLEAN_MAC_FRAGMENT_ORDER);
+        if (qos && ((m[24] ^ s->frame[24]) & 0x8fu))
+            return rx_error(s, CLEAN_MAC_FRAGMENT_ORDER);
         for (uint32_t i = 4u; i < 22u; ++i)
             if (m[i] != s->frame[i]) return rx_error(s, CLEAN_MAC_FRAGMENT_ORDER);
-        if (payload > CLEAN_MSDU_BYTES - (s->length - 24u))
+        if (payload > CLEAN_MSDU_BYTES - (s->length - header))
             return rx_error(s, CLEAN_MAC_INVALID);
-        for (uint32_t i = 0u; i < payload; ++i) s->frame[s->length + i] = m[24u + i];
+        for (uint32_t i = 0u; i < payload; ++i) s->frame[s->length + i] = m[header + i];
         s->length += payload;
     } else {
         if (more && s->active) return rx_error(s, CLEAN_MAC_FRAGMENT_BUSY);
@@ -245,10 +263,73 @@ static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now
 }
 
 int clean_mac_rx(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now) {
-    return receive(s, m, n, now, 0);
+    return receive(s, m, n, now, 0, 0);
 }
 
 int clean_mac_rx_authenticated(clean_mac_rx_t *s, const uint8_t *m, uint32_t n,
                                uint32_t now) {
-    return receive(s, m, n, now, 1);
+    return receive(s, m, n, now, 1, 0);
+}
+
+void clean_qos_rx_init(clean_qos_rx_t *s) {
+    for (uint32_t i = 0u; i < 16u; ++i) clean_mac_rx_init(&s->tid[i]);
+}
+
+void clean_qos_rx_expire(clean_qos_rx_t *s, uint32_t now) {
+    for (uint32_t i = 0u; i < 16u; ++i) clean_mac_rx_expire(&s->tid[i], now);
+}
+
+static int qos_receive(clean_qos_rx_t *s, const uint8_t *m, uint32_t n,
+                        uint32_t now, int authenticated) {
+    clean_qos_rx_expire(s, now);
+    if (n < 30u || !clean_mac_valid(m, n)) return CLEAN_MAC_INVALID;
+    if (m[0] != 0x88u && m[0] != 0xc8u) return CLEAN_MAC_UNSUPPORTED;
+    return receive(&s->tid[m[24] & 15u], m, n, now, authenticated, 1);
+}
+
+int clean_qos_rx(clean_qos_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now) {
+    return qos_receive(s, m, n, now, 0);
+}
+
+int clean_qos_rx_authenticated(clean_qos_rx_t *s, const uint8_t *m,
+                               uint32_t n, uint32_t now) {
+    return qos_receive(s, m, n, now, 1);
+}
+
+int clean_amsdu_open(clean_amsdu_t *s, const volatile uint8_t *body, uint32_t length) {
+    s->body = 0;
+    s->length = s->offset = 0u;
+    if (!body || length < 15u || length > CLEAN_AMSDU_BYTES) return 0;
+    uint32_t offset = 0u;
+    while (offset < length) {
+        uint32_t remaining = length - offset;
+        if (remaining < 15u) return 0;
+        const volatile uint8_t *m = body + offset;
+        uint32_t size = ((uint32_t)m[12] << 8u) | m[13];
+        if (!size || size > CLEAN_MSDU_BYTES || size > remaining - 14u || (m[6] & 1u))
+            return 0;
+        /* An RFC1042 LLC header must not masquerade as the first DA. */
+        if (m[0] == 0xaau && m[1] == 0xaau && m[2] == 3u &&
+            !m[3] && !m[4] && !m[5]) return 0;
+        uint32_t used = 14u + size;
+        if (used == remaining) break;
+        uint32_t padded = (used + 3u) & ~3u;
+        if (padded >= remaining) return 0;
+        offset += padded;
+    }
+    s->body = body;
+    s->length = length;
+    return 1;
+}
+
+int clean_amsdu_next(clean_amsdu_t *s, clean_amsdu_subframe_t *subframe) {
+    if (s->offset == s->length) return 0;
+    const volatile uint8_t *m = s->body + s->offset;
+    subframe->destination = m;
+    subframe->source = m + 6u;
+    subframe->payload = m + 14u;
+    subframe->length = (uint16_t)(((uint32_t)m[12] << 8u) | m[13]);
+    uint32_t used = 14u + subframe->length;
+    s->offset += used == s->length - s->offset ? used : ((used + 3u) & ~3u);
+    return 1;
 }

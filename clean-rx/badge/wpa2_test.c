@@ -185,19 +185,27 @@ static void protected_traffic(clean_wpa_t before) {
     assert(!clean_wpa_probe(&s,tx) && s.error==WPA_EXHAUSTED && !s.installed);
 }
 
+static uint32_t protected_qos_fragment(clean_wpa_t *s, uint8_t *m, uint8_t tid,
+        uint16_t sequence, uint8_t frag, int more, uint64_t number,
+        const uint8_t *plain, uint32_t payload) {
+    uint32_t h=tid==16u?24u:26u;
+    uint8_t pn[6]={0};
+    for (uint32_t i=0u;i<6u;++i) pn[i]=(uint8_t)(number>>(8u*i));
+    memset(m,0,h+20u+payload);
+    m[0]=tid==16u?8u:0x88u; m[1]=(uint8_t)(0x42u|(more?4u:0u));
+    memcpy(m+4u,s->mac,6u); memcpy(m+10u,s->bssid,6u); memcpy(m+16u,s->bssid,6u);
+    m[22]=(uint8_t)((sequence<<4u)|frag); m[23]=(uint8_t)(sequence>>4u);
+    if (h==26u) m[24]=tid;
+    m[h]=pn[0]; m[h+1u]=pn[1]; m[h+3u]=32u; memcpy(m+h+4u,pn+2u,4u);
+    assert(wpa_ccmp(s->ptk+32u,m,h,pn,plain,payload,m+h+8u,m+h+8u+payload,0));
+    badger_bytes_store_u32(m+h+16u+payload,diag_crc32(m,h+16u+payload));
+    return h+20u+payload;
+}
+
 static uint32_t protected_fragment(clean_wpa_t *s, uint8_t *m, uint16_t sequence,
                                     uint8_t frag, int more, uint32_t number,
                                     const uint8_t *plain, uint32_t payload) {
-    uint8_t pn[6]={0};
-    for (uint32_t i=0u;i<4u;++i) pn[i]=(uint8_t)(number>>(8u*i));
-    memset(m,0,44u+payload);
-    m[0]=8u; m[1]=(uint8_t)(0x42u|(more?4u:0u));
-    memcpy(m+4u,s->mac,6u); memcpy(m+10u,s->bssid,6u); memcpy(m+16u,s->bssid,6u);
-    m[22]=(uint8_t)((sequence<<4u)|frag); m[23]=(uint8_t)(sequence>>4u);
-    m[24]=pn[0]; m[25]=pn[1]; m[27]=32u; memcpy(m+28u,pn+2u,4u);
-    assert(wpa_ccmp(s->ptk+32u,m,24u,pn,plain,payload,m+32u,m+32u+payload,0));
-    badger_bytes_store_u32(m+40u+payload,diag_crc32(m,40u+payload));
-    return 44u+payload;
+    return protected_qos_fragment(s,m,16u,sequence,frag,more,number,plain,payload);
 }
 
 static void protected_fragments(clean_wpa_t before) {
@@ -255,6 +263,96 @@ static void protected_fragments(clean_wpa_t before) {
     }
 }
 
+static void qos_plaintext_wiped(const clean_wpa_t *s) {
+    for (uint32_t tid=0u;tid<16u;++tid) {
+        assert(!s->rx_qos.tid[tid].active);
+        for (uint32_t i=0u;i<sizeof(s->rx_qos.tid[tid].frame);++i)
+            assert(!s->rx_qos.tid[tid].frame[i]);
+        for (uint32_t i=0u;i<6u;++i) assert(!s->qos_fragment_pn[tid][i]);
+    }
+    for (uint32_t i=0u;i<sizeof(s->rx_mpdu);++i) assert(!s->rx_mpdu[i]);
+}
+
+static void protected_qos(clean_wpa_t before) {
+    uint8_t m[CLEAN_MPDU_BYTES], plain[CLEAN_MSDU_BYTES];
+    const uint8_t reply[16]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
+    memset(plain,0x5a,sizeof(plain));
+    memcpy(plain,reply,16u); memcpy(plain+16u,before.snonce,16u);
+    const uint32_t sizes[]={32u,1500u,2304u};
+    for (uint32_t size=0u;size<3u;++size) {
+        clean_wpa_t s=before;
+        uint32_t at=0u;
+        for (uint8_t frag=0u;frag<16u;++frag) {
+            uint32_t count=frag==15u?sizes[size]-at:sizes[size]/16u;
+            for (uint8_t tid=0u;tid<16u;++tid) {
+                uint32_t n=protected_qos_fragment(&s,m,tid,4095u,frag,frag!=15u,
+                                                 250u+frag,plain+at,count);
+                assert(clean_wpa_protected(&s,m,n,100u+frag)==(frag==15u));
+                assert(!s.error && s.installed);
+                if (frag!=15u) {
+                    assert(s.rx_qos.tid[tid].active);
+                    assert(s.rx_qos.tid[tid].length==26u+at+count);
+                    assert(!memcmp(s.rx_qos.tid[tid].frame+26u,plain,at+count));
+                }
+                assert(clean_mac_retry(m,n));
+                assert(clean_wpa_protected(&s,m,n,101u+frag)==0 && !s.error);
+            }
+            at+=count;
+        }
+        assert(s.protected_rx==16u && !s.rx_mac.delivered && !s.rx_pn[16][0]);
+        qos_plaintext_wiped(&s);
+        for (uint8_t tid=0u;tid<16u;++tid) {
+            assert(s.rx_qos.tid[tid].delivered==1u && s.rx_qos.tid[tid].fragments==15u);
+            assert(s.rx_pn[tid][0]==9u && s.rx_pn[tid][1]==1u);
+            uint32_t n=protected_qos_fragment(&s,m,tid,0u,0u,0,266u,plain,32u);
+            assert(clean_wpa_protected(&s,m,n,200u)==1);
+        }
+        assert(s.protected_rx==32u);
+        qos_plaintext_wiped(&s);
+    }
+    for (uint32_t fault=0u;fault<10u;++fault) {
+        clean_wpa_t s=before;
+        uint32_t first=fault==4u?2304u:1u;
+        uint32_t n=protected_qos_fragment(&s,m,0u,10u,0u,1,1u,plain,first);
+        assert(clean_wpa_protected(&s,m,n,0u)==0);
+        n=protected_qos_fragment(&s,m,1u,10u,0u,1,1u,plain,1u);
+        assert(clean_wpa_protected(&s,m,n,0u)==0);
+        n=protected_qos_fragment(&s,m,0u,fault==1u?11u:10u,fault==2u?2u:1u,0,
+                                 fault==0u?3u:2u,plain,first==2304u?1u:31u);
+        if (fault==3u) m[n-12u]^=1u;
+        if (fault==6u) m[24]=2u;
+        if (fault==7u) m[24]|=128u;
+        if (fault==8u) m[24]|=0x60u;
+        if (fault==9u) m[29]=96u;
+        badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+        assert(clean_wpa_protected(&s,m,n,fault==5u?CLEAN_MAC_RX_LIFETIME_US:1u)==-1);
+        assert(s.error==(fault==3u||fault==6u?WPA_MIC:
+                         fault>=7u?WPA_FORMAT:WPA_FRAGMENT));
+        assert(!s.installed && !s.protected_rx);
+        qos_plaintext_wiped(&s);
+    }
+    clean_wpa_t s=before;
+    uint32_t n=protected_qos_fragment(&s,m,0u,0x123u,0u,0,1u,plain,32u);
+    assert(clean_wpa_protected(&s,m,n,0u)==1);
+    n=protected_qos_fragment(&s,m,0u,0x123u,0u,0,2u,plain,32u);
+    assert(clean_mac_retry(m,n));
+    assert(clean_wpa_protected(&s,m,n,1u)==0 && !s.error);
+    assert(s.protected_rx==1u && s.rx_pn[0][0]==2u && s.rx_qos.tid[0].duplicates==1u);
+    n=protected_qos_fragment(&s,m,0u,0x124u,0u,0,3u,plain,32u);
+    assert(clean_wpa_protected(&s,m,n,2u)==1);
+    s=before;
+    uint32_t start=UINT32_MAX-10u;
+    for (uint8_t tid=0u;tid<16u;++tid) {
+        n=protected_qos_fragment(&s,m,tid,7u,0u,1,1u,plain,1u);
+        assert(clean_wpa_protected(&s,m,n,start)==0);
+    }
+    clean_wpa_rx_expire(&s,start+CLEAN_MAC_RX_LIFETIME_US);
+    qos_plaintext_wiped(&s);
+    assert(s.installed && !s.error);
+    for (uint32_t tid=0u;tid<16u;++tid) assert(s.rx_qos.tid[tid].expired==1u);
+    puts("WPA2 QoS: 16 interleaved TIDs x 16 fragments, size/sequence/PN boundaries, duplicate suppression, MIC/policy rejection and idle expiry/wiping pass; NOT HT negotiation");
+}
+
 static void handshake(void) {
     uint8_t secret[64], mac[6]={2u,6u,7u,8u,9u,10u}, ap[6]={2u,1u,2u,3u,4u,5u};
     memset(secret,1,32u); memset(secret+32u,3,32u);
@@ -273,6 +371,7 @@ static void handshake(void) {
     assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && size==141u && s.installed && s.stage==WPA_KEYS);
     protected_traffic(s);
     protected_fragments(s);
+    protected_qos(s);
     s.tx_pn[0]=5u; s.rx_pn[0][0]=9u;
     assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && s.tx_pn[0]==5u && s.rx_pn[0][0]==9u);
     s=before; m[32u+81u]^=1u; badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));

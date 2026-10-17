@@ -383,6 +383,102 @@ static void soak_protocol(void) {
     puts("MAC: continuous-fixture sequence/wrap, all payload sizes, corruption, duplicates and ordering OK; NOT OTA");
 }
 
+static uint32_t qos_frame(uint8_t *m, uint16_t seq, uint8_t frag, uint8_t flags,
+                           uint8_t tid, uint32_t payload) {
+    uint32_t n = frame(m, seq, frag, flags, payload) + 2u;
+    memmove(m + 26u, m + 24u, payload);
+    m[0] = 0x88u; m[24] = tid; m[25] = 0u;
+    fcs(m, n);
+    return n;
+}
+
+static void qos_receive(void) {
+    clean_qos_rx_t s;
+    uint8_t m[CLEAN_MPDU_BYTES], detail[2048] = {0};
+    clean_qos_rx_init(&s);
+    for (uint32_t tid = 0u; tid < 16u; ++tid) {
+        uint32_t n = qos_frame(m, 4095u, 0u, 4u, (uint8_t)tid, 16u);
+        assert(clean_qos_rx(&s, m, n, 0u) == CLEAN_MAC_FRAGMENT);
+        assert(clean_mac_retry(m, n));
+        assert(clean_qos_rx(&s, m, n, 1u) == CLEAN_MAC_DUPLICATE);
+    }
+    for (uint32_t tid = 0u; tid < 16u; ++tid) {
+        uint32_t n = qos_frame(m, 4095u, 1u, 0u, (uint8_t)tid, 16u);
+        assert(clean_qos_rx(&s, m, n, 2u) == CLEAN_MAC_DELIVER);
+        const clean_mac_rx_t *r = &s.tid[tid];
+        assert(r->length == 62u && clean_mac_valid(r->frame, r->length));
+        assert(r->frame[24] == tid && !(r->frame[22] & 15u) && !(r->frame[1] & 12u));
+        for (uint32_t i = 0u; i < 32u; ++i)
+            assert(r->frame[26u+i] == (uint8_t)(4095u + i/16u + i%16u));
+        assert(clean_mac_retry(m, n));
+        assert(clean_qos_rx(&s, m, n, 3u) == CLEAN_MAC_DUPLICATE);
+        n = qos_frame(m, 0u, 0u, 8u, (uint8_t)tid, CLEAN_MSDU_BYTES);
+        assert(clean_qos_rx(&s, m, n, 4u) == CLEAN_MAC_DELIVER);
+        assert(clean_qos_rx(&s, m, n, 5u) == CLEAN_MAC_DUPLICATE);
+    }
+    clean_mac_rx_t legacy;
+    clean_mac_rx_init(&legacy);
+    clean_station_qos_report_at(&legacy, &s, detail, CLEAN_STATION_PROTECTED_DETAIL);
+    assert(badger_bytes_load_u32(detail + CLEAN_STATION_PROTECTED_DETAIL + 4u) == 32u);
+    assert(badger_bytes_load_u32(detail + CLEAN_STATION_PROTECTED_DETAIL + 8u) == 48u);
+    assert(badger_bytes_load_u32(detail + CLEAN_STATION_PROTECTED_DETAIL + 12u) == 16u);
+    for (uint32_t fault = 0u; fault < 8u; ++fault) {
+        uint32_t n = qos_frame(m, 1u, 0u, 0u, 0u, 1u);
+        if (fault < 2u) m[24] = (uint8_t)(0x40u + fault*0x20u);
+        if (fault == 2u) m[1] = 3u;
+        if (fault == 3u) m[1] = 128u;
+        if (fault == 4u) m[0] = 0xc8u;
+        if (fault == 5u) m[24] = 128u;
+        if (fault == 6u) m[1] = 4u, m[22] |= 15u;
+        fcs(m, n);
+        if (fault == 7u) m[n - 1u] ^= 1u;
+        assert(clean_qos_rx(&s, m, n, 6u) < 0);
+        assert(s.tid[0].delivered == 2u);
+    }
+    uint32_t n = qos_frame(m, 2u, 0u, 0u, 0x20u, 0u);
+    m[0] = 0xc8u; fcs(m, n);
+    assert(clean_qos_rx(&s, m, n, 7u) == CLEAN_MAC_DELIVER);
+    for (uint32_t size = 0u; size < 30u; ++size)
+        assert(clean_qos_rx(&s, m, size, 8u) == CLEAN_MAC_INVALID);
+    clean_qos_rx_init(&s);
+    uint32_t start = UINT32_MAX - 10u;
+    for (uint32_t tid = 0u; tid < 16u; ++tid) {
+        n = qos_frame(m, 10u, 0u, 4u, (uint8_t)tid, 32u);
+        assert(clean_qos_rx(&s, m, n, start) == CLEAN_MAC_FRAGMENT);
+    }
+    clean_qos_rx_expire(&s, start + CLEAN_MAC_RX_LIFETIME_US);
+    for (uint32_t tid = 0u; tid < 16u; ++tid) {
+        assert(!s.tid[tid].active && !s.tid[tid].length && s.tid[tid].expired == 1u);
+        for (uint32_t i = 0u; i < sizeof(s.tid[tid].frame); ++i) assert(!s.tid[tid].frame[i]);
+        n = qos_frame(m, 10u, 1u, 0u, (uint8_t)tid, 32u);
+        assert(clean_qos_rx(&s, m, n, start + CLEAN_MAC_RX_LIFETIME_US + 1u) ==
+               CLEAN_MAC_FRAGMENT_ORDER);
+    }
+    clean_qos_rx_init(&s);
+    n = qos_frame(m, 1u, 0u, 0x44u, 3u, 1u);
+    assert(clean_qos_rx(&s, m, n, 0u) == CLEAN_MAC_PROTECTED && !s.tid[3].active);
+    assert(clean_qos_rx_authenticated(&s, m, n, 0u) == CLEAN_MAC_FRAGMENT);
+    n = qos_frame(m, 1u, 1u, 0u, 3u, 1u);
+    assert(clean_qos_rx_authenticated(&s, m, n, 1u) == CLEAN_MAC_INVALID);
+    assert(clean_qos_rx(&s, m, n, 1u) == CLEAN_MAC_FRAGMENT_ORDER);
+    n = qos_frame(m, 1u, 1u, 64u, 3u, 1u);
+    m[10] ^= 2u; fcs(m, n);
+    assert(clean_qos_rx_authenticated(&s, m, n, 1u) == CLEAN_MAC_FRAGMENT_ORDER);
+    n = qos_frame(m, 2u, 0u, 0u, 0u, 17u);
+    m[24] |= 128u;
+    memset(m + 26u, 0, 17u);
+    m[26] = 2u; m[32] = 4u; m[39] = 3u;
+    fcs(m, n);
+    assert(clean_qos_rx(&s, m, n, 2u) == CLEAN_MAC_DELIVER);
+    assert(clean_mac_retry(m, n));
+    assert(clean_qos_rx(&s, m, n, 3u) == CLEAN_MAC_DUPLICATE);
+    m[39] = 4u; fcs(m, n);
+    assert(clean_qos_rx(&s, m, n, 4u) == CLEAN_MAC_INVALID);
+    m[39] = 3u; m[1] |= 64u; fcs(m, n);
+    assert(clean_qos_rx_authenticated(&s, m, n, 5u) == CLEAN_MAC_UNSUPPORTED);
+    puts("QoS RX: independent TID sequences/fragments, duplicate/wrap, bounds, policy gates and expiry/wiping pass; NOT EDCA or Block ACK");
+}
+
 int main(void) {
     contention();
     retries_and_nav();
@@ -391,6 +487,7 @@ int main(void) {
     station_delivery();
     station_transmit();
     soak_protocol();
+    qos_receive();
     puts("MAC: DCF/NAV/EIFS/wrap, retry identity, FCS, duplicates and bounded reassembly OK");
     puts("MAC: 100000 native deliveries per simulated direction across 3 sizes; NOT RF qualification");
     return 0;

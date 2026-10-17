@@ -56,7 +56,7 @@ static void capture_layout(uint8_t original[2360]) {
     assert(phy_latch > 198u && phy_latch < 225u && phy_latch < held_capture);
     restore(original, 262u, WORD(0x77fu,0x1780u,0x1780u,RX_TRACE_BAD),
             WORD(0x3f0u,0x100cu,0x1800u,0x7a5u));
-    restore(original, 197u, WORD(0x77fu,0x1780u,0x1780u,DCF_GOOD),
+    restore(original, 197u, WORD(0x77fu,0x1780u,0x1780u,HT_TRACE_GOOD),
             WORD(0x3f0u,0x180fu,0x1800u,0x607u));
     restore(original, 123u, WORD(0x77fu,0x1780u,0x1780u,DCF_IDLE),
             WORD(0x78eu,0x1780u,0x1780u,130u));
@@ -97,7 +97,7 @@ static void capture_layout(uint8_t original[2360]) {
                 WORD(0xdcu,reg,0x19feu,0x103u));
     }
     for (uint32_t i = 0u; i < 3u; ++i) {
-        restore(original, 147u + i, i == 0u ? WORD(0x77fu,0x1780u,0x1780u,RX_TRACE_ENTER) :
+        restore(original, 147u + i, i == 0u ? WORD(0x77fu,0x1780u,0x1780u,HT_TRACE_ENTER) :
                 WORD(0x3f0u,CLEAN_SHM_FRAME + 1u + i,0x1800u,0x7acu + i),
                 WORD(0x3f0u,0x6a1u + i,0x1800u,0x7acu + i));
         restore(original, 225u + i, WORD(0x3f0u,CLEAN_SHM_FRAME + 1u + i,0x1800u,0x7fau + i),
@@ -110,7 +110,7 @@ static void capture_layout(uint8_t original[2360]) {
     for (uint32_t length = 6u; length <= CLEAN_RXE_BYTES; ++length) {
         uint32_t words = (length + 3u) >> 1u;
         assert(words <= CLEAN_RAW_BYTES / 2u);
-        assert(CLEAN_SHM_FRAME + words <= 0x600u);
+        assert(CLEAN_SHM_FRAME + words <= CLEAN_SHM_FRAME_END);
     }
 }
 
@@ -233,6 +233,7 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
         else if (op == 0xd0u) { if (av == bv) pc = d; }
         else if (op == 0xd1u) { if (av != bv) pc = d; }
         else if (op == 0xdau) { if (av < bv) pc = d; }
+        else if (op == 0xdcu) { if (av > bv) pc = d; }
         else if (op == 0x1c0u) regs[d] = (uint16_t)(av + bv);
         else if (op == 0x1d0u) regs[d] = (uint16_t)(av - bv);
         else if (op == 0x140u) regs[d] = av & bv;
@@ -255,6 +256,155 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
 
 static uint32_t ack_run(uint16_t regs[0x1800], int tx_now) {
     return psm_run(regs, tx_now, ACK_ENTER);
+}
+
+static void qos_ack_base(uint16_t r[0x1800], uint32_t mcs, uint32_t length) {
+    memset(r, 0, 0x1800u * sizeof(*r));
+    r[CLEAN_ACK_ENABLE] = 1u;
+    r[CLEAN_QOS_RESPONSE_POLICY] = 3u;
+    r[CLEAN_RESPONSE_POLICY] = 3u;
+    r[0x1009u] = 2u;
+    r[0x100cu] = (uint16_t)(length + 6u);
+    r[CLEAN_SHM_FRAME + 1u] = (uint16_t)(mcs | (length << 8u));
+    r[CLEAN_SHM_FRAME + 2u] = (uint16_t)(((length & 1u) ? 0x0600u : 0x0700u) |
+                                                    (length >> 8u));
+    r[CLEAN_SHM_FRAME + 4u] = 0x88u;
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        r[CLEAN_SHM_FRAME + 6u + i] = r[0x612u + i] = (uint16_t)(0x1102u + i);
+        r[CLEAN_SHM_FRAME + 9u + i] = r[CLEAN_ACK_PEER + i] = (uint16_t)(0x2202u + i);
+    }
+}
+
+static void ht_qos_acknowledgements(void) {
+    uint16_t r[0x1800], base[0x1800];
+    static const uint8_t rates[] = {2u,4u,11u,22u,12u,18u,24u,36u,48u,72u,96u,108u};
+    static const uint8_t reference[] = {12u,24u,36u,48u,72u,96u,108u,108u};
+    assert(clean_ht_ack_rate(0u, 0u) < 0 && clean_ht_ack_rate(0x1000u, 0u) < 0);
+    assert(clean_ht_ack_rate(1u, 8u) < 0);
+    for (uint32_t profile = 0u; profile < 5u; ++profile)
+        for (uint32_t policy = 0u; policy < 256u; ++policy) {
+            uint32_t command = CLEAN_HT_RESPONSE_CMD | (policy << 8u);
+            assert(clean_ht_response_policy(command, 1u, profile) ==
+                   (profile == 3u && policy < 4u ? (int)policy : -1));
+            assert(clean_ht_response_policy(command, 0u, profile) < 0);
+            assert(clean_ht_response_policy(command | (1u << 24u), 1u, profile) < 0);
+            assert(clean_ht_response_policy(command ^ 1u, 1u, profile) < 0);
+        }
+    for (uint32_t mcs = 0u; mcs < 8u; ++mcs) {
+        qos_ack_base(base, mcs, 60u);
+        for (uint32_t basic = 1u; basic < 4096u; ++basic) {
+            int rate = clean_ht_ack_rate((uint16_t)basic, mcs), expected = -1;
+            for (uint32_t speed = 1u; speed <= reference[mcs]; ++speed)
+                for (uint32_t i = 0u; i < 12u; ++i)
+                    if ((basic & (1u << i)) && rates[i] == speed) expected = (int)i;
+            if (expected < 0) expected = mcs == 0u ? 4 : mcs < 3u ? 6 : 8;
+            assert(rate == expected);
+            uint8_t plcp[6];
+            uint16_t phy;
+            assert(clean_ack_template(plcp, (uint32_t)rate, &phy));
+            uint32_t at = CLEAN_HT_ACK_TABLE + 6u*mcs;
+            memcpy(r, base, sizeof(r));
+            for (uint32_t i = 0u; i < 3u; ++i)
+                r[at + i] = (uint16_t)(plcp[2u*i] | ((uint16_t)plcp[2u*i+1u] << 8u));
+            r[at + 3u] = phy;
+            r[at + 4u] = rate < 4 ? 0x40u : 0x41u;
+            r[at + 5u] = (uint16_t)(rate < 4 ?
+                clean_cck_airtime_us(14u, (uint32_t)rate, 0u) :
+                clean_ofdm_airtime_us(14u, (uint32_t)rate - 4u));
+            assert(ack_run(r, 1) == 198u && r[CLEAN_ACK_SENT] == 1u);
+            assert(r[0x108au] == phy && r[0x1086u] == r[at + 4u]);
+            assert(!r[CLEAN_SHORT_SENT] && r[0x10e3u] == 0xd4u);
+            for (uint32_t i = 0u; i < 3u; ++i)
+                assert(r[0x10e0u + i] == r[at + i] &&
+                       r[0x10e5u + i] == r[CLEAN_ACK_PEER + i]);
+        }
+        for (uint32_t length = 30u; length <= CLEAN_MPDU_BYTES; ++length) {
+            qos_ack_base(r, mcs, length);
+            assert(ack_run(r, 1) == 198u && r[CLEAN_ACK_SENT] == 1u);
+            r[CLEAN_ACK_SENT] = 0u;
+            r[0x100cu] ^= 1u;
+            assert(ack_run(r, 1) == 198u && !r[CLEAN_ACK_SENT]);
+        }
+    }
+    qos_ack_base(base, 0u, 60u);
+    for (uint32_t fault = 0u; fault < 19u; ++fault) {
+        memcpy(r, base, sizeof(r));
+        if (fault < 2u) r[CLEAN_QOS_RESPONSE_POLICY] ^= (uint16_t)(1u << fault);
+        if (fault == 2u) r[0x1009u] = 3u;
+        if (fault == 3u) r[CLEAN_SHM_FRAME + 1u] |= 8u;
+        if (fault == 4u) r[CLEAN_SHM_FRAME + 1u] |= 128u;
+        if (fault >= 5u && fault <= 11u)
+            r[CLEAN_SHM_FRAME + 2u] ^= (uint16_t)(1u << (fault + 4u));
+        if (fault == 12u) r[CLEAN_SHM_FRAME + 3u] |= 1u;
+        if (fault == 13u) r[CLEAN_SHM_FRAME + 3u] |= 2u;
+        if (fault == 14u) r[CLEAN_SHM_FRAME + 3u] |= 0xfc00u;
+        if (fault == 15u) r[CLEAN_SHM_FRAME + 4u] |= 0x300u;
+        if (fault == 16u) r[CLEAN_SHM_FRAME + 4u] |= 0x8000u;
+        if (fault == 17u) r[CLEAN_SHM_FRAME + 6u] ^= 1u;
+        if (fault == 18u) r[CLEAN_SHM_FRAME + 9u] ^= 1u;
+        assert(ack_run(r, 1) == 198u && !r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
+    }
+    for (uint32_t format = 0u; format < 3u; ++format)
+        for (uint32_t subtype = 0x88u; subtype <= 0xf8u; subtype += 16u)
+            for (uint32_t qos = 0u; qos < 256u; ++qos) {
+                memcpy(r, base, sizeof(r));
+                r[0x1009u] = (uint16_t)format;
+                if (format < 2u) r[CLEAN_SHM_FRAME + 1u] = format ? 0xbu : 10u;
+                r[CLEAN_SHM_FRAME + 4u] = (uint16_t)subtype;
+                r[CLEAN_SHM_FRAME + 16u] = (uint16_t)qos;
+                assert(ack_run(r, 1) == 198u);
+                assert(r[CLEAN_ACK_SENT] == (uint16_t)(subtype == 0x88u && !(qos & 0x60u)));
+            }
+    for (uint32_t format = 0u; format < 3u; ++format) {
+        qos_ack_base(r, 0u, 30u);
+        r[0x1009u] = (uint16_t)format;
+        if (format < 2u) r[CLEAN_SHM_FRAME + 1u] = format ? 0xbu : 10u;
+        r[CLEAN_SHM_FRAME + 4u] = 0xc8u;
+        assert(ack_run(r, 1) == 198u && r[CLEAN_ACK_SENT] == 1u);
+    }
+    puts("PSM QoS/HT ACK: all basic sets/MCS, lengths, TIDs/policies, profile and address gates OK; NOT RF timing");
+}
+
+static void ack_capture_evidence(void) {
+    uint16_t r[0x1800], base[0x1800];
+    qos_ack_base(base, 0u, 60u);
+    base[CLEAN_SHM_FRAME + 4u] = 0xd4u;
+    base[CLEAN_SHM_FRAME + 5u] = 0u;
+    base[CLEAN_SHM_FRAME + 9u] = 0x1234u;
+    base[CLEAN_SHM_FRAME + 10u] = 0x5678u;
+    base[CLEAN_ACK_WAITING] = 1u;
+    base[CLEAN_RESPONSE_POLICY] |= CLEAN_RESPONSE_INTERNAL_ACK;
+    base[0x100cu] = 20u;
+    base[0x1009u] = 1u;
+    base[0x1119u] = 0xfffeu;
+    base[0x111au] = 0x1234u;
+    memcpy(r, base, sizeof(r));
+    assert(ack_run(r, 1) == 266u && r[CLEAN_ACK_SEEN]);
+    assert(r[CLEAN_ACK_RX_SHM] == 1u);
+    assert(r[CLEAN_ACK_RX_SHM + 1u] == 0xfffeu &&
+           r[CLEAN_ACK_RX_SHM + 2u] == 0x1234u &&
+           r[CLEAN_ACK_RX_SHM + 3u] == 1u);
+    for (uint32_t i = 0u; i < 7u; ++i)
+        assert(r[CLEAN_ACK_RX_SHM + 4u+i] == base[CLEAN_SHM_FRAME + 4u+i]);
+    for (uint32_t i = 0u; i < 3u; ++i)
+        assert(r[CLEAN_ACK_RX_SHM + 11u+i] == base[CLEAN_SHM_FRAME + 1u+i]);
+    for (uint32_t fault = 0u; fault < 6u; ++fault) {
+        memcpy(r, base, sizeof(r));
+        if (fault == 0u) r[CLEAN_ACK_WAITING] = 0u;
+        if (fault == 1u) r[CLEAN_ACK_ENABLE] = 0u;
+        if (fault == 2u) r[CLEAN_SHM_FRAME + 6u] ^= 1u;
+        if (fault == 3u) r[0x100cu] = 19u;
+        if (fault == 4u) r[0x100cu] = 21u;
+        if (fault == 5u) r[CLEAN_QOS_RESPONSE_POLICY] = 0u;
+        (void)ack_run(r, 1);
+        assert(!r[CLEAN_ACK_RX_SHM]);
+    }
+    memcpy(r, base, sizeof(r));
+    r[CLEAN_DCF_ENABLE] = 1u;
+    r[CLEAN_DCF_ACK_UNTIL] = base[0x1119u];
+    assert(psm_run(r, 1, DCF_GOOD) == 266u);
+    assert(!r[CLEAN_ACK_RX_SHM] && !r[CLEAN_ACK_SEEN]);
+    puts("PSM ACK evidence: exact bytes/PHY/TSF, expected-ACK/address/length/policy/deadline gates pass; NOT RF");
 }
 
 static void receive_trace(void) {
@@ -290,8 +440,76 @@ static void receive_trace(void) {
     assert(r[0x1780u] == 123u && r[0x1781u] == 456u && r[0x1782u] == 789u);
 }
 
+static void ht_receive_trace(void) {
+    uint16_t r[0x1800] = {0};
+    for (uint32_t phy = 0u; phy <= UINT16_MAX; ++phy) {
+        r[0x1009u] = (uint16_t)phy;
+        r[0x100cu] = 6u;
+        r[CLEAN_SHM_FRAME + 1u] = 0x5800u;
+        r[CLEAN_SHM_FRAME + 2u] = 0x0700u;
+        r[CLEAN_SHM_FRAME + 3u] = 0x0024u;
+        r[CLEAN_HT_EARLY_SHM] = UINT16_MAX;
+        r[CLEAN_HT_EARLY_SHM + 9u] = 99u;
+        assert(psm_run(r, 0, HT_TRACE_ENTER) == 148u);
+        assert(!r[CLEAN_HT_EARLY_SHM] && r[CLEAN_HT_EARLY_SHM + 1u] == phy);
+        assert(r[CLEAN_HT_EARLY_SHM + 2u] == 0x5800u);
+        assert(r[CLEAN_HT_EARLY_SHM + 3u] == 0x0700u);
+        assert(r[CLEAN_HT_EARLY_SHM + 4u] == 0x0024u);
+        assert(r[CLEAN_HT_EARLY_SHM + 5u] == 6u);
+        for (uint32_t i = 6u; i < CLEAN_HT_EARLY_WORDS; ++i)
+            assert(!r[CLEAN_HT_EARLY_SHM + i]);
+        r[0x100cu] = 94u; r[0x100du] = 0x1234u; r[0x100eu] = 0x5678u;
+        if ((phy & 3u) < 2u) {
+            assert(psm_run(r, 0, HT_TRACE_GOOD) == 198u);
+            assert(!r[CLEAN_HT_EARLY_SHM + 9u]);
+            assert(psm_run(r, 0, HT_TRACE_BAD) == 263u);
+            assert(!r[CLEAN_HT_EARLY_SHM + 9u]);
+        }
+        r[0x1009u] = (uint16_t)((phy & ~3u) | 2u);
+        assert(psm_run(r, 0, HT_TRACE_GOOD) == 198u);
+        assert(r[CLEAN_HT_EARLY_SHM + 6u] == 94u);
+        assert(r[CLEAN_HT_EARLY_SHM + 7u] == 0x1234u);
+        assert(r[CLEAN_HT_EARLY_SHM + 8u] == 0x5678u);
+        assert(r[CLEAN_HT_EARLY_SHM + 9u] == 1u);
+        assert(psm_run(r, 0, HT_TRACE_BAD) == 263u);
+        assert(r[CLEAN_HT_EARLY_SHM + 9u] == 1u);
+        assert(psm_run(r, 0, HT_TRACE_ENTER) == 148u);
+        for (uint32_t i = 1u; i <= 3u; ++i) {
+            r[CLEAN_SHM_FRAME + i] ^= 1u;
+            assert(psm_run(r, 0, HT_TRACE_BAD) == 263u);
+            assert(!r[CLEAN_HT_EARLY_SHM + 9u]);
+            assert(psm_run(r, 0, HT_TRACE_GOOD) == 198u);
+            assert(!r[CLEAN_HT_EARLY_SHM + 9u]);
+            r[CLEAN_SHM_FRAME + i] ^= 1u;
+        }
+        r[0x100cu] = 35u;
+        assert(psm_run(r, 0, HT_TRACE_BAD) == 263u);
+        assert(r[CLEAN_HT_EARLY_SHM + 6u] == 35u);
+        assert(r[CLEAN_HT_EARLY_SHM + 9u] == 2u);
+        assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+    }
+    for (uint32_t first = 0u; first < 256u; ++first) {
+        r[CLEAN_SHM_FRAME + 1u] = (uint16_t)(0x5800u | first);
+        r[CLEAN_HT_EARLY_SHM] = 100u;
+        r[CLEAN_HT_EARLY_SHM + 9u] = 99u;
+        assert(psm_run(r, 0, HT_TRACE_ENTER) == 148u);
+        assert(r[CLEAN_HT_EARLY_SHM] == (first < 8u ? 101u : 100u));
+        assert(r[CLEAN_HT_EARLY_SHM + 9u] == (first < 8u ? 0u : 99u));
+    }
+    puts("PSM: early PHY is not a format decision; HT prefix filtering, terminal evidence, stale rejection and wrap pass; NOT RF");
+}
+
 static void contention(void) {
     uint16_t r[0x1800];
+    assert(instruction(DCF_SLOTS_CHECK) ==
+           WORD(0x3f0u,CLEAN_DCF_SLOTS,0x1800u,0x1783u));
+    assert(DCF_COUNT_CLOCK == DCF_SLOTS_CHECK + 1u &&
+           DCF_SLOTS_RANGE == DCF_COUNT_CLOCK + 1u);
+    assert(instruction(DCF_COUNT_CLOCK) ==
+           WORD(0x3f0u,0x1119u,0x1800u,CLEAN_DCF_TRACE_SHM + 3u));
+    assert(instruction(DCF_SLOT_COUNT) == WORD(0x1d0u,0x1783u,0x1801u,0x1783u));
+    assert(instruction(DCF_SLOT_STORE) == WORD(0x3f0u,0x1783u,0x1800u,CLEAN_DCF_SLOTS));
+    assert(instruction(DCF_SLOT_MORE) == WORD(0xd1u,0x1783u,0x1800u,124u));
     for (uint32_t status = 0u; status < 4096u; ++status) {
         memset(r, 0, sizeof(r));
         r[CLEAN_DCF_ENABLE] = 1u;
@@ -367,7 +585,8 @@ static void contention(void) {
         assert(r[CLEAN_ACK_WAITING] == !late);
         assert(r[CLEAN_DCF_RX_LO] == 2u + late);
     }
-    const uint16_t draws[] = {0u,1u,15u,1023u};
+    const uint16_t draws[] = {0u,1u,2u,3u,4u,5u,6u,7u,8u,9u,10u,11u,12u,13u,14u,
+                              15u,31u,63u,127u,255u,511u,1023u};
     for (uint32_t slot = 9u; slot <= 20u; slot += 11u) {
         for (uint32_t d = 0u; d < sizeof(draws) / sizeof(draws[0]); ++d) {
             memset(r, 0, sizeof(r));
@@ -381,8 +600,45 @@ static void contention(void) {
                 r[0x1119u] = (uint16_t)(65500u + elapsed);
                 assert(psm_run(r, 0, DCF_IDLE) == 124u);
                 assert((r[CLEAN_DCF_REQUEST] == 2u) == (elapsed == access));
+                assert(r[CLEAN_DCF_SLOTS] <= draws[d] && !r[CLEAN_ACK_ERROR]);
+                if (r[CLEAN_DCF_TRACE_SHM + 1u])
+                    assert(r[CLEAN_DCF_TRACE_SHM + 2u] + 1u ==
+                           r[CLEAN_DCF_TRACE_SHM + 1u]);
             }
         }
+        for (uint32_t draw = 0u; draw <= 15u; ++draw) {
+            memset(r, 0, sizeof(r));
+            r[CLEAN_DCF_ENABLE] = 1u;
+            r[CLEAN_DCF_SLOTS] = (uint16_t)draw;
+            r[CLEAN_DCF_SLOT_US] = 9u;
+            r[CLEAN_DCF_DIFS_US] = 28u;
+            r[0x1148u] = 15u;
+            for (uint32_t elapsed = 0u; elapsed <= 700000u; elapsed += 7u) {
+                r[0x1119u] = (uint16_t)(65500u + elapsed);
+                assert(psm_run(r, 0, DCF_IDLE) == 124u);
+                assert(r[CLEAN_DCF_SLOTS] <= draw && !r[CLEAN_ACK_ERROR] && !r[0x1081u]);
+            }
+            assert(!r[CLEAN_DCF_SLOTS]);
+            r[CLEAN_DCF_REQUEST] = 1u;
+            assert(psm_run(r, 0, DCF_IDLE) == 124u && r[CLEAN_DCF_REQUEST] == CLEAN_DCF_FIRED);
+        }
+        const uint16_t corrupt[] = {1024u,15574u,18000u,21300u,23297u,35046u,60025u,65535u};
+        for (uint32_t i = 0u; i < sizeof(corrupt) / sizeof(corrupt[0]); ++i) {
+            memset(r, 0, sizeof(r));
+            r[CLEAN_DCF_ENABLE] = r[CLEAN_DCF_REQUEST] = 1u;
+            r[CLEAN_DCF_IDLE_VALID] = 2u;
+            r[CLEAN_DCF_SLOTS] = corrupt[i];
+            r[0x1148u] = 15u;
+            r[0x1119u] = 123u;
+            assert(psm_run(r, 0, DCF_IDLE) == 124u);
+            assert(!r[CLEAN_DCF_ENABLE] && !r[0x1081u] && !r[CLEAN_ACK_WAITING]);
+            assert(r[CLEAN_DCF_REQUEST] == CLEAN_DCF_DEFERRED && r[CLEAN_ACK_ERROR] == 1u);
+            assert(r[CLEAN_DCF_TRACE_SHM + 1u] == corrupt[i]);
+            assert(r[CLEAN_DCF_TRACE_SHM + 2u] == corrupt[i]);
+            assert(r[CLEAN_DCF_TRACE_SHM + 3u] == 123u && r[CLEAN_DCF_TRACE_SHM + 4u] == 1u);
+            assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[0x1081u]);
+        }
+        puts("PSM backoff: register-staged transitions, all CWmin draws, 700-ms idle/wrap and corrupt-counter fail-closed gates pass; NOT RF");
         memset(r, 0, sizeof(r));
         r[CLEAN_DCF_ENABLE] = r[CLEAN_DCF_REQUEST] = 1u;
         r[CLEAN_DCF_SLOT_US] = (uint16_t)slot;
@@ -529,10 +785,15 @@ static void acknowledgements(void) {
         }
     }
     for (uint32_t format = 2u; format < 4u; ++format) {
-        memcpy(regs, base_regs, sizeof(regs));
-        regs[0x1009u] = (uint16_t)format;
-        regs[CLEAN_SHM_FRAME + 4u] = 8u;
-        assert(ack_run(regs, 1) == 198u && !regs[CLEAN_ACK_SENT]);
+        for (uint32_t flags = 0u; flags < 4u; ++flags) {
+            memcpy(regs, base_regs, sizeof(regs));
+            regs[0x1009u] = (uint16_t)(format | ((flags & 1u) ? 0x80u : 0u));
+            regs[0x100eu] = (flags & 2u) ? 0x2000u : 0u;
+            regs[CLEAN_SHM_FRAME + 1u] = 0xbu;
+            regs[CLEAN_SHM_FRAME + 4u] = 8u;
+            assert(ack_run(regs, 1) == 198u && !regs[CLEAN_ACK_SENT] &&
+                   !regs[CLEAN_CTS_SENT] && !regs[0x1080u]);
+        }
     }
     for (uint32_t kind = 0u; kind < 10u; ++kind) {
         memcpy(regs, base_regs, sizeof(regs));
@@ -617,6 +878,8 @@ static void acknowledgements(void) {
 }
 
 int main(void) {
+    ht_qos_acknowledgements();
+    ack_capture_evidence();
     assert(psm_ucode_byte_count == sizeof(psm_ucode_bytes));
     operand_limits();
     assert(ACK_TA2 < ACK_CTL && ACK_SELECT < ACK_CTL && ACK_CRYPTO < ACK_CTL);
@@ -636,6 +899,7 @@ int main(void) {
     assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
     streaming();
     receive_trace();
+    ht_receive_trace();
     acknowledgements();
     contention();
     for (uint16_t bits = 0u; bits < 32u; ++bits) {

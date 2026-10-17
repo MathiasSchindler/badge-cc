@@ -10,6 +10,7 @@
 #include "loader.h"
 #include "frames.h"
 #include "station.h"
+#include "../src/ht20.h"
 #include "../src/wpa2_crypto.h"
 #include "station_rx.h"
 #include "../src/tx_diag.h"
@@ -298,6 +299,170 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+    if (tx >= 21u && tx <= 28u) {
+        int data_mode = tx >= 24u;
+        int ack_mode = tx >= 26u;
+        int clocked = tx == 28u;
+        uint32_t expected_length = data_mode ? clean_ht_data_length(nonce) : CLEAN_HT_PROBE_MPDU;
+        uint8_t expected[CLEAN_HT_DATA_STORAGE];
+        uint32_t expected_fcs = 0u;
+        if (data_mode) {
+            if (!(ack_mode ? clean_ht_ack_frame(expected, nonce) :
+                             clean_ht_data_frame(expected, nonce))) {
+                fputs("Invalid HT data challenge/profile\n", stderr);
+                return 0;
+            }
+            expected_fcs = usb_report_u32(expected + 14u + expected_length - 4u);
+        }
+        clean_ht_rx_t rx;
+        memcpy(&rx, detail + CLEAN_HT_DETAIL, sizeof(rx));
+        int trace_fresh = tx == 22u && clean_ht_probe_rx_valid(&rx, nonce);
+        if (data_mode) trace_fresh = tx == 25u && clean_ht_data_trace_valid(&rx, nonce);
+        if (ack_mode) trace_fresh = tx == 27u &&
+            rx.magic == CLEAN_HT_RX_MAGIC && rx.captures &&
+            (rx.phy[0] & 3u) == 2u && rx.rxe_length == expected_length + 6u &&
+            rx.sig[0] == nonce[13] && clean_ht20_rx_sig_valid(rx.sig, expected_length) &&
+            clean_ht_ack_match(rx.mpdu, expected_length, nonce);
+        int fresh = trace_fresh &&
+            usb_report_u32(detail + 1996u) &&
+            usb_report_u32(detail + 1088u) == 18u + CLEAN_HT_PROBE_MPDU &&
+            clean_ht_probe_match(detail + 1122u, CLEAN_HT_PROBE_MPDU, nonce);
+        if (data_mode) fresh = (tx == 25u || tx == 27u) &&
+            usb_report_u32(detail + 680u) == 0x31524448u &&
+            usb_report_u32(detail + 684u) == expected_length &&
+            usb_report_u32(detail + 688u) == nonce[13] &&
+            usb_report_u32(detail + 692u) == expected_fcs &&
+            usb_report_u32(detail + 1996u) &&
+            usb_report_u32(detail + 1088u) == 18u + expected_length &&
+            clean_ht_rx_metadata(detail[1119u], detail[1120u], detail[1121u],
+                                 expected_length, channel, nonce[13]) &&
+            !memcmp(detail + 1122u, expected + 14u,
+                    expected_length < CLEAN_DETAIL_PACKET_BYTES - 18u ?
+                    expected_length : CLEAN_DETAIL_PACKET_BYTES - 18u);
+        int completed = !usb_report_u32(detail + 8u) &&
+            usb_report_u32(detail + 36u) == 10u;
+        int submitted = completed && usb_report_u32(detail + 1096u);
+        int returned_ack = ack_mode && tx == 26u && completed &&
+            usb_report_u32(detail + 1992u) &&
+            usb_report_u32(detail + 1088u) == 32u &&
+            clean_ack_reply(detail + 1122u, 14u, expected + 24u);
+        clean_ack_rx_t ack_rx = {0};
+        clean_unicast_status_t ack_status = {0};
+        if (clocked) {
+            memcpy(&ack_rx, detail + CLEAN_ACK_RX_DETAIL, sizeof(ack_rx));
+            memcpy(&ack_status, detail + 1000u, sizeof(ack_status));
+            returned_ack = completed && submitted &&
+                ack_status.magic == CLEAN_UNICAST_MAGIC &&
+                ack_status.result == CLEAN_UNICAST_ACKED &&
+                ack_status.attempts == 1u && ack_status.ack_received == 1u &&
+                clean_ht_ack_evidence(&ack_rx, nonce);
+        }
+        uint32_t mpdu_length = rx.rxe_length >= 6u ? rx.rxe_length - 6u : 0u;
+        int sig_valid = rx.magic == CLEAN_HT_RX_MAGIC && rx.captures &&
+            (rx.phy[0] & 3u) >= 2u && clean_ht20_rx_sig_valid(rx.sig, mpdu_length);
+        int fcs_valid = sig_valid && mpdu_length <= sizeof(rx.mpdu) &&
+            clean_frame_valid(rx.mpdu, mpdu_length);
+        printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"mode\":\"%s\","
+               "\"role\":\"%s\",\"channel\":%u,\"mcs\":%u,\"error\":%u,"
+               "\"api_version\":%u,\"expected_mpdu_bytes\":%u,\"full_payload_checked_on_badge\":%s,"
+               "\"fw_error\":%u,\"tx_submitted\":%s,\"fresh_ht_rx\":%s,\"fresh_ht_trace\":%s,"
+               "\"rx_ht20_sig_valid\":%s,\"rx_mpdu_fcs_valid\":%s,\"rx_mcs\":%u,"
+               "\"tx_over_air_confirmed\":false,\"ht_interoperability_qualified\":false,"
+               "\"rx_captures\":%u,\"rxe_length\":%u,\"phy\":[%u,%u,%u,%u],\"sig\":\"",
+               serial, USB_REPORT_BUILD_ID, ack_mode ? "ht-ack" : data_mode ? "ht-data" : "ht-probe",
+               tx == 21u || tx == 24u || tx == 26u || clocked ? "tx" :
+               tx == 22u || tx == 25u || tx == 27u ? "rx" : "passive",
+               channel, tx == 23u ? 0u : nonce[13],
+               usb_report_u32(detail + 8u), clocked ? CLEAN_HT_CLOCKED_VERSION :
+                   ack_mode ? CLEAN_HT_ACK_VERSION : data_mode ?
+                   (expected_length == CLEAN_AMSDU_MPDU_BYTES ?
+                    CLEAN_HT_AMSDU_VERSION : CLEAN_HT_DATA_VERSION) : 0u,
+               expected_length, data_mode && fresh ? "true" : "false",
+               usb_report_u32(detail + 44u),
+               submitted ? "true" : "false", fresh && completed ? "true" : "false",
+               trace_fresh && completed ? "true" : "false",
+               sig_valid ? "true" : "false", fcs_valid ? "true" : "false", rx.sig[0] & 127u,
+               rx.captures, rx.rxe_length, rx.phy[0], rx.phy[1], rx.phy[2], rx.phy[3]);
+        for (uint32_t i = 0u; i < 6u; ++i) printf("%02x", rx.sig[i]);
+        printf("\",\"challenge\":\"");
+        for (uint32_t i = 0u; i < 14u; ++i) printf("%02x", nonce[i]);
+        printf("\"");
+        if (ack_mode)
+            printf(",\"response_configured\":%s,\"ack_responses_started\":%u,"
+                   "\"ack_response_errors\":%u,\"psm_response_delay_us\":%u,\"fresh_return_ack\":%s,"
+                   "\"sifs_timing_qualified\":false",
+                   usb_report_u32(detail + 704u) ? "true" : "false",
+                   usb_report_u32(detail + 696u), usb_report_u32(detail + 700u),
+                   usb_report_u32(detail + 708u),
+                   returned_ack ? "true" : "false");
+        if (clocked) {
+            clean_mac_radio_status_t radio;
+            clean_mac_trace_status_t trace;
+            clean_dcf_trace_t dcf;
+            memcpy(&radio, detail + 800u, sizeof(radio));
+            memcpy(&trace, detail + 864u, sizeof(trace));
+            memcpy(&dcf, detail + CLEAN_DCF_TRACE_DETAIL, sizeof(dcf));
+            printf(",\"clocked_tx\":true,\"ack_result\":%u,\"tx_attempts\":%u,"
+                   "\"ack_capture_count\":%u,\"ack_rx_time_us\":%u,\"ack_phy\":%u,"
+                   "\"access_deferrals\":%u,\"access_cw\":%u,\"access_slots\":%u,"
+                   "\"access_nav_until\":%u,\"access_policy_pending\":%u,"
+                   "\"access_ifs\":%u,\"access_psm_ifs\":%u,\"access_psm_polls\":%u,"
+                   "\"dcf_trace_valid\":%s,\"dcf_draw\":%u,\"dcf_before\":%u,"
+                   "\"dcf_after\":%u,\"dcf_clock\":%u,\"ack_mpdu\":\"",
+                   ack_status.result, ack_status.attempts, ack_rx.count,
+                   (uint32_t)ack_rx.time_lo | ((uint32_t)ack_rx.time_hi << 16u), ack_rx.phy,
+                   radio.deferrals, radio.cw, radio.slots, radio.nav_until, radio.policy_pending,
+                   trace.ifs_status, trace.psm_ifs, trace.psm_polls,
+                   dcf.magic == CLEAN_DCF_TRACE_MAGIC ? "true" : "false",
+                   dcf.draw, dcf.before, dcf.after, dcf.clock);
+            const uint8_t *m = (const uint8_t *)ack_rx.mpdu;
+            for (uint32_t i = 0u; i < 14u; ++i) printf("%02x", m[i]);
+            printf("\",\"ack_plcp\":\"");
+            const uint8_t *plcp = (const uint8_t *)ack_rx.plcp;
+            for (uint32_t i = 0u; i < 6u; ++i) printf("%02x", plcp[i]);
+            printf("\"");
+        }
+        clean_ht_diag_t diagnostic;
+        memcpy(&diagnostic, detail + CLEAN_HT_DIAG_DETAIL, sizeof(diagnostic));
+        uint32_t early_length = (uint32_t)diagnostic.early.sig[1] |
+                                ((uint32_t)diagnostic.early.sig[2] << 8u);
+        printf(",\"ht_diag_valid\":%s,\"early_candidates\":%u,\"early_phy\":%u,"
+               "\"early_ht20_sig_valid\":%s,"
+               "\"early_initial_count\":%u,\"early_final_count\":%u,"
+               "\"early_status1\":%u,\"early_status2\":%u,\"early_outcome\":%u,"
+               "\"discard_bad_fcs\":%u,\"discard_oversize\":%u,"
+               "\"discard_rx_event\":%u,\"discard_plcp\":%u,"
+               "\"tx_controls\":[%u,%u,%u,%u],\"ht_sig_template_crc_zeroed\":%s,\"early_sig\":\"",
+               diagnostic.magic == CLEAN_HT_DIAG_MAGIC ? "true" : "false",
+               diagnostic.early.starts, diagnostic.early.phy,
+               diagnostic.magic == CLEAN_HT_DIAG_MAGIC &&
+                   clean_ht20_rx_sig_valid(diagnostic.early.sig, early_length) ? "true" : "false",
+               diagnostic.early.initial_count, diagnostic.early.final_count,
+               diagnostic.early.status1, diagnostic.early.status2, diagnostic.early.outcome,
+               usb_report_u32(detail + 492u), usb_report_u32(detail + 496u),
+               usb_report_u32(detail + 500u), usb_report_u32(detail + 504u),
+               diagnostic.tx.phyctl, diagnostic.tx.phyctl1,
+               diagnostic.tx.mmplcp[0], diagnostic.tx.mmplcp[1],
+               diagnostic.template_crc_zeroed ? "true" : "false");
+        for (uint32_t i = 0u; i < 6u; ++i) printf("%02x", diagnostic.early.sig[i]);
+        printf("\"");
+        print_tx_diag(detail);
+        puts("}");
+        int valid = tx == 21u || tx == 24u || tx == 26u || clocked ? submitted :
+            completed && (tx == 22u || tx == 25u || tx == 27u ? fresh : fcs_valid);
+        if (tx == 27u) valid = valid && trace_fresh &&
+            usb_report_u32(detail + 704u) && usb_report_u32(detail + 696u) == 1u &&
+            !usb_report_u32(detail + 700u);
+        if (tx == 26u || clocked) {
+            valid = valid && returned_ack;
+            if (!valid)
+                fputs("HT ACK exchange unconfirmed: local TX/response counters do not replace a fresh returned ACK\n",
+                      stderr);
+        }
+        if (!valid)
+            fputs("HT probe did not establish the requested local submission or fresh RX evidence\n", stderr);
+        return valid;
+    }
     if (tx == 19u || tx == 20u) {
         clean_soak_status_t s;
         memcpy(&s, detail + CLEAN_SOAK_DETAIL, sizeof(s));
@@ -457,6 +622,15 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+32u),
                usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+36u));
         print_mac_timing(detail);
+        const uint8_t *ht = detail + CLEAN_HT_PEER_DETAIL;
+        printf(",\"ht_peer_profile_valid\":%s,\"ht_advertised\":false,"
+               "\"ht_legacy_fallback_reasons\":%u,\"ht_peer_rx_mcs_mask\":%u,"
+               "\"ht_peer_basic_mcs_mask\":%u,\"ht_peer_primary_channel\":%u,"
+               "\"ht_peer_width40\":%s,\"wmm_peer_parameters_present\":%s,"
+               "\"wmm_peer_parameter_set\":%u",
+               usb_report_u32(ht) == CLEAN_HT_PEER_MAGIC ? "true" : "false",
+               usb_report_u32(ht + 4u), ht[8], ht[9], ht[11], ht[10] ? "true" : "false",
+               ht[16] ? "true" : "false", ht[17]);
         puts("}");
         if (!associated) fputs("No validated successful association exchange\n", stderr);
         if (tx==18u && !authorized) fputs("WPA2 protected round trip not established\n",stderr);
@@ -564,6 +738,44 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint8_t peer_mode = 0u;
+    int ht_ack = argc == 7 && (strcmp(argv[4], "--ht-ack-tx") == 0 ||
+                               strcmp(argv[4], "--ht-ack-clocked-tx") == 0 ||
+                               strcmp(argv[4], "--ht-ack-rx") == 0);
+    int ht_data = argc == 8 && (strcmp(argv[4], "--ht-data-tx") == 0 ||
+                                strcmp(argv[4], "--ht-data-rx") == 0);
+    int ht_probe = ht_ack || ht_data || (argc == 7 && (strcmp(argv[4], "--ht-probe-tx") == 0 ||
+                                           strcmp(argv[4], "--ht-probe-rx") == 0));
+    if (ht_probe) {
+        char *end_mcs;
+        unsigned long mcs = strtoul(argv[6], &end_mcs, 10);
+        if (!peer_challenge_decode(argv[5], challenge) || !*argv[6] || *end_mcs || mcs >= 8u) {
+            fputs("HT probe requires a 28-hex challenge and MCS 0..7\n", stderr);
+            return 2;
+        }
+        challenge[13] = (uint8_t)mcs;
+        peer_mode = strcmp(argv[4], "--ht-probe-tx") == 0 ? 21u : 22u;
+        if (ht_ack) {
+            if (!CLEAN_RX_HT_RESPONSE) {
+                fputs("HT ACK diagnostics require CLEAN_RX_HT_RESPONSE=1\n", stderr);
+                return 2;
+            }
+            challenge[11] = CLEAN_HT_ACK_MPDU; challenge[12] = 0u;
+            peer_mode = strcmp(argv[4], "--ht-ack-clocked-tx") == 0 ? 28u :
+                strcmp(argv[4], "--ht-ack-tx") == 0 ? 26u : 27u;
+        }
+        if (ht_data) {
+            unsigned long mpdu = strtoul(argv[7], &end_mcs, 10);
+            if (!*argv[7] || *end_mcs || mpdu > CLEAN_HT_DATA_MAX_MPDU ||
+                !clean_ht_data_size_valid((uint32_t)mpdu)) {
+                fputs(CLEAN_RX_HT_RX ?
+                    "HT data requires MPDU bytes 28..2332 or the 3869-byte A-MSDU fixture\n" :
+                    "HT data requires MPDU bytes 28..2332 including FCS\n", stderr);
+                return 2;
+            }
+            challenge[11] = (uint8_t)mpdu; challenge[12] = (uint8_t)(mpdu >> 8u);
+            peer_mode = strcmp(argv[4], "--ht-data-tx") == 0 ? 24u : 25u;
+        }
+    }
     uint32_t soak_count = 0u;
     int soak = (argc >= 7 && argc <= 10) && (strcmp(argv[4], "--mac-soak-init") == 0 ||
                              strcmp(argv[4], "--mac-soak-reply") == 0);
@@ -626,12 +838,19 @@ int main(int argc, char **argv) {
                       strcmp(argv[4], "--tx-auth-1m") != 0 &&
                       strcmp(argv[4], "--tx-one-auth") != 0 &&
                       strcmp(argv[4], "--tx-one-probe") != 0 &&
+                      strcmp(argv[4], "--ht-observe") != 0 &&
                       strcmp(argv[4], "--reject-tx") != 0)) {
         fputs("usage: collector BADGE_SERIAL EVIDENCE_BIN CHANNEL:1-11 "
               "[--tx-one-probe|--tx-probe-1m|--tx-probe-broadcast-1m|--tx-one-auth|--tx-auth-1m|--tx-auth-ofdm|--tx-auth-short|--tx-auth-rearm|--tx-auth-match|--tx-auth-match-rearm|--reject-tx]\n",
               stderr);
         fputs("peer usage: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--peer-rx|--peer-tx|--peer-tx-1m CHALLENGE_HEX_28\n", stderr);
+        fputs("HT diagnostic only: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--ht-observe OR --ht-probe-tx|--ht-probe-rx CHALLENGE_HEX_28 MCS:0-7\n", stderr);
+        fputs("HT data diagnostic: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--ht-data-tx|--ht-data-rx CHALLENGE_HEX_28 MCS:0-7 MPDU_BYTES:28-2332\n", stderr);
+        fputs("HT ACK diagnostic: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--ht-ack-tx|--ht-ack-clocked-tx|--ht-ack-rx CHALLENGE_HEX_28 MCS:0-7\n", stderr);
         fputs("AP authentication only: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-auth|--ap-assoc|--ap-monitor XX:XX:XX:XX:XX:XX\n", stderr);
         fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "
@@ -667,6 +886,7 @@ int main(int argc, char **argv) {
     if (status == 0) status = libusb_claim_interface(device, 0);
     int ok = 0;
     uint8_t mode = argc == 5 ? (strcmp(argv[4], "--reject-tx") == 0 ? 2u :
+                              strcmp(argv[4], "--ht-observe") == 0 ? 23u :
                               strcmp(argv[4], "--tx-one-auth") == 0 ? 3u :
                               strcmp(argv[4], "--tx-auth-ofdm") == 0 ? 4u :
                               strcmp(argv[4], "--tx-auth-1m") == 0 ? 5u :

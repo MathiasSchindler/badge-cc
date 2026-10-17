@@ -174,7 +174,7 @@ int clean_receive(clean_loader_t *l, uint8_t packet[CLEAN_RX_PACKET_BYTES], uint
     }
     l->rx_stalled = 0u;
     uint32_t assembled = 0u, total = 0u, sdpcm = 0u;
-    for (uint32_t part = 0u; part < 2u; ++part) {
+    for (uint32_t part = 0u; part < CLEAN_F2_MAX_FRAGMENTS; ++part) {
         if (!clean_service(l)) return 0;
         uint32_t size = (status >> 9u) & 0x7ffu;
         if (size < 18u || size > CLEAN_F2_PACKET_BYTES) {
@@ -299,6 +299,21 @@ int clean_receive(clean_loader_t *l, uint8_t packet[CLEAN_RX_PACKET_BYTES], uint
     return 1;
 }
 
+int clean_check_layout(clean_loader_t *l) {
+    uint8_t layout[4u * CLEAN_RX_LAYOUT_WORDS];
+    static const uint32_t expected[CLEAN_RX_LAYOUT_WORDS] = CLEAN_RX_LAYOUT_VALUES;
+    if (!clean_block(l, CLEAN_RX_LAYOUT_ADDR, layout, sizeof(layout), 0u)) return 0;
+    for (uint32_t i = 0u; i < CLEAN_RX_LAYOUT_WORDS; ++i) {
+        uint32_t value = badger_bytes_load_u32(layout + 4u*i);
+        if (value != expected[i]) {
+            l->address = CLEAN_RX_LAYOUT_ADDR + 4u*i;
+            l->actual = value;
+            return fail(l, CLEAN_INPUT);
+        }
+    }
+    return 1;
+}
+
 int clean_boot(clean_loader_t *l, const uint8_t *image, uint32_t length,
                uint32_t channel, uint32_t generation, uint8_t tx_enabled) {
     if (image == 0 || length < 256u || length > 0x14000u || (length & 3u) ||
@@ -364,6 +379,7 @@ int clean_boot(clean_loader_t *l, const uint8_t *image, uint32_t length,
     if (!clean_write(l, CLEAN_MBOX + 24u, 1u) ||
         !clean_wait_state(l, 8u, 2000000u)) return 0;
     l->stage = 6u;
+    if (!clean_check_layout(l)) return 0;
     l->rx_consumed = 0u;
     l->rx_credit = CLEAN_SDIO_WINDOW;
     return 1;

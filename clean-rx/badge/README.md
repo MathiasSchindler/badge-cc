@@ -27,6 +27,58 @@ complete 802.11b/g MAC operation or general-purpose station reliability.
 The separate controlled WPA2 qualification
 below proves a bounded encrypted exchange, not sustained networking.
 
+**802.11n:** D1's [HT20 implementation target](../doc/HT20_IMPLEMENTATION.md)
+defines the conservative mixed-mode, single-stream MCS0-MCS7 profile and
+maps current firmware gaps. Ordinary HT operation is not enabled or
+advertised. Tested framing helpers, a default-disabled one-frame TX probe,
+and raw HT diagnostics are implemented. Correcting the mixed-mode
+register interface to separate RATE/LENGTH fields produced fresh valid
+captures at every MCS0-MCS7 in both directions. A separate experiment
+confirmed hardware HT-SIG CRC regeneration. The 48 all-rate one-frame
+trials had 39 exact raw captures and 38 F2 deliveries, so this is a bounded
+D1 mapping result, not reliable/general HT operation or independent-peer
+qualification.
+See the map's build/run instructions and evidence limits.
+Native tests preserve legacy-only association even when an AP advertises
+HT/WMM.
+
+**D2 in progress:** a separate `CLEAN_RX_HT_DATA=1` build adds a versioned,
+one-frame broadcast HT payload API (MCS0-MCS7, 28..2,332-byte MPDUs), validated
+HT RX metadata and capture retention across F2 backpressure. The paired
+`ht_probe.sh` accepts an optional fifth MPDU-length argument to select this
+path. HT/WMM beacon profiling records peer EDCA parameters and explicit
+fallback reasons, but does not enable HT association or execute EDCA.
+An additional `CLEAN_RX_HT_RX=1` build expands raw receive storage to
+3,896-byte MPDUs, checks upper SHM on chip and validates host/controller
+layout compatibility. Passing `3869 --extended-rx` to the paired script
+selects its fixed version-2, No-Ack QoS A-MSDU diagnostic: two MSDUs inside
+the mandatory-minimum 3,839-byte aggregate, delivered through three F2
+fragments and validated/deaggregated on the badge. It is not negotiated HT,
+Block ACK, A-MPDU reception or general QoS station delivery.
+The additional, default-disabled `CLEAN_RX_HT_RESPONSE=1` gate requires
+extended RX and adds pinned-radio QoS/HT normal-ACK response logic.
+`ht_probe.sh TX RX PREFIX MCS --ack` uses its matching `ht-ack` build for a
+fixed 60-byte normal-ACK QoS diagnostic using live PSM/RX and automatic
+PHY turnaround (API version 4). `--ack-raw` retains the raw-TX/version-3
+control, which restores RX too late for this ACK exchange. The standalone
+clocked TX collector flag is `--ht-ack-clocked-tx`; RX remains `--ht-ack-rx`.
+Reports distinguish full fresh HT delivery, response starts and an actual
+returned ACK, including its complete FCS and legacy PLCP. Clocked success
+requires exactly one TX attempt and independently validated ACK/address/rate
+evidence, not just local response counters.
+The earlier full-evidence matrix passed 12/16 exchanges: three failures never
+transmitted and one transmitted frame timed out. Access-state repeats
+exposed invalid backoff operands. The DCF transition now stages its counter
+and separates the SHM load from its first comparison; out-of-range values
+fail explicitly with controller error `0x8e`. Frozen diagnostics include
+the last draw, before/after counter values and a TSF sample. Three bounded
+all-MCS/direction sweeps subsequently launched 48/48 frames without access
+faults, but only 37/48 completed verified ACK exchanges. The remaining
+11 transmitted-frame failures are retained, not counted as successful HT.
+RF SIFS/reliability qualification, EDCA, protection and Block ACK remain
+open; neither this diagnostic nor a response counter enables HT/WMM association.
+See [D2 API, build instructions and remaining gates](../doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
+
 ## Source layout and maintenance
 
 - [`../src/`](../src/) contains the CYW43439 firmware and portable shared code:
@@ -179,7 +231,9 @@ Implemented paths:
 - OFDM response classification reads PHY status 0's frame-type field, retaining
   the legacy G-PHY OFDM indicator as a fallback. The latter alone is insufficient
   on this LP PHY: real 6-Mbps receptions had RX flags `0x0440`, without bit 13.
-  Unsupported HT frame types are rejected. The complete ACK/CTS replacement
+  HT is rejected by default. The separate HT response gate permits only
+  the supported HT20 mixed-mode profile and normal-ACK QoS policy.
+  The complete ACK/CTS replacement
   header, masks, byte count and crypto bypass are prepared before TX is armed
   and explicitly triggered. TXE ownership remains reserved through scheduled
   start and the physical TX tail, including periods when PHYDEBUG's byte strobe
@@ -230,15 +284,20 @@ Implemented paths:
   Reassembled packets carry `packet[17] = 1`: their reconstructed FCS is **not**
   an original over-air FCS or RF timing measurement.
 - Protected frames bypass the unauthenticated duplicate cache. After each
-  non-QoS fragment passes CCMP MIC and PN checks, a separate authenticated
+  supported data fragment passes CCMP MIC and PN checks, a separate authenticated
   cache/reassembly state accepts it. Subsequent fragments must have consecutive
   PNs, consistent headers/addresses and sequence, and the supported pairwise
   Key ID. Reassembly retains the Protected bit as a cache-domain discriminator;
   it never mixes authenticated and unauthenticated fragments. It has the same
   16-fragment/2,304-byte/lifetime bounds. Reconstructed plaintext/FCS stays
-  internal, and plaintext is wiped on delivery or terminal protocol failure.
-  Protected QoS fragmentation remains unsupported. The existing WPA QoS parser/replay path is preserved, not
-  represented as newly implemented QoS MAC support. Pending WPA transmissions
+  internal, and plaintext is wiped on delivery, expiry or terminal protocol failure.
+  QoS reception has 16 independent TID duplicate/fragment contexts, now used
+  by the existing WPA QoS receive path. Idle station polling expires assemblies
+  without requiring another packet on the same TID. Protected A-MSDUs,
+  Block ACK/No Explicit Ack policy, four-address and HT Control frames remain
+  unsupported; this does not enable WMM/HT negotiation. The isolated response
+  prototype described above is separately gated, not an EDCA scheduler.
+  Pending WPA transmissions
   survive zero-attempt `BUSY` results without advancing submission counters or
   allocating another protected PN.
 - Authentication/association budgets now count actual submissions, not `BUSY`
@@ -293,7 +352,7 @@ Bad-FCS counts include unrelated channel traffic; they are not bound-peer loss.
 Station evidence at detail offset 1680 contains `MAC1` plus unprotected
 delivery, duplicate, fragment, malformed, unsupported, expiry and fragment-error
 counters. Offset 1712 contains the radio status; offset 1776 contains a separate
-`MAC1` report for authenticated non-QoS reception/reassembly. PN replays are
+`MAC1` report summing authenticated non-QoS and all QoS TID receive counters. PN replays are
 rejected before this second cache, not counted as authenticated-cache duplicates.
 The collector reports these
 as `mac_*` fields; `mac_rx_waits` counts backpressure polls, **not lost packets**.
@@ -332,8 +391,12 @@ valid beacon result; truncated packets are ignored and malformed complete
 beacons still report parser errors. None of these simulated events counts as
 OTA traffic.
 WPA tests exercise authenticated 16-fragment reception at 32, 1,500 and
-2,304 payload bytes, PN carry/continuity, MIC/header/key-ID/order failures,
-expiry, overflow and plaintext wiping. These are native tests, not OTA
+2,304 payload bytes, both legacy and 16 simultaneously interleaved QoS TIDs,
+PN carry/continuity, MIC/header/key-ID/order failures, per-TID duplicates,
+idle expiry across timer wrap, overflow and plaintext wiping. The shared
+QoS core also covers normal/No Ack policy, QoS Null and plaintext A-MSDUs;
+unsupported Block ACK policies and protected aggregates remain rejected.
+These are native tests, not OTA
 qualification of those new paths.
 Loader/DMA-credit, WPA2/crypto, secret-provisioning and Micro Signal regressions
 pass; all ten existing Micro Signal modes build, and both freestanding ELFs

@@ -441,11 +441,74 @@ See [fixture usage and detailed evidence](clean-rx/badge/README.md#dssscck-rate-
 
 ### D1. Confirm the implementation target
 
-- [ ] Map the datasheet-supported HT20, single-stream MCS0-MCS7 capabilities to
+- [x] Map the datasheet-supported HT20, single-stream MCS0-MCS7 capabilities to
   actual PHY/MAC controls, framing, receive status and firmware requirements.
-- [ ] Document optional capabilities separately. Do not advertise short GI,
+- [x] Document optional capabilities separately. Do not advertise short GI,
   STBC, beamforming or aggregation modes until their exact support is
   established and implemented. Do not assume HT40 or additional spatial streams.
+
+**D1 complete for the conservative control/framing target, not for a
+general HT station or reliability qualification.** See the
+[HT20 implementation target](clean-rx/doc/HT20_IMPLEMENTATION.md).
+The selected baseline is 2.4-GHz HT20 mixed mode, one spatial stream,
+MCS0-MCS7, BCC and 800-ns GI. The repository datasheet's internal revision
+is 002-30348 Rev. *B; Table 25 provides the mixed-mode MCS/GI evidence.
+Pinned public D11 references and hardware readback identified the direct
+template interface. The earlier failure was writing serialized L-SIG bits:
+`0x0bab` at `+0x510` read back as `0x000b`. These registers require separate
+RATE (`+0x510 = 0xb`, legacy 6 Mbps) and protection LENGTH
+(`+0x512 = 3*Nsym+9`), not packed SIGNAL bytes. Selector `0x42` and all
+eight MCS PHYCTL1 values now produce fresh HT20 captures in both directions.
+Control/template readback and nonzero PHY errors are explicit failures.
+
+Opcode 11 is an explicit, default-disabled diagnostic: an opt-in build
+permits one fixed synthetic broadcast frame, without association or ACK.
+Command/frame bit-corruption and station/default gates have native tests;
+the final default gate also rejected TX on hardware with error `0x85`.
+An isolated, compile-time CRC-only experiment zeroed HT-SIG CRC bits in
+the readback-verified TX template; fresh peer captures still had valid
+nonzero CRC. Hardware regenerates that CRC in the tested path; software
+retains strict input/RX validation and zero tail bits.
+
+Same-frame raw RX diagnostics captured external HT20 MCS1, 800-ns-GI
+frames with valid HT-SIG CRC and MPDU FCS: six-byte HT-SIG
+`013900061402`, PSDU 57 bytes, RXE 63 bytes, PHY status0 `0x0102`.
+Controlled probes now extend this to all eight MCS values: six HT-SIG
+bytes, RXE length 94 for an 88-byte PSDU, terminal PHY status0 `0x0002`.
+Raw early PHY bits proved unreliable and are not used as a format
+decision. New PSM traces distinguish candidate headers and good/bad
+terminal paths; full-prefix matching prevents stale completion updates.
+RX smoothing zero remains accepted and regression-tested.
+
+All-rate build `4bc556b3` ran 48 fresh one-frame trials, three per
+MCS/direction. Every cell had a fresh valid capture: 39/48 raw controller
+captures, 38/48 full F2 deliveries. One exact fresh GoodFCS MPDU was
+captured but not delivered over F2. Of the other nine unmatched trials,
+four had no candidate, three reached a bad receive path with valid
+HT-SIG and length 94, and two retained early-only evidence. These losses
+remain unresolved; this is not a reliability pass.
+The CRC experiment (`636a7d0a`) had 4/6 fresh raw captures, 3/6 F2
+deliveries. Final normal build `c81def60` again captured MCS0 and MCS7
+in both directions (5/6 and 2/6 full matches). Individual TX status is
+still not OTA proof; the paired fresh-frame reports provide that proof.
+Independent implementation interoperability remains a D2 gate.
+
+Native tests now exhaust 196,608 nonlegacy RX metadata combinations, test
+that open/WPA2 HT/WMM peer beacons do not enable local HT advertisements,
+and extend PSM rejection checks for conflicting PHY flags. Ordinary
+station operation stays legacy-only; no HT capabilities are advertised.
+The target also records why minimum advertised HT aggregation/receive
+sizes cannot be equated with the current 2,400-byte MPDU limit. D2's raw
+PHY bring-up must not be mistaken for a complete HT station; QoS/EDCA and
+the required HT receive/Block ACK path remain gates.
+
+Validation: both controller builds, native suites, sanitized loader/HT
+tests and existing Micro Signal regression builds passed. Default build
+`b5ab34c5` passed cyclic-size 2-Mbps long-preamble and OFDM6 controls,
+30 delivered/ACKed frames per direction each, zero failures or PHY
+mismatches. Both badges' originals were restored and independently
+compared: A's 33,604-byte application, B's full 16-MiB flash. Both are
+left in BOOTSEL. No unrelated experiment directories were changed.
 
 ### D2. HT PHY and association
 
@@ -455,6 +518,291 @@ See [fixture usage and detailed evidence](clean-rx/badge/README.md#dssscck-rate-
   profile; parsing a QoS header alone is insufficient.
 - [ ] Verify association capabilities and actual OTA HT framing against an
   independent HT20 peer, with explicit legacy fallback.
+
+**D2 in progress; not an enabled HT station.** The following implementation
+steps are complete, without closing the broader requirements above:
+
+- [x] Add a separate, default-disabled, versioned HT20 payload API with
+  explicit MCS/profile/length validation and the verified mixed-mode TX
+  controls. Version 1 sends one non-QoS broadcast MPDU, 28..2,332 bytes,
+  without ACK/retries or a station profile. Enforce the 2,304-byte MSDU
+  limit independently of the larger raw storage capacity.
+- [x] Add CRC-checked HT20 RX metadata without changing legacy metadata or
+  MPDU offsets; preserve profile/MCS/channel through split F2 delivery.
+  Retain completed captures across host/SDIO backpressure in the opt-in
+  build rather than release an unposted frame.
+- [x] Parse HT capability/operation and WMM AP EDCA parameters, validate
+  basic MCS/channel/parameter consistency, and report explicit legacy
+  fallback reasons. Preserve byte-identical legacy association requests
+  for open/WPA2 peers, even after optional-element errors or WMM changes.
+- [x] Preserve saved association-response evidence when publishing the HT
+  peer report: compact version-2 report at offset 1040, with an integrated
+  association-evidence regression.
+- [x] Add a separately gated 3,896-byte MPDU receive layout, on-chip upper-SHM
+  capacity/alias checks, relocated DMA buffers, three-fragment F2 transport
+  and a checked host/controller layout manifest. Keep the default layout.
+- [x] Implement full 3,839-byte plaintext A-MSDU validation and zero-copy
+  deaggregation, rejecting malformed/truncated aggregates before exposing
+  any subframe. Verify a fixed two-MSDU aggregate over the air through the
+  extended receive path; retain the independent-peer/negotiation gate.
+- [x] Implement native-verified per-TID QoS duplicate/fragment state and
+  integrate authenticated QoS reassembly with the existing CCMP receive path.
+  Preserve per-TID replay counters, require consecutive fragment PNs, reject
+  protected A-MSDUs and unsupported ACK policies, and wipe expired plaintext.
+- [x] Add a separately gated QoS/HT PSM normal-ACK response prototype,
+  HT-to-legacy basic-rate tables, safe deferred policy updates and a fixed
+  one-frame normal-ACK diagnostic. Native and on-chip response-start tests
+  pass; these counters alone do not qualify returned ACKs or SIFS timing.
+- [x] Add an isolated, clocked HT normal-ACK fixture using live PSM/RX,
+  automatic PHY turnaround and the existing DCF/ACK-wait path. Save the
+  actual returned ACK, FCS and legacy PLCP before internal consumption;
+  require independent address/FCS/rate validation for paired-test success.
+  This is bounded diagnostic evidence, not general HT station qualification.
+- [x] Replace the failing DCF slot operand/decrement sequence with a staged
+  register transition and a separated SHM-load/branch consumer. Add bounded
+  counter checks, explicit controller faults and frozen transition evidence.
+  Verify all 48 launches in three bounded MCS/direction sweeps; this does
+  not close shared-medium access or HT receive-reliability qualification.
+- [ ] Implement actual EDCA/QoS access and HT protection/response behavior,
+  meet receive-size/required HT MAC obligations jointly with D3, then wire
+  association negotiation and independent-peer verification.
+
+Opcode 12 and its eight-byte versioned descriptor are documented in the
+[D2 implementation/API notes](clean-rx/doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
+The `CLEAN_RX_HT_DATA=1` build is separate from D1's fixed probe and CRC
+experiment. Normal association remains legacy-only, and
+`ht_advertised:false` plus the local-MAC fallback reason remain explicit.
+WMM parsing is not EDCA execution; large-frame diagnostics are not HT
+station receive-size or aggregation qualification.
+
+**D3 prerequisite work pulled forward with approval:** the minimum-size
+receive foundation above is now implemented, but D2 is still **not finished**.
+The extended image uses `CLEAN_RX_HT_RX=1` together with `CLEAN_RX_HT_DATA=1`.
+It verifies the upper SHM bank with MAC/PSM halted, supports three physical
+F2 fragments per logical frame, and checks an eight-word SRAM layout
+manifest before starting RX. Native tests cover every transport length
+through 3,896 bytes, incomplete/mismatched third fragments, unchanged
+credits on failure, and all eight manifest-field mismatches.
+
+A separate version-2 diagnostic sends exactly one unprotected, No-Ack QoS
+MPDU of 3,869 bytes: a 26-byte header, a 3,839-byte A-MSDU containing
+2,304- and 1,505-byte MSDUs, and FCS. Version 1 retains its non-QoS
+2,304-byte MSDU limit. Build `941546f0` completed all 16 MCS/direction
+trials, with 12 fresh full deliveries; the four failures remain recorded.
+Twelve bounded repeat trials produced seven fresh deliveries, establishing
+at least one full aggregate delivery at every MCS in both directions
+without erasing any failures. The first reverse-MCS0 failure had no early
+candidate; the other three original failures reached an early receive
+error without a completed capture. Their causes remain unresolved.
+Final build `9a581374`, with explicit halted-bank checking and the manifest
+also published by transport-only firmware, passed both-direction MCS0
+aggregate smoke tests. Saved USB evidence remains a prefix, not a complete
+external large-frame capture.
+
+Default build `18882dbb` rejected HT data before TX (`0x85`) and passed
+30 ACKed/delivered frames per direction at both OFDM6 and 2-Mbps long
+preamble, cycling 32/1,500/2,304-byte payloads. Default/extended native
+suites and Micro Signal regression builds passed. Both original full
+16-MiB flashes were restored and independently compared against fresh
+pre-test snapshots; both badges are in BOOTSEL.
+
+**QoS receive continuation:** the shared receive core now has 16 independent
+TID contexts, each with bounded duplicate history and one 16-fragment,
+2,304-byte MSDU assembly. The existing WPA QoS path now uses those contexts
+after MIC/replay validation instead of bypassing MAC duplicate/reassembly
+state. Incomplete assemblies expire after 512 ms, including idle station
+polling and timer wrap; plaintext is wiped on expiry, delivery and terminal
+protocol failure. Protected A-MSDUs, Block ACK/No Explicit Ack policy,
+four-address frames and HT Control remain unsupported, not silently enabled.
+Plaintext A-MSDUs are validated before committing duplicate history.
+Protected receive diagnostics sum legacy and all TID counters.
+
+Default and extended native suites passed with sanitizers, including
+16 interleaved TIDs each carrying 16 fragments at 32/1,500/2,304-byte MSDU
+sizes, sequence/PN carry, duplicate retries, malformed headers, MIC and PN
+continuity failures, overflow, expiry and wiping. Native tests also feed
+the full 3,839-byte A-MSDU through the new QoS core. These are **not** OTA
+QoS/fragment qualification.
+
+Default build `5115ae14` passed three fresh protected station exchanges
+against the unchanged vendor AP, each with a matching independent AP
+observation, and one wrong-password negative control. It also passed
+30 ACKed/delivered cyclic-size frames per direction at OFDM6 and 2-Mbps
+long preamble. Extended build `dbb6d9e2` passed both-direction MCS0
+3,869-byte A-MSDU smoke tests. Evidence is under `d2-qos-*` in
+`build/clean-rx/badge/`. Default/extended badge BSS is 221,256/225,744 bytes;
+the per-TID state is statically allocated, with no new dependencies.
+Both original full 16-MiB flashes were restored and independently compared
+against fresh backups; both badges are in BOOTSEL.
+
+**HT/QoS response continuation:** `CLEAN_RX_HT_RESPONSE=1`, requiring the
+extended receive layout, enables opcode 14 for pinned profile-3 radios.
+Response changes defer until RX/response ownership is idle. QoS Data/Null
+normal-ACK policy and HT20 mixed-mode MCS0-MCS7/BCC/800-ns-GI response
+selection now run inside the final-GoodFCS PSM path. No-Ack/Block ACK
+policies, four-address/HT Control and unsupported HT PHY profiles do not
+trigger normal ACKs. HT response rates use the highest basic rate at or
+below the non-HT reference rate, including CCK rather than reusing the
+legacy same-modulation selector. The default response policy stays disabled.
+
+The new API-version-3 fixture is exactly one nonce-bound, 60-byte,
+unprotected, three-address QoS MPDU with normal ACK policy, TID 0..15 and
+correct reserved ACK airtime for the diagnostic's OFDM basic set. It is
+not arbitrary QoS injection or negotiated station TX.
+Native tests cover all 4,095 nonempty basic sets at every MCS, all receive
+lengths, all TIDs/ACK policies, malformed profiles/addresses and API gates.
+
+Opt-in build `7b4c37c8` produced 13 fresh full deliveries and one error-free
+PSM response start per delivery in a 16-cell MCS/direction matrix.
+Three bounded repeats added two fresh deliveries; the reverse-MCS7 repeat
+still failed. All failures are retained under `d2-response-*`. No return
+ACK was observed by the transmitter in these 19 trials. PSM-local delays
+of 1..2 us are not PHY-end-to-ACK SIFS measurements. **Neither reliable HT
+ACK reception nor RF SIFS timing is qualified.** Earlier build `5c4921cb`
+had 10/16 matching matrix deliveries and an ambient-RX policy-update
+failure; the latter motivated deferred updates, not an RF-loss fix.
+Final collector build `5ecb6600` makes a returned ACK mandatory for the
+paired ACK test to succeed. A fresh MCS1 trial delivered the full frame
+and started one error-free response, but correctly failed the paired test
+because no return ACK was received. Local counters cannot pass this gate.
+
+Default build `b83a299b` passed 30 ACKed/delivered cyclic-size frames per
+direction at OFDM6 and 2-Mbps long preamble, plus a fresh vendor-AP WPA2
+positive exchange and a wrong-password negative control with matching
+independent AP observations. Both default/opt-in builds and native suites
+pass, with no new firmware dependencies. Both complete original 16-MiB
+flashes were restored and independently compared against fresh pre-test
+snapshots; both badges are in BOOTSEL.
+
+**Clocked HT ACK continuation:** the raw diagnostic halts PSM/RX and forces
+TX, then waits conservatively after MAC byte drain before restoring RX.
+That restoration is too late for an ordinary SIFS ACK exchange; byte drain
+is not physical PPDU completion. API version 4 instead keeps PSM/RX live
+and uses automatic PHY turnaround, PSM-clocked contention and bounded ACK
+acceptance. It reuses the fixed 60-byte QoS fixture, permits exactly one
+actual TX attempt, and requires pinned profile 3, response policy 3,
+OFDM6/12/24 basic mask `0x150` and short slots. Raw version 3 remains a
+separate control; no normal association or arbitrary QoS TX is enabled.
+
+The PSM saves the expected, correctly addressed ACK at final GoodFCS before
+consuming it internally. Version-2 evidence is 32 bytes, including TSF/PHY,
+all 14 ACK bytes and the six-byte legacy PLCP. The host requires exactly one
+attempt, controller ACKED, one fresh saved ACK, valid FCS/RA and the expected
+6/12/24-Mbps response rate. Native tests cover descriptor/profile/policy
+gates, all MCS/TIDs, evidence corruption, PLCP/rate checks and PSM
+address/length/deadline gates. Default/opt-in native suites pass.
+
+Intermediate build `4baa273b` completed 13/16 strict ACK exchanges. Build
+`4f1bd5e9`, adding full PLCP evidence and exact basic/slot policy gates,
+completed **12/16** strict exchanges: three failures made **zero actual TX
+attempts** before the 200-ms access deadline, and one transmitted reverse
+MCS7 frame timed out after an early RX error at its peer. All 12 successful
+ACKs were independently checked with zlib FCS, fresh RA and complete PLCP
+rate/length/parity checks, alongside matching peer delivery/response counts.
+A raw forward-MCS0 control delivered the data and started a response but
+missed the return ACK, supporting the RX-turnaround diagnosis.
+
+Diagnostic build `393935f8` retains that controller and adds frozen
+MAC/IFS/backoff snapshots on failure. Four bounded repeats added reverse
+MCS2/7 ACK successes; forward MCS3 and reverse MCS0 still failed without TX.
+Their snapshots have valid layout magic, no pending policy/NAV and idle
+IFS samples, but remaining backoff counts of **18,000/21,300 with CW 15**.
+This was an unresolved scheduler/counter fault, not evidence of a busy RF
+channel; the continuation below investigates its operand dependencies. Do not hide
+it by extending deadlines, masking the counter or counting BUSY as RF loss.
+All original failures remain under `d2-clocked-*` in `build/clean-rx/badge/`.
+
+Default build `be5b417d` passed 30 ACKed/delivered cyclic-size frames per
+direction at both OFDM6 and 2-Mbps long preamble. WPA2 positive and
+wrong-password controls passed against the unchanged vendor AP with
+matching independent AP authorization/protected-traffic observations.
+Both original full 16-MiB flashes were restored and independently compared
+against this batch's pre-test backups; both badges are in BOOTSEL.
+Returned ACKs are now demonstrated for the bounded clocked fixture;
+reliable HT access, independently measured RF SIFS and interoperability
+remain unqualified. HT/WMM advertisement stays disabled.
+
+**DCF operand-visibility continuation:** instrumented the last configured
+draw, PSM before/after values and TSF sample, without extending the access
+deadline or allowing an extra actual TX attempt. A 20-launch spacing
+experiment avoided the fault, but restoring the adjacent SHM decrement/
+branch reproduced a zero-attempt failure with 15,574 remaining slots.
+Register staging alone was also insufficient: build `5332172b` trapped
+three invalid operand values (35,046/23,297/60,025) in 32 trials, before TX.
+The actual SHM counter was zero in those frozen snapshots. That rules out
+explaining these observations as ordinary contention or just a large
+legitimate backoff; the flat native interpreter did not model this on-chip
+operand-visibility behavior.
+
+The retained sequence loads slots into a register, samples TSF independently
+before the first register comparison, decrements/commits the staged value
+and branches on that register rather than the just-written SHM word.
+Structural native tests preserve this ordering. The exact silicon
+writeback/visibility timing is not independently characterized; this is a
+tested repair of the observed sequence, not a general ISA timing claim.
+Values above the legal maximum 1,023 disable PSM contention and raise
+controller error `0x8e` with the offending value. Error snapshots preserve
+an already-faulted controller rather than trying to stop it as if still
+running. The three intermediate hardware faults verified this fail-closed
+path naturally, with zero actual attempts.
+
+Builds `c933fd3f`/`2b7315ae` completed **48/48 actual one-attempt launches**
+across three full MCS/direction sweeps, with zero access errors, corrupt
+counter observations or range-guard trips. **37/48** completed strict
+returned-ACK exchanges; every success passed independent zlib FCS,
+fresh-address and complete PLCP/rate checks against its matching peer.
+The 11 failures all transmitted: six had no early peer candidate and five
+had an early RX error, with no fresh data delivery or response start.
+They remain RF/receive failures, not successful HT exchanges.
+Final build `fb981a82` additionally invalidates stale counter-trace magic
+at controller startup and passed both-direction MCS0 ACK smoke tests.
+
+Default build `d575252e` passed 30 ACKed/delivered cyclic-size frames per
+direction at OFDM6, 2-Mbps long preamble and OFDM6 with exactly three
+deliberately suppressed ACKs per endpoint. All had zero corruption and
+controller faults; retries/timeouts remain reported, not erased.
+The earlier 16-suppression exhaustion trial did not pass the positive soak:
+its initiator reached the existing eight-attempt budget; the peer then
+stopped waiting for progress. Actual suppression was 6/8, not 16 each.
+Final vendor-AP WPA2 positive and wrong-password controls passed with
+matching independent authorization/protected-traffic observations.
+Default/opt-in native suites pass, including all 16 CWmin draws, expanded
+CW boundaries, 700-ms idle periods across TSF wrap and corrupt-value gates.
+Both original complete 16-MiB flashes were restored and independently
+compared against fresh pre-test backups; both badges are in BOOTSEL.
+Evidence remains under `d2-backoff-*` in `build/clean-rx/badge/`.
+
+Still required before D2 closure: actual AP-driven EDCA/QoS contention,
+longer access/operand-visibility qualification, HT ACK reliability/SIFS
+qualification and protection behavior, negotiated/OTA
+QoS and protected aggregate
+integration, Immediate Block ACK agreements/windows/reordering and required
+A-MPDU reception, then negotiated HT association and an independent HT20
+peer. The new A-MSDU parser is wired into the bounded receive diagnostic,
+not enabled as a negotiated station delivery path. Permanently declining
+ADDBA is not a substitute for implementing mandatory HT Block ACK behavior.
+
+Hardware progress: build `61902238` completed 47/48 planned paired trials
+at MCS0-MCS7 and 60/512/2,332-byte MPDUs, with 32 fresh full host
+deliveries. One incomplete collection is excluded, not treated as RF loss;
+15 completed receive trials did not match. These failures are unresolved.
+The final `c6915690` build also invalidates prepared transport state at
+explicit raw capture-discard/rearm boundaries; its six full-size smoke
+trials passed at MCS0/MCS1/MCS7 in both directions, each with an exact
+2,304-byte payload and FCS. This is not an all-rate reliability pass or
+proof that the earlier losses are fixed. Large payloads are checked in full
+on the badge; USB evidence saves only a prefix, whose bytes and expected
+FCS were independently reconstructed with zlib.
+
+Native HT/peer-profile and loader/transport tests, PSM/MAC, WPA2/secret
+tests and existing Micro Signal regression builds passed. D1's fixed probe
+still passed in both directions. Default build `88cbc56d` rejected the
+new opcode before TX (`0x85`) and passed 2-Mbps long-preamble CCK/OFDM6
+controls, 30 ACKed/delivered frames per direction each, zero corruption,
+duplicates or PHY mismatches. Both badges were restored and independently
+compared over their complete 16-MiB flashes against fresh pre-test backups;
+both remain in BOOTSEL. See the linked implementation notes for build IDs,
+exclusions and remaining D2 gates.
 
 ### D3. HT MAC and performance
 

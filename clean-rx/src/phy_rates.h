@@ -113,11 +113,7 @@ static inline uint32_t clean_ofdm_airtime_us(uint32_t mpdu_length, uint32_t rate
     return 20u + 4u * symbols + 6u;
 }
 
-static inline int clean_ofdm_plcp_rate(uint8_t frame[6], uint32_t mpdu_length,
-                                       uint32_t rate_index) {
-    if (rate_index >= CLEAN_OFDM_RATES || mpdu_length < 14u || mpdu_length > 4095u)
-        return 0;
-    uint32_t signal = clean_ofdm_rates[rate_index].signal | (mpdu_length << 5u);
+static inline void clean_ofdm_signal_encode(uint8_t frame[6], uint32_t signal) {
     uint32_t parity = 0u;
     for (uint32_t bits = signal; bits != 0u; bits >>= 1u) parity ^= bits & 1u;
     signal |= parity << 17u;
@@ -125,6 +121,13 @@ static inline int clean_ofdm_plcp_rate(uint8_t frame[6], uint32_t mpdu_length,
     frame[1] = (uint8_t)(signal >> 8u);
     frame[2] = (uint8_t)(signal >> 16u);
     frame[3] = frame[4] = frame[5] = 0u;
+}
+
+static inline int clean_ofdm_plcp_rate(uint8_t frame[6], uint32_t mpdu_length,
+                                       uint32_t rate_index) {
+    if (rate_index >= CLEAN_OFDM_RATES || mpdu_length < 14u || mpdu_length > 4095u)
+        return 0;
+    clean_ofdm_signal_encode(frame, clean_ofdm_rates[rate_index].signal | (mpdu_length << 5u));
     return 1;
 }
 

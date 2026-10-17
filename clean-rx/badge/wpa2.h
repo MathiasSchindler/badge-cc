@@ -18,7 +18,9 @@ typedef struct {
     uint32_t gtk_info;
     uint16_t sequence;
     clean_mac_rx_t rx_mac;
+    clean_qos_rx_t rx_qos;
     uint8_t rx_mpdu[CLEAN_MPDU_BYTES], fragment_pn[6];
+    uint8_t qos_fragment_pn[16][6];
 } clean_wpa_t;
 
 void clean_wpa_init(clean_wpa_t *s, const uint8_t secret[64], const uint8_t mac[6],
@@ -28,5 +30,6 @@ int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
                        uint8_t response[512], uint32_t *length);
 uint32_t clean_wpa_probe(clean_wpa_t *s, uint8_t frame[512]);
 int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t now);
+void clean_wpa_rx_expire(clean_wpa_t *s, uint32_t now);
 
 #endif

@@ -8,6 +8,7 @@
 #include "../src/unicast.h"
 #include "../src/tx_diag.h"
 #include "../src/mac_soak.h"
+#include "../src/ht20.h"
 
 static uint32_t ticks, calls, blocks, state, base;
 static int cancel, mismatch, bus_error, terminate_error, f2_post_status, ack_error;
@@ -17,6 +18,8 @@ static uint32_t fifo_status, terminations;
 static uint8_t f2_packet[CLEAN_RX_PACKET_BYTES];
 static uint8_t f2_next[CLEAN_F2_PACKET_BYTES];
 static uint32_t f2_next_size, f2_reads;
+static uint8_t f2_last[CLEAN_F2_PACKET_BYTES];
+static uint32_t f2_last_size;
 static int f2_second_error, f2_cancel_next;
 static int f2_check_credit;
 static uint32_t f2_expected_credit;
@@ -73,7 +76,9 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
         if (f2_next_size != 0u) {
             memcpy(f2_packet, f2_next, sizeof(f2_next));
             f2_status = 0x100u | (f2_next_size << 9u);
-            f2_next_size = 0u;
+            memcpy(f2_next, f2_last, sizeof(f2_next));
+            f2_next_size = f2_last_size;
+            f2_last_size = 0u;
         } else if (f2_post_status) f2_status = f2_after_status;
         if (f2_cancel_next) cancel = 1;
         return WIFI_BUS_OK;
@@ -156,18 +161,26 @@ static void fragments(const wifi_wire_t *wire) {
             badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, 1234u);
             uint32_t first = fragment(f2_packet, mpdu, 0u);
             f2_next_size = fragment(f2_next, mpdu, CLEAN_F2_FRAGMENT_BYTES);
+            if (mpdu > 2u * CLEAN_F2_FRAGMENT_BYTES)
+                f2_last_size = fragment(f2_last, mpdu, 2u * CLEAN_F2_FRAGMENT_BYTES);
             uint32_t rate = mpdu % CLEAN_CCK_RATES;
             uint8_t meta = clean_rx_phy_metadata(rounded && rate ? 0x80u : 0u, 0u, 1u);
             f2_packet[15] = f2_next[15] = clean_cck_rates[rate].signal;
             f2_packet[16] = f2_next[16] = meta;
+            if (f2_last_size) {
+                f2_last[15] = f2_next[15];
+                f2_last[16] = meta;
+            }
             if (rounded) {
                 first = (first + 3u) & ~3u;
                 f2_next_size = (f2_next_size + 3u) & ~3u;
+                if (f2_last_size) f2_last_size = (f2_last_size + 3u) & ~3u;
             }
             f2_status = 0x100u | (first << 9u);
             f2_reads = 0u;
             assert(clean_receive(&l, packet, &length) && length == mpdu + 18u);
-            assert(f2_reads == 2u && packet[14] == 0x20u);
+            assert(f2_reads == (mpdu + CLEAN_F2_FRAGMENT_BYTES - 1u) /
+                               CLEAN_F2_FRAGMENT_BYTES && packet[14] == 0x20u);
             assert(packet[15] == clean_cck_rates[rate].signal && packet[16] == meta);
             assert(badger_bytes_load_u32(packet) ==
                    (length | ((length ^ 0xffffu) << 16u)));
@@ -182,7 +195,7 @@ static void fragments(const wifi_wire_t *wire) {
 #endif
         }
     }
-    for (uint32_t fault = 0u; fault < 18u; ++fault) {
+    for (uint32_t fault = 0u; fault < (CLEAN_F2_MAX_FRAGMENTS > 2u ? 27u : 19u); ++fault) {
         f2_expected_credit = 0u;
         f2_after_status = 0u;
         clean_loader_init(&l, wire, service, NULL);
@@ -190,6 +203,8 @@ static void fragments(const wifi_wire_t *wire) {
         badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, 0u);
         uint32_t first = fragment(f2_packet, CLEAN_MPDU_BYTES, 0u);
         f2_next_size = fragment(f2_next, CLEAN_MPDU_BYTES, CLEAN_F2_FRAGMENT_BYTES);
+        if (CLEAN_F2_MAX_FRAGMENTS > 2u)
+            f2_last_size = fragment(f2_last, CLEAN_MPDU_BYTES, 2u * CLEAN_F2_FRAGMENT_BYTES);
         f2_status = 0x100u | (first << 9u);
         f2_reads = 0u;
         if (fault == 0u) f2_packet[2] ^= 1u;
@@ -215,14 +230,23 @@ static void fragments(const wifi_wire_t *wire) {
         if (fault == 16u)
             f2_next_size = fragment(f2_next, CLEAN_MPDU_BYTES, 0u);
         if (fault == 17u) f2_next[16] ^= CLEAN_RX_SHORT_PREAMBLE;
+        if (fault == 18u) f2_next[17] ^= CLEAN_HT_DATA_VERSION;
+        if (fault == 19u) f2_last[20] ^= 1u;
+        if (fault == 20u) f2_last[4] ^= 1u;
+        if (fault == 21u) f2_last[15] ^= 1u;
+        if (fault == 22u) f2_last[16] ^= CLEAN_RX_SHORT_PREAMBLE;
+        if (fault == 23u) f2_last[17] ^= CLEAN_HT_DATA_VERSION;
+        if (fault == 24u) f2_last[2] ^= 1u;
+        if (fault == 25u) f2_last[18] ^= 1u;
+        if (fault == 26u) f2_last_size = 0u;
         assert(!clean_receive(&l, packet, &length) && length == 0u);
         assert(l.error == (fault == 6u || fault == 14u ? CLEAN_BUS :
-                           fault == 7u ? CLEAN_TIMEOUT :
+                           fault == 7u || fault == 26u ? CLEAN_TIMEOUT :
                            fault == 8u ? CLEAN_CANCELLED : CLEAN_INPUT));
         assert(l.rx_consumed == 0u && l.rx_resyncs == 0u);
         assert(badger_bytes_load_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET) == 0u);
         cancel = f2_second_error = f2_cancel_next = 0;
-        f2_next_size = 0u;
+        f2_next_size = f2_last_size = 0u;
     }
     f2_post_status = 0;
     f2_after_status = 0u;
@@ -230,7 +254,83 @@ static void fragments(const wifi_wire_t *wire) {
     f2_status = 0u;
 }
 
+static void layout_tests(const wifi_wire_t *wire) {
+    static const uint32_t words[CLEAN_RX_LAYOUT_WORDS] = CLEAN_RX_LAYOUT_VALUES;
+    clean_loader_t l;
+    for (uint32_t fault = 0u; fault <= CLEAN_RX_LAYOUT_WORDS; ++fault) {
+        for (uint32_t i = 0u; i < CLEAN_RX_LAYOUT_WORDS; ++i)
+            badger_bytes_store_u32(ram + CLEAN_RX_LAYOUT_ADDR + 4u*i,
+                                  words[i] ^ (i == fault ? 1u : 0u));
+        clean_loader_init(&l, wire, service, NULL);
+        assert(clean_check_layout(&l) == (fault == CLEAN_RX_LAYOUT_WORDS));
+        if (fault < CLEAN_RX_LAYOUT_WORDS) {
+            assert(l.error == CLEAN_INPUT && l.address == CLEAN_RX_LAYOUT_ADDR + 4u*fault);
+            assert(l.actual == (words[fault] ^ 1u));
+        }
+    }
+    clean_loader_init(&l, wire, service, NULL);
+    bus_error = 1;
+    assert(!clean_check_layout(&l) && l.error == CLEAN_BUS);
+    bus_error = 0;
+}
+
 static void eapol_tests(uint8_t evidence[2048]);
+
+static void ht_transport(const wifi_wire_t *wire) {
+    static const uint16_t sizes[] = {28u,88u,2026u,2027u,2332u,
+#if CLEAN_RX_HT_RX
+        CLEAN_AMSDU_MPDU_BYTES
+#endif
+    };
+    uint8_t expected[CLEAN_HT_DATA_STORAGE], packet[CLEAN_RX_PACKET_BYTES];
+    uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u};
+    f2_post_status = 1;
+    f2_after_status = 0u;
+    for (uint32_t mcs = 0u; mcs < 8u; ++mcs)
+        for (uint32_t i = 0u; i < sizeof(sizes)/sizeof(sizes[0]); ++i) {
+            uint32_t mpdu = sizes[i], length = 0u;
+            nonce[11] = (uint8_t)mpdu; nonce[12] = (uint8_t)(mpdu >> 8u);
+            nonce[13] = (uint8_t)mcs;
+            assert(clean_ht_data_frame(expected, nonce));
+            clean_loader_t l;
+            clean_loader_init(&l, wire, service, NULL);
+            uint32_t physical = mpdu + 18u;
+            if (physical > CLEAN_F2_PACKET_BYTES) {
+                physical = fragment(f2_packet, mpdu, 0u);
+                f2_next_size = fragment(f2_next, mpdu, CLEAN_F2_FRAGMENT_BYTES);
+                memcpy(f2_packet + 22u, expected + 14u, CLEAN_F2_FRAGMENT_BYTES);
+                uint32_t remaining = mpdu - CLEAN_F2_FRAGMENT_BYTES;
+                memcpy(f2_next + 22u, expected + 14u + CLEAN_F2_FRAGMENT_BYTES,
+                       remaining < CLEAN_F2_FRAGMENT_BYTES ? remaining : CLEAN_F2_FRAGMENT_BYTES);
+                f2_next[15] = (uint8_t)mcs;
+                f2_next[16] = CLEAN_RX_HT20 | CLEAN_RX_UNSUPPORTED_PHY | 1u;
+                f2_next[17] = CLEAN_HT_DATA_VERSION;
+                if (mpdu > 2u * CLEAN_F2_FRAGMENT_BYTES) {
+                    f2_last_size = fragment(f2_last, mpdu, 2u * CLEAN_F2_FRAGMENT_BYTES);
+                    memcpy(f2_last + 22u, expected + 14u + 2u * CLEAN_F2_FRAGMENT_BYTES,
+                           mpdu - 2u * CLEAN_F2_FRAGMENT_BYTES);
+                    memcpy(f2_last + 4u, f2_next + 4u, 14u);
+                }
+            } else {
+                memset(f2_packet, 0, (physical + 3u) & ~3u);
+                badger_bytes_store_u32(f2_packet, physical | ((physical ^ 0xffffu) << 16u));
+                f2_packet[5] = 2u; f2_packet[7] = 14u; f2_packet[14] = 0x20u;
+                memcpy(f2_packet + 18u, expected + 14u, mpdu);
+            }
+            f2_packet[15] = (uint8_t)mcs;
+            f2_packet[16] = CLEAN_RX_HT20 | CLEAN_RX_UNSUPPORTED_PHY | 1u;
+            f2_packet[17] = CLEAN_HT_DATA_VERSION;
+            f2_status = 0x100u | (physical << 9u);
+            f2_reads = 0u;
+            assert(clean_receive(&l, packet, &length) && length == mpdu + 18u);
+            assert(clean_ht_rx_metadata(packet[15], packet[16], packet[17], mpdu, 1u, mcs));
+            assert(clean_ht_data_match(packet + 18u, mpdu, nonce));
+            assert(!memcmp(packet + 18u, expected + 14u, mpdu));
+        }
+    f2_post_status = 0; f2_status = f2_next_size = 0u;
+    printf("HT transport: all MCS and up to %u fragments preserve version, PHY evidence, full payload and FCS; NOT RF\n",
+           CLEAN_F2_MAX_FRAGMENTS);
+}
 
 static void cck_rates(void) {
     clean_tx_tail_t tail = {0};
@@ -324,6 +424,221 @@ static void cck_rates(void) {
         }
     }
     puts("CCK: four rates, all lengths/CRC bits, seven legal preambles, RX PHY evidence and mismatch rejection pass");
+}
+
+static void ht_probe_tests(void) {
+    for (uint32_t word = 0u; word < 3u; ++word)
+        for (uint32_t bit = 0u; bit < 32u; ++bit) {
+            uint32_t input = 1u << bit;
+            uint32_t expected = word == 1u && bit >= 2u && bit < 10u ? 0u : input;
+            assert(clean_ht_probe_template_word(input, word, 1u, 1u) == expected);
+        }
+    static const uint8_t golden[5][6] = {
+        {0u,0x58u,0u,7u,0x24u,0u}, {7u,0x58u,0u,7u,0x80u,3u},
+        {0u,0x1cu,9u,7u,0x88u,3u}, {7u,0x1cu,9u,7u,0x2cu,0u},
+        {0u,14u,0u,7u,0xe4u,3u}
+    };
+    static const uint16_t lengths[5] = {88u,88u,2332u,2332u,14u};
+    static const uint16_t airtimes[5] = {154u,54u,2918u,330u,66u};
+    static const uint16_t lsig_lengths[5] = {93u,18u,2166u,225u,27u};
+    static const uint16_t phyctl1[8] = {0x0002u,0x0802u,0x0a02u,0x1002u,
+                                      0x1202u,0x1902u,0x1a02u,0x1c02u};
+    uint8_t sig[6], lsig[6], frame[96];
+    clean_ht_tx_t controls;
+    assert(clean_ht20_tx_controls(&controls, 88u, 0u));
+    assert(controls.phyctl == 0x42u && controls.phyctl1 == 2u &&
+           controls.mmplcp[0] == 0xbu && controls.mmplcp[1] == 93u);
+    assert(clean_ht20_tx_controls(&controls, 88u, 7u));
+    assert(controls.phyctl == 0x42u && controls.phyctl1 == 0x1c02u &&
+           controls.mmplcp[0] == 0xbu && controls.mmplcp[1] == 18u);
+    static const uint8_t observed[6] = {1u,57u,0u,6u,0x14u,2u};
+    assert(clean_ht20_rx_sig_valid(observed, 57u) && !clean_ht20_sig_valid(observed, 57u));
+    for (uint32_t i = 0u; i < 5u; ++i) {
+        assert(clean_ht20_sig(sig, lengths[i], golden[i][0]) && !memcmp(sig, golden[i], 6u));
+        assert(clean_ht20_airtime_us(lengths[i], golden[i][0]) == airtimes[i]);
+        assert(clean_ht20_lsig_length(lengths[i], golden[i][0]) == lsig_lengths[i]);
+    }
+    for (uint32_t mcs = 0u; mcs < 8u; ++mcs) {
+        for (uint32_t length = 14u; length <= CLEAN_MPDU_BYTES; ++length) {
+            assert(clean_ht20_sig(sig, length, mcs) && clean_ht20_sig_valid(sig, length));
+            assert(clean_ht20_rx_sig_valid(sig, length));
+            uint32_t symbols = clean_ht20_symbols(length, mcs);
+            uint32_t n = clean_ht20_rates[mcs].ndbps;
+            assert(symbols * n >= 22u + 8u*length && (symbols - 1u)*n < 22u + 8u*length);
+            assert(clean_ht20_lsig(lsig, length, mcs));
+            assert(clean_ht20_tx_controls(&controls, length, mcs));
+            assert(controls.phyctl == 0x42u && controls.phyctl1 == phyctl1[mcs]);
+            assert(controls.mmplcp[0] == 0xbu);
+            assert(controls.mmplcp[1] == 3u * symbols + 9u);
+            uint32_t signal = lsig[0] | ((uint32_t)lsig[1] << 8u) | ((uint32_t)lsig[2] << 16u);
+            assert((signal & 31u) == 0xbu && (signal >> 18u) == 0u);
+            assert(((signal >> 5u) & 4095u) == 3u * symbols + 9u);
+            uint32_t ones = 0u;
+            for (uint32_t bits = signal; bits; bits >>= 1u) ones += bits & 1u;
+            assert(!(ones & 1u) && !lsig[3] && !lsig[4] && !lsig[5]);
+            for (uint32_t bit = 0u; bit < 48u; ++bit) {
+                sig[bit/8u] ^= (uint8_t)(1u << (bit & 7u));
+                assert(!clean_ht20_sig_valid(sig, length));
+                assert(!clean_ht20_rx_sig_valid(sig, length));
+                sig[bit/8u] ^= (uint8_t)(1u << (bit & 7u));
+            }
+        }
+        assert(!clean_ht20_symbols(13u, mcs) && !clean_ht20_symbols(UINT32_MAX, mcs));
+        assert(!clean_ht20_sig(sig, CLEAN_MPDU_BYTES + 1u, mcs));
+        uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u,7u,8u,9u,10u,11u,12u,13u};
+        nonce[13] = (uint8_t)mcs;
+        assert(clean_ht_probe_frame(frame, nonce));
+        assert(clean_frame_valid(frame + 6u, CLEAN_HT_PROBE_MPDU));
+        assert(clean_ht_probe_match(frame + 6u, CLEAN_HT_PROBE_MPDU, nonce));
+        clean_ht_rx_t rx = {.magic=CLEAN_HT_RX_MAGIC,.captures=1u,
+                            .rxe_length=CLEAN_HT_PROBE_BYTES,.phy={2u,0u,0u,0u}};
+        memcpy(rx.sig, frame, 6u);
+        memcpy(rx.mpdu, frame + 6u, CLEAN_HT_PROBE_MPDU);
+        assert(clean_ht_probe_rx_valid(&rx, nonce));
+        for (uint32_t format = 0u; format < 4u; ++format) {
+            rx.phy[0] = (uint16_t)(0x100u | format);
+            assert(clean_ht_probe_rx_valid(&rx, nonce) == (format == 2u));
+        }
+        rx.phy[0] = 2u; rx.captures = 0u;
+        assert(!clean_ht_probe_rx_valid(&rx, nonce));
+        rx.captures = 1u; --rx.rxe_length;
+        assert(!clean_ht_probe_rx_valid(&rx, nonce));
+        ++rx.rxe_length; rx.magic ^= 1u;
+        assert(!clean_ht_probe_rx_valid(&rx, nonce));
+        rx.magic ^= 1u;
+        for (uint32_t bit = 0u; bit < CLEAN_HT_PROBE_BYTES * 8u; ++bit) {
+            uint8_t *part = bit < 48u ? rx.sig : rx.mpdu;
+            uint32_t offset = bit < 48u ? bit : bit - 48u;
+            part[offset / 8u] ^= (uint8_t)(1u << (offset & 7u));
+            assert(!clean_ht_probe_rx_valid(&rx, nonce));
+            part[offset / 8u] ^= (uint8_t)(1u << (offset & 7u));
+        }
+        rx.sig[3] &= 254u; rx.sig[4] &= 3u; rx.sig[5] = 0u;
+        uint8_t rx_crc = clean_ht20_crc(rx.sig);
+        for (uint32_t bit = 0u; bit < 8u; ++bit)
+            rx.sig[(34u+bit)/8u] |= (uint8_t)(((rx_crc >> (7u-bit)) & 1u) << ((34u+bit)&7u));
+        assert(clean_ht_probe_rx_valid(&rx, nonce));
+        assert(!clean_ht20_sig_valid(rx.sig, CLEAN_HT_PROBE_MPDU));
+        uint8_t masked[96];
+        for (uint32_t word = 0u; word < 24u; ++word) {
+            uint32_t w = (uint32_t)frame[4u*word] | ((uint32_t)frame[4u*word+1u] << 8u) |
+                         ((uint32_t)frame[4u*word+2u] << 16u) | ((uint32_t)frame[4u*word+3u] << 24u);
+            assert(clean_ht_probe_template_word(w, word, 0u, 1u) == w);
+            assert(clean_ht_probe_template_word(w, word, 1u, 0u) == w);
+            uint32_t actual = clean_ht_probe_template_word(w, word, 1u, 1u);
+            assert(actual == (word == 1u ? w & 0xfffffc03u : w));
+            for (uint32_t byte = 0u; byte < 4u; ++byte)
+                masked[4u*word+byte] = (uint8_t)(actual >> (8u*byte));
+        }
+        assert(!clean_ht20_sig_valid(masked, CLEAN_HT_PROBE_MPDU));
+        assert(!memcmp(masked + 6u, frame + 6u, 90u));
+        uint32_t cmd = CLEAN_HT_PROBE_CMD | clean_tx_length_bits(CLEAN_HT_PROBE_BYTES) | (1u << 19u);
+        assert(clean_ht_probe_command_valid(cmd, 1u, 0u, frame));
+        assert(!clean_ht_probe_command_valid(cmd, 1u, 0u, masked));
+        assert(!clean_ht_probe_command_valid(cmd, 0u, 0u, NULL));
+        assert(!clean_ht_probe_command_valid(cmd, 1u, 1u, NULL));
+        for (uint32_t bit = 0u; bit < 32u; ++bit)
+            assert(!clean_ht_probe_command_valid(cmd ^ (1u << bit), 1u, 0u, frame));
+        for (uint32_t bit = 0u; bit < CLEAN_HT_PROBE_BYTES * 8u; ++bit) {
+            frame[bit/8u] ^= (uint8_t)(1u << (bit & 7u));
+            assert(!clean_ht_probe_command_valid(cmd, 1u, 0u, frame));
+            frame[bit/8u] ^= (uint8_t)(1u << (bit & 7u));
+        }
+        nonce[0] ^= 1u;
+        assert(!clean_ht_probe_match(frame + 6u, CLEAN_HT_PROBE_MPDU, nonce));
+    }
+    assert(!clean_ht20_sig(sig, 88u, 8u) && !clean_ht20_airtime_us(88u, UINT32_MAX));
+    assert(!clean_ht20_lsig_length(13u, 0u));
+    memset(&controls, 0xa5, sizeof(controls));
+    const uint8_t *unchanged = (const uint8_t *)&controls;
+    assert(!clean_ht20_tx_controls(&controls, 13u, 0u));
+    assert(!clean_ht20_tx_controls(&controls, CLEAN_MPDU_BYTES + 1u, 0u));
+    assert(!clean_ht20_tx_controls(&controls, 88u, 8u));
+    assert(!clean_ht20_tx_controls(&controls, UINT32_MAX, UINT32_MAX));
+    for (uint32_t i = 0u; i < sizeof(controls); ++i) assert(unchanged[i] == 0xa5u);
+    puts("HT probe: CRC/timing/control vectors, all lengths/MCS, trace matching, CRC-only template experiment and gates pass; NOT RF");
+}
+
+static void ht_boundaries(void) {
+    for (uint32_t status = 0u; status <= UINT16_MAX; ++status) {
+        if ((status & 3u) < 2u) continue;
+        static const uint8_t channels[] = {1u,6u,14u};
+        for (uint32_t i = 0u; i < sizeof(channels); ++i)
+            for (uint32_t legacy = 0u; legacy < 2u; ++legacy)
+                assert(clean_rx_phy_metadata((uint16_t)status,
+                    legacy ? 0x2000u : 0u, channels[i]) ==
+                    (channels[i] | CLEAN_RX_UNSUPPORTED_PHY));
+    }
+    static const uint8_t ht_cap[28] = {45u,26u,0x62u,0u,0x1bu,0xffu};
+    static const uint8_t ht_operation[24] = {61u,22u,1u};
+    static const uint8_t wmm[26] = {
+        221u,24u,0u,0x50u,0xf2u,2u,1u,1u,0u,0u,
+        0x03u,0xa4u,0u,0u,0x27u,0xa4u,0u,0u,
+        0x42u,0x43u,0x5eu,0u,0x62u,0x32u,0x2fu,0u
+    };
+    static const uint8_t own[6] = {2u,1u,2u,3u,4u,5u};
+    for (uint32_t secured = 0u; secured < 2u; ++secured) {
+        clean_station_ap_t ap = {0}, parsed;
+        ap.bssid[0] = 2u; ap.bssid[5] = 6u;
+        ap.ssid_length = sizeof(ap.ssid);
+        memset(ap.ssid, 'n', sizeof(ap.ssid));
+        ap.rates = 0xfffu; ap.basic_rates = 0x15fu;
+        ap.capability = (uint16_t)(0xffedu | (secured ? 16u : 0u));
+        ap.secured = (uint8_t)secured;
+        uint8_t frame[160], fallback[160], beacon[256] = {0};
+        uint32_t length = clean_station_associate(frame, 0x123u, own, &ap);
+        assert(clean_frame_valid(frame + 6u, length - 6u));
+        assert(clean_station_u16(frame + 30u) == (0x421u | (secured ? 16u : 0u)));
+        uint32_t seen = 0u;
+        for (uint32_t at = 34u; at < length - 4u;) {
+            assert(length - 4u - at >= 2u);
+            uint32_t id = frame[at], size = frame[at + 1u];
+            at += 2u;
+            assert(size <= length - 4u - at);
+            assert(id == 0u || id == 1u || id == 50u || (secured && id == 48u));
+            uint32_t bit = id == 0u ? 1u : id == 1u ? 2u : id == 50u ? 4u : 8u;
+            assert(!(seen & bit));
+            seen |= bit;
+            at += size;
+        }
+        assert(seen == (secured ? 15u : 7u));
+        beacon[0] = 0x80u;
+        memset(beacon + 4u, 255, 6u);
+        memcpy(beacon + 10u, ap.bssid, 6u);
+        memcpy(beacon + 16u, ap.bssid, 6u);
+        beacon[34] = (uint8_t)ap.capability;
+        beacon[35] = (uint8_t)(ap.capability >> 8u);
+        uint32_t ies = length - 38u, at = 36u + ies;
+        memcpy(beacon + 36u, frame + 34u, ies);
+        memcpy(beacon + at, ht_cap, sizeof(ht_cap)); at += sizeof(ht_cap);
+        memcpy(beacon + at, ht_operation, sizeof(ht_operation)); at += sizeof(ht_operation);
+        memcpy(beacon + at, wmm, sizeof(wmm)); at += sizeof(wmm);
+        assert(at + 4u <= sizeof(beacon));
+        badger_bytes_store_u32(beacon + at, diag_crc32(beacon, at));
+        assert(clean_station_beacon(beacon, at + 4u, ap.bssid, &parsed) ==
+               (secured ? CLEAN_AP_PSK_CCMP : CLEAN_AP_OPEN));
+        assert(parsed.ht.capabilities && parsed.ht.operation && parsed.ht.wmm.present);
+        assert(clean_ht_peer_fallback(&parsed.ht, 1u) == CLEAN_HT_FALLBACK_MAC);
+        assert(clean_station_associate(fallback, 0x123u, own, &parsed) == length);
+        assert(!memcmp(frame, fallback, sizeof(frame)));
+        beacon[at - sizeof(wmm) + 8u] ^= 1u;
+        badger_bytes_store_u32(beacon + at, diag_crc32(beacon, at));
+        assert(clean_station_refresh(&parsed, beacon, at + 4u) == 0);
+        assert(parsed.ht.wmm.parameter_set == 1u);
+        assert(clean_station_associate(fallback, 0x123u, own, &parsed) == length);
+        assert(!memcmp(frame, fallback, sizeof(frame)));
+        memcpy(beacon + at, ht_cap, sizeof(ht_cap));
+        at += sizeof(ht_cap);
+        assert(at + 4u <= sizeof(beacon));
+        badger_bytes_store_u32(beacon + at, diag_crc32(beacon, at));
+        assert(clean_station_beacon(beacon, at + 4u, ap.bssid, &parsed) ==
+               (secured ? CLEAN_AP_PSK_CCMP : CLEAN_AP_OPEN));
+        assert(parsed.ht.invalid);
+        assert(clean_ht_peer_fallback(&parsed.ht, 1u) & CLEAN_HT_FALLBACK_MALFORMED);
+        assert(clean_station_associate(fallback, 0x123u, own, &parsed) == length);
+        assert(!memcmp(frame, fallback, sizeof(frame)));
+    }
+    puts("HT boundary: nonlegacy RX stays unsupported; HT/WMM peers do not enable advertisements; NOT HT RF");
 }
 
 static void station_tests(void) {
@@ -491,6 +806,9 @@ static void station_tests(void) {
     badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
     memcpy(evidence + 600u, response, 34u);
     assert(clean_station_evidence(evidence));
+    clean_ht_peer_report(&ap.ht, 1u, evidence);
+    assert(clean_station_evidence(evidence));
+    assert(badger_bytes_load_u32(evidence + CLEAN_HT_PEER_DETAIL) == CLEAN_HT_PEER_MAGIC);
     eapol_tests(evidence);
     evidence[800u + 4u] ^= 1u;
     assert(!clean_station_evidence(evidence));
@@ -572,10 +890,14 @@ static void eapol_tests(uint8_t evidence[2048]) {
 
 int main(void) {
     cck_rates();
+    ht_probe_tests();
+    ht_boundaries();
     station_tests();
     wifi_wire_t wire = {.now_us = now, .transfer = mock_transfer,
         .write = write_signal, .data_output = output, .read_data = read_signal};
     fragments(&wire);
+    ht_transport(&wire);
+    layout_tests(&wire);
     calls = blocks = 0u;
     clean_loader_t l;
     uint8_t bytes[128], readback[128];
