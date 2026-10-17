@@ -1,5 +1,9 @@
 # HT20 implementation (milestones D1/D2)
 
+Development record: implementation milestones, experiments, failures and open
+qualification work. For the current interface, use the
+[HT20 reference](../doc/HT20.md).
+
 Status: **D1's conservative target/control mapping is complete**, with
 bounded fresh HT20 captures at every MCS0-MCS7 in both badge directions.
 This is **not an enabled or RF-qualified HT station**. Losses remain in the
@@ -497,7 +501,7 @@ With MAC/PSM halted, startup writes distinct sentinels at words
 bank aliasing/inaccessibility, then clears them before PSM startup.
 Failure stops initialization with `0x8e`. This passed on both chips.
 Expanded capture slots and DMA buffers are relocated as documented in the
-[memory map](HARDWARE_AND_FIRMWARE.md).
+[memory map](../doc/HARDWARE_AND_FIRMWARE.md#memory-layout).
 
 An eight-word layout manifest at controller SRAM `0x203c0` is required by
 the loader before RX starts. Default and extended images publish their

@@ -405,7 +405,7 @@ condition or exact control remains **unresolved**; a receive-duration limit
 is a hypothesis, not an identified hardware watchdog. C1 stays open.
 Retained diagnostics include a boundary fixture, retry-aligned PSM trace
 and stopped-failure snapshots; see the
-[diagnostic layout](clean-rx/doc/HARDWARE_AND_FIRMWARE.md#1-mbps-receive-truncation-diagnostics).
+[diagnostic layout](clean-rx/dev-doc/HARDWARE_DEVELOPMENT.md#1-mbps-receive-truncation-diagnostics).
 Native controller/loader/PSM tests, Micro Signal regressions, freestanding
 ELF closure and whitespace checks pass.
 
@@ -449,7 +449,7 @@ See [fixture usage and detailed evidence](clean-rx/badge/README.md#dssscck-rate-
 
 **D1 complete for the conservative control/framing target, not for a
 general HT station or reliability qualification.** See the
-[HT20 implementation target](clean-rx/doc/HT20_IMPLEMENTATION.md).
+[HT20 implementation target](clean-rx/dev-doc/HT20_IMPLEMENTATION.md).
 The selected baseline is 2.4-GHz HT20 mixed mode, one spatial stream,
 MCS0-MCS7, BCC and 800-ns GI. The repository datasheet's internal revision
 is 002-30348 Rev. *B; Table 25 provides the mixed-mode MCS/GI evidence.
@@ -568,7 +568,7 @@ steps are complete, without closing the broader requirements above:
   association negotiation and independent-peer verification.
 
 Opcode 12 and its eight-byte versioned descriptor are documented in the
-[D2 implementation/API notes](clean-rx/doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
+[D2 implementation/API notes](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
 The `CLEAN_RX_HT_DATA=1` build is separate from D1's fixed probe and CRC
 experiment. Normal association remains legacy-only, and
 `ht_advertised:false` plus the local-MAC fallback reason remain explicit.
@@ -864,7 +864,7 @@ uncharacterized, not a generic SHM timing rule.
 Evidence under `d2-rx-deeper-*`, `d2-rx-idle-*`, `d2-rx-idlefixed-*`,
 `d2-rx-final-*` and `d2-rx-port-*` includes unsuccessful/intermediate
 builds and one incomplete USB collection; none are silently counted as
-successful exchanges. See the [detailed investigation](clean-rx/doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog)
+successful exchanges. See the [detailed investigation](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog)
 for denominators and layout changes. Default `c42d0041` passed 12
 ACKed/delivered cyclic-size frames per direction at OFDM6, 2-Mbps-long
 and OFDM6 with three deliberately suppressed ACKs per endpoint, with

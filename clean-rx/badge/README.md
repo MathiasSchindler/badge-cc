@@ -27,7 +27,7 @@ complete 802.11b/g MAC operation or general-purpose station reliability.
 The separate controlled WPA2 qualification
 below proves a bounded encrypted exchange, not sustained networking.
 
-**802.11n:** D1's [HT20 implementation target](../doc/HT20_IMPLEMENTATION.md)
+**802.11n:** D1's [HT20 implementation target](../dev-doc/HT20_IMPLEMENTATION.md)
 defines the conservative mixed-mode, single-stream MCS0-MCS7 profile and
 maps current firmware gaps. Ordinary HT operation is not enabled or
 advertised. Tested framing helpers, a default-disabled one-frame TX probe,
@@ -107,10 +107,10 @@ cells completed strict ACKs: five corrupt frames, two no-candidate misses
 and two zero-attempt access faults remain. New halted counter evidence
 (`dcf_guard_latched`, `dcf_final_slots`) confirms that access faults can
 still occur; they are not receive losses or a completed backoff repair.
-See the [follow-up evidence and limits](../doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog).
+See the [follow-up evidence and limits](../dev-doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog).
 RF SIFS/reliability qualification, EDCA, protection and Block ACK remain
 open; neither this diagnostic nor a response counter enables HT/WMM association.
-See [D2 API, build instructions and remaining gates](../doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
+See [D2 API, build instructions and remaining gates](../dev-doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
 
 ## Source layout and maintenance
 
@@ -575,7 +575,7 @@ the original failure code. Reports now include `tx_diagnostic`, `psm_diag`,
 diagnostics, not additional success criteria. Trace timing is meaningful
 only when the retained PLCP LENGTH matches the failed LENGTH; low TSF
 differences wrap modulo 65,536 us. See the
-[trace layout and limitations](../doc/HARDWARE_AND_FIRMWARE.md#1-mbps-receive-truncation-diagnostics).
+[trace layout and limitations](../dev-doc/HARDWARE_DEVELOPMENT.md#1-mbps-receive-truncation-diagnostics).
 
 Intermediate build `786ad5ee`, prefix `c1-matrix-*`, exposed one valid OFDM
 frame paired with stale DMA PHY status and had an interrupted OFDM full-size
