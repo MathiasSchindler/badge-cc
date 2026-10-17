@@ -93,8 +93,11 @@ The mailbox is 480 bytes at `0x00020000`. Important fields are:
 | 456 | RX fault snapshot |
 
 Configuration bits select RXE setup, branch masks, antenna grant, IFS/TSF,
-radio LPF setup, promiscuous reception, continuous reception, TX permission,
-station role and hardware crypto. The initial channel occupies bits 23..16.
+radio LPF setup, promiscuous reception, TX permission and station role.
+`CFG_CONTINUOUS_RX` and `CFG_WPA2_CCMP` are defined in the header but are
+not read by the controller. Continuous operation is selected by
+`MULTI->target_frames = 0xffffffff`; command 6 selects hardware crypto.
+The initial channel occupies bits 23..16.
 Controller channel selection accepts 1..14; the badge collector accepts 1..11.
 
 Bound every wait and check `fw_state` for `FW_STATE_ERROR` (255).
@@ -111,20 +114,28 @@ The staging address comes from the selected build's layout.
 | --- | --- |
 | `2` | Active reception and frame delivery |
 | `3` | Stop MAC/PSM and RX DMA, snapshot state, enter `FW_STATE_RX_DONE` (10) |
-| `4 \| (channel << 8)` | Retune the channel and resume reception |
+| `4 \| (channel << 8)` | Request a channel retune and resume reception; completion acknowledges handling, not successful tuning |
 | `5 \| clean_tx_length_bits(total) \| (ofdm << 18) \| (count << 19)` | Send a staged legacy frame with OFDM or long-preamble DSSS/CCK |
 | `6 \| (enable << 8)` | Copy the staged 16-byte key to the D11 crypto key area and select the hardware-crypto path |
 | `7` | Configure the 16-byte pinned-peer station MAC record |
-| `8` | Queue basic-rate/slot policy for the active station profile |
+| `8` | Queue basic-rate/slot policy for active station profile 2 or 3 |
 | `10 \| clean_tx_length_bits(total) \| (count << 19)` | Send short-preamble DSSS/CCK at 2, 5.5 or 11 Mbps |
 
 Command 7's record contains local MAC at byte 0, peer MAC at byte 6,
 little-endian basic-rate mask at byte 12, short-slot selection at byte 14
 and profile at byte 15. Profile 1 selects the capture-based ACK path,
 profile 2 Cortex DCF/NAV and profile 3 PSM/IFS/TSF-clocked medium access.
-Command 8 keeps the bound addresses and active profile, and applies policy
-at an idle RX/response boundary. Completion acknowledges queueing; the
+Command 8 requires profile 2 or 3 and keeps the bound addresses and active
+profile. Profile 1 is rejected with error `0x85`. Policy is applied at an
+idle RX/response boundary. Completion acknowledges queueing; the
 policy-pending status records application.
+
+Command 4 uses the channel field at bits 15..8. Values outside 1..14 are
+acknowledged without a retune. For in-range values, the controller updates
+its software channel only when the tuning routine succeeds, but returns
+`host_cmd` to 2 even if that routine fails. The command does not report
+that failure through `fw_error`; neither completion nor the retained
+software channel confirms the physical tuning state.
 
 Station mode rejects channel/key changes and raw rearm/address-match
 overrides. Reliable legacy unicast uses `CLEAN_TX_ACK_REQUIRED`, at most

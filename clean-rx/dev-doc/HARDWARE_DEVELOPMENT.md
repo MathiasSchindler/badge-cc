@@ -5,6 +5,16 @@ including historical assumptions, qualification results and investigations.
 Use the [current architecture reference](../doc/HARDWARE_AND_FIRMWARE.md)
 for the firmware's present behavior.
 
+## Badge silicon identification
+
+The exact CYW43439 version and revision installed on the badges have not
+yet been established. The
+[datasheet in pimoroni](../../pimoroni/Infineon_CYW43439_DataSheet_v03_00_EN-3074791.pdf)
+describes the CYW43439 family in general; it does not establish the
+badge-specific part or revision. Names such as LCN20, Radio 20691 and
+Arch15 in the implementation and historical notes are not, by themselves,
+a complete badge silicon identification.
+
 ## 1. Chip Architecture Overview
 
 The CYW43439 is a 2.4 GHz IEEE 802.11b/g/n wireless LAN system-on-chip built around an internal interconnect backplane. The chip contains five primary functional cores connected to the backplane, each with a register block in the `0x18000000` range and a corresponding core-control wrapper in the `0x18100000` range:

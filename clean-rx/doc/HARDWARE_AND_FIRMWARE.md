@@ -5,6 +5,11 @@ The RP2350 is its gSPI host. Radio initialization, PSM execution, frame
 capture and DMA run on the CYW43439; the badge application handles host
 protocols, software cryptography and application traffic.
 
+The hardware names and register map below describe the paths used by the
+source code. They are implementation identifiers, not a badge-specific
+ordering-code or silicon-revision identification. See the
+[device-family reference scope](README.md).
+
 ## Cores and data paths
 
 | Core | Register base | Wrapper base | Role |
@@ -15,9 +20,13 @@ protocols, software cryptography and application traffic.
 | Cortex-M3 | `0x18003000` | `0x18103000` | Controller execution |
 | SOCRAM | `0x18004000` | `0x18104000` | 512-KiB SRAM |
 
-The receive path is antenna -> Radio 20691 -> LCN20 PHY -> D11 RXE/SHM ->
-PSM receive header -> D11 RX DMA -> controller frame storage -> SDIOD
-TX DMA -> gSPI Function 2 -> RP2350.
+The captured-payload path is antenna -> Radio 20691 -> LCN20 PHY ->
+D11 RXE/SHM -> Cortex-M3 SHM reads -> controller frame storage ->
+SDIOD TX DMA -> gSPI Function 2 -> RP2350.
+
+Separately, the PSM publishes a receive header to the D11 RX FIFO and
+D11 RX DMA transfers it to SRAM. The controller records DMA completion,
+length and header bytes alongside the SHM-derived capture.
 
 The raw transmit path is host staging -> D11 template RAM -> TXE ->
 LCN20 PHY -> Radio 20691 -> antenna. Profile-3 transmission and pinned
@@ -114,7 +123,10 @@ word in a register before comparing it to another SHM word.
 ## DMA and host credits
 
 D11 RX DMA transfers the PSM header into a 32-descriptor ring. The
-controller records the complete frame and metadata in its capture area.
+reclaim routine copies 38 DMA-header bytes and records completion and
+length; it does not supply the captured MPDU. The controller reads the
+PLCP/MPDU bytes directly from SHM into its capture area and records the
+associated metadata.
 The SDIOD TX ring carries host-facing packets with 32-byte DMA bursts.
 Its final descriptor marks end-of-table.
 
@@ -150,8 +162,12 @@ An ordinary packet has an 18-byte SDPCM/BDC header:
 
 Byte 16 uses `0x10` for OFDM, `0x20` for CCK short preamble, `0x40`
 for unsupported legacy interpretation and `0x80` for HT metadata.
-The phase word is `0x5258` before explicit TX and `0x52d8` after successful
-explicit TX; the tag persists until reset.
+The phase word starts at `0x5258` and changes to `0x52d8` when an explicit
+TX command reaches its RX-resume path; the tag then persists until reset.
+A late BUSY result with zero attempts can also reach that path. The tag
+therefore identifies command-processing phase, not a confirmed transmission
+or received ACK. Use the separate TX/ACK result and attempt count for those
+outcomes.
 
 MPDUs up to 2,026 bytes fit a single physical packet. Larger frames use
 BDC flags `0x21`: bytes 18..19 contain total MPDU length, bytes 20..21
