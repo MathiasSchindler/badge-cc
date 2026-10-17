@@ -46,6 +46,14 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+    uint32_t phy_latch = 0u, held_capture = 0u;
+    for (uint32_t pc = 198u; pc < 260u; ++pc) {
+        if (instruction(pc) == WORD(0x3f0u,0x1009u,0x1800u,CLEAN_SHM_PHY_STATUS0))
+            phy_latch = pc;
+        if (instruction(pc) == WORD(0x3f0u,0x180eu,0x1800u,0x601u))
+            held_capture = pc;
+    }
+    assert(phy_latch > 198u && phy_latch < 225u && phy_latch < held_capture);
     restore(original, 197u, WORD(0x77fu,0x1780u,0x1780u,DCF_GOOD),
             WORD(0x3f0u,0x180fu,0x1800u,0x607u));
     restore(original, 123u, WORD(0x77fu,0x1780u,0x1780u,DCF_IDLE),
@@ -382,6 +390,18 @@ static void acknowledgements(void) {
         regs[0x100e] = rate >= 4u ? 0x2000u : 0u;
         regs[CLEAN_SHM_FRAME + 1u] = rate >= 4u ?
             (uint16_t)(0xf0u | clean_ofdm_rates[rate - 4u].signal) : cck[rate];
+        regs[CLEAN_TEST_ACK_REMAINING] = CLEAN_TEST_ACK_MAX;
+        regs[CLEAN_SHM_FRAME + 9u] ^= 1u;
+        assert(ack_run(regs, 1) == 198u && !regs[CLEAN_TEST_ACK_DROPPED]);
+        assert(regs[CLEAN_TEST_ACK_REMAINING] == CLEAN_TEST_ACK_MAX);
+        regs[CLEAN_SHM_FRAME + 9u] ^= 1u;
+        for (uint32_t dropped = 1u; dropped <= CLEAN_TEST_ACK_MAX; ++dropped) {
+            assert(ack_run(regs, 1) == 198u && !regs[CLEAN_ACK_SENT]);
+            assert(regs[CLEAN_TEST_ACK_REMAINING] == CLEAN_TEST_ACK_MAX - dropped);
+            assert(regs[CLEAN_TEST_ACK_DROPPED] == dropped);
+            assert(!regs[0x1081u] && !regs[CLEAN_RESPONSE_PENDING]);
+        }
+        regs[CLEAN_TEST_ACK_DROPPED] = 0u;
         ack_run(regs, 1);
         assert(regs[CLEAN_ACK_SENT] == 1u && !regs[CLEAN_ACK_ERROR]);
         assert(regs[CLEAN_ACK_KINDS] == 1u);
@@ -391,6 +411,19 @@ static void acknowledgements(void) {
         assert(regs[0x10e3] == 0xd4u && regs[0x10e4] == 0u);
         assert(regs[0x1081u] == 0xd0u);
         assert(regs[CLEAN_RESPONSE_PENDING] == 2u);
+        regs[CLEAN_RESPONSE_POLICY] = 1u;
+        regs[CLEAN_CTS_ALLOWED] = 1u;
+        regs[CLEAN_TEST_ACK_REMAINING] = 1u;
+        regs[CLEAN_SHM_FRAME + 4u] = 0xb4u;
+        regs[CLEAN_SHM_FRAME + 5u] = 1000u;
+        regs[0x100cu] = 26u;
+        assert(ack_run(regs, 1) == 266u && regs[CLEAN_CTS_SENT] == 1u);
+        assert(regs[CLEAN_TEST_ACK_REMAINING] == 1u && !regs[CLEAN_TEST_ACK_DROPPED]);
+        regs[CLEAN_CTS_SENT] = regs[CLEAN_TEST_ACK_REMAINING] = 0u;
+        regs[CLEAN_RESPONSE_POLICY] = 0u;
+        regs[CLEAN_SHM_FRAME + 4u] = 0x08b0u;
+        regs[CLEAN_SHM_FRAME + 5u] = 0u;
+        regs[0x100cu] = 40u;
         if (rate >= 4u) {
             regs[0x100eu] = 0x440u;
             regs[0x1009u] = 1u;
@@ -577,6 +610,6 @@ int main(void) {
         }
     }
     puts("PSM: image identity, capture bounds, RX streaming and startup flush OK");
-    puts("PSM: single-SHM inputs, pinned ACK/CTS addresses and 100000 native ACK rearms OK; NOT RF timing");
+    puts("PSM: single-SHM inputs, pinned ACK/CTS addresses, bounded ACK suppression at all 12 rates and 100000 native ACK rearms OK; NOT RF timing");
     return 0;
 }

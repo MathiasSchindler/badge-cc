@@ -310,12 +310,14 @@ To transmit a raw or hardware-encrypted 802.11 frame (`cmd = 5 | clean_tx_length
      - Streams the 8 16-bit words of `TK` (`SHM 0x618..0x61f`) into `0x180017c4` (`WEP_KEY`)
      - Programs `0x180017c0 = 0x1170` (`WEP_CTL`: AES-128-CCMP TX encrypt + 8-byte MIC generation + hardware FCS regeneration), `0x180017d4 = 0x0000`, `0x180017d6 = total_len`, `0x180017d0 = 0x0305`
    - Otherwise (unencrypted frame): sets `0x180017c0 = 0x0100`, `0x180017d0 = 0x0300`
-   - `0x1800150c = is_ofdm ? 0x0041 : 0x0040` (`TXE_PHYCTL`: OFDM vs. CCK modulation)
+   - `0x1800150c = 0x0041` for OFDM, `0x0040` for long-preamble CCK,
+     or `0x0050` for short-preamble CCK (`TXE_PHYCTL`).
    - `0x18001514 = phyctl1` (`TXE_PHYCTL1`): OFDM rate-specific modulation/coding
      plus 20-MHz SISO bandwidth from [phy_rates.h](../src/phy_rates.h). For
      6/9/12/18/24/36/48/54 Mbps these words are
      `0x0002/0x0202/0x0802/0x0a02/0x1002/0x1202/0x1902/0x1a02`.
-     The existing CCK path retains `0x1a02`.
+     DSSS/CCK uses `0x0002/0x0802/0x1002/0x1802` for 1/2/5.5/11 Mbps,
+     selected from the validated PLCP SIGNAL byte rather than a fixed 11-Mbps word.
    - `0x18001508 = 0x0000` (Template RAM start offset = `0`), `0x1800156a = total_len` (byte count)
    - `0x18001568 = 0x0826`, `0x18001500 = 0x0000`, `0x18001502 = 0x00d0` (`TXE_CTL`: immediate template transmit)
 4. The firmware polls `TXE_STATUS` (`0x1800150e`, waiting for bit 7 to clear and
@@ -341,6 +343,38 @@ The five-minute paired qualification received all eight rates at each of
 badge. See [results and scope](../../docs/micro-signal.md#80211g-legacy-ofdm).
 This qualifies raw PHY operation, not full 802.11g MAC compliance, ACK timing,
 ERP protection or hardware CCMP.
+
+#### DSSS/CCK PLCP and preamble selection
+
+Shared [PHY helpers](../src/phy_rates.h) construct and validate all four
+DSSS/CCK rates. SIGNAL is `10/20/55/110`; SERVICE retains locked-clock bit 2.
+LENGTH is `ceil(16 * mpdu_bytes / half_mbps)` microseconds, including FCS.
+Only 11 Mbps sets SERVICE length-extension bit 7 when
+`11 * LENGTH - 8 * mpdu_bytes >= 8`. Header CRC is complemented reflected
+CCITT (`0x8408`, initial `0xffff`), little endian. Validation regenerates the
+complete six-byte header, including SERVICE, LENGTH and CRC.
+
+Long preamble/header adds 192 us and short adds 96 us. Short is legal only at
+2/5.5/11 Mbps; the six PLCP bytes are identical, while command 10 selects the
+short PHY header. Command 5 remains long-preamble CCK or ordinary OFDM.
+Native tests exhaust MPDU lengths 14..2400, all header-bit corruptions and
+independent fixed CRC vectors. TX completion polling scales with airtime.
+
+For reliable CCK in profile 3, the first observed IFS TX-active-to-idle
+transition anchors the existing bounded ACK wait to the actual transmission
+tail. The 398-us long-slot CCK ACK allowance is not enlarged; subsequent
+activity cannot re-anchor it. OFDM scheduling is unchanged. This fixes
+premature ACK expiry at slow rates, not independent SIFS/timing qualification.
+
+Receiving PHY status supplies frame type (bits 0..1) and short header
+(bit 7). Published packet byte 16 adds `0x20` for short preamble and `0x40`
+for unsupported PHY encoding, alongside channel and the existing `0x10`
+OFDM flag. The controller snapshots the PHY status latched in the held
+capture's PSM header (`SHM 0x7f6`); a DMA descriptor can lag capture and must
+not supply another frame's status. Native image checks pin this latch before
+the captured state. The separate receiving chip thus supplies rate/preamble evidence;
+requested TX settings and successful TXE completion alone do not qualify it.
+See the [paired fixture results and full-size 1-Mbps limitation](../badge/README.md#dssscck-rate-and-preamble-fixture).
 
 ### 9.4 Unicast MAC Filter and Automatic 802.11 `ACK` Transmission (`d11_transmit_ack_frame`)
 At startup, the firmware stores the local 6-byte unicast MAC address in `SHM 0x612..0x614`:
@@ -375,17 +409,18 @@ wait are consumed without setting `ACK_SEEN`. Profile 1 retains the older
 capture path.
 
 `SHM 0x67c..0x67f` count scheduled responses by received auth, association,
-non-QoS data and other frame classes. A separate 100-byte `MCR1` report at
+non-QoS data and other frame classes. A separate 104-byte `MCR1` report at
 `0x20250` accumulates those counts and counts matching frames actually posted
 to transport, plus FCS failures detected in those posted captures. The original
 40-byte prefix is unchanged; appended words expose IFS/clock samples, response
-path, bad-FCS identity and ACK notification timing.
+path, bad-FCS identity, ACK notification timing, response setup delay and
+the actual deliberately suppressed ACK count.
 These are local diagnostics, **not** independent proof of RF/SIFS timing.
 See the [milestone-A evidence and remaining gates](../badge/README.md#milestone-a-mac-implementation-experimental-not-complete).
 
 ### 9.6 Experimental PSM-clocked medium access
 
-Profile 3 uses SHM `0x680..0x69d` for TX arbitration, clocks, diagnostics and
+Profile 3 uses SHM `0x680..0x69f` for TX arbitration, clocks, diagnostics and
 response ownership. The idle hook prioritizes RX-start, samples IFS physical
 and NAV carrier/active-frame flags, explicitly times DIFS (SIFS plus two slots),
 then counts complete 9/20-us backoff slots against TSF. Busy/RX resets partial
@@ -393,6 +428,15 @@ idle time without changing the residual draw. Bad FCS and invalid length start
 EIFS; valid RX clears it. Cortex chooses CW/random draws and prepares templates,
 but an armed request is fired by the PSM, not a Cortex final register write.
 GoodFCS cancels an armed request before response setup can overwrite TXE.
+
+SHM `0x69e` is the remaining deliberate ACK-suppression budget; `0x69f`
+counts actual suppressed responses. Explicit test command
+`9 | (count << 8)`, profile 3 only, atomically arms 0..16 suppressions while
+PSM is halted, clears partial idle timing, then resumes. Only otherwise valid
+GoodFCS, local-RA/pinned-TA, supported-rate ACK responses consume a suppression;
+no TX is armed/triggered and response ownership is not acquired for that ACK.
+CTS, incoming ACK consumption and application delivery are unchanged.
+The default is zero and ordinary station paths never enable it.
 
 The PSM reads TSF through IHR `0x1119/0x111a`; Cortex reads the same domain at
 `D11+0x180`, not its old timer at `D11+0x1c`. The deadline is refreshed at

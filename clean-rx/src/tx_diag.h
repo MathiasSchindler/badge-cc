@@ -17,6 +17,7 @@ static inline uint32_t clean_tx_length(uint32_t command) {
 #define CLEAN_TX_DIAG_OFFSET 296u
 #define CLEAN_TX_REARM_RX (1u << 27)
 #define CLEAN_TX_MATCH_SOURCE (1u << 28)
+#define CLEAN_TX_CCK_SHORT 10u
 #define CLEAN_RX_PHASE_MAGIC 0x5258u
 #define CLEAN_TX_PHY_COUNT 26u
 #define CLEAN_TX_PHY_REGS {0x631u,0x62au,0x439u,0x4b0u,0x43au,0x4b5u,0x4fbu,0x46eu, \

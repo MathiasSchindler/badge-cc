@@ -147,7 +147,14 @@ static void receive(void) {
     assert(clean_mac_rx(&s, m, n, 2u) == CLEAN_MAC_DELIVER);
     n = frame(m, 4095u, 0u, 8u, 8u);
     assert(clean_mac_rx(&s, m, n, 3u) == CLEAN_MAC_DUPLICATE);
-    assert(clean_mac_rx(&s, m, n, CLEAN_MAC_RX_LIFETIME_US) == CLEAN_MAC_DELIVER);
+    assert(clean_mac_rx(&s, m, n, CLEAN_MAC_RX_LIFETIME_US) == CLEAN_MAC_DUPLICATE);
+    assert(clean_mac_rx(&s, m, n, 2000000u) == CLEAN_MAC_DUPLICATE);
+    assert(clean_mac_rx(&s, m, n, UINT32_MAX - 1u) == CLEAN_MAC_DUPLICATE);
+    assert(clean_mac_rx(&s, m, n, 1u) == CLEAN_MAC_DUPLICATE);
+    n = frame(m, 4095u, 0u, 0u, 8u);
+    assert(clean_mac_rx(&s, m, n, 2u) == CLEAN_MAC_DELIVER);
+    assert(clean_mac_retry(m, n));
+    assert(clean_mac_rx(&s, m, n, 3u) == CLEAN_MAC_DUPLICATE);
     m[0] = 0x10u; fcs(m, n);
     assert(clean_mac_rx(&s, m, n, CLEAN_MAC_RX_LIFETIME_US + 1u) == CLEAN_MAC_DELIVER);
     assert(clean_mac_rx(&s, m, n, CLEAN_MAC_RX_LIFETIME_US + 2u) == CLEAN_MAC_DUPLICATE);
@@ -183,10 +190,19 @@ static void receive(void) {
     n = frame(m, 7u, 1u, 0u, 10u);
     assert(clean_mac_rx(&s, m, n, 2000000u + CLEAN_MAC_RX_LIFETIME_US) == CLEAN_MAC_FRAGMENT_ORDER);
     assert(s.expired == 1u);
+    n = frame(m, 7u, 0u, 12u, 10u);
+    assert(clean_mac_rx(&s, m, n, 2000001u + CLEAN_MAC_RX_LIFETIME_US) == CLEAN_MAC_FRAGMENT);
+    n = frame(m, 7u, 1u, 8u, 10u);
+    assert(clean_mac_rx(&s, m, n, 2000002u + CLEAN_MAC_RX_LIFETIME_US) == CLEAN_MAC_DELIVER);
+    assert(clean_mac_rx(&s, m, n, 5000000u) == CLEAN_MAC_DUPLICATE);
     n = frame(m, 8u, 0u, 4u, CLEAN_MSDU_BYTES);
     assert(clean_mac_rx(&s, m, n, 3000000u) == CLEAN_MAC_FRAGMENT);
     n = frame(m, 8u, 1u, 0u, 1u);
     assert(clean_mac_rx(&s, m, n, 3000001u) == CLEAN_MAC_INVALID);
+    n = frame(m, 8u, 0u, 0u, 10u);
+    assert(clean_mac_rx(&s, m, n, 3000002u) == CLEAN_MAC_DELIVER);
+    assert(clean_mac_retry(m, n));
+    assert(clean_mac_rx(&s, m, n, 3000002u + CLEAN_MAC_RX_LIFETIME_US) == CLEAN_MAC_DUPLICATE);
     clean_mac_rx_init(&s);
     n = frame(m, 9u, 0u, 64u, 32u);
     assert(clean_mac_rx(&s, m, n, 0u) == CLEAN_MAC_PROTECTED);
@@ -326,8 +342,25 @@ static void station_delivery(void) {
 
 static void soak_protocol(void) {
     uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u,7u,8u,9u,10u,11u,12u,13u,14u};
+    nonce[13] = 0u;
     uint8_t packet[CLEAN_TX_STORAGE_BYTES];
     clean_soak_status_t s = {.target = CLEAN_SOAK_MAX_FRAMES};
+    s.elapsed_us = 0xffffffffu; s.elapsed_hi = 1u;
+    assert(clean_soak_elapsed(&s) == 8589934591ULL);
+    s.elapsed_us = (uint32_t)CLEAN_SOAK_MAX_US;
+    s.elapsed_hi = (uint32_t)(CLEAN_SOAK_MAX_US >> 32u);
+    assert(clean_soak_elapsed(&s) == CLEAN_SOAK_MAX_US);
+    assert((uint64_t)CLEAN_SOAK_HOST_SECONDS * 1000000u >
+           CLEAN_SOAK_MAX_US + 5000000u);
+    assert((uint64_t)CLEAN_SOAK_POLLS * CLEAN_SOAK_POLL_US >
+           CLEAN_SOAK_MAX_US + 5000000u);
+    for (uint32_t profile = 0u; profile <= 4u; ++profile)
+        for (uint32_t drop = 0u; drop <= CLEAN_TEST_ACK_MAX; ++drop)
+            assert(clean_test_ack_count(9u | (drop << 8u), profile) ==
+                   (profile == 3u ? (int)drop : -1));
+    assert(clean_test_ack_count(9u | ((CLEAN_TEST_ACK_MAX + 1u) << 8u), 3u) == -1);
+    assert(clean_test_ack_count(9u | 0x80000000u, 3u) == -1);
+    assert(clean_test_ack_count(8u, 3u) == -1);
     for (uint32_t i = 0u; i < CLEAN_SOAK_MAX_FRAMES; ++i) {
         uint32_t n = clean_soak_frame(packet, nonce, 1u, i);
         assert(n == clean_soak_size(i) + 34u && n <= CLEAN_TX_BYTES);

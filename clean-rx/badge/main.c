@@ -256,7 +256,7 @@ static int soak_receive(clean_loader_t *l, clean_soak_status_t *s,
         l->error = CLEAN_INPUT; l->actual = (uint32_t)mac;
         return 0;
     }
-    if (size >= 18u && clean_soak_receive(s, rx_packet + 18u, size - 18u, nonce, role) < 0) {
+    if (clean_soak_receive_packet(s, rx_packet, size, nonce, role) < 0) {
         l->error = CLEAN_INPUT; l->actual = s->failure;
         return 0;
     }
@@ -269,8 +269,11 @@ static int soak_send(clean_loader_t *l, clean_soak_status_t *s,
     if (!length) { l->error = CLEAN_INPUT; l->actual = index; return 0; }
     uint32_t started = l->wire->now_us(l->wire->context), attempts = 0u;
     while (attempts < 8u) {
+        uint32_t command = clean_soak_short(nonce) ? CLEAN_TX_CCK_SHORT : 5u;
         if (!station_command(l, soak_tx, length,
-            5u | clean_tx_length_bits(length) | (1u << 18u) | (1u << 19u) | CLEAN_TX_ACK_REQUIRED))
+            command | clean_tx_length_bits(length) |
+            (clean_soak_rate(nonce) == 4u ? 1u << 18u : 0u) |
+            (1u << 19u) | CLEAN_TX_ACK_REQUIRED))
             return 0;
         clean_unicast_status_t status;
         if (!clean_block(l, CLEAN_UNICAST_ADDR, (uint8_t *)&status, sizeof(status), 0u)) return 0;
@@ -297,20 +300,27 @@ static int soak_send(clean_loader_t *l, clean_soak_status_t *s,
 static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
     clean_soak_status_t s;
     badger_bytes_zero((uint8_t *)&s, sizeof(s));
-    s.magic = CLEAN_SOAK_MAGIC;
+    s.magic = CLEAN_SOAK_STATUS_MAGIC;
     s.target = badger_bytes_load_u32(nonce + 8u);
-    l->budget_us = 3505000000u;
+    l->budget_us = CLEAN_SOAK_MAX_US + 5000000u;
     uint8_t role = nonce[14] == 19u ? 1u : 2u;
     uint8_t config[16] = {0};
     clean_soak_address(config, nonce, role);
     clean_soak_address(config + 6u, nonce, (uint8_t)(3u - role));
     config[12] = 0x50u; config[13] = 1u; config[15] = 3u;
-    uint32_t started = l->wire->now_us(l->wire->context);
-    if (!s.target || s.target > CLEAN_SOAK_MAX_FRAMES) {
-        l->error = CLEAN_INPUT; l->actual = s.target;
-    } else if (station_command(l, config, sizeof(config), 7u)) {
+    if (clean_soak_phy(nonce)) { config[12] = 15u; config[13] = 0u; }
+    uint64_t started = l->elapsed_us;
+    if (!s.target || s.target > CLEAN_SOAK_MAX_FRAMES || nonce[12] > CLEAN_TEST_ACK_MAX ||
+        nonce[13] >= CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS) {
+        l->error = CLEAN_INPUT;
+        l->actual = nonce[13] >= CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS ? nonce[13] :
+            nonce[12] > CLEAN_TEST_ACK_MAX ? nonce[12] : s.target;
+    } else if (station_command(l, config, sizeof(config), 7u) &&
+               (!nonce[12] || station_command(l, config, sizeof(config),
+                   9u | ((uint32_t)nonce[12] << 8u)))) {
         for (uint32_t index = 0u; index < s.target && l->error == CLEAN_OK; ++index) {
-            if (l->wire->now_us(l->wire->context) - started >= 3500000000u) {
+            if (!clean_service(l)) break;
+            if (l->elapsed_us - started >= CLEAN_SOAK_MAX_US) {
                 s.failure = 5u; l->error = CLEAN_TIMEOUT; l->actual = index;
                 break;
             }
@@ -326,7 +336,9 @@ static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
                 break;
         }
     }
-    s.elapsed_us = l->wire->now_us(l->wire->context) - started;
+    uint64_t elapsed = l->elapsed_us - started;
+    s.elapsed_us = (uint32_t)elapsed;
+    s.elapsed_hi = (uint32_t)(elapsed >> 32u);
     badger_bytes_copy(detail + CLEAN_SOAK_DETAIL, (const uint8_t *)&s, sizeof(s));
 }
 

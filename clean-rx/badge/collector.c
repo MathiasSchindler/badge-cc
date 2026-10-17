@@ -183,7 +183,7 @@ static void print_mac_timing(const uint8_t detail[2048]) {
         "ifs_status", "ifs_backoff", "ifs_idle", "psm_ifs", "psm_tsf", "psm_polls",
         "ack_stage", "ack_frame_control", "ack_rx_status",
         "bad_fcs", "bad_frame_control", "bad_frame_length",
-        "ack_elapsed", "ack_window", "response_delay"
+        "ack_elapsed", "ack_window", "response_delay", "ack_dropped"
     };
     _Static_assert(sizeof(clean_mac_trace_status_t) == 40u + 4u * sizeof(names) / sizeof(names[0]),
                    "Trace JSON fields match the shared status layout");
@@ -259,7 +259,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_USB_TEST_ID);
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
     int got = 0;
-    for (unsigned attempt = 0u; attempt < (tx >= 19u ? 360000u : 800u); ++attempt) {
+    for (unsigned attempt = 0u; attempt < (tx >= 19u ? CLEAN_SOAK_POLLS : 800u); ++attempt) {
         int count = libusb_control_transfer(device, 0xc0u, LIVE_USB_WIFI_REPORT, 0, 0,
                                             report, sizeof(report), 1000u);
         if (count == 64) { got = 1; break; }
@@ -267,7 +267,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             fprintf(stderr, "Report read: %d\n", count);
             return 0;
         }
-        usleep(10000u);
+        usleep(tx >= 19u ? CLEAN_SOAK_POLL_US : 10000u);
     }
     if (!got) { fputs("Report deadline\n", stderr); return 0; }
     if (usb_report_u32(report) != 0x57363255u || report[4] != 1u ||
@@ -301,20 +301,33 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (tx == 19u || tx == 20u) {
         clean_soak_status_t s;
         memcpy(&s, detail + CLEAN_SOAK_DETAIL, sizeof(s));
-        int valid = s.magic == CLEAN_SOAK_MAGIC && !usb_report_u32(detail + 8u) &&
+        int valid = s.magic == CLEAN_SOAK_STATUS_MAGIC && !usb_report_u32(detail + 8u) &&
             s.target == usb_report_u32(nonce + 8u) && s.tx_acked == s.target &&
-            s.received == s.target && !s.failure && !s.corrupt && !s.duplicates && !s.out_of_order;
+            s.received == s.target && !s.failure && !s.corrupt && !s.duplicates && !s.out_of_order &&
+            s.rx_phy_checked == s.target && !s.rx_phy_mismatch &&
+            usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 100u) == nonce[12];
         printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,"
                "\"mode\":\"mac-soak\",\"role\":%u,\"valid\":%s,\"error\":%u,\"actual\":%u,"
                "\"target\":%u,\"tx_acked\":%u,\"tx_attempts\":%u,\"tx_timeouts\":%u,"
                "\"deferrals\":%u,\"received\":%u,\"duplicate_deliveries\":%u,"
                "\"mac_duplicates_suppressed\":%u,\"corrupt\":%u,\"out_of_order\":%u,"
-               "\"elapsed_us\":%u,\"failure\":%u",
+               "\"elapsed_us\":%llu,\"failure\":%u",
                serial, USB_REPORT_BUILD_ID, channel, tx == 19u ? 1u : 2u,
                valid ? "true" : "false", usb_report_u32(detail + 8u),
                usb_report_u32(detail + 16u), s.target, s.tx_acked, s.tx_attempts,
                s.tx_timeouts, s.deferrals, s.received, s.duplicates,
-               usb_report_u32(detail + 1688u), s.corrupt, s.out_of_order, s.elapsed_us, s.failure);
+               usb_report_u32(detail + 1688u), s.corrupt, s.out_of_order,
+               (unsigned long long)clean_soak_elapsed(&s), s.failure);
+        printf(",\"fw_state\":%u,\"fw_substage\":%u,\"fw_error\":%u,"
+               "\"fw_error_addr\":\"%08x\",\"fw_error_val\":\"%08x\"",
+               usb_report_u32(detail + 36u), usb_report_u32(detail + 40u),
+               usb_report_u32(detail + 44u), usb_report_u32(detail + 48u),
+               usb_report_u32(detail + 52u));
+        printf(",\"phy\":\"%s\",\"payload\":\"%s\",\"rx_phy_checked\":%u,\"rx_phy_mismatch\":%u,"
+               "\"rx_phy_last\":\"%04x\"",
+               clean_soak_phy_names[clean_soak_phy(nonce)], clean_soak_payload_names[nonce[13] >> 3u],
+               s.rx_phy_checked,
+               s.rx_phy_mismatch, s.rx_phy_last);
         print_mac_timing(detail);
         puts("}");
         if (!valid) fputs("Continuous MAC trial did not satisfy endpoint counts/integrity\n", stderr);
@@ -531,7 +544,7 @@ int main(int argc, char **argv) {
     }
     uint8_t peer_mode = 0u;
     uint32_t soak_count = 0u;
-    int soak = argc == 7 && (strcmp(argv[4], "--mac-soak-init") == 0 ||
+    int soak = (argc >= 7 && argc <= 10) && (strcmp(argv[4], "--mac-soak-init") == 0 ||
                              strcmp(argv[4], "--mac-soak-reply") == 0);
     if (soak) {
         char *end_count;
@@ -542,6 +555,34 @@ int main(int argc, char **argv) {
             return 2;
         }
         soak_count = (uint32_t)count;
+        unsigned long dropped = 0u;
+        if (argc >= 8) {
+            dropped = strtoul(argv[7], &end_count, 10);
+            if (!*argv[7] || *end_count || dropped > CLEAN_TEST_ACK_MAX) {
+                fputs("MAC soak ACK suppression must be 0..16\n", stderr);
+                return 2;
+            }
+        }
+        uint32_t phy = 0u;
+        if (argc >= 9) {
+            for (; phy < CLEAN_SOAK_PHYS; ++phy)
+                if (strcmp(argv[8], clean_soak_phy_names[phy]) == 0) break;
+            if (phy == CLEAN_SOAK_PHYS) {
+                fputs("MAC soak PHY must be ofdm6, 1/2/5.5/11-long or 2/5.5/11-short\n", stderr);
+                return 2;
+            }
+        }
+        uint32_t payload = 0u;
+        if (argc == 10) {
+            for (; payload < CLEAN_SOAK_PAYLOADS; ++payload)
+                if (strcmp(argv[9], clean_soak_payload_names[payload]) == 0) break;
+            if (payload == CLEAN_SOAK_PAYLOADS) {
+                fputs("MAC soak payload must be cycle, 32, 1500 or 2304\n", stderr);
+                return 2;
+            }
+        }
+        challenge[12] = (uint8_t)dropped;
+        challenge[13] = (uint8_t)(phy | (payload << 3u));
         for (uint32_t i = 0u; i < 4u; ++i) challenge[8u + i] = (uint8_t)(soak_count >> (8u * i));
         peer_mode = strcmp(argv[4], "--mac-soak-init") == 0 ? 19u : 20u;
     }
@@ -575,7 +616,7 @@ int main(int argc, char **argv) {
         fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-wpa2 XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE\n",stderr);
         fputs("Continuous raw MAC: collector SERIAL EVIDENCE_BIN CHANNEL "
-              "--mac-soak-init|--mac-soak-reply CHALLENGE_HEX_28 COUNT:1-100000\n",stderr);
+              "--mac-soak-init|--mac-soak-reply CHALLENGE_HEX_28 COUNT:1-100000 [DROP_ACKS:0-16 [PHY [PAYLOAD]]]\n",stderr);
         return 2;
     }
     char *end;
@@ -585,7 +626,7 @@ int main(int argc, char **argv) {
         if (!((argv[1][i] >= '0' && argv[1][i] <= '9') ||
               (argv[1][i] >= 'A' && argv[1][i] <= 'F'))) return 2;
     if (signal(SIGALRM, deadline) == SIG_ERR) { perror("signal"); return 1; }
-    alarm(soak ? 3605u : 15u);
+    alarm(soak ? CLEAN_SOAK_HOST_SECONDS : 15u);
     libusb_context *context = NULL;
     int status = libusb_init(&context);
     if (status != 0) { fprintf(stderr, "USB init: %s\n", libusb_error_name(status)); return 1; }

@@ -47,13 +47,7 @@ static inline void clean_cck_plcp_service(uint8_t frame[6], uint8_t rate,
     frame[1] = service;
     frame[2] = (uint8_t)duration;
     frame[3] = (uint8_t)(duration >> 8u);
-    uint16_t crc = 0xffffu;
-    for (uint32_t i = 0u; i < 4u; ++i) {
-        crc ^= frame[i];
-        for (uint32_t bit = 0u; bit < 8u; ++bit)
-            crc = (uint16_t)((crc >> 1u) ^ ((crc & 1u) ? 0x8408u : 0u));
-    }
-    crc = (uint16_t)~crc;
+    uint16_t crc = clean_cck_plcp_crc(frame);
     frame[4] = (uint8_t)crc;
     frame[5] = (uint8_t)(crc >> 8u);
 }
@@ -63,10 +57,7 @@ static inline void clean_cck_plcp(uint8_t frame[6], uint8_t rate, uint16_t durat
 }
 
 static inline void clean_cck11_plcp(uint8_t frame[6], uint32_t mpdu_length) {
-    uint32_t bits = mpdu_length * 8u;
-    uint16_t duration = (uint16_t)((bits + 10u) / 11u);
-    uint8_t service = (uint8_t)(0x04u | (duration * 11u - bits >= 8u ? 0x80u : 0u));
-    clean_cck_plcp_service(frame, 0x6eu, duration, service);
+    (void)clean_cck_plcp_rate(frame, mpdu_length, 3u);
 }
 
 static inline void clean_ofdm_plcp(uint8_t frame[6]) {

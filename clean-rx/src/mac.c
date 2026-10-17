@@ -159,6 +159,9 @@ static int rx_error(clean_mac_rx_t *s, int result) {
 static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now,
                     int authenticated) {
     if (s->active && now - s->started_us >= CLEAN_MAC_RX_LIFETIME_US) {
+        clean_mac_history_t *h = &s->history[s->sequence & (CLEAN_MAC_RX_HISTORY - 1u)];
+        if (!h->delivered && h->sequence == s->sequence && h->subtype == s->frame[0] &&
+            h->protected_frame == (s->frame[1] & 64u)) h->valid = 0u;
         s->active = 0u;
         ++s->expired;
     }
@@ -184,9 +187,11 @@ static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now
         return rx_error(s, CLEAN_MAC_INVALID);
     clean_mac_history_t *h = &s->history[seq & (CLEAN_MAC_RX_HISTORY - 1u)];
     uint8_t protected_frame = m[1] & 64u;
+    /* Retry exchanges can outlive the assembly timeout. Delivered identities
+     * persist until replaced by another sequence or a fresh, non-Retry frame. */
     if ((m[1] & 8u) && h->valid && h->sequence == seq && h->subtype == m[0] &&
         h->protected_frame == protected_frame &&
-        now - h->received_us < CLEAN_MAC_RX_LIFETIME_US && (h->fragments & (1u << frag))) {
+        (h->fragments & (1u << frag))) {
         ++s->duplicates;
         return CLEAN_MAC_DUPLICATE;
     }
@@ -212,16 +217,15 @@ static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now
         }
     }
     if (!h->valid || h->sequence != seq || h->subtype != m[0] ||
-        h->protected_frame != protected_frame || (!frag && !(m[1] & 8u)) ||
-        now - h->received_us >= CLEAN_MAC_RX_LIFETIME_US) {
+        h->protected_frame != protected_frame || (!frag && !(m[1] & 8u))) {
         h->fragments = 0u;
         h->sequence = seq;
         h->subtype = m[0];
         h->protected_frame = protected_frame;
         h->valid = 1u;
+        h->delivered = 0u;
     }
     h->fragments |= (uint16_t)(1u << frag);
-    h->received_us = now;
     if (more) {
         s->next_fragment = (uint8_t)(frag + 1u);
         ++s->fragments;
@@ -235,6 +239,7 @@ static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now
         for (uint32_t i = 0u; i < 4u; ++i) s->frame[s->length + i] = (uint8_t)(crc >> (8u * i));
         s->length += 4u;
     }
+    h->delivered = 1u;
     ++s->delivered;
     return CLEAN_MAC_DELIVER;
 }

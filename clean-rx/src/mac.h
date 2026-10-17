@@ -25,8 +25,7 @@ void clean_dcf_slot(clean_dcf_t *s, uint32_t now, uint8_t short_slot);
 
 typedef struct {
     uint16_t sequence, fragments;
-    uint32_t received_us;
-    uint8_t valid, subtype, protected_frame;
+    uint8_t valid, subtype, protected_frame, delivered;
 } clean_mac_history_t;
 
 enum {

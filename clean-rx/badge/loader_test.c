@@ -7,6 +7,7 @@
 #include "station.h"
 #include "../src/unicast.h"
 #include "../src/tx_diag.h"
+#include "../src/mac_soak.h"
 
 static uint32_t ticks, calls, blocks, state, base;
 static int cancel, mismatch, bus_error, terminate_error, f2_post_status, ack_error;
@@ -155,6 +156,10 @@ static void fragments(const wifi_wire_t *wire) {
             badger_bytes_store_u32(ram + CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET, 1234u);
             uint32_t first = fragment(f2_packet, mpdu, 0u);
             f2_next_size = fragment(f2_next, mpdu, CLEAN_F2_FRAGMENT_BYTES);
+            uint32_t rate = mpdu % CLEAN_CCK_RATES;
+            uint8_t meta = clean_rx_phy_metadata(rounded && rate ? 0x80u : 0u, 0u, 1u);
+            f2_packet[15] = f2_next[15] = clean_cck_rates[rate].signal;
+            f2_packet[16] = f2_next[16] = meta;
             if (rounded) {
                 first = (first + 3u) & ~3u;
                 f2_next_size = (f2_next_size + 3u) & ~3u;
@@ -163,6 +168,7 @@ static void fragments(const wifi_wire_t *wire) {
             f2_reads = 0u;
             assert(clean_receive(&l, packet, &length) && length == mpdu + 18u);
             assert(f2_reads == 2u && packet[14] == 0x20u);
+            assert(packet[15] == clean_cck_rates[rate].signal && packet[16] == meta);
             assert(badger_bytes_load_u32(packet) ==
                    (length | ((length ^ 0xffffu) << 16u)));
             for (uint32_t i = 0u; i < mpdu; ++i)
@@ -176,7 +182,7 @@ static void fragments(const wifi_wire_t *wire) {
 #endif
         }
     }
-    for (uint32_t fault = 0u; fault < 17u; ++fault) {
+    for (uint32_t fault = 0u; fault < 18u; ++fault) {
         f2_expected_credit = 0u;
         f2_after_status = 0u;
         clean_loader_init(&l, wire, service, NULL);
@@ -208,6 +214,7 @@ static void fragments(const wifi_wire_t *wire) {
         if (fault == 15u) l.rx_credit = 0u;
         if (fault == 16u)
             f2_next_size = fragment(f2_next, CLEAN_MPDU_BYTES, 0u);
+        if (fault == 17u) f2_next[16] ^= CLEAN_RX_SHORT_PREAMBLE;
         assert(!clean_receive(&l, packet, &length) && length == 0u);
         assert(l.error == (fault == 6u || fault == 14u ? CLEAN_BUS :
                            fault == 7u ? CLEAN_TIMEOUT :
@@ -224,6 +231,94 @@ static void fragments(const wifi_wire_t *wire) {
 }
 
 static void eapol_tests(uint8_t evidence[2048]);
+
+static void cck_rates(void) {
+    clean_tx_tail_t tail = {0};
+    assert(!clean_tx_tail_poll(&tail, 0) && !tail.ended);
+    assert(!clean_tx_tail_poll(&tail, 1) && tail.active && !tail.ended);
+    assert(!clean_tx_tail_poll(&tail, 1));
+    assert(clean_tx_tail_poll(&tail, 0) && tail.ended);
+    assert(!clean_tx_tail_poll(&tail, 0) && !clean_tx_tail_poll(&tail, 1));
+    static const uint8_t golden[4][6] = {
+        {0x0au,0x04u,0x70u,0x00u,0xd5u,0xb3u},
+        {0x14u,0x04u,0x38u,0x00u,0x90u,0x56u},
+        {0x37u,0x04u,0x15u,0x00u,0x45u,0x6fu},
+        {0x6eu,0x84u,0x0bu,0x00u,0x5du,0x40u}
+    };
+    uint8_t plcp[6], packet[CLEAN_RX_PACKET_BYTES];
+    for (uint32_t rate = 0u; rate < CLEAN_CCK_RATES; ++rate) {
+        assert(clean_cck_plcp_rate(plcp, 14u, rate) && !memcmp(plcp, golden[rate], 6u));
+        assert(clean_cck_rate_index(plcp[0]) == (int)rate);
+        assert(clean_cck_preamble_valid(rate, 0u));
+        assert(clean_cck_preamble_valid(rate, 1u) == (rate != 0u));
+        assert(!clean_cck_preamble_valid(rate, 2u));
+        for (uint32_t length = 14u; length <= CLEAN_MPDU_BYTES; ++length) {
+            assert(clean_cck_plcp_rate(plcp, length, rate));
+            assert(clean_cck_plcp_valid(plcp, length));
+            uint32_t duration = clean_cck_duration_us(length, rate);
+            uint32_t half_mbps = clean_cck_rates[rate].half_mbps;
+            assert(duration * half_mbps >= length * 16u);
+            assert((duration - 1u) * half_mbps < length * 16u);
+            assert(clean_cck_airtime_us(length, rate, 0u) == duration + 192u);
+            assert(clean_cck_airtime_us(length, rate, 1u) ==
+                   (rate ? duration + 96u : 0u));
+            assert(plcp[1] == (4u | (rate == 3u && duration * 11u - length * 8u >= 8u ? 128u : 0u)));
+            assert(!clean_cck_plcp_valid(plcp, length + 1u));
+            for (uint32_t bit = 0u; bit < 48u; ++bit) {
+                plcp[bit / 8u] ^= (uint8_t)(1u << (bit & 7u));
+                assert(!clean_cck_plcp_valid(plcp, length));
+                plcp[bit / 8u] ^= (uint8_t)(1u << (bit & 7u));
+            }
+        }
+        assert(!clean_cck_plcp_rate(plcp, 13u, rate));
+        assert(!clean_cck_plcp_rate(plcp, CLEAN_MPDU_BYTES + 1u, rate));
+        assert(!clean_cck_duration_us(UINT32_MAX, rate));
+    }
+    assert(!clean_cck_plcp_rate(plcp, 14u, CLEAN_CCK_RATES));
+    assert(!clean_cck_airtime_us(14u, CLEAN_CCK_RATES, 0u));
+    assert(clean_cck_rate_index(0u) == -1 && clean_cck_rate_index(111u) == -1);
+    assert(clean_cck_airtime_us(2332u, 0u, 0u) == 18848u);
+    assert(clean_cck_airtime_us(2332u, 1u, 0u) == 9520u);
+    assert(clean_cck_airtime_us(2332u, 2u, 0u) == 3584u);
+    assert(clean_cck_airtime_us(2332u, 3u, 0u) == 1888u);
+    assert(clean_rx_phy_metadata(0u, 0u, 1u) == 1u);
+    assert(clean_rx_phy_metadata(0x80u, 0u, 1u) == (1u | CLEAN_RX_SHORT_PREAMBLE));
+    assert(clean_rx_phy_metadata(1u, 0x440u, 1u) == (1u | CLEAN_RX_OFDM));
+    assert(clean_rx_phy_metadata(0u, 0x2000u, 1u) == (1u | CLEAN_RX_OFDM));
+    assert(clean_rx_phy_metadata(2u, 0u, 1u) == (1u | CLEAN_RX_UNSUPPORTED_PHY));
+    assert(clean_rx_phy_metadata(3u, 0u, 1u) == (1u | CLEAN_RX_UNSUPPORTED_PHY));
+    uint8_t invalid_nonce[14] = {0};
+    invalid_nonce[13] = CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS;
+    assert(!clean_soak_frame(packet, invalid_nonce, 1u, 0u));
+    assert(!clean_soak_payload_size(invalid_nonce, 0u));
+    for (uint32_t phy = 0u; phy < CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS; ++phy) {
+        uint8_t nonce[14] = {1u,2u,3u,4u};
+        nonce[13] = (uint8_t)phy;
+        uint32_t rate = clean_soak_rate(nonce);
+        uint8_t flags = rate == 4u ? CLEAN_RX_OFDM :
+            clean_soak_short(nonce) ? CLEAN_RX_SHORT_PREAMBLE : 0u;
+        for (uint32_t fault = 0u; fault < 5u; ++fault) {
+            clean_soak_status_t s = {.target = 3u};
+            for (uint32_t index = 0u; index < 3u; ++index) {
+                uint32_t length = clean_soak_frame(packet + 12u, nonce, 1u, index) + 12u;
+                packet[15] = rate == 4u ? 0x8bu : clean_cck_rates[rate].signal;
+                packet[16] = 1u | flags;
+                if (fault == 1u) packet[15] ^= 1u;
+                if (fault == 2u) packet[16] ^= CLEAN_RX_SHORT_PREAMBLE;
+                if (fault == 3u) packet[16] ^= CLEAN_RX_OFDM;
+                if (fault == 4u) packet[16] |= CLEAN_RX_UNSUPPORTED_PHY;
+                int result = clean_soak_receive_packet(&s, packet, length, nonce, 2u);
+                assert(result == (fault ? -1 : 1));
+                if (fault) {
+                    assert(s.failure == 6u && s.rx_phy_mismatch == 1u && !s.rx_phy_checked);
+                    break;
+                }
+            }
+            if (!fault) assert(s.received == 3u && s.rx_phy_checked == 3u && !s.failure);
+        }
+    }
+    puts("CCK: four rates, all lengths/CRC bits, seven legal preambles, RX PHY evidence and mismatch rejection pass");
+}
 
 static void station_tests(void) {
     const uint8_t mac[6] = {2u,1u,2u,3u,4u,5u};
@@ -470,6 +565,7 @@ static void eapol_tests(uint8_t evidence[2048]) {
 }
 
 int main(void) {
+    cck_rates();
     station_tests();
     wifi_wire_t wire = {.now_us = now, .transfer = mock_transfer,
         .write = write_signal, .data_output = output, .read_data = read_signal};
@@ -520,6 +616,17 @@ int main(void) {
     l.budget_us = 3505000000u;
     ticks += 3505000000u;
     assert(!clean_service(&l) && l.error == CLEAN_TIMEOUT);
+    ticks = UINT32_MAX - 5u;
+    clean_loader_init(&l, &wire, service, NULL);
+    l.budget_us = CLEAN_SOAK_MAX_US;
+    ticks += 3000000000u;
+    assert(clean_service(&l) && l.elapsed_us == 3000000001ULL);
+    ticks += 3000000000u;
+    assert(clean_service(&l) && l.elapsed_us == 6000000002ULL);
+    ticks += 1200000000u - 4u;
+    assert(clean_service(&l) && l.elapsed_us == CLEAN_SOAK_MAX_US - 1u);
+    assert(!clean_service(&l) && l.error == CLEAN_TIMEOUT &&
+           l.elapsed_us == CLEAN_SOAK_MAX_US);
     clean_loader_init(&l, &wire, service, NULL);
     state = 8u;
     assert(clean_wait_state(&l, 8u, 20u));

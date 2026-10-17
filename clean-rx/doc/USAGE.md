@@ -29,8 +29,12 @@ with build commands and physical results from 2026-10-14 and 2026-10-15.
 Cold beacon reception, Function-2 delivery and single-frame 11 Mbps CCK OTA TX
 have been verified between a Universe badge and a Tufty2350, in both
 directions. Peer RX matches a fresh challenge, full MPDU and valid FCS.
-Micro Signal additionally qualifies the eight legacy OFDM rates above;
-other CCK TX rates, automatic ACK timing and WPA2 connectivity remain unqualified.
+Micro Signal additionally qualifies the eight legacy OFDM rates above.
+The paired raw MAC fixture now supports all four DSSS/CCK rates and all seven
+legal long/short-preamble combinations, with receiving-chip rate/preamble
+checks. See [C1 evidence and limitations](../badge/README.md#dssscck-rate-and-preamble-fixture);
+full-size 1-Mbps reception remains an explicit failure. Automatic ACK timing
+and general WPA2 connectivity remain unqualified.
 For a persistent, no-USB application using this loader and radio interface, see
 [Micro Signal](../../docs/micro-signal.md): the same small UF2 on both boards
 sends debounced button presses and displays received peer events.
@@ -262,18 +266,28 @@ Once `MBOX->fw_state == FW_STATE_RX_ACTIVE` (`9`), the RP2350 controls the trans
 | `2` | **Idle / Active RX** | Firmware is actively receiving frames and streaming them over gSPI Function 2. Look for `host_cmd == 2` to confirm completion of commands `4`, `5`, or `6`. |
 | `3` | **Stop Transceiver** | Cleanly stops MAC/PSM and D11 RX DMA, populates diagnostic snapshots in `MBOX`, and transitions `fw_state` to `FW_STATE_RX_DONE` (`10`). |
 | `4 \| (ch << 8)` | **Fast Channel Switch** | Tunes Radio 20691 and LCN20 PHY to 2.4 GHz channel `ch` (`1..14`) in ~3.5 ms without re-running cold calibration, then resumes reception. |
-| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..2406`, staged at `FW_TX_BUF_ADDR` (`0x0004a400`), repeated `1..255` times. Full-MSDU qualification reaches 2,332 MPDU bytes at 11 Mbps CCK and all eight legacy OFDM rates. OFDM requires a valid SIGNAL header with matching MPDU length; use `clean_ofdm_plcp_rate` in `phy_rates.h`. Other CCK rates and hardware CCMP remain unqualified. |
+| `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, staged at `FW_TX_BUF_ADDR` (`0x0004a400`), repeated `1..255` times. CCK accepts MPDUs `14..2400` and uses long preamble at 1/2/5.5/11 Mbps; OFDM accepts `10..2400`. Use `clean_cck_plcp_rate` or `clean_ofdm_plcp_rate` in `phy_rates.h` for matching length/rate headers. Hardware CCMP remains unqualified. |
 | `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x0004a400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
 | `7` | **Enable experimental station MAC** | Stage 16 bytes: local MAC at 0, pinned peer at 6, little-endian basic-rate mask at 12, short-slot flag at 14 and profile at 15. Profile 3 selects PSM/IFS/TSF-clocked DIFS/backoff/EIFS and final TX trigger; profile 2 retains Cortex DCF/NAV. Both provide experimental reliable unicast and PSM ACK/CTS handling. Profile 1 retains the older ACK experiment. All require TX enabled and unicast, nonzero addresses. Reconfiguration with command 7 is rejected. |
 | `8` | **Queue station rate/slot policy** | Stage the same 16-byte configuration with unchanged bound addresses and active profile (2 or 3). Updates response rates and slot policy at idle RX/PHY without resetting pending TX identity, NAV or receive transport. Completion acknowledges queueing; `mac_policy_pending` reports whether application is still pending. |
+| `9 \| (count << 8)` | **Test-only bounded missing ACKs** | Requires enabled profile 3 and `count` 0..16 with no reserved high bits. Atomically resets the actual-drop counter and arms suppression of the next `count` otherwise eligible, valid-FCS local-RA/pinned-TA ACK responses. Zero cancels suppression. Invalid input/profile reports firmware error `0x85`. No ordinary station caller enables it. |
+| `10 \| clean_tx_length_bits(total_len) \| (cnt << 19)` | **Transmit short-preamble DSSS/CCK** | Same length/count/reliability flags and staging format as command 5, but requests short preamble at 2/5.5/11 Mbps. Short 1 Mbps or short OFDM requests report error `0x83`. No command-5 flag bit is repurposed. |
 
 With station MAC enabled, commands 4 and 6 and TX rearm/source-match overrides
 are rejected rather than discarding held captures. Profile 2 requires reliable
 unicast TX: set `CLEAN_TX_ACK_REQUIRED`, use at most eight attempts, and provide
 a valid-FCS, bound-peer management or non-QoS ToDS data MPDU. Supported templates
-are legacy OFDM or validated long-preamble 11 Mbps CCK. Inspect the separate
+are legacy OFDM or validated DSSS/CCK at all four rates; short preamble requires
+command 10 and is forbidden at 1 Mbps. This does not change station association
+rate negotiation or establish b-only AP compatibility. Inspect the separate
 ACK status at `0x201e0`: a `BUSY` result with zero attempts is a deferral, not
 a radio transmission or retry.
+
+Command 9 does not suppress CTS, incoming ACK consumption or application
+delivery, and invalid/unbound receptions do not spend its budget. The report
+field `mac_ack_dropped` counts actual suppressed responses, not a promise that
+all configured responses were received. See the
+[continuous fixture and controlled-loss evidence](../badge/README.md#continuous-raw-mac-fixture).
 
 MAC retransmissions retain sequence/fragment identity and protected bytes/PN.
 After a request is MAC-ACKed, a management response timeout instead starts a
@@ -306,12 +320,20 @@ To poll and read incoming frames on the RP2350:
    - `uint8_t plcp_rate = buf[15];` (CCK or OFDM rate byte from `PLCP[0]`)
    - `uint8_t channel = buf[16] & 0x0fu;`
    - `int is_ofdm = (buf[16] & 0x10u) != 0u;`
+   - `int short_preamble = (buf[16] & CLEAN_RX_SHORT_PREAMBLE) != 0u;` (`0x20`, CCK).
+   - `int unsupported_phy = (buf[16] & CLEAN_RX_UNSUPPORTED_PHY) != 0u;` (`0x40`).
    - **802.11 MPDU bytes** start at `&buf[18]` with length `mpdu_len = sdpcm_len - 18u` (including the trailing 4-byte FCS).
 
 For OFDM, use `clean_ofdm_rate_index(plcp_rate)` from `phy_rates.h`:
 only the low RATE nibble identifies Mbps; the upper nibble also contains
 LENGTH bits. The controller derives the OFDM flag from DMA PHY status or
 RXE encoding bit 13, not the unrelated RXE bits 9..10.
+For DSSS/CCK, SIGNAL values `10/20/55/110` identify 1/2/5.5/11 Mbps.
+The preamble flag comes from actual receiving PHY status bit 7, not
+the transmitter command or expected fixture setting. Both physical transport
+fragments must agree on rate, channel and preamble metadata.
+The controller snapshots the held PSM header at SHM `0x7f6`, not a potentially
+lagging DMA descriptor's header, so status belongs to the published capture.
 
 The source-built controller additionally uses the two SDPCM padding bytes
 `buf[12..13]` for optional RX publication-phase metadata. The little-endian word

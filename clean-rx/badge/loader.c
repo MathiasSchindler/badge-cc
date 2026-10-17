@@ -9,7 +9,10 @@ static int fail(clean_loader_t *l, uint32_t error) {
 
 int clean_service(clean_loader_t *l) {
     if (l->error != CLEAN_OK) return 0;
-    if (l->wire->now_us(l->wire->context) - l->started >= l->budget_us)
+    uint32_t now = l->wire->now_us(l->wire->context);
+    l->elapsed_us += (uint32_t)(now - l->serviced_at);
+    l->serviced_at = now;
+    if (l->elapsed_us >= l->budget_us)
         return fail(l, CLEAN_TIMEOUT);
     if (l->service != 0 && !l->service(l->context)) return fail(l, CLEAN_CANCELLED);
     return 1;
@@ -21,6 +24,8 @@ void clean_loader_init(clean_loader_t *l, const wifi_wire_t *wire,
     l->service = service;
     l->context = context;
     l->started = wire->now_us(wire->context);
+    l->serviced_at = l->started;
+    l->elapsed_us = 0u;
     l->budget_us = 6000000u;
     l->window = l->error = l->address = l->actual = l->verified = l->stage = 0u;
     l->window_valid = 0u;

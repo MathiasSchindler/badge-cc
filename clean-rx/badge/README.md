@@ -19,10 +19,12 @@ now qualifies raw 6/9/12/18/24/36/48/54 Mbps legacy OFDM in both directions
 between two Universe badges, at six MPDU sizes through 2,332 bytes.
 Use `make micro-signal-g` for the normal fixed-6-Mbps button application or
 `make micro-signal-g-test` for that all-rate sweep. This badge diagnostic
-application still uses its original CCK challenge protocol.
-The 1 Mbps experiments have not passed; do not generalize the qualification
-to other CCK rates, automatic ACK timing, complete 802.11g MAC operation,
-general-purpose station reliability. The separate controlled WPA2 qualification
+application retains its original CCK challenge protocol. Its separate
+[DSSS/CCK fixture](#dssscck-rate-and-preamble-fixture) now verifies all four
+rates and seven legal preambles on paired badges; full-size 1-Mbps reception
+still fails. Do not generalize these bounded results to automatic ACK timing,
+complete 802.11b/g MAC operation or general-purpose station reliability.
+The separate controlled WPA2 qualification
 below proves a bounded encrypted exchange, not sustained networking.
 
 ## Source layout and maintenance
@@ -218,7 +220,11 @@ Implemented paths:
 - [`station_rx.h`](station_rx.h) applies the shared non-QoS duplicate cache
   and bounded unprotected reassembly to station waits, drains, post-association
   reception and the WPA loop. The pinned-peer cache tracks subtype, sequence
-  and fragment identity across sequence wrap, with a 512-ms lifetime.
+  and fragment identity across sequence wrap. Delivered identities persist
+  until their bounded history slot is replaced or a fresh non-Retry frame
+  reuses the identity; they do not expire during a long retransmission exchange.
+  Only incomplete reassembly has a 512-ms lifetime. Expiry invalidates its
+  incomplete history, not an already delivered replacement.
   One assembly supports up to 16 fragments and 2,304 payload bytes; conflicting,
   out-of-order, expired and oversized fragments have explicit counters/results.
   Reassembled packets carry `packet[17] = 1`: their reconstructed FCS is **not**
@@ -269,7 +275,7 @@ address readback. It does not overlap the mailbox, ACK status or capture ring.
 New response counts accumulate sampled 16-bit PSM deltas into 32-bit totals;
 the original ACK-status counters retain their existing format.
 
-A separate 100-byte `MCR1` status at `0x20250`, copied to detail offset 1808,
+A separate 104-byte `MCR1` status at `0x20250`, copied to detail offset 1808,
 reports scheduled responses by auth/association/non-QoS-data/other receive
 classes, corresponding bound frames actually published to transport, and
 invalid-FCS published captures. These counters are reset at controller startup
@@ -279,7 +285,9 @@ they do not identify individual RF exchanges or measure SIFS. Its original
 40-byte prefix is preserved. Appended words report host/PSM IFS and clock
 samples, the last local-response stage/FC/RX flags, global bad-FCS count and
 last invalid frame identity/length, ACK notification elapsed/window and response
-setup delay. Both station and soak JSON expose these as `mac_*` diagnostics.
+setup delay. The final word, at detail offset 1908, reports deliberately
+suppressed eligible ACKs as `mac_ack_dropped`. Both station and soak JSON
+expose these as `mac_*` diagnostics.
 Bad-FCS counts include unrelated channel traffic; they are not bound-peer loss.
 
 Station evidence at detail offset 1680 contains `MAC1` plus unprotected
@@ -303,13 +311,17 @@ make test-micro-signal
 The ASan/UBSan MAC test covers idle/busy/NAV overlap and expiry, timer wrap,
 EIFS, partial-slot freezing, CW limits/reset, deterministic draws, Retry/FCS
 identity, all supported CCK PLCP lengths, ERP fallback, malformed frames,
-duplicate expiry, maximum-size 16-fragment reassembly and the actual station
+late-retry duplicate retention across timeout and timer wrap, fresh non-Retry
+identity reuse, incomplete-assembly expiry/restart, maximum-size 16-fragment
+reassembly and the actual station
 adapter. It delivers 100,000 frames per **simulated** direction, alternating
 32-, 1,500- and 2,304-byte payloads, and suppresses their retries. This is
 **not** the roadmap's 100,000-frame-per-direction OTA qualification.
 PSM tests also run under ASan/UBSan and exercise all 12 receive rates, long/short
 responses, 1 Mbps fallback, CTS Duration, NAV gating, rejection and immediate
-rearm. They reject multiple memory inputs in every instruction, flip each of
+rearm. Bounded ACK suppression is tested at all 12 rates, including budget
+exhaustion/resumption, wrong-TA budget preservation, no TX trigger/ownership
+while dropping, and unaffected CTS. They reject multiple memory inputs in every instruction, flip each of
 the 96 RA/TA bits for ACK/CTS rejection, and run 100,000 internal ACK rearms
 without DMA/header publication, including counter wrap and out-of-window ACKs.
 Native request tests cover zero-attempt deferrals, no-ACK Retry/FCS identity,
@@ -334,11 +346,13 @@ and use a fresh evidence prefix:
 
 ```sh
 bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-soak 5000
+# Optionally suppress the first two eligible ACKs at each endpoint:
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-loss 100 2
 ```
 
 This does not flash or change the Mac's networking. It runs the responder
 first, uses a fresh challenge and pinned local addresses, and alternates
-32/1,500/2,304-byte payloads at 6 Mbps on channel 1. Each endpoint requires
+32/1,500/2,304-byte payloads at 6 Mbps on channel 1 by default. Each endpoint requires
 exact application indices, MAC sequence wrap, payload pattern and FCS,
 and actual ACK-confirmed TX. MAC retries preserve sequence/body; only Retry
 and FCS change. Duplicate application delivery, corruption, ordering errors,
@@ -346,15 +360,110 @@ eight exhausted actual attempts, peer inactivity and overall deadline are
 explicit failures. Zero-attempt BUSY does not consume the retry budget.
 The real station duplicate/reassembly adapter runs before fixture validation.
 
+The optional fifth argument, `DROP_ACKS`, is 0..16 and defaults to zero.
+Both collectors also accept it after `COUNT`. Only the
+explicit profile-3 test command enables suppression; ordinary station callers
+never issue it. Only otherwise eligible GoodFCS, pinned-peer ACK responses
+consume the budget; CTS and incoming ACK consumption are unchanged. A passing
+run must report exactly the requested suppression count at both endpoints.
+Config JSON retains the requested count and reports retain the actual count.
+
 The loader retains its six-second default for ordinary diagnostics. Only the
 soak selects a longer bounded budget, continues USB/cancellation servicing,
 and renews the existing eight-second BOOTSEL lease every four seconds.
-Native tests cover the unchanged default, long budget, cancellation and wrap.
-Targets are 1..100,000, with a 3,500-second overall radio-test deadline and
-a 3,605-second host limit. At the measured approximately 45 ms per exchange,
-the full 100,000 target needs additional throughput/deadline work.
+Elapsed microseconds accumulate in 64 bits from successive unsigned 32-bit
+clock deltas; servicing must occur at least once per hardware-clock wrap.
+Native tests cover the unchanged default, two wraps, exact deadline boundaries
+and cancellation. Targets are 1..100,000, with a 7,200-second radio-test
+deadline, a loader budget five seconds longer, and a 7,230-second host limit.
+Soak-only host polling is every 250 ms, including loading/snapshot margin.
+Status at detail offset 520 is now 64-byte `MSK3`, with elapsed low/high words
+reconstructed as a 64-bit JSON `elapsed_us`; the on-air `MSK1` payload is
+unchanged. The final three words count PHY-checked deliveries, mismatches
+and last received rate/flags. Use the matching current collector and image. Soak JSON also
+exposes the controller snapshot as `fw_state`, `fw_substage`, `fw_error`,
+`fw_error_addr` and `fw_error_val`, rather than hiding it behind state 255.
+The earlier runtime ceiling is removed, but a full run has not passed.
 This is a raw two-clean-endpoint test, not a vendor interoperability/control
 soak, persistent AP station link or independent RF timing measurement.
+
+### DSSS/CCK rate and preamble fixture
+
+The optional sixth argument selects `ofdm6` (default), `1-long`, `2-long`,
+`5.5-long`, `11-long`, `2-short`, `5.5-short` or `11-short`. The optional
+seventh argument selects `cycle` (default), `32`, `1500` or `2304` payload
+bytes. Fixed-size selection is explicit and recorded in configuration and
+endpoint reports; the original cyclic-size coverage is not silently reduced.
+Collectors accept `[DROP_ACKS [PHY [PAYLOAD]]]` after `COUNT`.
+
+```sh
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1500 100 0 1-long 1500
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-11-short 100 0 11-short
+```
+
+The last challenge byte encodes PHY in bits 0..2 and payload selection in
+bits 3..4 (cycle/32/1500/2304); higher bits are rejected. Payload seed,
+exact length, FCS and sequence validation cover every selection. CCK selects
+the four b basic rates; default OFDM retains its existing rate policy.
+Every accepted delivery also checks the separate receiver's decoded
+modulation/rate and long/short-preamble status. Passing requires exactly
+`COUNT` PHY checks and zero mismatches at each endpoint, alongside the
+existing ACK, payload and ordering criteria.
+
+Shared PLCP helpers cover all four rates, length extension, CRC, airtime and
+legal preambles. Short CCK TX uses opcode 10; opcode 5 retains its existing
+layout. Receiving packet byte 16 publishes short preamble (`0x20`) and
+unsupported PHY (`0x40`) without changing the MPDU offset. Fragmented
+transport preserves and checks these flags. Native tests cover all lengths,
+header-bit corruption, fixed independent CRC vectors, all fixture PHY/size
+selections and deliberate receiving-PHY mismatches.
+
+This is C1 PHY/rate evidence, not C2 b-only association, C3's 1,000-frame
+per-cell qualification, calibrated RF/EVM/spectral-mask evidence, or
+independent SIFS measurements. Full-sized 1-Mbps reception is still failing
+and must not be represented as qualified.
+
+Final build `9c3deabc`, channel 1, evidence prefix
+`build/clean-rx/badge/c1-final-PHY-SIZE`:
+
+| PHY/preamble | 32-byte MSDU | 1,500-byte MSDU | 2,304-byte MSDU | Received rate/flags |
+| --- | --- | --- | --- | --- |
+| 1 Mbps long | 100/100 | 100/100 | **Incomplete** | `010a` |
+| 2 Mbps long | 100/100 | 100/100 | 100/100 | `0114` |
+| 5.5 Mbps long | 100/100 | 100/100 | 100/100 | `0137` |
+| 11 Mbps long | 100/100 | 100/100 | 100/100 | `016e` |
+| 2 Mbps short | 100/100 | 100/100 | 100/100 | `2114` |
+| 5.5 Mbps short | 100/100 | 100/100 | 100/100 | `2137` |
+| 11 Mbps short | 100/100 | 100/100 | 100/100 | `216e` |
+| 6 Mbps OFDM | 100/100 | 100/100 | 100/100 | `118b` / `110b` |
+
+Counts are ACK-confirmed TX/received application frames **at each endpoint**,
+not totals pooled between directions. The final column encodes packet bytes
+15 and 16 in a little-endian word; OFDM SIGNAL's upper nibble varies with
+length. The 23 passing cells total 4,600 application deliveries with exact
+PHY checks, 4,639 actual attempts and 39 ACK timeouts, with zero corruption,
+duplicate delivery, ordering errors, PHY mismatch or controller faults.
+
+The full-size 1-Mbps cell exceeded an external 60-second test bound without
+complete endpoint reports; the process group was stopped and its configuration
+and incomplete logs retained. No success or packet-loss rate is inferred.
+Earlier build `b678cb3e`, prefix `c1-tail-1-long`, reached that size after
+successful small/1,500-byte exchanges and exhausted eight attempts without
+delivery. A hardware-clock RX-deadline experiment did not fix it and was
+removed; its evidence remains separate. The cause is unresolved.
+
+Intermediate build `786ad5ee`, prefix `c1-matrix-*`, exposed one valid OFDM
+frame paired with stale DMA PHY status and had an interrupted OFDM full-size
+trial. The final build uses the held PSM header for the same capture, not
+the lagging DMA descriptor; native image tests pin that PHY-status latch
+before publication. Final OFDM cells pass without metadata mismatch.
+Intermediate and final-build counts are not pooled.
+
+Both originals were restored and independently read/compared after this matrix:
+the 33,604-byte saved application range for `08DA26F86E57F5EA` and full
+16-MiB flash for `9BBF88DD17D66E7D`. Both remain in BOOTSEL. No Mac networking
+changes were made. C1 remains partial pending the full-size 1-Mbps failure;
+see [milestone status](../../todo.md#c1-all-legacy-dssscck-rates).
 
 Build `2269c6c0`, evidence prefix `build/clean-rx/badge/mac-a-soak-owner`:
 
@@ -370,6 +479,45 @@ acceptance gate. Earlier retained failures include `a5c9577d` after 2,615
 frames per direction (controller TX-completion fault), and a `54054044`
 100,000-target attempt near frame 523 (missing initiator USB report and
 responder retry exhaustion). Do not pool different builds or exclude failures.
+
+#### Controlled-loss continuation and retained failures
+
+Build `5d7008c7` passed an initial ten-frame-per-direction run with two
+deliberately suppressed ACKs per endpoint (`mac-a-fault-two` under
+`build/clean-rx/badge/`). Its subsequent 10,000-target run,
+`mac-a-fault-long`, failed: the initiator reported 483 ACK-confirmed TX,
+482 received and one duplicate application delivery; the responder reported
+482 ACK-confirmed TX, 483 received and retry exhaustion. Inspection exposed
+a concrete bug: the duplicate cache expired after 512 ms even though a
+single fixture retry exchange can last two seconds. The late-retry regression
+failed before the fix. Delivered identities now persist independently of
+incomplete-assembly expiry; this is not an RF diagnosis of every lost ACK.
+
+The repeat on intermediate build `3414b640`, `mac-a-duplicate-recovery`,
+also failed: initiator 449 ACK-confirmed/448 received, responder 448/449.
+Neither reported duplicate delivery, corruption or ordering errors, but the
+responder stopped with controller error `0x82`, substage 5, address
+`0x1800150e`, value `0x00c1002f`: a TX-completion-condition failure. The
+initiator then timed out waiting for its peer. This fault remains unresolved;
+neither 10,000-target run passed.
+
+Final build `9c6fb6d6`, prefix `mac-a-final-recovery`, passed a **100-frame
+smoke test**, not an extended soak:
+
+| Endpoint | ACK-confirmed / received | TX attempts | ACK timeouts | Deferrals | Suppressed ACKs | Suppressed MAC duplicates |
+| --- | --- | --- | --- | --- | --- | --- |
+| Initiator | 100 / 100 | 117 | 17 | 67 | 2 | 7 |
+| Responder | 100 / 100 | 115 | 15 | 40 | 2 | 4 |
+
+Both reported zero corruption, duplicate application delivery and ordering
+errors. On that same final build, `mac-a-final-exhaustion` configured eight
+suppressed responses and correctly failed at index zero with exactly eight
+actual attempts/eight ACK timeouts, zero ACK confirmations and `failure:3`,
+`error:2` at both endpoints. Each delivered the first application frame once.
+Actual suppressed ACKs were 7/3, not eight each: the configured budget does
+not imply every transmitted frame was received. Exact positive/negative
+JSON assertions passed. These are controlled **missing-ACK** tests, not
+late-ACK, SIFS or occupied-credit qualification.
 
 The same `2269c6c0` image was subsequently tested against unchanged vendor
 AP `0353f1de`, channel 1, with evidence prefix
@@ -389,6 +537,10 @@ After these profile-3 tests, badge A's original 33,604-byte application was
 restored and independently compared; badge B's entire 16 MiB flash was read
 back and compared to its original full backup after restoring the modified
 prefix. Both comparisons passed and both badges were left in BOOTSEL.
+Restoration was repeated after the controlled-loss continuation: independent
+readbacks `mac-a-final-restored-A.bin` (application only) and
+`mac-a-final-restored-B-full.bin` (entire 16 MiB), under
+`build/clean-rx/badge/`, both matched their originals. Both badges remain BOOTSEL.
 
 ### Hardware evidence and remaining gates
 
@@ -511,8 +663,9 @@ fallback instead. Current profile-3 carrier/NAV scheduling is PSM/IFS/TSF-based;
 profile 2 retains conservative Cortex polling. Profile 3 anchors NAV to the
 GoodFCS PSM timestamp and mirrors remaining reservations into hardware NAV.
 Independent qualification of its slot/SIFS/turnaround timing is still necessary.
-Independent contention/SIFS captures, controlled missing/late
-ACK and occupied-credit RF trials, and the required large bidirectional OTA
+Controlled missing-ACK recovery/exhaustion now has small two-badge evidence.
+Independent contention/SIFS captures, controlled late-ACK and occupied-credit
+RF trials, and the required large bidirectional OTA
 soak/vendor control have **not** passed. Earlier unexplained response loss
 and no-ACK authentication failures have not been established as resolved.
 Native arithmetic, local counters, a scheduled CTS or

@@ -5,16 +5,60 @@
 #include "phy_rates.h"
 
 #define CLEAN_SOAK_MAGIC 0x314b534du
+#define CLEAN_SOAK_STATUS_MAGIC 0x334b534du
 #define CLEAN_SOAK_DETAIL 520u
 #define CLEAN_SOAK_MAX_FRAMES 100000u
+#define CLEAN_SOAK_MAX_US 7200000000ULL
+#define CLEAN_SOAK_HOST_SECONDS 7230u
+#define CLEAN_SOAK_POLL_US 250000u
+#define CLEAN_SOAK_POLLS (CLEAN_SOAK_HOST_SECONDS * 4u)
+#define CLEAN_SOAK_PHYS 8u
+#define CLEAN_SOAK_PAYLOADS 4u
+
+static const char *const clean_soak_phy_names[CLEAN_SOAK_PHYS] = {
+    "ofdm6", "1-long", "2-long", "5.5-long", "11-long",
+    "2-short", "5.5-short", "11-short"
+};
+
+static const char *const clean_soak_payload_names[CLEAN_SOAK_PAYLOADS] = {
+    "cycle", "32", "1500", "2304"
+};
+
+static inline uint32_t clean_soak_phy(const uint8_t nonce[14]) {
+    return nonce[13] & 7u;
+}
+
+static inline uint32_t clean_soak_rate(const uint8_t nonce[14]) {
+    uint32_t phy = clean_soak_phy(nonce);
+    return phy == 0u ? 4u : phy <= 4u ? phy - 1u : phy - 4u;
+}
+
+static inline uint32_t clean_soak_short(const uint8_t nonce[14]) {
+    return clean_soak_phy(nonce) >= 5u;
+}
 
 typedef struct {
     uint32_t magic, target, tx_acked, tx_attempts, tx_timeouts, deferrals;
     uint32_t received, duplicates, corrupt, out_of_order, elapsed_us, failure;
+    uint32_t elapsed_hi;
+    uint32_t rx_phy_checked, rx_phy_mismatch, rx_phy_last;
 } clean_soak_status_t;
+
+_Static_assert(sizeof(clean_soak_status_t) == 64u, "MSK3 status wire layout");
+
+static inline uint64_t clean_soak_elapsed(const clean_soak_status_t *s) {
+    return ((uint64_t)s->elapsed_hi << 32u) | s->elapsed_us;
+}
 
 static inline uint32_t clean_soak_size(uint32_t index) {
     return index % 3u == 0u ? 32u : index % 3u == 1u ? 1500u : CLEAN_MSDU_BYTES;
+}
+
+static inline uint32_t clean_soak_payload_size(const uint8_t nonce[14], uint32_t index) {
+    uint32_t payload = nonce[13] >> 3u;
+    if (payload >= CLEAN_SOAK_PAYLOADS) return 0u;
+    return payload == 0u ? clean_soak_size(index) :
+        payload == 1u ? 32u : payload == 2u ? 1500u : CLEAN_MSDU_BYTES;
 }
 
 static inline void clean_soak_address(uint8_t address[6], const uint8_t nonce[14],
@@ -34,12 +78,17 @@ static inline uint32_t clean_soak_frame(uint8_t *frame, const uint8_t nonce[14],
     uint8_t own[6], peer[6];
     clean_soak_address(own, nonce, role);
     clean_soak_address(peer, nonce, (uint8_t)(3u - role));
-    uint32_t payload = clean_soak_size(index), length = payload + 28u;
-    if (!clean_ofdm_plcp_rate(frame, length, 0u)) return 0u;
+    uint32_t payload = clean_soak_payload_size(nonce, index), length = payload + 28u;
+    if (nonce[13] >= CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS) return 0u;
+    uint32_t rate = clean_soak_rate(nonce);
+    if (!(rate == 4u ? clean_ofdm_plcp_rate(frame, length, 0u) :
+          clean_cck_plcp_rate(frame, length, rate))) return 0u;
     uint8_t *m = frame + 6u;
     for (uint32_t i = 0u; i < 24u; ++i) m[i] = 0u;
     m[0] = 8u; m[1] = 1u;
-    m[2] = (uint8_t)(10u + clean_ofdm_airtime_us(14u, 0u));
+    uint32_t duration = 10u + (rate == 4u ? clean_ofdm_airtime_us(14u, 0u) :
+                              clean_cck_airtime_us(14u, rate, clean_soak_short(nonce)));
+    m[2] = (uint8_t)duration; m[3] = (uint8_t)(duration >> 8u);
     for (uint32_t i = 0u; i < 6u; ++i) {
         m[4u + i] = m[16u + i] = peer[i];
         m[10u + i] = own[i];
@@ -77,7 +126,7 @@ static inline int clean_soak_receive(clean_soak_status_t *s, const uint8_t *m,
         index |= (uint32_t)m[28u + i] << (8u * i);
     }
     if (magic != CLEAN_SOAK_MAGIC || index >= s->target ||
-        length != clean_soak_size(index) + 28u ||
+        length != clean_soak_payload_size(nonce, index) + 28u ||
         ((uint16_t)m[22] | ((uint16_t)m[23] << 8u)) != (uint16_t)(index << 4u))
         goto corrupt;
     for (uint32_t i = 8u; i < length - 28u; ++i)
@@ -94,6 +143,32 @@ corrupt:
     ++s->corrupt;
     s->failure = 1u;
     return -1;
+}
+
+static inline int clean_soak_receive_packet(clean_soak_status_t *s, const uint8_t *packet,
+                                            uint32_t length, const uint8_t nonce[14],
+                                            uint8_t role) {
+    if (length < 18u) return 0;
+    int result = clean_soak_receive(s, packet + 18u, length - 18u, nonce, role);
+    if (result != 1) return result;
+    s->rx_phy_last = packet[15] | ((uint32_t)packet[16] << 8u);
+    if (nonce[13] >= CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS) {
+        ++s->rx_phy_mismatch;
+        s->failure = 6u;
+        return -1;
+    }
+    uint32_t rate = clean_soak_rate(nonce);
+    uint8_t flags = rate == 4u ? CLEAN_RX_OFDM :
+        clean_soak_short(nonce) ? CLEAN_RX_SHORT_PREAMBLE : 0u;
+    uint8_t signal = rate == 4u ? clean_ofdm_rates[0].signal : clean_cck_rates[rate].signal;
+    int rate_matches = rate == 4u ? (packet[15] & 15u) == signal : packet[15] == signal;
+    if (!rate_matches || (packet[16] & 0xf0u) != flags) {
+        ++s->rx_phy_mismatch;
+        s->failure = 6u;
+        return -1;
+    }
+    ++s->rx_phy_checked;
+    return 1;
 }
 
 #endif

@@ -147,7 +147,7 @@ typedef struct {
     uint16_t f2_sdpcm_len;
     uint16_t rx_tick_hi;
     uint8_t  dma_hdr[38];
-    uint8_t  pad[2];
+    uint16_t phy_status0;
     uint8_t  raw[CLEAN_RAW_BYTES];
 } fw_frame_slot_t;
 

@@ -50,6 +50,8 @@ static uint16_t rx_discard_fcs, rx_discard_length;
 static uint8_t nav_frame[CLEAN_MPDU_BYTES], station_address[6];
 static uint32_t access_started;
 static uint32_t ack_started, ack_window;
+static uint32_t cck_ack_window;
+static clean_tx_tail_t cck_tx_tail;
 static uint32_t last_tx_identity;
 static uint8_t last_tx_valid;
 static uint8_t capture_prepared;
@@ -380,8 +382,7 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
         /* 4-byte BDC header at offset 14 */
         pkt[14] = fragments > 1u ? 0x21u : 0x20u;
         pkt[15] = slot->raw[2]; /* PLCP[0] rate/SIGNAL byte */
-        uint8_t is_ofdm = (uint8_t)((slot->dma_hdr[4] & 1u) || ((slot->rxe_status2 >> 13u) & 1u));
-        pkt[16] = (uint8_t)((channel & 0xfu) | (is_ofdm ? 0x10u : 0u));
+        pkt[16] = clean_rx_phy_metadata(slot->phy_status0, slot->rxe_status2, channel);
         pkt[17] = 0u;
 
         if (fragments > 1u) {
@@ -574,6 +575,7 @@ static void station_publish_mac(void) {
     MAC_TRACE->ack_elapsed = shm_read16(CLEAN_ACK_ELAPSED);
     MAC_TRACE->ack_window = shm_read16(CLEAN_ACK_WINDOW);
     MAC_TRACE->response_delay = shm_read16(CLEAN_RESPONSE_DELAY);
+    MAC_TRACE->ack_dropped = shm_read16(CLEAN_TEST_ACK_DROPPED);
     if (station_hw) {
         MAC_TRACE->ifs_status = mmio_read16(D11_BASE + 0x690u);
         MAC_TRACE->ifs_backoff = mmio_read16(D11_BASE + 0x68au);
@@ -605,10 +607,20 @@ static void station_consume_ack(void) {
 
 static void station_service_tx(void) {
     if (station_hw && shm_read16(CLEAN_DCF_REQUEST) == CLEAN_DCF_FIRED &&
-        !shm_read16(CLEAN_DCF_TX_PENDING))
+        !cck_tx_tail.ended && !shm_read16(CLEAN_DCF_TX_PENDING))
         ack_started = (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
             ((uint32_t)shm_read16(CLEAN_DCF_TX_HI) << 16u);
-    if (mac_now() - ack_started >= ack_window)
+    uint32_t now = mac_now();
+    if (cck_ack_window &&
+        clean_tx_tail_poll(&cck_tx_tail, (mmio_read16(D11_BASE + 0x690u) & 0x100u) != 0u)) {
+        /* The CCK TX-request edge precedes the physical tail by more than
+         * PLCP airtime alone. Start its bounded ACK wait at observed TX end. */
+        shm_write16(CLEAN_DCF_ACK_UNTIL, (uint16_t)(now + cck_ack_window));
+        shm_write16(CLEAN_DCF_ACK_US, (uint16_t)(now - ack_started + cck_ack_window));
+        ack_started = now;
+        ack_window = cck_ack_window;
+    }
+    if (now - ack_started >= ack_window)
         shm_write16(CLEAN_ACK_WAITING, 0u);
     station_consume_ack();
 }
@@ -702,7 +714,8 @@ static int station_wait_access(uint32_t mac_en, uint16_t ack_sent, uint16_t cts_
 
 /* Returns 2 for a station MAC deferral, 1 for submission, 0 for a fatal error. */
 static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uint32_t channel,
-                                       uint32_t mac_tx_ctl, uint32_t reliable) {
+                                       uint32_t mac_tx_ctl, uint32_t reliable,
+                                       uint32_t short_preamble) {
     if (total_len < 16u || total_len > CLEAN_TX_BYTES)
         return fail(0x83u, FW_TX_BUF_ADDR, total_len);
     const volatile uint8_t *tx_buf = (const volatile uint8_t *)FW_TX_BUF_ADDR;
@@ -717,11 +730,17 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
             return fail(0x83u, FW_TX_BUF_ADDR, total_len);
         phyctl1 = clean_ofdm_rates[(uint32_t)rate].phyctl1;
         ofdm_airtime = clean_ofdm_airtime_us(total_len - CLEAN_PLCP_BYTES, (uint32_t)rate);
-    } else if (station_mac) {
-        if (!clean_cck11_valid(tx_buf, total_len - CLEAN_PLCP_BYTES))
+    } else {
+        int rate = clean_cck_rate_index(tx_buf[0]);
+        if (rate < 0 || !clean_cck_plcp_valid(tx_buf, total_len - CLEAN_PLCP_BYTES) ||
+            !clean_cck_preamble_valid((uint32_t)rate, short_preamble))
             return fail(0x83u, FW_TX_BUF_ADDR, total_len);
-        phyctl1 = 0x1802u;
+        phyctl1 = clean_cck_rates[rate].phyctl1;
     }
+    if (is_ofdm && short_preamble) return fail(0x83u, FW_TX_BUF_ADDR, total_len);
+    uint32_t airtime = is_ofdm ? ofdm_airtime :
+        clean_cck_airtime_us(total_len - CLEAN_PLCP_BYTES,
+                             (uint32_t)clean_cck_rate_index(tx_buf[0]), short_preamble);
     tx_diag.magic = CLEAN_TX_DIAG_MAGIC;
     tx_diag.resume_ticks = 0u;
     tx_diag.mac_resume_us = 0u;
@@ -788,7 +807,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         mmio_write16(0x180017c0u, 0x0100u);
         mmio_write16(0x180017d0u, 0x0300u);
     }
-    mmio_write16(0x1800150cu, is_ofdm ? 0x0041u : 0x0040u);
+    mmio_write16(0x1800150cu, is_ofdm ? 0x0041u : short_preamble ? 0x0050u : 0x0040u);
     mmio_write16(0x18001514u, phyctl1);
     mmio_write16(0x18001508u, 0x0000u);
     mmio_write16(0x1800150au, 0x0000u);
@@ -818,10 +837,12 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     tx_diag.gci_control = mmio_read32(GCI_CONTROL_REG1);
     MBOX->rc_dacbuf = 0x55550004u;
     if (station_mac) {
+        cck_tx_tail.active = cck_tx_tail.ended = 0u;
+        cck_ack_window = station_hw && !is_ofdm ?
+            clean_ack_timeout_us((uint32_t)clean_cck_rate_index(tx_buf[0]), station_dcf.slot_us) : 0u;
         if (station_hw) {
-            uint32_t rate = is_ofdm ? (uint32_t)clean_ofdm_rate_index(tx_buf[0]) + 4u : 3u;
-            uint32_t airtime = is_ofdm ? ofdm_airtime :
-                192u + (uint32_t)tx_buf[2] + ((uint32_t)tx_buf[3] << 8u);
+            uint32_t rate = is_ofdm ? (uint32_t)clean_ofdm_rate_index(tx_buf[0]) + 4u :
+                (uint32_t)clean_cck_rate_index(tx_buf[0]);
             shm_write16(CLEAN_DCF_ACK_US,
                 (uint16_t)(airtime + clean_ack_timeout_us(rate, station_dcf.slot_us)));
         }
@@ -839,9 +860,8 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
         ((uint32_t)shm_read16(CLEAN_DCF_TX_HI) << 16u) : mac_now();
     if (station_mac) {
-        uint32_t airtime = is_ofdm ? ofdm_airtime :
-            192u + (uint32_t)tx_buf[2] + ((uint32_t)tx_buf[3] << 8u);
-        uint32_t rate = is_ofdm ? (uint32_t)clean_ofdm_rate_index(tx_buf[0]) + 4u : 3u;
+        uint32_t rate = is_ofdm ? (uint32_t)clean_ofdm_rate_index(tx_buf[0]) + 4u :
+            (uint32_t)clean_cck_rate_index(tx_buf[0]);
         ack_started = tx_diag.mac_trigger_us;
         ack_window = airtime + clean_ack_timeout_us(rate, station_dcf.slot_us);
     }
@@ -866,7 +886,8 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
 
     uint16_t st_50e_seen = 0u, st_690_seen = 0u;
     uint32_t tx_conditions = 0u;
-    for (uint32_t i = 0u; i < 2000u; ++i) {
+    uint32_t completion_polls = 2000u + airtime;
+    for (uint32_t i = 0u; i < completion_polls; ++i) {
         if (station_mac) station_service_tx();
         uint16_t v = mmio_read16(0x1800150eu);
         st_50e_seen |= v;
@@ -876,7 +897,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         }
         (void)delay_ticks(180u);
     }
-    for (uint32_t i = 0u; i < 2000u; ++i) {
+    for (uint32_t i = 0u; i < completion_polls; ++i) {
         if (station_mac) station_service_tx();
         uint16_t v = mmio_read16(0x1800150eu);
         st_50e_seen |= v;
@@ -886,7 +907,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         }
         (void)delay_ticks(180u);
     }
-    for (uint32_t i = 0u; i < 2000u; ++i) {
+    for (uint32_t i = 0u; i < completion_polls; ++i) {
         if (station_mac) station_service_tx();
         uint16_t v = mmio_read16(0x18001690u);
         st_690_seen |= v;
@@ -902,8 +923,6 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     if (station_mac) {
         /* RX/PSM are already live. This conservative CPU guard is not a PHY
          * tail measurement: TXA is a byte-transfer strobe, not frame-active. */
-        uint32_t airtime = is_ofdm ? ofdm_airtime :
-            192u + (uint32_t)tx_buf[2] + ((uint32_t)tx_buf[3] << 8u);
         uint32_t wait = mac_now();
         phy_drained = 0u;
         for (uint32_t poll = 0u; poll < 2000000u; ++poll) {
@@ -921,7 +940,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
             uint32_t active = mmio_read32(D11_BASE + 0x158u) & 2u;
             active_seen |= active;
             if (active_seen && !active) { phy_drained = 1u; break; }
-            if (mac_now() - wait >= 5000u) break;
+            if (mac_now() - wait >= airtime + 2000u) break;
         }
         mmio_write16(0x18001502u, 0u);
         mmio_write16(0x18001568u, 0u);
@@ -1311,7 +1330,7 @@ void cyw43_main(void) {
             __asm__ volatile("dsb" ::: "memory");
             continue;
         }
-        if ((cmd & 0xffu) == 5u) {
+        if ((cmd & 0xffu) == 5u || (cmd & 0xffu) == CLEAN_TX_CCK_SHORT) {
             if ((flags & CFG_TX_ENABLE) == 0u) {
                 fail(0x81u, FW_MBOX_ADDR + 24u, cmd);
                 break;
@@ -1321,6 +1340,7 @@ void cyw43_main(void) {
             uint32_t tx_cnt  = (cmd >> 19u) & 0xffu;
             if (tx_cnt == 0u) tx_cnt = 1u;
             uint32_t reliable = (cmd & CLEAN_TX_ACK_REQUIRED) != 0u;
+            uint32_t short_preamble = (cmd & 255u) == CLEAN_TX_CCK_SHORT;
             const volatile uint8_t *frame = (const volatile uint8_t *)FW_TX_BUF_ADDR;
             if (station_enabled && (cmd & (CLEAN_TX_REARM_RX | CLEAN_TX_MATCH_SOURCE))) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
@@ -1328,7 +1348,7 @@ void cyw43_main(void) {
             }
             if (reliable && (!station_enabled || tx_cnt > 8u ||
                 tx_len < 34u || tx_len > CLEAN_TX_BYTES ||
-                (!is_ofdm && (!station_mac || !clean_cck11_valid(frame, tx_len - 6u))) ||
+                (!is_ofdm && (!station_mac || !clean_cck_plcp_valid(frame, tx_len - 6u))) ||
                 !clean_mac_valid(frame + 6u, tx_len - 6u) ||
                 (frame[10] & 1u) ||
                 !(((frame[6] & 0x0fu)==0u && (frame[7]&7u)==0u) ||
@@ -1407,7 +1427,8 @@ void cyw43_main(void) {
                     shm_write16(CLEAN_ACK_SEEN, 0u);
                     shm_write16(CLEAN_ACK_WAITING, station_mac ? 0u : 1u);
                 }
-                int submitted = d11_transmit_template_frame(tx_len, is_ofdm, channel, mac_en & ~2u, reliable);
+                int submitted = d11_transmit_template_frame(tx_len, is_ofdm, channel,
+                                                            mac_en & ~2u, reliable, short_preamble);
                 if (!submitted) break;
                 if (submitted == 2) {
                     shm_write16(CLEAN_ACK_WAITING, 0u);
@@ -1422,7 +1443,8 @@ void cyw43_main(void) {
                     uint32_t timeout = 1500u;
                     if (station_mac) {
                         uint32_t rate = is_ofdm ?
-                            (uint32_t)clean_ofdm_rate_index(frame[0]) + 4u : 3u;
+                            (uint32_t)clean_ofdm_rate_index(frame[0]) + 4u :
+                            (uint32_t)clean_cck_rate_index(frame[0]);
                         timeout = clean_ack_timeout_us(rate, station_dcf.slot_us);
                     }
                     for (uint32_t poll = 0u; poll < 200000u; ++poll) {
@@ -1574,6 +1596,22 @@ void cyw43_main(void) {
             __asm__ volatile("dsb" ::: "memory");
             continue;
         }
+        if ((cmd & 0xffu) == 9u) {
+            int count = clean_test_ack_count(cmd, MAC_RADIO->profile);
+            if (!station_hw || count < 0) {
+                fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+                break;
+            }
+            mmio_write32(D11_MACCONTROL, 0x84020400u);
+            (void)mmio_read32(D11_MACCONTROL);
+            shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
+            shm_write16(CLEAN_TEST_ACK_REMAINING, (uint16_t)count);
+            shm_write16(CLEAN_TEST_ACK_DROPPED, 0u);
+            mmio_write32(D11_MACCONTROL, mac_en);
+            MBOX->host_cmd = 2u;
+            __asm__ volatile("dsb" ::: "memory");
+            continue;
+        }
         if ((cmd & 0xffu) == 6u) {
             if (station_enabled) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
@@ -1652,6 +1690,8 @@ void cyw43_main(void) {
                 slot->rxe_len = rxe_len;
                 slot->rxe_status1 = shm_read16(0x7a7u);
                 slot->rxe_status2 = shm_read16(0x603u);
+                /* The held PSM header belongs to this capture; DMA can lag it. */
+                slot->phy_status0 = shm_read16(CLEAN_SHM_PHY_STATUS0);
                 slot->rx_tick_hi = (uint16_t)((ARM_CYCLE_COUNTER - rx_start) >> 16u);
                 uint32_t copy_words = ((uint32_t)rxe_len + 3u) >> 1u;
                 if (copy_words > CLEAN_RAW_BYTES / 2u) copy_words = CLEAN_RAW_BYTES / 2u;
