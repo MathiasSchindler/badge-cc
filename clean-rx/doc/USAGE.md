@@ -33,7 +33,14 @@ Micro Signal additionally qualifies the eight legacy OFDM rates above.
 The paired raw MAC fixture now supports all four DSSS/CCK rates and all seven
 legal long/short-preamble combinations, with receiving-chip rate/preamble
 checks. See [C1 evidence and limitations](../badge/README.md#dssscck-rate-and-preamble-fixture);
-full-size 1-Mbps reception remains an explicit failure. Automatic ACK timing
+full-size 1-Mbps reception remains an explicit failure. The boundary fixture
+(`mac_soak.sh ... COUNT 0 1-long cck-boundary`) passes 1,500/1,550-byte
+MSDUs but reproduces incomplete reception at 1,600 bytes. RXE stops at
+roughly 1,589/1,590 bytes despite correct PLCP decoding; doubling the PSM
+wait does not recover the missing bytes. The exact PHY/RXE cause is not
+identified and no experimental timeout-register changes are retained.
+See the [diagnostics](HARDWARE_AND_FIRMWARE.md#1-mbps-receive-truncation-diagnostics).
+Automatic ACK timing
 and general WPA2 connectivity remain unqualified.
 For a persistent, no-USB application using this loader and radio interface, see
 [Micro Signal](../../docs/micro-signal.md): the same small UF2 on both boards

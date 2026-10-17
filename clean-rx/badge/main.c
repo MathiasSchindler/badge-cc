@@ -706,7 +706,11 @@ static void run(const uint8_t nonce[16]) {
     uint32_t saved_error = l.error, saved_addr = l.address, saved_actual = l.actual;
     /* Collect fault evidence even after a failed stage, still under a deadline. */
     l.error = CLEAN_OK;
-    int snapshot = clean_block(&l, CLEAN_MBOX, detail + 32u, 448u, 0u) &&
+    int snapshot = 1;
+    if (soak_mode() && saved_error != CLEAN_OK)
+        snapshot = clean_write(&l, CLEAN_MBOX + 24u, 3u) &&
+                   clean_wait_state(&l, 10u, 200000u);
+    snapshot = snapshot && clean_block(&l, CLEAN_MBOX, detail + 32u, 448u, 0u) &&
                    clean_block(&l, CLEAN_MULTI, detail + 480u, 40u, 0u);
     if (snapshot && !station_mode() && !soak_mode() && nonce[14] != 17u)
         snapshot = clean_block(&l, CLEAN_MULTI + 40u, detail + 520u, 568u, 0u);
@@ -720,6 +724,11 @@ static void run(const uint8_t nonce[16]) {
                 detail + CLEAN_STATION_MAC_DETAIL + 32u, sizeof(clean_mac_radio_status_t), 0u) &&
                 clean_block(&l, CLEAN_MAC_TRACE_ADDR, detail + CLEAN_STATION_TRACE_DETAIL,
                             sizeof(clean_mac_trace_status_t), 0u);
+            if (snapshot && soak_mode())
+                snapshot = clean_block(&l, CLEAN_MBOX + 456u,
+                    detail + CLEAN_SOAK_FAULT_DETAIL, 2u * CLEAN_RX_FAULT_WORDS, 0u) &&
+                    clean_block(&l, CLEAN_RX_TRACE_ADDR, detail + 200u,
+                                2u * CLEAN_RX_TRACE_WORDS + 24u, 0u);
         }
     }
     if (station_mode() || soak_mode()) clean_station_rx_report(&station_rx, detail);

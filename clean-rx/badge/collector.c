@@ -329,7 +329,28 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                s.rx_phy_checked,
                s.rx_phy_mismatch, s.rx_phy_last);
         print_mac_timing(detail);
-        puts("}");
+        print_tx_diag(detail);
+        fputs(",\"psm_diag\":[", stdout);
+        for (unsigned i = 0u; i < 16u; ++i)
+            printf("%s%u", i ? "," : "",
+                (unsigned)(detail[136u + 2u * i] | ((uint16_t)detail[137u + 2u * i] << 8u)));
+        putchar(']');
+        fputs(",\"rx_cck_trace\":[", stdout);
+        for (unsigned i = 0u; i < CLEAN_RX_TRACE_WORDS; ++i)
+            printf("%s%u", i ? "," : "",
+                (unsigned)(detail[200u + 2u * i] | ((uint16_t)detail[201u + 2u * i] << 8u)));
+        putchar(']');
+        printf(",\"cck_tx_tail_us\":%u,\"txe_timeout\":%u,\"tx_template_end\":%u,\"tx_count_end\":%u",
+            usb_report_u32(detail + 224u), usb_report_u32(detail + 228u),
+            usb_report_u32(detail + 232u), usb_report_u32(detail + 236u));
+        printf(",\"phy_465\":%u,\"phy_42c\":%u",
+            usb_report_u32(detail + 240u), usb_report_u32(detail + 244u));
+        fputs(",\"rx_fifo_fault\":[", stdout);
+        for (unsigned i = 0u; i < CLEAN_RX_FAULT_WORDS; ++i)
+            printf("%s%u", i ? "," : "",
+                (unsigned)(detail[CLEAN_SOAK_FAULT_DETAIL + 2u * i] |
+                           ((uint16_t)detail[CLEAN_SOAK_FAULT_DETAIL + 2u * i + 1u] << 8u)));
+        puts("]}");
         if (!valid) fputs("Continuous MAC trial did not satisfy endpoint counts/integrity\n", stderr);
         return valid;
     }
@@ -577,7 +598,7 @@ int main(int argc, char **argv) {
             for (; payload < CLEAN_SOAK_PAYLOADS; ++payload)
                 if (strcmp(argv[9], clean_soak_payload_names[payload]) == 0) break;
             if (payload == CLEAN_SOAK_PAYLOADS) {
-                fputs("MAC soak payload must be cycle, 32, 1500 or 2304\n", stderr);
+                fputs("MAC soak payload must be cycle, 32, 1500, 2304 or cck-boundary\n", stderr);
                 return 2;
             }
         }

@@ -376,6 +376,52 @@ the captured state. The separate receiving chip thus supplies rate/preamble evid
 requested TX settings and successful TXE completion alone do not qualify it.
 See the [paired fixture results and full-size 1-Mbps limitation](../badge/README.md#dssscck-rate-and-preamble-fixture).
 
+##### 1-Mbps receive-truncation diagnostics
+
+The PSM retains 12 little-endian 16-bit words at SHM `0x6a0..0x6ab`,
+snapshotted to controller SRAM `0x202c0..0x202d7`. The trace hooks preserve
+the original PLCP/count diagnostic copies and use only scratch `r3`:
+
+| Word | Meaning |
+| --- | --- |
+| 0..2 | Maximum observed 1-Mbps PLCP SIGNAL/SERVICE, LENGTH, CRC |
+| 3 | Raw `spr:0x02b` at prefix |
+| 4 | RXE byte count at prefix |
+| 5..6 | Raw `spr:0x00d` and `spr:0x00e` at prefix |
+| 7 | Low TSF at prefix |
+| 8..11 | Failed LENGTH, low TSF, RXE count, remaining wait counter |
+
+Only PLCP word `0x040a` is traced. Equal maximum LENGTH refreshes the
+prefix and clears the failure words, keeping retry timestamps aligned;
+smaller lengths and other rates do not replace it. Failure words are
+written only for a matching LENGTH at the no-GoodFCS wait-expiry path.
+This is not a complete RX event history or independent PHY timing capture.
+Low TSF differences wrap modulo 65,536 us.
+
+Six 32-bit words at SRAM `0x202d8..0x202ef` expose the first observed
+TX-active duration, TXE timeout register `0x506`, template end pointer
+`0x54c`, remaining count `0x56a`, and read-only PHY `0x465`/`0x42c`.
+The first four are cleared at startup and before each TX. An end count of
+zero establishes template consumption, not complete OTA waveform fidelity.
+The PHY values are diagnostic snapshots, not verified LCN20 timeout units.
+Static assertions protect trace/storage and report bounds.
+
+Badge soak reports copy the RX trace to detail bytes 200..223, these six
+words to 224..247, and the original 12-word RX FIFO fault record to
+1912..1935. JSON fields are `rx_cck_trace`, `cck_tx_tail_us`, `txe_timeout`,
+`tx_template_end`, `tx_count_end`, `phy_465`, `phy_42c` and `rx_fifo_fault`;
+`tx_diagnostic` and `psm_diag` also expose existing raw diagnostics.
+The failed-soak path issues stop command 3 before collecting the final
+snapshot while preserving the first fixture failure. The existing
+64-byte `MSK3` status and packet formats are unchanged.
+
+Reproducible 1-Mbps failures decode valid 1,600/2,304-byte-MSDU PLCPs but
+report only 1,589/1,590 RXE bytes at discard. Extending the PSM wait from
+about 16.4 ms to 32.8 ms leaves the count unchanged. Missing GoodFCS and
+ACK are consequences; the exact initiating PHY/RXE fault remains unknown.
+No speculative PHY writes, Locked Clocks changes or expanded wait budgets
+are retained. See [evidence and controls](../../todo.md#c1-all-legacy-dssscck-rates).
+
 ### 9.4 Unicast MAC Filter and Automatic 802.11 `ACK` Transmission (`d11_transmit_ack_frame`)
 At startup, the firmware stores the local 6-byte unicast MAC address in `SHM 0x612..0x614`:
 - Default / AP role (`CFG_STA_ROLE == 0`): `02:9b:bf:88:dd:7d` (`0x9b02, 0x88bf, 0x7ddd`)

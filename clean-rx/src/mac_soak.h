@@ -13,7 +13,11 @@
 #define CLEAN_SOAK_POLL_US 250000u
 #define CLEAN_SOAK_POLLS (CLEAN_SOAK_HOST_SECONDS * 4u)
 #define CLEAN_SOAK_PHYS 8u
-#define CLEAN_SOAK_PAYLOADS 4u
+#define CLEAN_SOAK_PAYLOADS 5u
+#define CLEAN_SOAK_FAULT_DETAIL 1912u
+
+_Static_assert(CLEAN_SOAK_FAULT_DETAIL + 2u * CLEAN_RX_FAULT_WORDS <= 1960u,
+               "RX fault report must not overlap fixture inputs");
 
 static const char *const clean_soak_phy_names[CLEAN_SOAK_PHYS] = {
     "ofdm6", "1-long", "2-long", "5.5-long", "11-long",
@@ -21,7 +25,7 @@ static const char *const clean_soak_phy_names[CLEAN_SOAK_PHYS] = {
 };
 
 static const char *const clean_soak_payload_names[CLEAN_SOAK_PAYLOADS] = {
-    "cycle", "32", "1500", "2304"
+    "cycle", "32", "1500", "2304", "cck-boundary"
 };
 
 static inline uint32_t clean_soak_phy(const uint8_t nonce[14]) {
@@ -57,6 +61,12 @@ static inline uint32_t clean_soak_size(uint32_t index) {
 static inline uint32_t clean_soak_payload_size(const uint8_t nonce[14], uint32_t index) {
     uint32_t payload = nonce[13] >> 3u;
     if (payload >= CLEAN_SOAK_PAYLOADS) return 0u;
+    if (payload == 4u) {
+        static const uint16_t sizes[10] = {
+            1500u, 1550u, 1600u, 1650u, 1700u, 1750u, 1800u, 1850u, 1900u, 2304u
+        };
+        return sizes[index % 10u];
+    }
     return payload == 0u ? clean_soak_size(index) :
         payload == 1u ? 32u : payload == 2u ? 1500u : CLEAN_MSDU_BYTES;
 }

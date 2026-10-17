@@ -287,6 +287,12 @@ static void cck_rates(void) {
     assert(clean_rx_phy_metadata(0u, 0x2000u, 1u) == (1u | CLEAN_RX_OFDM));
     assert(clean_rx_phy_metadata(2u, 0u, 1u) == (1u | CLEAN_RX_UNSUPPORTED_PHY));
     assert(clean_rx_phy_metadata(3u, 0u, 1u) == (1u | CLEAN_RX_UNSUPPORTED_PHY));
+    static const uint8_t long_vectors[2][6] = {
+        {0x0au,0x04u,0xe0u,0x32u,0x19u,0xb8u},
+        {0x0au,0x04u,0xe0u,0x48u,0xc4u,0x64u}
+    };
+    assert(clean_cck_plcp_rate(plcp, 1628u, 0u) && !memcmp(plcp, long_vectors[0], 6u));
+    assert(clean_cck_plcp_rate(plcp, 2332u, 0u) && !memcmp(plcp, long_vectors[1], 6u));
     uint8_t invalid_nonce[14] = {0};
     invalid_nonce[13] = CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS;
     assert(!clean_soak_frame(packet, invalid_nonce, 1u, 0u));
@@ -298,8 +304,8 @@ static void cck_rates(void) {
         uint8_t flags = rate == 4u ? CLEAN_RX_OFDM :
             clean_soak_short(nonce) ? CLEAN_RX_SHORT_PREAMBLE : 0u;
         for (uint32_t fault = 0u; fault < 5u; ++fault) {
-            clean_soak_status_t s = {.target = 3u};
-            for (uint32_t index = 0u; index < 3u; ++index) {
+            clean_soak_status_t s = {.target = 10u};
+            for (uint32_t index = 0u; index < 10u; ++index) {
                 uint32_t length = clean_soak_frame(packet + 12u, nonce, 1u, index) + 12u;
                 packet[15] = rate == 4u ? 0x8bu : clean_cck_rates[rate].signal;
                 packet[16] = 1u | flags;
@@ -314,7 +320,7 @@ static void cck_rates(void) {
                     break;
                 }
             }
-            if (!fault) assert(s.received == 3u && s.rx_phy_checked == 3u && !s.failure);
+            if (!fault) assert(s.received == 10u && s.rx_phy_checked == 10u && !s.failure);
         }
     }
     puts("CCK: four rates, all lengths/CRC bits, seven legal preambles, RX PHY evidence and mismatch rejection pass");

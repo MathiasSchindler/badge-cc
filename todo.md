@@ -359,14 +359,55 @@ deliveries. Evidence is retained under
 `build/clean-rx/badge/c1-final-PHY-SIZE-*`, including configuration,
 endpoint reports and logs.
 
-**Remaining blocker:** full 2,304-byte MSDUs at 1 Mbps long. The final fixed-size
-cell hit the explicit external 60-second trial bound without complete
-endpoint reports; it is incomplete, not a pass or a measured loss rate.
+**Remaining blocker:** full 2,304-byte MSDUs at 1 Mbps long. Inspection of
+`c1-final-1-long-2304-run.log` corrected the earlier characterization of the
+final fixed-size cell: picotool aborted during reboot/BOOTSEL launch
+(`cancelled_exception`); this was not an RF trial or a measured loss rate.
 Earlier retained cyclic-size trials (`c1-tail-1-long`, build `b678cb3e`)
 delivered 32/1,500-byte frames but exhausted eight attempts on the full-sized
 frame. A hardware-clock RX-deadline experiment did not repair reception and
 was removed. No speculative PHY-register write or increased ACK allowance
-is retained. The cause remains unresolved.
+is retained.
+
+**Follow-up receive-truncation investigation, build `956a3e85`:**
+paired channel-1 tests retained as `build/clean-rx/badge/c1-cause-retained-*`
+reproduce the failure independently of the aborted launch:
+
+- `full`: a 2,304-byte MSDU has a 2,332-byte MPDU. The receiver decodes the
+  correct PLCP `0a04e048c464` (18,656-us LENGTH), but its RXE count reaches
+  only 1,589 bytes at the PSM no-GoodFCS expiry. The transmitter consumes
+  the complete staged template (end pointer 585 words, remaining count 0),
+  reports no PHY TX error, and shows about 19,219 us of TX-active time.
+  These counters do not independently prove the complete OTA waveform.
+- `reverse`: swapping badge roles passes 1,500 and 1,550-byte MSDUs in
+  both directions, then fails at 1,600 bytes. That failing receiver decodes
+  the correct PLCP `0a04e03219b8` (13,024-us LENGTH), but again stops at
+  RXE count 1,589. Thus the problem starts below the maximum MSDU and below
+  the F2 fragmentation boundary; it is not solely a 2,304-byte buffer issue.
+- Other trials observe 1,590 bytes. Same-attempt PSM tracing measures
+  approximately 16,429 us from decoded PLCP to the normal discard.
+  A removed, SHM-backed two-pass wait experiment (`e24cdff6`,
+  `c1-cause-count-shm`) extends this to about 32,814 us, yet RXE still
+  reports only 1,590 bytes. Waiting longer alone does not repair reception.
+  Earlier traces that mixed a first-prefix timestamp with a later retry's
+  failure timestamp are not valid elapsed-time evidence.
+- Removing PLCP SERVICE Locked Clocks, and separate receiver-only changes
+  to PHY `0x42c` (2590 to 5120) and `0x465` (10 to 20), did not help.
+  The latter register names come from related LP-family public definitions,
+  not verified LCN20 semantics. All those experiments were removed.
+- On this same retained build, `2-long`, `11-long` and `ofdm6` each pass
+  30 fresh cyclic-size frames per direction (32/1,500/2,304 bytes):
+  180 total verified deliveries, with no fixture failure.
+
+The verified failure is incomplete PHY/RXE reception, followed by no valid
+FCS, no published MPDU and consequently no ACK. The initiating PHY/RXE
+condition or exact control remains **unresolved**; a receive-duration limit
+is a hypothesis, not an identified hardware watchdog. C1 stays open.
+Retained diagnostics include a boundary fixture, retry-aligned PSM trace
+and stopped-failure snapshots; see the
+[diagnostic layout](clean-rx/doc/HARDWARE_AND_FIRMWARE.md#1-mbps-receive-truncation-diagnostics).
+Native controller/loader/PSM tests, Micro Signal regressions, freestanding
+ELF closure and whitespace checks pass.
 
 Intermediate `c1-matrix-*` evidence belongs to build `786ad5ee`, including
 one stale-PHY-metadata rejection and an interrupted OFDM full-size trial;

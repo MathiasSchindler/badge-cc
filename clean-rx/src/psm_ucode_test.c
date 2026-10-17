@@ -54,6 +54,8 @@ static void capture_layout(uint8_t original[2360]) {
             held_capture = pc;
     }
     assert(phy_latch > 198u && phy_latch < 225u && phy_latch < held_capture);
+    restore(original, 262u, WORD(0x77fu,0x1780u,0x1780u,RX_TRACE_BAD),
+            WORD(0x3f0u,0x100cu,0x1800u,0x7a5u));
     restore(original, 197u, WORD(0x77fu,0x1780u,0x1780u,DCF_GOOD),
             WORD(0x3f0u,0x180fu,0x1800u,0x607u));
     restore(original, 123u, WORD(0x77fu,0x1780u,0x1780u,DCF_IDLE),
@@ -95,7 +97,8 @@ static void capture_layout(uint8_t original[2360]) {
                 WORD(0xdcu,reg,0x19feu,0x103u));
     }
     for (uint32_t i = 0u; i < 3u; ++i) {
-        restore(original, 147u + i, WORD(0x3f0u,CLEAN_SHM_FRAME + 1u + i,0x1800u,0x7acu + i),
+        restore(original, 147u + i, i == 0u ? WORD(0x77fu,0x1780u,0x1780u,RX_TRACE_ENTER) :
+                WORD(0x3f0u,CLEAN_SHM_FRAME + 1u + i,0x1800u,0x7acu + i),
                 WORD(0x3f0u,0x6a1u + i,0x1800u,0x7acu + i));
         restore(original, 225u + i, WORD(0x3f0u,CLEAN_SHM_FRAME + 1u + i,0x1800u,0x7fau + i),
                 WORD(0x3f0u,0x6a1u + i,0x1800u,0x7fau + i));
@@ -215,7 +218,8 @@ static uint16_t ack_operand(const uint16_t regs[0x1800], uint32_t operand) {
 
 static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
     for (uint32_t step = 0u; step < 10000u; ++step) {
-        if (pc == 198u || pc == 266u || pc == 124u || pc == 130u) return pc;
+        if (pc == 198u || pc == 266u || pc == 124u || pc == 130u ||
+            pc == 148u || pc == 263u) return pc;
         assert(pc >= ACK_ENTER && pc < ACK_PROGRAM_END);
         uint64_t w = instruction(pc++);
         uint32_t op = (uint32_t)(w >> 39u);
@@ -251,6 +255,39 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
 
 static uint32_t ack_run(uint16_t regs[0x1800], int tx_now) {
     return psm_run(regs, tx_now, ACK_ENTER);
+}
+
+static void receive_trace(void) {
+    uint16_t r[0x1800] = {0};
+    r[0x1780u] = 123u; r[0x1781u] = 456u; r[0x1782u] = 789u;
+    r[CLEAN_SHM_FRAME + 1u] = 0x040au;
+    r[CLEAN_SHM_FRAME + 2u] = 18656u;
+    r[CLEAN_SHM_FRAME + 3u] = 25796u;
+    r[0x100cu] = 6u; r[0x100du] = 0x1800u;
+    r[0x102bu] = 0x8000u; r[0x100eu] = 64u; r[0x1119u] = 65530u;
+    assert(psm_run(r, 0, RX_TRACE_ENTER) == 148u);
+    assert(r[CLEAN_RX_TRACE_SHM] == 0x040au);
+    assert(r[CLEAN_RX_TRACE_SHM + 1u] == 18656u);
+    assert(r[CLEAN_RX_TRACE_SHM + 2u] == 25796u);
+    assert(r[CLEAN_RX_TRACE_SHM + 7u] == 65530u && r[0x7acu] == 0x040au);
+    r[CLEAN_SHM_FRAME + 2u] = 12224u;
+    assert(psm_run(r, 0, RX_TRACE_ENTER) == 148u);
+    assert(r[CLEAN_RX_TRACE_SHM + 1u] == 18656u);
+    assert(psm_run(r, 0, RX_TRACE_BAD) == 263u);
+    assert(!r[CLEAN_RX_TRACE_SHM + 8u]);
+    r[CLEAN_SHM_FRAME + 2u] = 18656u;
+    r[0x1119u] = 12u; r[0x100cu] = 1590u;
+    assert(psm_run(r, 0, RX_TRACE_BAD) == 263u);
+    assert(r[CLEAN_RX_TRACE_SHM + 8u] == 18656u);
+    assert(r[CLEAN_RX_TRACE_SHM + 9u] == 12u);
+    assert(r[CLEAN_RX_TRACE_SHM + 10u] == 1590u && r[0x7a5u] == 1590u);
+    r[0x1119u] = 20u;
+    assert(psm_run(r, 0, RX_TRACE_ENTER) == 148u);
+    assert(r[CLEAN_RX_TRACE_SHM + 7u] == 20u && !r[CLEAN_RX_TRACE_SHM + 8u]);
+    r[CLEAN_SHM_FRAME + 1u] = 0x840eu;
+    assert(psm_run(r, 0, RX_TRACE_ENTER) == 148u);
+    assert(r[0x7acu] == 0x840eu && r[CLEAN_RX_TRACE_SHM] == 0x040au);
+    assert(r[0x1780u] == 123u && r[0x1781u] == 456u && r[0x1782u] == 789u);
 }
 
 static void contention(void) {
@@ -598,6 +635,7 @@ int main(void) {
     capture_layout(original);
     assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
     streaming();
+    receive_trace();
     acknowledgements();
     contention();
     for (uint16_t bits = 0u; bits < 32u; ++bits) {

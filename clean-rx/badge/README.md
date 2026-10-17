@@ -391,18 +391,22 @@ soak, persistent AP station link or independent RF timing measurement.
 
 The optional sixth argument selects `ofdm6` (default), `1-long`, `2-long`,
 `5.5-long`, `11-long`, `2-short`, `5.5-short` or `11-short`. The optional
-seventh argument selects `cycle` (default), `32`, `1500` or `2304` payload
-bytes. Fixed-size selection is explicit and recorded in configuration and
+seventh argument selects `cycle` (default), `32`, `1500`, `2304` or
+`cck-boundary`. The boundary mode repeats MSDU lengths
+1500/1550/1600/1650/1700/1750/1800/1850/1900/2304 bytes, stopping at the
+first fixture failure. Fixed-size selection is explicit and recorded in configuration and
 endpoint reports; the original cyclic-size coverage is not silently reduced.
 Collectors accept `[DROP_ACKS [PHY [PAYLOAD]]]` after `COUNT`.
 
 ```sh
 bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1500 100 0 1-long 1500
 bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-11-short 100 0 11-short
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-boundary 10 0 1-long cck-boundary
 ```
 
 The last challenge byte encodes PHY in bits 0..2 and payload selection in
-bits 3..4 (cycle/32/1500/2304); higher bits are rejected. Payload seed,
+bits 3..5 (values 0..4: cycle/32/1500/2304/cck-boundary); values 5..7 and
+any higher bits are rejected. Payload seed,
 exact length, FCS and sequence validation cover every selection. CCK selects
 the four b basic rates; default OFDM retains its existing rate policy.
 Every accepted delivery also checks the separate receiver's decoded
@@ -444,13 +448,38 @@ length. The 23 passing cells total 4,600 application deliveries with exact
 PHY checks, 4,639 actual attempts and 39 ACK timeouts, with zero corruption,
 duplicate delivery, ordering errors, PHY mismatch or controller faults.
 
-The full-size 1-Mbps cell exceeded an external 60-second test bound without
-complete endpoint reports; the process group was stopped and its configuration
-and incomplete logs retained. No success or packet-loss rate is inferred.
+The full-size 1-Mbps cell did not launch successfully: inspection of
+`c1-final-1-long-2304-run.log` shows picotool aborting during reboot/BOOTSEL
+(`cancelled_exception`), not an RF timeout. Its incomplete reports are not
+RF evidence and no success or packet-loss rate is inferred.
 Earlier build `b678cb3e`, prefix `c1-tail-1-long`, reached that size after
 successful small/1,500-byte exchanges and exhausted eight attempts without
 delivery. A hardware-clock RX-deadline experiment did not fix it and was
 removed; its evidence remains separate. The cause is unresolved.
+
+Follow-up build `956a3e85`, prefix `build/clean-rx/badge/c1-cause-retained`,
+reproduces the RF failure with complete endpoint reports: `full` decodes
+the correct 2,332-byte MPDU PLCP but RXE reports only 1,589 bytes at discard.
+The TX template is consumed completely; this is not independent waveform
+verification. In `reverse`, swapped roles pass 1,500/1,550-byte MSDUs, then
+fail at 1,600 with the correct PLCP and the same RXE count. Other trials
+report 1,590 bytes. A removed doubled-wait experiment reaches about 32.8 ms
+instead of 16.4 ms after PLCP, without receiving the missing bytes.
+No complete GoodFCS MPDU is published, so missing ACKs are downstream of
+incomplete reception. The exact initiating PHY/RXE condition remains unknown;
+no hardware watchdog or timeout-register fix has been established.
+On the retained build, `2-long`, `11-long` and `ofdm6` each pass 30
+cyclic-size frames per direction, including full-size MSDUs.
+See the [investigation and excluded causes](../../todo.md#c1-all-legacy-dssscck-rates).
+
+Failure collection stops the soak before reading diagnostics and preserves
+the original failure code. Reports now include `tx_diagnostic`, `psm_diag`,
+`rx_cck_trace`, `cck_tx_tail_us`, `txe_timeout`, `tx_template_end`,
+`tx_count_end`, `phy_465`, `phy_42c` and `rx_fifo_fault`. These are raw
+diagnostics, not additional success criteria. Trace timing is meaningful
+only when the retained PLCP LENGTH matches the failed LENGTH; low TSF
+differences wrap modulo 65,536 us. See the
+[trace layout and limitations](../doc/HARDWARE_AND_FIRMWARE.md#1-mbps-receive-truncation-diagnostics).
 
 Intermediate build `786ad5ee`, prefix `c1-matrix-*`, exposed one valid OFDM
 frame paired with stale DMA PHY status and had an interrupted OFDM full-size

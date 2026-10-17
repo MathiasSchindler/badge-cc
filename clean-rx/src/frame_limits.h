@@ -22,6 +22,10 @@
 #define CLEAN_SHM_CAPTURE_LIMIT 0x616u
 #define CLEAN_SHM_RXE_LIMIT 0x617u
 #define CLEAN_SHM_PHY_STATUS0 0x7f6u
+#define CLEAN_RX_TRACE_SHM 0x6a0u
+#define CLEAN_RX_TRACE_ADDR 0x202c0u
+#define CLEAN_RX_TRACE_WORDS 12u
+#define CLEAN_TX_TAIL_ADDR (CLEAN_RX_TRACE_ADDR + 2u * CLEAN_RX_TRACE_WORDS)
 #define CLEAN_RX_FAULT_WORDS 12u
 #define CLEAN_RX_STREAM_PREFIX_BYTES 128u
 
@@ -42,6 +46,9 @@
 
 _Static_assert(CLEAN_SHM_FRAME + CLEAN_RAW_BYTES / 2u <= 0x600u,
                "Capture must not overlap PSM controls");
+_Static_assert(CLEAN_RX_TRACE_ADDR >= 0x202b8u &&
+               CLEAN_TX_TAIL_ADDR + 24u <= 0x20d80u,
+               "RX/TX trace must not overlap MAC status or frame storage");
 _Static_assert(CLEAN_RX_STREAM_PREFIX_BYTES >= CLEAN_PLCP_BYTES + 36u + 8u &&
                CLEAN_RX_STREAM_PREFIX_BYTES < 506u,
                "Stream after the MAC/CCMP prefix and before PHY staging fills");

@@ -613,6 +613,11 @@ static void station_service_tx(void) {
     uint32_t now = mac_now();
     if (cck_ack_window &&
         clean_tx_tail_poll(&cck_tx_tail, (mmio_read16(D11_BASE + 0x690u) & 0x100u) != 0u)) {
+        volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
+        tail[0] = now - ack_started;
+        tail[1] = mmio_read16(D11_BASE + 0x506u);
+        tail[2] = mmio_read16(D11_BASE + 0x54cu);
+        tail[3] = mmio_read16(D11_BASE + 0x56au);
         /* The CCK TX-request edge precedes the physical tail by more than
          * PLCP airtime alone. Start its bounded ACK wait at observed TX end. */
         shm_write16(CLEAN_DCF_ACK_UNTIL, (uint16_t)(now + cck_ack_window));
@@ -838,6 +843,8 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     MBOX->rc_dacbuf = 0x55550004u;
     if (station_mac) {
         cck_tx_tail.active = cck_tx_tail.ended = 0u;
+        volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
+        tail[0] = tail[1] = tail[2] = tail[3] = 0u;
         cck_ack_window = station_hw && !is_ofdm ?
             clean_ack_timeout_us((uint32_t)clean_cck_rate_index(tx_buf[0]), station_dcf.slot_us) : 0u;
         if (station_hw) {
@@ -980,7 +987,17 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     return tx_conditions == 7u || fail(0x82u, 0x1800150eu, MBOX->vco_status);
 }
 
+static void snapshot_rx_trace(void) {
+    volatile uint16_t *trace = (volatile uint16_t *)(uintptr_t)CLEAN_RX_TRACE_ADDR;
+    for (uint32_t i = 0u; i < CLEAN_RX_TRACE_WORDS; ++i)
+        trace[i] = shm_read16(CLEAN_RX_TRACE_SHM + i);
+    volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
+    tail[4] = phy_reg_read(0x465u);
+    tail[5] = phy_reg_read(0x42cu);
+}
+
 static void snapshot_psm(uint32_t started, uint32_t polls) {
+    snapshot_rx_trace();
     for (uint32_t i = 0u; i < 16u; ++i) {
         MBOX->psm_mailbox[i] = shm_read16(0x600u + i);
         MBOX->psm_diag[i] = shm_read16(0x7a0u + i);
@@ -1015,6 +1032,8 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
 
     for (uint32_t i = 0u; i < 32u; ++i)  shm_write16(0x600u + i, 0u);
     for (uint32_t i = 0u; i < 480u; ++i) shm_write16(0x620u + i, 0u);
+    volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
+    for (uint32_t i = 0u; i < 4u; ++i) tail[i] = 0u;
     shm_write16(CLEAN_SHM_CAPTURE_LIMIT, CLEAN_RAW_BYTES);
     shm_write16(CLEAN_SHM_RXE_LIMIT, CLEAN_RXE_BYTES);
 
@@ -1042,6 +1061,7 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
             /* Observe late completion without restarting or accepting the failed PSM. */
             (void)delay_ticks(2000000u);
             sample_rxe8(MBOX->rxe_post);
+            snapshot_rx_trace();
             return fail(0x71u, shm_read16(0x602u), st);
         }
         (void)delay_ticks(500u);
