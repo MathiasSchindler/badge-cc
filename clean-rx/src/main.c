@@ -576,6 +576,16 @@ static void station_apply_policy(uint32_t mac_en) {
     mmio_write32(D11_MACCONTROL, mac_en);
 }
 
+static void snapshot_dcf_trace(void) {
+    DCF_TRACE->draw = shm_read16(CLEAN_DCF_TRACE_SHM);
+    DCF_TRACE->before = shm_read16(CLEAN_DCF_TRACE_SHM + 1u);
+    DCF_TRACE->after = shm_read16(CLEAN_DCF_TRACE_SHM + 2u);
+    DCF_TRACE->clock = shm_read16(CLEAN_DCF_TRACE_SHM + 3u);
+    DCF_TRACE->fault = shm_read16(CLEAN_DCF_TRACE_SHM + 4u);
+    DCF_TRACE->slots = shm_read16(CLEAN_DCF_SLOTS);
+    DCF_TRACE->magic = CLEAN_DCF_TRACE_MAGIC;
+}
+
 static void station_publish_mac(void) {
     if (!station_mac) return;
     MAC_RADIO->cw = station_dcf.cw;
@@ -613,11 +623,7 @@ static void station_publish_mac(void) {
         MAC_TRACE->psm_ifs = shm_read16(CLEAN_DCF_IFS_SAMPLE);
         MAC_TRACE->psm_tsf = shm_read16(CLEAN_DCF_CLOCK_SAMPLE);
         MAC_TRACE->psm_polls = shm_read16(CLEAN_DCF_POLLS);
-        DCF_TRACE->magic = CLEAN_DCF_TRACE_MAGIC;
-        DCF_TRACE->draw = shm_read16(CLEAN_DCF_TRACE_SHM);
-        DCF_TRACE->before = shm_read16(CLEAN_DCF_TRACE_SHM + 1u);
-        DCF_TRACE->after = shm_read16(CLEAN_DCF_TRACE_SHM + 2u);
-        DCF_TRACE->clock = shm_read16(CLEAN_DCF_TRACE_SHM + 3u);
+        snapshot_dcf_trace();
     }
     MAC_RADIO->address_lo = (uint32_t)shm_read16(0x612u) |
         ((uint32_t)shm_read16(0x613u) << 16u);
@@ -1131,6 +1137,7 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
     HT_RX->magic = CLEAN_HT_RX_MAGIC;
     volatile uint8_t *ht_diag_bytes = (volatile uint8_t *)HT_DIAG;
     for (uint32_t i = 0u; i < sizeof(*HT_DIAG); ++i) ht_diag_bytes[i] = 0u;
+    ((volatile clean_ht_failure_t *)CLEAN_HT_FAILURE_ADDR)->magic = 0u;
     HT_DIAG->magic = CLEAN_HT_DIAG_MAGIC;
     shm_write16(CLEAN_SHM_CAPTURE_LIMIT, CLEAN_RAW_BYTES);
     shm_write16(CLEAN_SHM_RXE_LIMIT, CLEAN_RXE_BYTES);
@@ -1932,9 +1939,17 @@ void cyw43_main(void) {
     (void)delay_ticks(20000u);
     rx_dma_stop();
 
+    if (station_hw) snapshot_dcf_trace();
     volatile uint16_t *early = (volatile uint16_t *)&HT_DIAG->early;
     for (uint32_t i = 0u; i < CLEAN_HT_EARLY_WORDS; ++i)
         early[i] = shm_read16(CLEAN_HT_EARLY_SHM + i);
+    if (CLEAN_RX_HT_RESPONSE) {
+        volatile clean_ht_failure_t *failure = (volatile clean_ht_failure_t *)CLEAN_HT_FAILURE_ADDR;
+        volatile uint16_t *words = (volatile uint16_t *)(CLEAN_HT_FAILURE_ADDR + 4u);
+        for (uint32_t i = 0u; i < CLEAN_HT_FAILURE_WORDS; ++i)
+            words[i] = shm_read16(CLEAN_HT_FAILURE_SHM + i);
+        failure->magic = CLEAN_HT_FAILURE_MAGIC;
+    }
     sample_rxe8(MBOX->rxe_post);
     for (uint32_t i = 0u; i < 16u; ++i)
         MBOX->psm_mailbox[i] = shm_read16(0x600u + i);

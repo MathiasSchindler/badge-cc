@@ -27,6 +27,28 @@
 #define CLEAN_ACK_RX_ADDR (CLEAN_RX_LAYOUT_ADDR + 4u * CLEAN_RX_LAYOUT_WORDS)
 #define CLEAN_ACK_RX_MAGIC 0x32524b41u
 #define CLEAN_ACK_RX_DETAIL 720u
+#define CLEAN_HT_ACK_MPDU 60u
+#define CLEAN_HT_FAILURE_SHM 0x700u
+#define CLEAN_HT_FAILURE_WORDS 78u
+#define CLEAN_HT_FAILURE_ADDR 0x20400u
+#define CLEAN_HT_FAILURE_MAGIC 0x32464848u
+#define CLEAN_HT_FAILURE_DETAIL 1640u
+
+typedef struct {
+    uint32_t magic;
+    uint16_t count, cause, time_lo, time_hi, length, status1, status2, phy;
+    uint16_t raw[(CLEAN_PLCP_BYTES + CLEAN_HT_ACK_MPDU) / 2u];
+    uint16_t repeated_raw[(CLEAN_PLCP_BYTES + CLEAN_HT_ACK_MPDU) / 2u];
+    uint16_t final_length, final_status1, final_status2, final_phy;
+} clean_ht_failure_t;
+
+_Static_assert(sizeof(clean_ht_failure_t) == 4u + 2u * CLEAN_HT_FAILURE_WORDS &&
+               CLEAN_HT_FAILURE_SHM >= CLEAN_ACK_RX_SHM + CLEAN_ACK_RX_WORDS &&
+               CLEAN_HT_FAILURE_SHM + CLEAN_HT_FAILURE_WORDS <= 0x7a0u &&
+               CLEAN_HT_FAILURE_ADDR + sizeof(clean_ht_failure_t) <= 0x20d80u &&
+               CLEAN_HT_FAILURE_DETAIL >= 1088u + CLEAN_DETAIL_PACKET_BYTES &&
+               CLEAN_HT_FAILURE_DETAIL + sizeof(clean_ht_failure_t) <= 1972u,
+               "Failed HT fixture evidence must not overlap captures or other diagnostics");
 
 typedef struct {
     uint32_t magic;
@@ -34,7 +56,7 @@ typedef struct {
 } clean_ack_rx_t;
 
 _Static_assert(sizeof(clean_ack_rx_t) == 32u &&
-               CLEAN_ACK_RX_ADDR + sizeof(clean_ack_rx_t) <= 0x20d80u,
+               CLEAN_ACK_RX_ADDR + sizeof(clean_ack_rx_t) <= CLEAN_HT_FAILURE_ADDR,
                "ACK evidence must fit between layout manifest and capture slots");
 
 _Static_assert(CLEAN_RX_HT_RESPONSE == 0 ||
@@ -80,7 +102,7 @@ static inline int clean_tx_tail_poll(clean_tx_tail_t *s, int active) {
 #define CLEAN_DCF_SLOTS 0x682u
 #define CLEAN_DCF_TRACE_SHM 0x6bbu
 #define CLEAN_DCF_TRACE_ADDR 0x203b0u
-#define CLEAN_DCF_TRACE_MAGIC 0x31464344u
+#define CLEAN_DCF_TRACE_MAGIC 0x32464344u
 #define CLEAN_DCF_TRACE_DETAIL 976u
 #define CLEAN_DCF_MAX_SLOTS 1023u
 #define CLEAN_DCF_EIFS 0x683u
@@ -130,12 +152,12 @@ typedef struct {
 
 typedef struct {
     uint32_t magic;
-    uint16_t draw, before, after, clock;
+    uint16_t draw, before, after, clock, fault, slots;
 } clean_dcf_trace_t;
 
 _Static_assert(CLEAN_DCF_TRACE_SHM > CLEAN_QOS_RESPONSE_POLICY &&
                CLEAN_DCF_TRACE_SHM + 5u <= CLEAN_HT_ACK_TABLE &&
-               sizeof(clean_dcf_trace_t) == 12u &&
+               sizeof(clean_dcf_trace_t) == 16u &&
                CLEAN_DCF_TRACE_ADDR + sizeof(clean_dcf_trace_t) <= CLEAN_RX_LAYOUT_ADDR &&
                CLEAN_DCF_TRACE_DETAIL + sizeof(clean_dcf_trace_t) <= 1000u,
                "DCF counter evidence must not overlap control or evidence regions");

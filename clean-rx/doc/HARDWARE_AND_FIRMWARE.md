@@ -218,6 +218,12 @@ encrypted reception or WPA2 support.
      confirmed completion (`0x0800`). That startup repair changes only the
      counter load; completion/fault branches and the ARM deadline remain intact.
 2. **PLCP Detection & Prefix Copy (`event_start` -> `prefix_seen`):**
+   - The original one-shot idle wait expires after 64 * 65,535 polls with
+     reason 6. For live hardware DCF only, an expiry hook restarts the idle
+     wait: quiet listening is not a MAC failure. Raw one-shot capture keeps
+     its original timeout; flush/control watchdogs and host deadlines remain
+     bounded. The native test includes the outer countdown, not just the
+     DCF hook, and on-chip no-peer controls verify the live path.
    - Polls `ext 14` (PLCP valid). When asserted, issues a 6-byte initial copy (`spr:0x02a = 6`, `spr:0x004 = 0x40`) and waits for `spr:0x00d` bit 12 and `spr:0x00c >= 6`.
    - The 6-byte PLCP header is written by RXE into `shm:0x101..0x103` (`shm:0x100` holds a duplicate of `shm:0x101`).
 3. **Variable-Length MPDU Streaming, Hardware AES-128-CCMP Decryption, & FCS Verification (`prefix_seen` -> `frame_wait`):**

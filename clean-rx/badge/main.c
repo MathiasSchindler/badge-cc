@@ -819,6 +819,9 @@ static void run(const uint8_t nonce[16]) {
                                sizeof(clean_ht_rx_t), 0u) &&
                    clean_block(&l, CLEAN_HT_DIAG_ADDR, detail + CLEAN_HT_DIAG_DETAIL,
                                sizeof(clean_ht_diag_t), 0u);
+    if (snapshot && (nonce[14] == 27u || nonce[14] == 28u))
+        snapshot = clean_block(&l, CLEAN_HT_FAILURE_ADDR, detail + CLEAN_HT_FAILURE_DETAIL,
+                               sizeof(clean_ht_failure_t), 0u);
     if (snapshot && nonce[14] == 27u)
         snapshot = clean_block(&l, CLEAN_UNICAST_ADDR + 16u, detail + 696u, 8u, 0u) &&
             clean_block(&l, CLEAN_MAC_TRACE_ADDR + sizeof(clean_mac_trace_status_t) - 8u,

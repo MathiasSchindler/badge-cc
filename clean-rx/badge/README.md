@@ -75,6 +75,39 @@ the last draw, before/after counter values and a TSF sample. Three bounded
 all-MCS/direction sweeps subsequently launched 48/48 frames without access
 faults, but only 37/48 completed verified ACK exchanges. The remaining
 11 transmitted-frame failures are retained, not counted as successful HT.
+Reinspection separates them into four with no early HT candidate, two with
+expected HT-SIG but no recorded terminal outcome, and five full-length
+terminal receive errors. The opt-in ACK diagnostic now snapshots failed
+60-byte fixtures before rearm, including raw bytes, count, status/TSF and
+terminal-error/RX-abort cause. JSON reports `failure_raw`,
+`failure_fcs_valid`, `failure_candidate_match` and, for complete captures,
+`failure_fixture_bit_errors`. Only `failure_length` bytes are valid; the
+latest qualifying failure can replace an earlier record. Corrupted addresses
+do not become exact peer matches simply because payload bytes correlate.
+Build `535e0ffe` reproduced six full-length corrupt MCS7 receptions with
+57..194 fixture bit differences, independently confirmed by zlib CRC32.
+MCS7 ACK results were 5/8, 7/8 and 4/8 on channels 1, 6 and 11;
+MCS0 controls were 2/4, 4/4 and 4/4. This establishes received-data corruption
+for the reproduced terminal failures, not its RF/PHY root cause or an
+explanation for every historical loss. Early-candidate evidence is a latest
+snapshot and can be replaced by unrelated traffic even after a success.
+Set `HT_PROBE_CHANNEL=6` (validated range 1..11, default 1) before the paired
+script for controlled channel comparisons; it selects both endpoints and
+their saved channel evidence. These bounded trials do not qualify any
+channel or enable HT association.
+Further investigation added `failure_repeated_raw`,
+`failure_raw_repeat_match`, `failure_time_us` and `failure_final_*` fields.
+Seventeen new full-length failures had identical independent copies and
+invalid FCS, including two RX-event aborts that leave the early trace pending.
+Capture now precedes terminal PHY classification, closing a diagnostic gap.
+A separate quiet-listening watchdog bug was reproduced and fixed for live
+hardware DCF; raw one-shot RX keeps its timeout. Final `72496ec8` passed four
+receive-only idle controls without controller faults, but only 3/12 paired
+cells completed strict ACKs: five corrupt frames, two no-candidate misses
+and two zero-attempt access faults remain. New halted counter evidence
+(`dcf_guard_latched`, `dcf_final_slots`) confirms that access faults can
+still occur; they are not receive losses or a completed backoff repair.
+See the [follow-up evidence and limits](../doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog).
 RF SIFS/reliability qualification, EDCA, protection and Block ACK remain
 open; neither this diagnostic nor a response counter enables HT/WMM association.
 See [D2 API, build instructions and remaining gates](../doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).

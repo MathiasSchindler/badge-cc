@@ -751,9 +751,12 @@ across three full MCS/direction sweeps, with zero access errors, corrupt
 counter observations or range-guard trips. **37/48** completed strict
 returned-ACK exchanges; every success passed independent zlib FCS,
 fresh-address and complete PLCP/rate checks against its matching peer.
-The 11 failures all transmitted: six had no early peer candidate and five
-had an early RX error, with no fresh data delivery or response start.
-They remain RF/receive failures, not successful HT exchanges.
+The 11 failures all transmitted: four had no early HT candidate, two
+detected the expected HT-SIG but had no recorded terminal outcome, and five
+reached the full-length terminal receive-error path. None delivered fresh
+data or started a response. The earlier classification of six as having
+no candidate incorrectly conflated a pending outcome with zero candidates.
+They remain unresolved receive failures, not successful HT exchanges.
 Final build `fb981a82` additionally invalidates stale counter-trace magic
 at controller startup and passed both-direction MCS0 ACK smoke tests.
 
@@ -771,6 +774,104 @@ CW boundaries, 700-ms idle periods across TSF wrap and corrupt-value gates.
 Both original complete 16-MiB flashes were restored and independently
 compared against fresh pre-test backups; both badges are in BOOTSEL.
 Evidence remains under `d2-backoff-*` in `build/clean-rx/badge/`.
+
+**Focused investigation of the 11 receive failures:** added default-disabled,
+policy-3 failed-frame evidence before RX rearm. It retains PLCP/MPDU bytes,
+RX count, raw PHY/status words and TSF for terminal errors (cause 2) and
+RX-event aborts (cause 3). The collector independently checks software FCS,
+exact peer addresses and bit differences against the fresh fixture.
+Native tests cover exact copies, both return paths, policy gates,
+stale/mismatched prefixes and RX-count/declared-length boundaries.
+No successful-frame acceptance or ACK criterion was relaxed.
+
+Build `535e0ffe`, one actual MCS7 transmission per trial, both directions:
+
+| Channel | Strict ACK exchanges | Full-length corrupt captures | No early HT candidate |
+| --- | --- | --- | --- |
+| 1 | 5/8 | 3 | 0 |
+| 6 | 7/8 | 0 | 1 |
+| 11 | 4/8 | 3 | 1 |
+
+All six corrupt captures reached cause 2 with 66 received bytes and valid
+expected HT-SIG. Independent zlib CRC32 and fixture reconstruction confirm
+**57/89/194 bit differences on channel 1**, and **159/85/133 on channel 11**,
+including header/payload corruption. The channel-1 reverse failure retained
+the original FCS bytes but its corrupted data did not match that FCS.
+Corrupted RA/TA means these are not exact-address candidate matches; surviving
+fresh nonce-bearing payload supports correlation with the diagnostic.
+TX template/control readback passed. This demonstrates corrupt received
+data rather than just a lost F2 delivery or missed ACK counter; it does not
+yet distinguish RF interference, analog calibration/EVM, TX/RX PHY behavior
+or an internal receive-path defect.
+
+MCS0 controls completed **2/4 on channel 1**, **4/4 on channel 6** and
+**4/4 on channel 11**. Both MCS0 failures had no early HT candidate, so
+losses are not exclusively a high-MCS terminal-error phenomenon.
+These small, sequential samples do not establish channel 6 as a fix or
+prove interference. `HT_PROBE_CHANNEL=1..11` now controls both endpoints
+and all paired-script channel evidence, with channel 1 unchanged by default.
+One successful channel-6 trial also had a later unrelated candidate replace
+its early trace with outcome 0, proving that this latest-candidate snapshot
+is not a per-fixture completion ledger. The two historical pending cases
+remained unexplained in that batch; no cause-3 capture was obtained then.
+
+The record retains the latest qualifying 60-byte failure, not a ring;
+only its RX-count prefix is valid, even though the fixed buffer is copied.
+Raw RXE status bits remain uninterpreted without verified register semantics.
+Evidence: `d2-rx-investigate-*`, `d2-rx-channel-*` and `d2-rx-lowrate-*`
+under `build/clean-rx/badge/`. Default and opt-in builds/native suites pass.
+Default `484712e6` passed 12 ACKed/delivered cyclic-size frames per direction
+at OFDM6, 2-Mbps long preamble and OFDM6 with three suppressed ACKs per
+endpoint, with zero corruption/controller errors; retries remain reported.
+Both original full 16-MiB flashes were restored and independently compared
+against this investigation's fresh full backups; both badges are in BOOTSEL.
+HT/WMM advertisements remain disabled; D2 reliability is not qualified.
+
+**Further RX investigation:** expanded the gated failure record to two
+independent copies plus before/after receive state, and moved terminal
+capture before PHY-format classification. **17 new full-length failed
+captures** independently reproduce identical bytes in both copies,
+unchanged receive state, invalid zlib FCS and **5..236 fixture bit errors**.
+Two take the RX-event abort path with an early candidate but outcome 0,
+reproducing the pending-trace failure class. Both retain exact RA/TA;
+one differs only by five BSSID bits with the original FCS intact.
+This is evidence for an abort exit, not proof that the two old pending
+cases had the same cause. The source of the stable corruption remains
+unresolved; no speculative radio gain/calibration changes were made.
+
+Found and fixed a separate **live-MAC idle-listening bug**: the original
+one-shot watchdog faults PSM with reason 6 after 64 * 65,535 quiet polls.
+Old-image receive-only controls reproduced this twice on badge A.
+The final expiry-only hook restarts that idle wait for hardware DCF only,
+preserving ordinary poll/slot timing, raw one-shot timeout and all other
+watchdogs/deadlines. A full-loop native test covers the actual old budget
+and subsequent RX; earlier hook-only idle tests missed the outer countdown.
+Final `72496ec8` passed two no-peer channel-11 listening controls per badge,
+without controller faults. This does not explain the original 11 failures,
+which had controller error zero.
+
+Final paired evidence is **12 completed cells: 10 launches, 3 strict ACKs,
+5 stable corrupt captures, 2 no-candidate misses and 2 zero-attempt guard
+faults**. No RX idle fault remained. Guard faults still fail closed with
+`0x8e`; the earlier 48/48 launches did not establish a permanent repair.
+All seven saved corrupt operands equal the final station-address word
+(nonce bytes 3/4). New halted snapshots retain guard reason 1 and the
+offending operand even though the stored slot count is zero. Changing the
+Cortex's last publication read to the preceding address word did not move
+this correlation; the temporary probe was removed. The mechanism remains
+uncharacterized, not a generic SHM timing rule.
+
+Evidence under `d2-rx-deeper-*`, `d2-rx-idle-*`, `d2-rx-idlefixed-*`,
+`d2-rx-final-*` and `d2-rx-port-*` includes unsuccessful/intermediate
+builds and one incomplete USB collection; none are silently counted as
+successful exchanges. See the [detailed investigation](clean-rx/doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog)
+for denominators and layout changes. Default `c42d0041` passed 12
+ACKed/delivered cyclic-size frames per direction at OFDM6, 2-Mbps-long
+and OFDM6 with three deliberately suppressed ACKs per endpoint, with
+zero corruption/controller faults and all retries/timeouts reported.
+Default/opt-in builds and native suites pass. Both original complete
+16-MiB flashes were restored and independently matched to fresh backups;
+both badges are in BOOTSEL. D2, receive reliability and HT/WMM gates remain open.
 
 Still required before D2 closure: actual AP-driven EDCA/QoS contention,
 longer access/operand-visibility qualification, HT ACK reliability/SIFS

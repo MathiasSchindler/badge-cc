@@ -408,18 +408,62 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                    "\"access_nav_until\":%u,\"access_policy_pending\":%u,"
                    "\"access_ifs\":%u,\"access_psm_ifs\":%u,\"access_psm_polls\":%u,"
                    "\"dcf_trace_valid\":%s,\"dcf_draw\":%u,\"dcf_before\":%u,"
-                   "\"dcf_after\":%u,\"dcf_clock\":%u,\"ack_mpdu\":\"",
+                   "\"dcf_after\":%u,\"dcf_clock\":%u,\"dcf_guard_latched\":%u,"
+                   "\"dcf_final_slots\":%u,\"ack_mpdu\":\"",
                    ack_status.result, ack_status.attempts, ack_rx.count,
                    (uint32_t)ack_rx.time_lo | ((uint32_t)ack_rx.time_hi << 16u), ack_rx.phy,
                    radio.deferrals, radio.cw, radio.slots, radio.nav_until, radio.policy_pending,
                    trace.ifs_status, trace.psm_ifs, trace.psm_polls,
                    dcf.magic == CLEAN_DCF_TRACE_MAGIC ? "true" : "false",
-                   dcf.draw, dcf.before, dcf.after, dcf.clock);
+                   dcf.draw, dcf.before, dcf.after, dcf.clock, dcf.fault, dcf.slots);
             const uint8_t *m = (const uint8_t *)ack_rx.mpdu;
             for (uint32_t i = 0u; i < 14u; ++i) printf("%02x", m[i]);
             printf("\",\"ack_plcp\":\"");
             const uint8_t *plcp = (const uint8_t *)ack_rx.plcp;
             for (uint32_t i = 0u; i < 6u; ++i) printf("%02x", plcp[i]);
+            printf("\"");
+        }
+        if (ack_mode) {
+            clean_ht_failure_t failure;
+            memcpy(&failure, detail + CLEAN_HT_FAILURE_DETAIL, sizeof(failure));
+            const uint8_t *raw = (const uint8_t *)failure.raw;
+            const uint8_t *repeated = (const uint8_t *)failure.repeated_raw;
+            int valid = failure.magic == CLEAN_HT_FAILURE_MAGIC &&
+                        failure.count && failure.length <= 66u;
+            int complete = valid && failure.length == 66u;
+            int candidate = complete && raw[0] == nonce[13] &&
+                clean_ht20_rx_sig_valid(raw, CLEAN_HT_ACK_MPDU) &&
+                !memcmp(raw + 10u, expected + 18u, 12u);
+            printf(",\"failure_record_valid\":%s,\"failure_count\":%u,\"failure_cause\":%u,"
+                   "\"failure_length\":%u,\"failure_phy\":%u,\"failure_status1\":%u,"
+                   "\"failure_status2\":%u,\"failure_candidate_match\":%s,"
+                   "\"failure_fcs_valid\":%s,\"failure_raw_repeat_match\":%s,"
+                   "\"failure_final_length\":%u,\"failure_final_status1\":%u,"
+                   "\"failure_final_status2\":%u,\"failure_final_phy\":%u,"
+                   "\"failure_time_us\":%u",
+                   failure.magic == CLEAN_HT_FAILURE_MAGIC ? "true" : "false",
+                   failure.count, failure.cause, failure.length, failure.phy,
+                   failure.status1, failure.status2, candidate ? "true" : "false",
+                   complete && diag_crc32(raw + 6u, 56u) == usb_report_u32(raw + 62u) ?
+                       "true" : "false",
+                   valid && failure.length && !memcmp(raw, repeated, failure.length) ?
+                       "true" : "false",
+                   failure.final_length, failure.final_status1, failure.final_status2,
+                   failure.final_phy, (uint32_t)failure.time_lo | ((uint32_t)failure.time_hi << 16u));
+            if (complete) {
+                uint32_t bit_errors = 0u;
+                for (uint32_t i = 0u; i < CLEAN_HT_ACK_MPDU; ++i) {
+                    uint8_t different = raw[6u+i] ^ expected[14u+i];
+                    for (; different; different &= (uint8_t)(different - 1u)) ++bit_errors;
+                }
+                printf(",\"failure_fixture_bit_errors\":%u", bit_errors);
+            }
+            printf(",\"failure_raw\":\"");
+            if (valid)
+                for (uint32_t i = 0u; i < failure.length; ++i) printf("%02x", raw[i]);
+            printf("\",\"failure_repeated_raw\":\"");
+            if (valid)
+                for (uint32_t i = 0u; i < failure.length; ++i) printf("%02x", repeated[i]);
             printf("\"");
         }
         clean_ht_diag_t diagnostic;

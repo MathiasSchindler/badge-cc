@@ -8,10 +8,16 @@ if [[ ( $# -ne 4 && $# -ne 5 && $# -ne 6 ) ||
     echo "Usage: bash clean-rx/badge/ht_probe.sh TX_SERIAL RX_SERIAL NEW_PREFIX MCS:0-7 [MPDU_BYTES:28-2332 [--extended-rx]]" >&2
     echo "The extended RX build also accepts the fixed 3869-byte A-MSDU fixture" >&2
     echo "Use --ack for the clocked 60-byte normal-ACK fixture; --ack-raw retains the raw-TX control" >&2
+    echo "HT_PROBE_CHANNEL selects channel 1..11 for controlled comparisons (default 1)" >&2
     exit 2
 fi
 cd "$(dirname "$0")/../.." || exit 1
 tx=$1 rx=$2 prefix=$3 mcs=$4
+channel=${HT_PROBE_CHANNEL:-1}
+if [[ ! $channel =~ ^([1-9]|10|11)$ ]]; then
+    echo "HT_PROBE_CHANNEL must be 1..11" >&2
+    exit 2
+fi
 collector=build/clean-rx/badge/ht-probe/collector
 mpdu=88 mode=probe
 clocked=0
@@ -50,8 +56,8 @@ if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]]; then
     echo "Challenge generation failed" >&2
     exit 1
 fi
-printf '{"challenge":"%s","mcs":%s,"channel":1,"mpdu_bytes":%s,"tx_frames":1,"vendor_peer":false,"ht_qualified":false}\n' \
-    "$challenge" "$mcs" "$mpdu" > "$prefix-config.json" || exit 1
+printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"vendor_peer":false,"ht_qualified":false}\n' \
+    "$challenge" "$mcs" "$channel" "$mpdu" > "$prefix-config.json" || exit 1
 rx_pid=
 cleanup() {
     if [[ -n $rx_pid ]]; then
@@ -89,14 +95,14 @@ wait_bootsel "$tx" && wait_bootsel "$rx" || exit 1
 start_badge "$rx" || exit 1
 args=("$challenge" "$mcs")
 if [[ $mode == data ]]; then args+=("$mpdu"); fi
-"$collector" "$rx" "$prefix-rx.bin" 1 "--ht-$mode-rx" "${args[@]}" \
+"$collector" "$rx" "$prefix-rx.bin" "$channel" "--ht-$mode-rx" "${args[@]}" \
     > "$prefix-rx.json" 2> "$prefix-rx.stderr" &
 rx_pid=$!
 sleep 0.2
 start_badge "$tx" || exit 1
 tx_role="--ht-$mode-tx"
 if [[ $clocked == 1 ]]; then tx_role=--ht-ack-clocked-tx; fi
-"$collector" "$tx" "$prefix-tx.bin" 1 "$tx_role" "${args[@]}" \
+"$collector" "$tx" "$prefix-tx.bin" "$channel" "$tx_role" "${args[@]}" \
     > "$prefix-tx.json" 2> "$prefix-tx.stderr"
 tx_result=$?
 wait "$rx_pid"
@@ -117,7 +123,7 @@ with open(sys.argv[1] + "-tx.json") as file:
     tx = json.load(file)
 with open(sys.argv[1] + "-rx.json") as file:
     rx = json.load(file)
-print(json.dumps(dict(mode="ht-ack-pair", channel=1, mcs=tx["mcs"], mpdu_bytes=60,
+print(json.dumps(dict(mode="ht-ack-pair", channel=tx["channel"], mcs=tx["mcs"], mpdu_bytes=60,
                      fresh_ht_rx=rx["fresh_ht_rx"],
                      ack_responses_started=rx["ack_responses_started"],
                      fresh_return_ack=tx["fresh_return_ack"],
@@ -125,5 +131,5 @@ print(json.dumps(dict(mode="ht-ack-pair", channel=1, mcs=tx["mcs"], mpdu_bytes=6
 PY
     exit "$?"
 fi
-printf '{"mode":"%s","channel":1,"mcs":%s,"mpdu_bytes":%s,"fresh_ht_rx":true,"tx_over_air_confirmed":true,"ht_interoperability_qualified":false}\n' \
-    "$pair_mode" "$mcs" "$mpdu" | tee "$prefix-pair.json"
+printf '{"mode":"%s","channel":%s,"mcs":%s,"mpdu_bytes":%s,"fresh_ht_rx":true,"tx_over_air_confirmed":true,"ht_interoperability_qualified":false}\n' \
+    "$pair_mode" "$channel" "$mcs" "$mpdu" | tee "$prefix-pair.json"
