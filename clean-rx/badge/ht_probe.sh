@@ -9,6 +9,7 @@ if [[ ( $# -ne 4 && $# -ne 5 && $# -ne 6 ) ||
     echo "The extended RX build also accepts the fixed 3869-byte A-MSDU fixture" >&2
     echo "Use --ack for the clocked 60-byte normal-ACK fixture; --ack-raw retains the raw-TX control" >&2
     echo "HT_PROBE_CHANNEL selects channel 1..11 for controlled comparisons (default 1)" >&2
+    echo "HT_PROBE_TID pins the normal-ACK fixture TID to 0..7" >&2
     exit 2
 fi
 cd "$(dirname "$0")/../.." || exit 1
@@ -36,6 +37,7 @@ elif [[ $# -ge 5 ]]; then
     collector=build/clean-rx/badge/ht-data/collector
     if [[ $# -eq 6 ]]; then collector=build/clean-rx/badge/ht-rx/collector; fi
 fi
+collector=${CLEAN_RX_COLLECTOR:-$collector}
 if [[ ! -x $collector || ! -x build/picotool-usb/picotool ]]; then
     echo "Build the matching isolated ht-$mode collector and install its image first" >&2
     exit 1
@@ -55,6 +57,14 @@ fi
 if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]]; then
     echo "Challenge generation failed" >&2
     exit 1
+fi
+if [[ ${HT_PROBE_TID+x} ]]; then
+    if [[ $mode != ack || ! $HT_PROBE_TID =~ ^[0-7]$ ]]; then
+        echo "HT_PROBE_TID requires --ack/--ack-raw and a TID in 0..7" >&2
+        exit 2
+    fi
+    byte=$((16#${challenge:12:2}))
+    challenge=${challenge:0:12}$(printf '%02x' "$(((byte & 240) | HT_PROBE_TID))")${challenge:14}
 fi
 printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"vendor_peer":false,"ht_qualified":false}\n' \
     "$challenge" "$mcs" "$channel" "$mpdu" > "$prefix-config.json" || exit 1

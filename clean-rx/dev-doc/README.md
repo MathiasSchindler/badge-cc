@@ -15,6 +15,10 @@ firmware.
   integration guide, preserving transport experiments, qualification
   history and hardware-crypto procedures.
 - [Project work tracker](../../todo.md): milestones and outstanding work.
+- [Milestone history](MILESTONE_HISTORY.md): implementation details,
+  measurements and experiment records moved out of the root tracker.
+- [Bounded EDCA implementation](EDCA_IMPLEMENTATION.md): controller policy,
+  per-category access, native tests, paired RF matrix and remaining D2 gates.
 
 Keep experiment commands, build IDs, trial counts, logs, unresolved behavior
 and proposed changes here. Document current user-visible behavior and

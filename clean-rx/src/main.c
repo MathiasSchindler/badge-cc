@@ -50,7 +50,14 @@ static uint8_t  sdpcm_seq;
 static uint8_t rx_after_explicit_tx;
 static uint8_t station_enabled;
 static uint8_t station_mac, station_hw, nav_sampled;
-static clean_dcf_t station_dcf;
+static clean_dcf_t station_legacy_dcf;
+static clean_edca_t station_edca;
+static clean_edca_ac_t policy_edca[4];
+static uint8_t policy_edca_pending;
+static clean_dcf_t *station_contention(void) {
+    return station_edca.enabled ? &station_edca.ac[station_edca.selected] : &station_legacy_dcf;
+}
+#define station_dcf (*station_contention())
 static uint16_t rx_discard_fcs, rx_discard_length;
 static uint8_t nav_frame[CLEAN_MPDU_BYTES], station_address[6];
 static uint32_t access_started;
@@ -495,10 +502,20 @@ static uint32_t mac_now(void) {
     return mmio_read32(D11_BASE + (station_hw ? 0x180u : 0x1cu));
 }
 
+static void station_bad_rx(uint32_t now) {
+    if (!station_edca.enabled) clean_dcf_bad_rx(&station_legacy_dcf, now);
+    else for (uint32_t i = 0u; i < 4u; ++i) clean_dcf_bad_rx(&station_edca.ac[i], now);
+}
+
+static void station_good_rx(void) {
+    if (!station_edca.enabled) clean_dcf_good_rx(&station_legacy_dcf);
+    else for (uint32_t i = 0u; i < 4u; ++i) clean_dcf_good_rx(&station_edca.ac[i]);
+}
+
 static void station_observe_errors(uint32_t now) {
     uint16_t fcs = shm_read16(0x7a8u), length = shm_read16(0x7a9u);
     if (fcs != rx_discard_fcs || length != rx_discard_length)
-        clean_dcf_bad_rx(&station_dcf, now);
+        station_bad_rx(now);
     rx_discard_fcs = fcs;
     rx_discard_length = length;
 }
@@ -524,7 +541,7 @@ static void station_hw_slot(void) {
     if (!station_hw) return;
     mmio_write16(D11_BASE + 0x684u, (uint16_t)(0x1feu + station_dcf.slot_us));
     shm_write16(CLEAN_DCF_SLOT_US, station_dcf.slot_us);
-    shm_write16(CLEAN_DCF_DIFS_US, (uint16_t)(10u + 2u * station_dcf.slot_us));
+    shm_write16(CLEAN_DCF_DIFS_US, (uint16_t)(10u + station_dcf.aifsn * station_dcf.slot_us));
     shm_write16(CLEAN_DCF_EIFS_US, 314u);
 }
 
@@ -567,7 +584,28 @@ static void station_apply_policy(uint32_t mac_en) {
     (void)mmio_read32(D11_MACCONTROL);
     if (station_rx_idle(shm_read16(0x601u)) && !station_phy_busy()) {
         if (station_response_rates(policy_basic)) {
-            clean_dcf_slot(&station_dcf, mac_now(), policy_short_slot);
+            uint32_t now = mac_now();
+            if (policy_edca_pending) {
+                clean_dcf_t previous = station_dcf;
+                if (!clean_edca_configure(&station_edca, policy_edca, now,
+                                          previous.random, policy_short_slot)) {
+                    fail(0x85u, FW_TX_BUF_ADDR, CLEAN_EDCA_CMD);
+                    return;
+                }
+                for (uint32_t i = 0u; i < 4u; ++i) {
+                    clean_dcf_t *d = &station_edca.ac[i];
+                    uint32_t remaining = previous.nav_until - now;
+                    if (previous.nav_valid && remaining && remaining <= 32767u)
+                        clean_dcf_nav(d, now, (uint16_t)remaining);
+                    if (previous.ifs_us > 10u + previous.aifsn * previous.slot_us)
+                        clean_dcf_bad_rx(d, now);
+                }
+                policy_edca_pending = 0u;
+                station_hw_backoff();
+            } else if (station_edca.enabled) {
+                for (uint32_t i = 0u; i < 4u; ++i)
+                    clean_dcf_slot(&station_edca.ac[i], now, policy_short_slot);
+            } else clean_dcf_slot(&station_dcf, now, policy_short_slot);
             station_hw_slot();
             shm_write16(CLEAN_QOS_RESPONSE_POLICY, policy_response);
             policy_pending = 0u;
@@ -588,6 +626,18 @@ static void snapshot_dcf_trace(void) {
 
 static void station_publish_mac(void) {
     if (!station_mac) return;
+    volatile clean_edca_status_t *edca = (volatile clean_edca_status_t *)CLEAN_EDCA_STATUS_ADDR;
+    edca->magic = CLEAN_EDCA_STATUS_MAGIC;
+    edca->cw_min = station_dcf.cw_min;
+    edca->cw_max = station_dcf.cw_max;
+    edca->aifs_us = station_hw ? shm_read16(CLEAN_DCF_DIFS_US) :
+        (uint16_t)(10u + station_dcf.aifsn * station_dcf.slot_us);
+    edca->txop_32us = station_edca.enabled ?
+        station_edca.parameters[station_edca.selected].txop_32us : 0u;
+    edca->ac = station_edca.selected;
+    edca->tid = station_edca.tid;
+    edca->enabled = station_edca.enabled;
+    edca->reserved = 0u;
     MAC_RADIO->cw = station_dcf.cw;
     MAC_RADIO->slots = station_hw ? shm_read16(CLEAN_DCF_SLOTS) : station_dcf.slots;
     MAC_RADIO->nav_until = station_dcf.nav_valid ? station_dcf.nav_until : 0u;
@@ -646,7 +696,7 @@ static void station_consume_ack(void) {
     /* An ACK can complete between the first state sample and transport
      * preparation. Its staged bytes must not survive into the next capture. */
     capture_prepared = 0u;
-    clean_dcf_good_rx(&station_dcf);
+    station_good_rx();
     ++MAC_RADIO->control_acks;
     shm_write16(0x601u, 0u);
     nav_sampled = 0u;
@@ -685,7 +735,7 @@ static void station_observe_capture(void) {
     nav_sampled = 1u;
     uint32_t n = shm_read16(0x606u);
     if (n < 20u || n > CLEAN_RXE_BYTES) {
-        clean_dcf_bad_rx(&station_dcf, mac_now());
+        station_bad_rx(mac_now());
         return;
     }
     n -= CLEAN_PLCP_BYTES;
@@ -699,10 +749,13 @@ static void station_observe_capture(void) {
         (uint32_t)shm_read16(CLEAN_DCF_RX_LO) |
         ((uint32_t)shm_read16(CLEAN_DCF_RX_HI) << 16u) : mac_now();
     station_observe_errors(now);
-    if (duration < 0) clean_dcf_bad_rx(&station_dcf, now);
+    if (duration < 0) station_bad_rx(now);
     else {
-        clean_dcf_good_rx(&station_dcf);
-        clean_dcf_nav(&station_dcf, now, (uint16_t)duration);
+        station_good_rx();
+        if (station_edca.enabled) {
+            for (uint32_t i = 0u; i < 4u; ++i)
+                clean_dcf_nav(&station_edca.ac[i], now, (uint16_t)duration);
+        } else clean_dcf_nav(&station_dcf, now, (uint16_t)duration);
         if (station_dcf.nav_valid) shm_write16(CLEAN_CTS_ALLOWED, 0u);
         if (station_hw && station_dcf.nav_valid) {
             uint32_t remaining = station_dcf.nav_until - mac_now();
@@ -716,6 +769,32 @@ static void station_observe_capture(void) {
 
 /* Template preparation is deliberately outside the contention interval. The
  * PSM may answer RX while waiting; in that case its TXE setup takes precedence. */
+static int station_edca_select(uint32_t mac_en, uint32_t tid, uint32_t mcs) {
+    mmio_write32(D11_MACCONTROL, 0x84020400u);
+    (void)mmio_read32(D11_MACCONTROL);
+    if (!station_rx_idle(shm_read16(0x601u)) || station_phy_busy()) {
+        mmio_write32(D11_MACCONTROL, mac_en);
+        return 2;
+    }
+    uint16_t slots = shm_read16(CLEAN_DCF_SLOTS);
+    if (slots > CLEAN_DCF_MAX_SLOTS)
+        return fail(0x8eu, CLEAN_DCF_SLOTS, slots);
+    station_dcf.slots = slots;
+    if (clean_edca_select(&station_edca, tid, mac_now()) < 0)
+        return fail(0x85u, FW_TX_BUF_ADDR, tid);
+    int rate = clean_ht_ack_rate(policy_basic, mcs);
+    uint32_t ack = rate < 0 ? 0u : rate < 4 ?
+        clean_cck_airtime_us(14u, (uint32_t)rate, 0u) :
+        clean_ofdm_airtime_us(14u, (uint32_t)rate - 4u);
+    if (!ack || !clean_edca_txop_valid(&station_edca,
+            clean_ht20_airtime_us(CLEAN_HT_ACK_MPDU, mcs) + 10u + ack))
+        return fail(0x85u, FW_TX_BUF_ADDR, tid);
+    station_hw_slot();
+    station_hw_backoff();
+    mmio_write32(D11_MACCONTROL, mac_en);
+    return 1;
+}
+
 static int station_wait_access(uint32_t mac_en, uint16_t ack_sent, uint16_t cts_sent) {
     if (station_hw) shm_write16(CLEAN_DCF_REQUEST, 1u);
     mmio_write32(D11_MACCONTROL, mac_en);
@@ -954,7 +1033,8 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     if (reliable) ++UNICAST->attempts;
     if (station_mac) {
         last_tx_identity = (uint32_t)tx_buf[28] | ((uint32_t)tx_buf[29] << 8u) |
-            ((uint32_t)tx_buf[6] << 16u);
+            ((uint32_t)tx_buf[6] << 16u) |
+            (ht_probe ? (uint32_t)(tx_buf[30] & 15u) << 24u : 0u);
         last_tx_valid = 1u;
     }
     MBOX->rc_dacbuf = 0x55550005u;
@@ -1219,6 +1299,7 @@ static int d11_restart_rx_psm(uint32_t channel) {
 }
 
 void cyw43_main(void) {
+    ((volatile clean_edca_status_t *)CLEAN_EDCA_STATUS_ADDR)->magic = 0u;
     volatile uint32_t *mac_words = (volatile uint32_t *)CLEAN_MAC_RADIO_ADDR;
     for (uint32_t i = 0u; i < sizeof(clean_mac_radio_status_t) / 4u; ++i) mac_words[i] = 0u;
     volatile uint32_t *trace_words = (volatile uint32_t *)CLEAN_MAC_TRACE_ADDR;
@@ -1495,6 +1576,10 @@ void cyw43_main(void) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
             }
+            if (station_edca.enabled && (!ht_clocked || (frame[30] & 15u) >= 8u)) {
+                fail(0x85u, FW_TX_BUF_ADDR, cmd);
+                break;
+            }
             if (station_enabled && (cmd & (CLEAN_TX_REARM_RX | CLEAN_TX_MATCH_SOURCE))) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
@@ -1536,8 +1621,14 @@ void cyw43_main(void) {
                 access_started = UNICAST->started_us;
             }
             if (station_mac) {
+                int selected = 1;
+                if (station_edca.enabled && !policy_pending) {
+                    selected = station_edca_select(mac_en, frame[30] & 15u, frame[0]);
+                    if (!selected) break;
+                }
                 uint32_t identity = (uint32_t)frame[28] | ((uint32_t)frame[29] << 8u) |
-                    ((uint32_t)frame[6] << 16u);
+                    ((uint32_t)frame[6] << 16u) |
+                    (ht_clocked ? (uint32_t)(frame[30] & 15u) << 24u : 0u);
                 if (last_tx_valid && identity != last_tx_identity) {
                     uint8_t redraw = station_dcf.cw != station_dcf.cw_min;
                     clean_dcf_new_frame(&station_dcf, mac_now());
@@ -1549,7 +1640,7 @@ void cyw43_main(void) {
                     fail(0x8cu, FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET, MBOX->f2_consumed);
                     break;
                 }
-                if (policy_pending || !credit || !station_rx_idle(shm_read16(0x601u)) ||
+                if (selected == 2 || policy_pending || !credit || !station_rx_idle(shm_read16(0x601u)) ||
                     station_phy_busy()) {
                     UNICAST->result = CLEAN_UNICAST_BUSY;
                     ++MAC_RADIO->deferrals;
@@ -1766,6 +1857,19 @@ void cyw43_main(void) {
             }
             policy_response = (uint8_t)policy;
             policy_pending = 1u;
+            MBOX->host_cmd = 2u;
+            __asm__ volatile("dsb" ::: "memory");
+            continue;
+        }
+        if ((cmd & 0xffu) == CLEAN_EDCA_CMD) {
+            const volatile uint8_t *p = (const volatile uint8_t *)FW_TX_BUF_ADDR;
+            if (!clean_edca_command_valid(cmd, CLEAN_RX_EDCA, MAC_RADIO->profile) ||
+                !station_hw || !clean_edca_decode(policy_edca, p) ||
+                !clean_edca_valid(policy_edca)) {
+                fail(0x85u, FW_TX_BUF_ADDR, cmd);
+                break;
+            }
+            policy_edca_pending = policy_pending = 1u;
             MBOX->host_cmd = 2u;
             __asm__ volatile("dsb" ::: "memory");
             continue;

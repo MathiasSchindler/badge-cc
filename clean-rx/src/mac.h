@@ -10,8 +10,8 @@
 
 typedef struct {
     uint32_t sampled_us, idle_us, nav_until, random;
-    uint16_t cw, cw_min, slots, ifs_us;
-    uint8_t slot_us, idle, nav_valid;
+    uint16_t cw, cw_min, cw_max, slots, ifs_us;
+    uint8_t slot_us, idle, nav_valid, aifsn;
 } clean_dcf_t;
 
 void clean_dcf_init(clean_dcf_t *s, uint32_t now, uint32_t seed, uint8_t short_slot);
@@ -22,6 +22,25 @@ void clean_dcf_good_rx(clean_dcf_t *s);
 void clean_dcf_complete(clean_dcf_t *s, uint32_t now, int acked);
 void clean_dcf_new_frame(clean_dcf_t *s, uint32_t now);
 void clean_dcf_slot(clean_dcf_t *s, uint32_t now, uint8_t short_slot);
+
+typedef struct {
+    uint8_t aifsn, acm, ecw_min, ecw_max;
+    uint16_t txop_32us;
+} clean_edca_ac_t;
+
+typedef struct {
+    clean_dcf_t ac[4];
+    clean_edca_ac_t parameters[4];
+    uint8_t selected, tid, enabled;
+} clean_edca_t;
+
+/* WMM ACI order: BE, BK, VI, VO. One outstanding controller TX at a time. */
+int clean_edca_decode(clean_edca_ac_t ac[4], const volatile uint8_t bytes[16]);
+int clean_edca_valid(const clean_edca_ac_t ac[4]);
+int clean_edca_configure(clean_edca_t *s, const clean_edca_ac_t ac[4],
+                         uint32_t now, uint32_t seed, uint8_t short_slot);
+int clean_edca_select(clean_edca_t *s, uint32_t tid, uint32_t now);
+int clean_edca_txop_valid(const clean_edca_t *s, uint32_t exchange_us);
 
 typedef struct {
     uint16_t sequence, fragments;

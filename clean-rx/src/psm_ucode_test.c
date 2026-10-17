@@ -633,6 +633,29 @@ static void ht_failure_capture(void) {
 
 static void contention(void) {
     uint16_t r[0x1800];
+    for (uint32_t aifsn = 2u; aifsn <= 15u; ++aifsn) {
+        for (uint32_t slot = 9u; slot <= 20u; slot += 11u) {
+            memset(r, 0, sizeof(r));
+            r[CLEAN_DCF_ENABLE] = r[CLEAN_DCF_REQUEST] = 1u;
+            r[CLEAN_DCF_SLOT_US] = (uint16_t)slot;
+            r[CLEAN_DCF_DIFS_US] = (uint16_t)(10u + aifsn * slot);
+            r[CLEAN_DCF_SLOTS] = 2u;
+            r[0x1148u] = 3u;
+            uint32_t end = 10u + aifsn * slot + 2u * slot;
+            for (uint32_t elapsed = 0u; elapsed <= end; ++elapsed) {
+                r[0x1119u] = (uint16_t)(65500u + elapsed);
+                assert(psm_run(r, 0, DCF_IDLE) == 124u);
+                assert((r[CLEAN_DCF_REQUEST] == CLEAN_DCF_FIRED) == (elapsed == end));
+            }
+            assert(!r[CLEAN_DCF_SLOTS]);
+        }
+    }
+    for (uint32_t profile = 0u; profile < 5u; ++profile) {
+        assert(clean_edca_command_valid(15u, 1u, profile) == (profile == 3u));
+        assert(!clean_edca_command_valid(15u, 0u, profile));
+        for (uint32_t bit = 0u; bit < 32u; ++bit)
+            assert(!clean_edca_command_valid(15u ^ (1u << bit), 1u, profile));
+    }
     assert(instruction(DCF_SLOTS_CHECK) ==
            WORD(0x3f0u,CLEAN_DCF_SLOTS,0x1800u,0x1783u));
     assert(DCF_COUNT_CLOCK == DCF_SLOTS_CHECK + 1u &&

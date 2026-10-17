@@ -150,7 +150,7 @@ version-0 non-DS management frames with a unicast source and total template
 length of at least 34 bytes. These flags do not change the SHM auto-ACK
 address. The hardware matcher persists until reprogrammed or reset.
 
-The [HT20 reference](HT20.md) describes commands 12 and 14.
+The [HT20 reference](HT20.md) describes commands 12, 14 and 15.
 Developer-only fixtures and test commands are documented in
 [dev-doc](../dev-doc/README.md).
 

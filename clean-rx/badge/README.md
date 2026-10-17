@@ -566,7 +566,7 @@ incomplete reception. The exact initiating PHY/RXE condition remains unknown;
 no hardware watchdog or timeout-register fix has been established.
 On the retained build, `2-long`, `11-long` and `ofdm6` each pass 30
 cyclic-size frames per direction, including full-size MSDUs.
-See the [investigation and excluded causes](../../todo.md#c1-all-legacy-dssscck-rates).
+See the [investigation and excluded causes](../dev-doc/MILESTONE_HISTORY.md#c1-all-legacy-dssscck-rates).
 
 Failure collection stops the soak before reading diagnostics and preserves
 the original failure code. Reports now include `tx_diagnostic`, `psm_diag`,

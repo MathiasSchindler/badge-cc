@@ -18,6 +18,11 @@ count=$4
 drop_acks=${5:-0}
 phy=${6:-ofdm6}
 payload=${7:-cycle}
+collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/collector}
+if [[ ! -x $collector || ! -x build/picotool-usb/picotool ]]; then
+    echo "Build the matching collector and install its image first" >&2
+    exit 1
+fi
 payloads=$payload
 if [[ $payload == cycle ]]; then payloads=32,1500,2304; fi
 if [[ $payload == cck-boundary ]]; then payloads=1500,1550,1600,1650,1700,1750,1800,1850,1900,2304; fi
@@ -55,12 +60,12 @@ start_badge() {
     return 1
 }
 start_badge "$responder" || exit 1
-build/clean-rx/badge/collector "$responder" "$prefix-reply.bin" 1 \
+"$collector" "$responder" "$prefix-reply.bin" 1 \
     --mac-soak-reply "$challenge" "$count" "$drop_acks" "$phy" "$payload" > "$prefix-reply.json" 2> "$prefix-reply.stderr" &
 reply_pid=$!
 sleep 1
 start_badge "$initiator" || exit 1
-build/clean-rx/badge/collector "$initiator" "$prefix-init.bin" 1 \
+"$collector" "$initiator" "$prefix-init.bin" 1 \
     --mac-soak-init "$challenge" "$count" "$drop_acks" "$phy" "$payload" > "$prefix-init.json" 2> "$prefix-init.stderr"
 init_result=$?
 wait "$reply_pid"

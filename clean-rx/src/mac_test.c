@@ -104,6 +104,85 @@ static void contention(void) {
     assert(s.ifs_us == 50u && s.nav_valid);
 }
 
+static void edca(void) {
+    uint8_t bytes[16] = {
+        3u,0xa4u,0u,0u, 0x27u,0xa4u,0u,0u,
+        0x42u,0x43u,94u,0u, 0x62u,0x32u,47u,0u
+    };
+    clean_edca_ac_t ac[4];
+    assert(clean_edca_decode(ac, bytes) && clean_edca_valid(ac));
+    clean_edca_t s = {0};
+    assert(clean_edca_configure(&s, ac, 0u, 1u, 1u));
+    static const uint8_t mapping[8] = {0u,1u,1u,0u,2u,2u,3u,3u};
+    static const uint16_t cw[] = {15u,15u,7u,3u};
+    static const uint16_t maximum[] = {1023u,1023u,15u,7u};
+    for (uint32_t tid = 0u; tid < 8u; ++tid) {
+        assert(clean_edca_select(&s, tid, 0u) == mapping[tid]);
+        clean_dcf_t *d = &s.ac[s.selected];
+        assert(d->cw_min == cw[s.selected] && d->cw_max == maximum[s.selected]);
+        d->slots = 2u;
+        uint32_t aifs = 10u + ac[s.selected].aifsn * 9u;
+        for (uint32_t now = 0u; now < aifs + 18u; ++now)
+            assert(!clean_dcf_poll(d, now, 0));
+        assert(clean_dcf_poll(d, aifs + 18u, 0));
+        for (uint32_t retry = 0u; retry < 12u; ++retry) {
+            clean_dcf_complete(d, 1000u + retry, 0);
+            assert(d->cw <= d->cw_max && d->slots <= d->cw);
+        }
+        assert(d->cw == maximum[s.selected]);
+        clean_dcf_complete(d, 2000u, 1);
+        assert(d->cw == cw[s.selected]);
+        clean_dcf_bad_rx(d, 2000u);
+        assert(d->ifs_us == aifs + 314u);
+        clean_dcf_slot(d, 2001u, 0u);
+        assert(d->ifs_us == 10u + ac[s.selected].aifsn * 20u + 314u);
+        clean_dcf_good_rx(d);
+        clean_dcf_slot(d, 2002u, 1u);
+        uint32_t limit = ac[s.selected].txop_32us * 32u;
+        assert(clean_edca_txop_valid(&s, limit ? limit : 100000u));
+        assert(clean_edca_txop_valid(&s, limit + 1u) == !limit);
+    }
+    clean_edca_t before = s;
+    assert(clean_edca_select(&s, 8u, 0u) < 0 && !memcmp(&before, &s, sizeof(s)));
+    assert(clean_edca_configure(&s, ac, 0u, 1u, 1u));
+    before = s;
+    clean_dcf_complete(&s.ac[0], 1u, 0);
+    for (uint32_t i = 1u; i < 4u; ++i)
+        assert(!memcmp(&s.ac[i], &before.ac[i], sizeof(s.ac[i])));
+    s.ac[0].slots = 3u;
+    clean_dcf_nav(&s.ac[0], 2u, 100u);
+    clean_dcf_bad_rx(&s.ac[0], 2u);
+    clean_dcf_t saved = s.ac[0];
+    assert(clean_edca_select(&s, 6u, 3u) == 3);
+    assert(!memcmp(&s.ac[0], &saved, sizeof(saved)));
+    assert(clean_edca_select(&s, 0u, 4u) == 0);
+    assert(s.ac[0].cw == saved.cw && s.ac[0].slots == saved.slots &&
+           s.ac[0].random == saved.random && s.ac[0].ifs_us == saved.ifs_us &&
+           s.ac[0].nav_until == saved.nav_until && s.ac[0].nav_valid);
+    ac[3].acm = 1u;
+    assert(clean_edca_configure(&s, ac, 0u, 1u, 1u));
+    assert(clean_edca_select(&s, 6u, 0u) == 2);
+    ac[2].acm = ac[0].acm = 1u;
+    assert(clean_edca_configure(&s, ac, 0u, 1u, 1u));
+    assert(clean_edca_select(&s, 6u, 0u) == 1);
+    ac[1].acm = 1u;
+    assert(clean_edca_configure(&s, ac, 0u, 1u, 1u));
+    before = s;
+    assert(clean_edca_select(&s, 6u, 0u) < 0 && !memcmp(&before, &s, sizeof(s)));
+    ac[0].ecw_max = 11u;
+    assert(!clean_edca_configure(&s, ac, 0u, 1u, 1u));
+    assert(!memcmp(&before, &s, sizeof(s)));
+    for (uint32_t fault = 0u; fault < 3u; ++fault) {
+        uint8_t saved = bytes[0];
+        bytes[0] = fault == 0u ? 0x83u : fault == 1u ? 1u : 0x23u;
+        clean_edca_ac_t original[4];
+        memcpy(original, ac, sizeof(ac));
+        assert(!clean_edca_decode(ac, bytes) && !memcmp(original, ac, sizeof(ac)));
+        bytes[0] = saved;
+    }
+    puts("EDCA: AP record decoding, all TIDs/ACs, AIFS, CW limits, ACM downgrade and TXOP bounds pass; NOT RF");
+}
+
 static void retries_and_nav(void) {
     uint8_t m[CLEAN_MPDU_BYTES], before[CLEAN_MPDU_BYTES], own[6] = {2u};
     assert(clean_mac_fcs((const uint8_t *)"123456789", 9u) == 0xcbf43926u);
@@ -481,6 +560,7 @@ static void qos_receive(void) {
 
 int main(void) {
     contention();
+    edca();
     retries_and_nav();
     receive();
     sequence_soak();

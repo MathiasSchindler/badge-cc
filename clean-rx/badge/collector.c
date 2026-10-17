@@ -491,6 +491,27 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         for (uint32_t i = 0u; i < 6u; ++i) printf("%02x", diagnostic.early.sig[i]);
         printf("\"");
         print_tx_diag(detail);
+        int edca_valid = 1;
+        if (clocked && CLEAN_RX_EDCA) {
+            clean_edca_status_t edca;
+            memcpy(&edca, detail + CLEAN_EDCA_DETAIL, sizeof(edca));
+            static const uint8_t ac[8] = {0u,1u,1u,0u,2u,2u,3u,3u};
+            static const uint16_t minimum[4] = {15u,15u,7u,3u};
+            static const uint16_t maximum[4] = {1023u,1023u,15u,7u};
+            static const uint16_t aifs[4] = {37u,73u,28u,28u};
+            static const uint16_t txop[4] = {0u,0u,94u,47u};
+            uint32_t tid = nonce[6] & 15u;
+            edca_valid = edca.magic == CLEAN_EDCA_STATUS_MAGIC && edca.enabled == 1u &&
+                tid < 8u && edca.tid == tid && edca.ac == ac[tid] &&
+                edca.cw_min == minimum[edca.ac] && edca.cw_max == maximum[edca.ac] &&
+                edca.aifs_us == aifs[edca.ac] && edca.txop_32us == txop[edca.ac] &&
+                !edca.reserved;
+            printf(",\"edca_valid\":%s,\"edca_ac\":%u,\"edca_tid\":%u,"
+                   "\"edca_cw_min\":%u,\"edca_cw_max\":%u,\"edca_aifs_us\":%u,"
+                   "\"edca_txop_32us\":%u",
+                   edca_valid ? "true" : "false", edca.ac, edca.tid,
+                   edca.cw_min, edca.cw_max, edca.aifs_us, edca.txop_32us);
+        }
         puts("}");
         int valid = tx == 21u || tx == 24u || tx == 26u || clocked ? submitted :
             completed && (tx == 22u || tx == 25u || tx == 27u ? fresh : fcs_valid);
@@ -498,7 +519,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             usb_report_u32(detail + 704u) && usb_report_u32(detail + 696u) == 1u &&
             !usb_report_u32(detail + 700u);
         if (tx == 26u || clocked) {
-            valid = valid && returned_ack;
+            valid = valid && returned_ack && edca_valid;
             if (!valid)
                 fputs("HT ACK exchange unconfirmed: local TX/response counters do not replace a fresh returned ACK\n",
                       stderr);

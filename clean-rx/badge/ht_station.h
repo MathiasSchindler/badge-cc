@@ -2,6 +2,7 @@
 #define CLEAN_RX_HT_STATION_H
 
 #include "../../src/shared/bytes.h"
+#include "../src/mac.h"
 
 #define CLEAN_HT_PEER_DETAIL 1040u
 #define CLEAN_HT_PEER_BYTES 44u
@@ -11,10 +12,7 @@ _Static_assert(CLEAN_HT_PEER_DETAIL >= 1000u + 40u &&
                CLEAN_HT_PEER_DETAIL + CLEAN_HT_PEER_BYTES <= 1088u,
                "HT peer report must not overwrite association or unicast evidence");
 
-typedef struct {
-    uint8_t aifsn, acm, ecw_min, ecw_max;
-    uint16_t txop_32us;
-} clean_wmm_ac_t;
+typedef clean_edca_ac_t clean_wmm_ac_t;
 
 typedef struct {
     clean_wmm_ac_t ac[4];
@@ -72,20 +70,7 @@ static inline void clean_ht_peer_ie(clean_ht_peer_t *s, uint32_t id,
             s->wmm.present || s->wmm.information) { s->invalid = 1u; return; }
         clean_wmm_t wmm;
         badger_bytes_zero((uint8_t *)&wmm, sizeof(wmm));
-        uint32_t seen = 0u;
-        for (uint32_t i = 0u; i < 4u; ++i) {
-            const uint8_t *ac = p + 8u + 4u*i;
-            uint32_t index = (ac[0] >> 5u) & 3u;
-            uint32_t bit = 1u << index;
-            if ((seen & bit) || (ac[0] & 0x80u) || (ac[0] & 15u) < 2u ||
-                (ac[1] & 15u) > (ac[1] >> 4u)) { s->invalid = 1u; return; }
-            seen |= bit;
-            wmm.ac[index].aifsn = ac[0] & 15u;
-            wmm.ac[index].acm = (ac[0] >> 4u) & 1u;
-            wmm.ac[index].ecw_min = ac[1] & 15u;
-            wmm.ac[index].ecw_max = ac[1] >> 4u;
-            wmm.ac[index].txop_32us = (uint16_t)((uint16_t)ac[2] | ((uint16_t)ac[3] << 8u));
-        }
+        if (!clean_edca_decode(wmm.ac, p + 8u)) { s->invalid = 1u; return; }
         wmm.present = 1u; wmm.parameter_set = p[6] & 15u; wmm.uapsd = p[6] >> 7u;
         badger_bytes_copy((uint8_t *)&s->wmm, (const uint8_t *)&wmm, sizeof(wmm));
     }

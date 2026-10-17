@@ -655,6 +655,13 @@ static void run(const uint8_t nonce[16]) {
             if (station_command(&l, config, sizeof(config), 7u) &&
                 station_command(&l, config, sizeof(config), CLEAN_HT_RESPONSE_CMD | (3u << 8u)))
                 badger_bytes_store_u32(detail + 704u, 1u);
+            if (CLEAN_RX_EDCA && nonce[14] == 28u && l.error == CLEAN_OK) {
+                uint8_t parameters[16] = {
+                    3u,0xa4u,0u,0u, 0x27u,0xa4u,0u,0u,
+                    0x42u,0x43u,94u,0u, 0x62u,0x32u,47u,0u
+                };
+                (void)station_command(&l, parameters, sizeof(parameters), CLEAN_EDCA_CMD);
+            }
         }
         if (soak_mode()) mac_soak_run(&l, nonce);
         else (void)receive_for(&l, nonce[14] == 13u || nonce[14] == 17u ||
@@ -837,6 +844,9 @@ static void run(const uint8_t nonce[16]) {
                         sizeof(clean_mac_trace_status_t), 0u) &&
             clean_block(&l, CLEAN_DCF_TRACE_ADDR, detail + CLEAN_DCF_TRACE_DETAIL,
                         sizeof(clean_dcf_trace_t), 0u);
+    if (snapshot && nonce[14] == 28u && CLEAN_RX_EDCA)
+        snapshot = clean_block(&l, CLEAN_EDCA_STATUS_ADDR, detail + CLEAN_EDCA_DETAIL,
+                               sizeof(clean_edca_status_t), 0u);
     if (snapshot && (station_mode() || soak_mode())) {
         uint8_t status[sizeof(clean_unicast_status_t)];
         snapshot = clean_block(&l, CLEAN_UNICAST_ADDR, status, sizeof(status), 0u);

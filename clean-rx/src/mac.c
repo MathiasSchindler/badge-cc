@@ -5,7 +5,7 @@ static uint16_t u16(const volatile uint8_t *p) {
 }
 
 static uint16_t difs(const clean_dcf_t *s) {
-    return (uint16_t)(10u + 2u * s->slot_us);
+    return (uint16_t)(10u + s->aifsn * s->slot_us);
 }
 
 static void draw(clean_dcf_t *s, uint32_t now) {
@@ -25,6 +25,8 @@ void clean_dcf_init(clean_dcf_t *s, uint32_t now, uint32_t seed, uint8_t short_s
     s->random = seed ? seed : 1u;
     s->slot_us = short_slot ? 9u : 20u;
     s->cw = s->cw_min = 15u; /* ERP/OFDM; DSSS-only DCF is a separate profile. */
+    s->cw_max = CLEAN_MAC_CW_MAX;
+    s->aifsn = 2u;
     s->nav_valid = 0u;
     s->nav_until = now;
     draw(s, now);
@@ -80,7 +82,7 @@ int clean_dcf_poll(clean_dcf_t *s, uint32_t now, int busy) {
 
 void clean_dcf_complete(clean_dcf_t *s, uint32_t now, int acked) {
     s->cw = acked ? s->cw_min :
-        (s->cw >= CLEAN_MAC_CW_MAX ? CLEAN_MAC_CW_MAX : (uint16_t)(2u * s->cw + 1u));
+        (s->cw >= s->cw_max ? s->cw_max : (uint16_t)(2u * s->cw + 1u));
     draw(s, now);
 }
 
@@ -101,6 +103,74 @@ void clean_dcf_slot(clean_dcf_t *s, uint32_t now, uint8_t short_slot) {
     s->sampled_us = now;
     s->idle = 0u;
     s->idle_us = 0u;
+}
+
+int clean_edca_decode(clean_edca_ac_t ac[4], const volatile uint8_t bytes[16]) {
+    clean_edca_ac_t decoded[4];
+    uint32_t seen = 0u;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        const volatile uint8_t *p = bytes + 4u*i;
+        uint32_t index = (p[0] >> 5u) & 3u, bit = 1u << index;
+        if ((seen & bit) || (p[0] & 0x80u) || (p[0] & 15u) < 2u ||
+            (p[1] & 15u) > (p[1] >> 4u)) return 0;
+        seen |= bit;
+        decoded[index].aifsn = p[0] & 15u;
+        decoded[index].acm = (p[0] >> 4u) & 1u;
+        decoded[index].ecw_min = p[1] & 15u;
+        decoded[index].ecw_max = p[1] >> 4u;
+        decoded[index].txop_32us = u16(p + 2u);
+    }
+    for (uint32_t i = 0u; i < 4u; ++i) ac[i] = decoded[i];
+    return 1;
+}
+
+int clean_edca_valid(const clean_edca_ac_t ac[4]) {
+    for (uint32_t i = 0u; i < 4u; ++i)
+        if (ac[i].aifsn < 2u || ac[i].aifsn > 15u || ac[i].acm > 1u ||
+            ac[i].ecw_min > ac[i].ecw_max || ac[i].ecw_max > 10u) return 0;
+    return 1;
+}
+
+int clean_edca_configure(clean_edca_t *s, const clean_edca_ac_t ac[4],
+                         uint32_t now, uint32_t seed, uint8_t short_slot) {
+    if (short_slot > 1u || !clean_edca_valid(ac)) return 0;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        s->parameters[i] = ac[i];
+        clean_dcf_t *d = &s->ac[i];
+        clean_dcf_init(d, now, seed ^ (0x9e3779b9u * (i + 1u)), short_slot);
+        d->aifsn = ac[i].aifsn;
+        d->cw = d->cw_min = (uint16_t)((1u << ac[i].ecw_min) - 1u);
+        d->cw_max = (uint16_t)((1u << ac[i].ecw_max) - 1u);
+        draw(d, now);
+    }
+    s->selected = s->tid = 0u;
+    s->enabled = 1u;
+    return 1;
+}
+
+int clean_edca_select(clean_edca_t *s, uint32_t tid, uint32_t now) {
+    static const uint8_t mapping[8] = {0u,1u,1u,0u,2u,2u,3u,3u};
+    static const uint8_t lower[4] = {1u,1u,0u,2u};
+    if (!s->enabled || tid >= 8u) return -1;
+    uint32_t ac = mapping[tid];
+    while (s->parameters[ac].acm) {
+        if (ac == 1u) return -1;
+        ac = lower[ac];
+    }
+    if (ac != s->selected) {
+        s->ac[ac].sampled_us = now;
+        s->ac[ac].idle = 0u;
+        s->ac[ac].idle_us = 0u;
+    }
+    s->selected = (uint8_t)ac;
+    s->tid = (uint8_t)tid;
+    return (int)ac;
+}
+
+int clean_edca_txop_valid(const clean_edca_t *s, uint32_t exchange_us) {
+    if (!s->enabled || !exchange_us) return 0;
+    uint32_t limit = s->parameters[s->selected].txop_32us;
+    return !limit || exchange_us <= limit * 32u;
 }
 
 uint32_t clean_mac_fcs(const volatile uint8_t *bytes, uint32_t length) {

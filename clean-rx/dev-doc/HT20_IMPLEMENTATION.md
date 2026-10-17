@@ -1196,7 +1196,8 @@ experiment directories were changed.
 
 ### Remaining D2 work
 
-- Implement real WMM/EDCA access and HT protection; qualify the gated ACK
+- Integrate the [bounded EDCA command](EDCA_IMPLEMENTATION.md) with actual
+  AP negotiation and runtime updates; implement HT protection and qualify the gated ACK
   prototype's returned responses, SIFS timing and EOF anchoring.
 - Qualify the implemented per-TID receive/CCMP state over the air and
   integrate negotiated protected aggregates; preserve legacy fallback.

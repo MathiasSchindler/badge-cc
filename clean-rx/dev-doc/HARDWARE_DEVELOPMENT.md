@@ -464,7 +464,7 @@ report only 1,589/1,590 RXE bytes at discard. Extending the PSM wait from
 about 16.4 ms to 32.8 ms leaves the count unchanged. Missing GoodFCS and
 ACK are consequences; the exact initiating PHY/RXE fault remains unknown.
 No speculative PHY writes, Locked Clocks changes or expanded wait budgets
-are retained. See [evidence and controls](../../todo.md#c1-all-legacy-dssscck-rates).
+are retained. See [evidence and controls](MILESTONE_HISTORY.md#c1-all-legacy-dssscck-rates).
 
 #### HT20 target, not enabled operation
 

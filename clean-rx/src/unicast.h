@@ -28,6 +28,32 @@
 #define CLEAN_ACK_RX_MAGIC 0x32524b41u
 #define CLEAN_ACK_RX_DETAIL 720u
 #define CLEAN_HT_ACK_MPDU 60u
+#ifndef CLEAN_RX_EDCA
+#define CLEAN_RX_EDCA 0
+#endif
+#define CLEAN_EDCA_CMD 15u
+#define CLEAN_EDCA_STATUS_ADDR 0x204a0u
+#define CLEAN_EDCA_STATUS_MAGIC 0x31434445u
+#define CLEAN_EDCA_DETAIL 752u
+
+typedef struct {
+    uint32_t magic;
+    uint16_t cw_min, cw_max, aifs_us, txop_32us;
+    uint8_t ac, tid, enabled, reserved;
+} clean_edca_status_t;
+
+_Static_assert(CLEAN_RX_EDCA == 0 || (CLEAN_RX_EDCA == 1 && CLEAN_RX_HT_RESPONSE),
+               "EDCA requires the gated QoS response build");
+_Static_assert(sizeof(clean_edca_status_t) == 16u &&
+               CLEAN_EDCA_DETAIL >= CLEAN_ACK_RX_DETAIL + 32u &&
+               CLEAN_EDCA_DETAIL + sizeof(clean_edca_status_t) <= 800u,
+               "EDCA evidence must fit before MAC reports");
+
+static inline int clean_edca_command_valid(uint32_t command, uint32_t enabled,
+                                           uint32_t profile) {
+    return enabled && profile == 3u && command == CLEAN_EDCA_CMD;
+}
+
 #define CLEAN_HT_FAILURE_SHM 0x700u
 #define CLEAN_HT_FAILURE_WORDS 78u
 #define CLEAN_HT_FAILURE_ADDR 0x20400u
@@ -49,6 +75,9 @@ _Static_assert(sizeof(clean_ht_failure_t) == 4u + 2u * CLEAN_HT_FAILURE_WORDS &&
                CLEAN_HT_FAILURE_DETAIL >= 1088u + CLEAN_DETAIL_PACKET_BYTES &&
                CLEAN_HT_FAILURE_DETAIL + sizeof(clean_ht_failure_t) <= 1972u,
                "Failed HT fixture evidence must not overlap captures or other diagnostics");
+_Static_assert(CLEAN_EDCA_STATUS_ADDR >= CLEAN_HT_FAILURE_ADDR + sizeof(clean_ht_failure_t) &&
+               CLEAN_EDCA_STATUS_ADDR + sizeof(clean_edca_status_t) <= 0x20d80u,
+               "EDCA status must not overlap failed captures or frame slots");
 
 typedef struct {
     uint32_t magic;
