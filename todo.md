@@ -52,8 +52,22 @@ experimental station profile now integrates carrier/NAV/backoff handling,
 bounded ACK/retry accounting, credit/DMA-safe capture retention, ERP-safe CCK
 fallback, receiver-side RTS/CTS, long/short control-response selection,
 non-QoS duplicate suppression, authenticated/unprotected reassembly, and
-queued basic-rate/slot updates from bound AP beacons. Native tests pass.
-Current retained build `5eeed6e7` completed independently confirmed protected
+queued basic-rate/slot updates from bound AP beacons. Profile 3 now moves
+carrier/NAV arbitration, explicit DIFS, slot countdown, EIFS and final template
+trigger into the PSM using the hardware TSF clock; profile 2 retains the
+earlier Cortex scheduler. Native tests pass.
+Build `2269c6c0` completed 5,000 ACK-confirmed raw application frames per
+direction between two clean badges, including 12-bit sequence wrap, in
+225.05/228.27 seconds. Payloads alternated 32/1,500/2,304 bytes at 6 Mbps,
+channel 1, with zero corruption, duplicate delivery or ordering errors.
+This is not a vendor-control comparison or the required 100,000-frame run.
+On that build, the 15-trial vendor-AP runner confirmed 3/10 protected
+exchanges at both endpoints, both wrong-password controls and all three open
+controls. Three more station reports validated protected echoes but lacked
+the required independent AP report; four protected trials lacked usable
+station reports or AP readiness. USB/report/startup failures remain unresolved,
+all seven unconfirmed trials are retained, and the runner exited unsuccessfully.
+Earlier build `5eeed6e7` completed independently confirmed protected
 exchanges in 9 of 10 fresh controlled vendor-AP attempts. In the unconfirmed
 attempt, the clean station authenticated/associated but received no EAPOL M1;
 the independent vendor peer reported `RADIO ERROR` (firmware error 7) and
@@ -62,12 +76,12 @@ or evidence that the clean MAC caused the failure. Two wrong-password controls
 were valid and three open-AP controls passed. No attempts have been excluded.
 RTS/short-preamble/fragmented RX and dynamic policy changes still need OTA
 qualification. Precise independent RF timing, controlled negative/credit tests,
-the required OTA soak/vendor comparison and earlier unexplained no-ACK
+the required full OTA soak/vendor comparison and earlier unexplained no-ACK
 authentication failures remain open. Initiator RTS chaining is not implemented;
 ERP protection uses the advertised long-preamble CCK fallback instead. See the
 [implementation, evidence and limitations](clean-rx/badge/README.md#milestone-a-mac-implementation-experimental-not-complete).
-Neither native 100,000-frame simulations nor the bounded connection runner
-satisfies the OTA acceptance test below.
+Neither native 100,000-frame simulations, the bounded connection runner nor
+the shorter two-clean-badge soak satisfies the OTA acceptance test below.
 
 ### Implemented and regression-tested progress
 
@@ -95,6 +109,21 @@ These completed subitems do **not** close the A1-A3 acceptance gates:
   wrong-password controls and three open controls, retaining failures and
   requiring independent matching endpoint evidence. It does not flash or
   change the host network and is not a continuous traffic-soak fixture.
+- [x] Add experimental PSM-clocked profile 3, with physical/virtual carrier,
+  explicit 28/50-us DIFS, 9/20-us slots, frozen residual backoff, bad-FCS and
+  bad-length EIFS, receive priority and a PSM-owned final template trigger.
+  Exercise all 4,096 lower IFS status combinations and timing/wrap boundaries
+  natively. Hardware contention timing is not independently qualified.
+- [x] Use the same TSF clock domain for PSM deadlines and Cortex comparisons.
+  Distinguish LP-PHY OFDM using PHY status rather than the G-PHY-only flag;
+  reject unsupported HT response formats. Prepare complete response templates
+  before arming/triggering TX, and hold TXE ownership until the response tail
+  completes, preventing Cortex template preparation from interrupting it.
+- [x] Add a continuous two-clean-badge raw-unicast fixture with fresh challenges,
+  exact payload/FCS validation, bounded retries, explicit failures, independent
+  endpoint counts and USB/watchdog servicing. Verify 5,000 frames each way,
+  including sequence wrap and repeated watchdog renewals; report 169/64 ACK
+  timeouts and 1/1 suppressed MAC duplicates, not application losses.
 - [x] Pass controller/badge native tests, configured ASan/UBSan regressions,
   all ten existing Micro Signal builds and unresolved-symbol checks for
   both freestanding ELFs.
@@ -120,11 +149,31 @@ These completed subitems do **not** close the A1-A3 acceptance gates:
   not protected-data soaks. The fixture was vendor build `0353f1de`,
   channel 1; clean protected requests carried 32-byte plaintexts in
   76-byte MPDUs at 6 Mbps OFDM.
-- The Cortex polling scheduler still needs timing-critical hardware
-  implementation/qualification against independent RF measurements.
+- Experimental profile 3 replaces timing-critical Cortex polling with
+  PSM/IFS/TSF scheduling. Its 5,000-frame result is retained at
+  `build/clean-rx/badge/mac-a-soak-owner`; the two endpoints reported
+  5,169/5,064 actual TX attempts, 6,231/3,619 zero-attempt deferrals, and
+  exactly 5,000 received and ACK-confirmed frames each. Global bad-FCS
+  diagnostics include unrelated channel traffic, not just bound-peer loss.
+- Retain failed development runs: before response-TXE ownership was fixed,
+  `a5c9577d` stopped after 2,615 frames each way with a controller TX-completion
+  error; a `54054044` 100,000-target attempt stopped near frame 523 with a
+  missing initiator USB report and responder retry exhaustion. These are
+  failures, not successful qualification runs or evidence for the later build.
+  The fixture currently has a 3,500-second overall bound; the measured
+  approximately 45 ms per exchange also requires throughput/deadline work
+  before a full 100,000-target run can complete at this pace.
+- Latest vendor-AP regression evidence is retained under
+  `build/clean-rx/badge/mac-a-psm-vendor`, build `2269c6c0` against unchanged
+  vendor `0353f1de`, channel 1. The six complete positive station reports
+  authenticated/associated on their first requests and validated protected
+  echoes, but only three had the required independent AP observation.
+  Missing reports, USB transfers and AP startup must be made reproducible
+  before this can be used as a reliable connection qualification result.
+- Independent RF qualification is still required.
   Precise contention/SIFS timing, controlled missing/late ACKs and
   occupied-credit RF tests, response/fragment/policy OTA matrices, and the
-  100,000-frame-per-direction OTA/vendor-comparison fixture and run have
+  100,000-frame-per-direction OTA run and continuous vendor-control peer have
   **not** been completed. Earlier unexplained failures are not declared
   resolved merely because they were absent from the latest small sample.
 - No extra timing hardware was available. The Mac's networking was left
@@ -134,6 +183,9 @@ These completed subitems do **not** close the A1-A3 acceptance gates:
   application was backed up, not the entire flash. Badge `9BBF88DD17D66E7D`
   had its original 16 MiB flash restored and independently read back/compared
   against its full backup. Both were left in BOOTSEL.
+  This was repeated after the profile-3/continuous tests, with readbacks
+  `mac-a-psm-restored-A.bin` and `mac-a-psm-restored-B-full.bin` under
+  `build/clean-rx/badge/`; both comparisons passed.
 
 ### A1. Correct medium access
 

@@ -509,6 +509,18 @@ int main(void) {
     ticks += 6000000u;
     assert(!clean_service(&l) && l.error == CLEAN_TIMEOUT);
     clean_loader_init(&l, &wire, service, NULL);
+    l.budget_us = 3505000000u;
+    ticks += 8000000u;
+    assert(clean_service(&l));
+    cancel = 1;
+    assert(!clean_service(&l) && l.error == CLEAN_CANCELLED);
+    cancel = 0;
+    ticks = UINT32_MAX - 1000000u;
+    clean_loader_init(&l, &wire, service, NULL);
+    l.budget_us = 3505000000u;
+    ticks += 3505000000u;
+    assert(!clean_service(&l) && l.error == CLEAN_TIMEOUT);
+    clean_loader_init(&l, &wire, service, NULL);
     state = 8u;
     assert(clean_wait_state(&l, 8u, 20u));
     clean_loader_init(&l, &wire, service, NULL);

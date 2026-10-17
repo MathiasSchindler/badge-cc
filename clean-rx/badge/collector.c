@@ -13,6 +13,7 @@
 #include "../src/wpa2_crypto.h"
 #include "station_rx.h"
 #include "../src/tx_diag.h"
+#include "../src/mac_soak.h"
 
 static int ap_bssid_decode(const char *text, uint8_t bssid[6]) {
     static const char digits[] = "0123456789abcdef";
@@ -177,6 +178,20 @@ static int inspect(const char *path, const char *credentials) {
     return raw_valid && f2_valid;
 }
 
+static void print_mac_timing(const uint8_t detail[2048]) {
+    static const char *const names[] = {
+        "ifs_status", "ifs_backoff", "ifs_idle", "psm_ifs", "psm_tsf", "psm_polls",
+        "ack_stage", "ack_frame_control", "ack_rx_status",
+        "bad_fcs", "bad_frame_control", "bad_frame_length",
+        "ack_elapsed", "ack_window", "response_delay"
+    };
+    _Static_assert(sizeof(clean_mac_trace_status_t) == 40u + 4u * sizeof(names) / sizeof(names[0]),
+                   "Trace JSON fields match the shared status layout");
+    for (uint32_t i = 0u; i < sizeof(names) / sizeof(names[0]); ++i)
+        printf(",\"mac_%s\":%u", names[i],
+               usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 40u + 4u * i));
+}
+
 static void deadline(int signum) {
     (void)signum;
     static const char text[] = "Collector deadline; badge has independent BOOTSEL recovery\n";
@@ -244,7 +259,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_USB_TEST_ID);
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
     int got = 0;
-    for (unsigned attempt = 0u; attempt < 800u; ++attempt) {
+    for (unsigned attempt = 0u; attempt < (tx >= 19u ? 360000u : 800u); ++attempt) {
         int count = libusb_control_transfer(device, 0xc0u, LIVE_USB_WIFI_REPORT, 0, 0,
                                             report, sizeof(report), 1000u);
         if (count == 64) { got = 1; break; }
@@ -283,6 +298,28 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+    if (tx == 19u || tx == 20u) {
+        clean_soak_status_t s;
+        memcpy(&s, detail + CLEAN_SOAK_DETAIL, sizeof(s));
+        int valid = s.magic == CLEAN_SOAK_MAGIC && !usb_report_u32(detail + 8u) &&
+            s.target == usb_report_u32(nonce + 8u) && s.tx_acked == s.target &&
+            s.received == s.target && !s.failure && !s.corrupt && !s.duplicates && !s.out_of_order;
+        printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,"
+               "\"mode\":\"mac-soak\",\"role\":%u,\"valid\":%s,\"error\":%u,\"actual\":%u,"
+               "\"target\":%u,\"tx_acked\":%u,\"tx_attempts\":%u,\"tx_timeouts\":%u,"
+               "\"deferrals\":%u,\"received\":%u,\"duplicate_deliveries\":%u,"
+               "\"mac_duplicates_suppressed\":%u,\"corrupt\":%u,\"out_of_order\":%u,"
+               "\"elapsed_us\":%u,\"failure\":%u",
+               serial, USB_REPORT_BUILD_ID, channel, tx == 19u ? 1u : 2u,
+               valid ? "true" : "false", usb_report_u32(detail + 8u),
+               usb_report_u32(detail + 16u), s.target, s.tx_acked, s.tx_attempts,
+               s.tx_timeouts, s.deferrals, s.received, s.duplicates,
+               usb_report_u32(detail + 1688u), s.corrupt, s.out_of_order, s.elapsed_us, s.failure);
+        print_mac_timing(detail);
+        puts("}");
+        if (!valid) fputs("Continuous MAC trial did not satisfy endpoint counts/integrity\n", stderr);
+        return valid;
+    }
     if (tx == 17u) {
         printf("{\"monitor_auth_requests\":%u,\"monitor_assoc_requests\":%u,"
                "\"monitor_ap_acks\":%u,\"monitor_ap_responses\":%u,"
@@ -326,7 +363,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                "\"mac_trace_report\":%s,\"mac_response_auth\":%u,\"mac_response_assoc\":%u,"
                "\"mac_response_data\":%u,\"mac_response_other\":%u,"
                "\"mac_published_auth\":%u,\"mac_published_assoc\":%u,"
-               "\"mac_published_data\":%u,\"mac_published_other\":%u,\"mac_published_invalid\":%u}\n",
+               "\"mac_published_data\":%u,\"mac_published_other\":%u,\"mac_published_invalid\":%u",
                serial, USB_REPORT_BUILD_ID, usb_report_u32(detail + 28u),
                usb_report_u32(detail + 4u), usb_report_u32(detail + 8u),
                usb_report_u32(detail + 16u), usb_report_u32(detail + 44u),
@@ -385,6 +422,8 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+28u),
                usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+32u),
                usb_report_u32(detail+CLEAN_STATION_TRACE_DETAIL+36u));
+        print_mac_timing(detail);
+        puts("}");
         if (!associated) fputs("No validated successful association exchange\n", stderr);
         if (tx==18u && !authorized) fputs("WPA2 protected round trip not established\n",stderr);
         return tx==18u?authorized:associated;
@@ -491,6 +530,21 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint8_t peer_mode = 0u;
+    uint32_t soak_count = 0u;
+    int soak = argc == 7 && (strcmp(argv[4], "--mac-soak-init") == 0 ||
+                             strcmp(argv[4], "--mac-soak-reply") == 0);
+    if (soak) {
+        char *end_count;
+        unsigned long count = strtoul(argv[6], &end_count, 10);
+        if (!peer_challenge_decode(argv[5], challenge) || !*argv[6] || *end_count ||
+            count < 1u || count > CLEAN_SOAK_MAX_FRAMES) {
+            fputs("MAC soak requires a 28-hex challenge and frame count 1..100000\n", stderr);
+            return 2;
+        }
+        soak_count = (uint32_t)count;
+        for (uint32_t i = 0u; i < 4u; ++i) challenge[8u + i] = (uint8_t)(soak_count >> (8u * i));
+        peer_mode = strcmp(argv[4], "--mac-soak-init") == 0 ? 19u : 20u;
+    }
     if (argc == 6 && (strcmp(argv[4], "--peer-rx") == 0 ||
                       strcmp(argv[4], "--peer-tx") == 0 ||
                       strcmp(argv[4], "--peer-tx-1m") == 0)) {
@@ -520,6 +574,8 @@ int main(int argc, char **argv) {
               "--ap-auth|--ap-assoc|--ap-monitor XX:XX:XX:XX:XX:XX\n", stderr);
         fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-wpa2 XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE\n",stderr);
+        fputs("Continuous raw MAC: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--mac-soak-init|--mac-soak-reply CHALLENGE_HEX_28 COUNT:1-100000\n",stderr);
         return 2;
     }
     char *end;
@@ -529,7 +585,7 @@ int main(int argc, char **argv) {
         if (!((argv[1][i] >= '0' && argv[1][i] <= '9') ||
               (argv[1][i] >= 'A' && argv[1][i] <= 'F'))) return 2;
     if (signal(SIGALRM, deadline) == SIG_ERR) { perror("signal"); return 1; }
-    alarm(15u);
+    alarm(soak ? 3605u : 15u);
     libusb_context *context = NULL;
     int status = libusb_init(&context);
     if (status != 0) { fprintf(stderr, "USB init: %s\n", libusb_error_name(status)); return 1; }

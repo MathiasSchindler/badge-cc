@@ -14,6 +14,7 @@ typedef struct {
     int (*service)(void *context);
     void *context;
     uint32_t started;
+    uint32_t budget_us;
     uint32_t window;
     uint32_t error;
     uint32_t address;

@@ -23,6 +23,37 @@
 #define CLEAN_ACK_KINDS 0x67cu
 #define CLEAN_ACK_PEER 0x63au
 #define CLEAN_ACK_HOOK 314u
+#define CLEAN_DCF_ENABLE 0x680u
+#define CLEAN_DCF_REQUEST 0x681u
+#define CLEAN_DCF_SLOTS 0x682u
+#define CLEAN_DCF_EIFS 0x683u
+#define CLEAN_DCF_EIFS_UNTIL 0x684u
+#define CLEAN_DCF_EIFS_US 0x685u
+#define CLEAN_DCF_RX_LO 0x686u
+#define CLEAN_DCF_RX_HI 0x687u
+#define CLEAN_DCF_TX_LO 0x688u
+#define CLEAN_DCF_TX_HI 0x689u
+#define CLEAN_DCF_ACK_US 0x68au
+#define CLEAN_DCF_ACK_UNTIL 0x68bu
+#define CLEAN_DCF_IFS_SAMPLE 0x68cu
+#define CLEAN_DCF_CLOCK_SAMPLE 0x68du
+#define CLEAN_DCF_POLLS 0x68eu
+#define CLEAN_DCF_IDLE_SINCE 0x68fu
+#define CLEAN_DCF_IDLE_VALID 0x690u
+#define CLEAN_DCF_SLOT_US 0x691u
+#define CLEAN_ACK_STAGE 0x692u
+#define CLEAN_ACK_FRAME_CONTROL 0x693u
+#define CLEAN_ACK_RX_STATUS 0x694u
+#define CLEAN_BAD_FRAME_CONTROL 0x695u
+#define CLEAN_BAD_FRAME_LENGTH 0x696u
+#define CLEAN_ACK_ELAPSED 0x697u
+#define CLEAN_ACK_WINDOW 0x698u
+#define CLEAN_RESPONSE_DELAY 0x69au
+#define CLEAN_DCF_TX_PENDING 0x69bu
+#define CLEAN_DCF_DIFS_US 0x69cu
+#define CLEAN_RESPONSE_PENDING 0x69du
+#define CLEAN_DCF_FIRED 2u
+#define CLEAN_DCF_DEFERRED 3u
 #define CLEAN_MAC_RADIO_ADDR 0x20210u
 #define CLEAN_MAC_RADIO_MAGIC 0x3343414du
 #define CLEAN_MAC_TRACE_ADDR 0x20250u
@@ -49,6 +80,11 @@ typedef struct {
 typedef struct {
     uint32_t magic;
     uint32_t responses[4], published[4], invalid;
+    uint32_t ifs_status, ifs_backoff, ifs_idle, psm_ifs, psm_tsf, psm_polls;
+    uint32_t ack_stage, ack_frame_control, ack_rx_status;
+    uint32_t bad_fcs, bad_frame_control, bad_frame_length;
+    uint32_t ack_elapsed, ack_window;
+    uint32_t response_delay;
 } clean_mac_trace_status_t;
 
 static inline uint32_t clean_mac_frame_kind(uint8_t fc) {
@@ -103,10 +139,12 @@ static inline uint32_t clean_ack_airtime_us(uint16_t basic, uint32_t received) {
 
 static inline uint32_t clean_ack_timeout_us(uint32_t received, uint8_t slot_us) {
     if (received >= 12u || (slot_us != 9u && slot_us != 20u)) return 0u;
-    /* Accept the slowest legacy response in the modulation family. The PSM
-     * reports GoodFCS, not PHY-RXSTART, so include the complete ACK PPDU. */
+    /* GoodFCS is later than PHY-RXSTART. Include the complete ACK PPDU and a
+     * bounded 64-us status/pipeline allowance: the two-radio 2304-byte test
+     * measured 115 us from predicted data end to ACK notification. This is
+     * an experimental completion deadline, not SIFS timing qualification. */
     uint32_t airtime = received < 4u ? 304u : clean_ofdm_airtime_us(14u, 0u);
-    return 10u + slot_us + 20u + airtime;
+    return 10u + slot_us + 64u + airtime;
 }
 
 static inline int clean_cck11_valid(const volatile uint8_t *plcp, uint32_t mpdu) {

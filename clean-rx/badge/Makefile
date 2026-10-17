@@ -74,6 +74,7 @@ test: $(NATIVE_TESTS)
 	$(BUILD)/secret_test
 	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh
 	bash -n mac_trials.sh
+	bash -n mac_soak.sh
 
 $(NATIVE_TESTS): $(HEADERS) $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
 

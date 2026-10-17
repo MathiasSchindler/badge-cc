@@ -264,8 +264,8 @@ Once `MBOX->fw_state == FW_STATE_RX_ACTIVE` (`9`), the RP2350 controls the trans
 | `4 \| (ch << 8)` | **Fast Channel Switch** | Tunes Radio 20691 and LCN20 PHY to 2.4 GHz channel `ch` (`1..14`) in ~3.5 ms without re-running cold calibration, then resumes reception. |
 | `5 \| clean_tx_length_bits(total_len) \| (is_ofdm << 18) \| (cnt << 19)` | **Transmit 802.11 Frame** | Accepts `total_len = 6 + mpdu_len`, `16..2406`, staged at `FW_TX_BUF_ADDR` (`0x0004a400`), repeated `1..255` times. Full-MSDU qualification reaches 2,332 MPDU bytes at 11 Mbps CCK and all eight legacy OFDM rates. OFDM requires a valid SIGNAL header with matching MPDU length; use `clean_ofdm_plcp_rate` in `phy_rates.h`. Other CCK rates and hardware CCMP remain unqualified. |
 | `6 \| (enable << 8)` | **Install AES-128-CCMP Key** | Copies the 16-byte Temporal Key (`TK`) staged at `FW_TX_BUF_ADDR` (`0x0004a400`) into `SHM 0x618..0x61f` and sets `SHM 0x615 = enable` (`1` = enable hardware CCMP TX/RX, `0` = disable). |
-| `7` | **Enable experimental station MAC** | Stage 16 bytes: local MAC at 0, pinned peer at 6, little-endian basic-rate mask at 12, short-slot flag at 14 and profile at 15. Profile 2 enables experimental DCF/NAV, reliable unicast and PSM ACK/CTS handling. Profile 1 retains the older ACK experiment. Both require TX enabled and unicast, nonzero addresses. Reconfiguration with command 7 is rejected. |
-| `8` | **Queue station rate/slot policy** | Stage the same 16-byte configuration with unchanged bound addresses and profile 2. Updates response rates and slot policy at idle RX/PHY without resetting pending TX identity, NAV or receive transport. Completion acknowledges queueing; `mac_policy_pending` reports whether application is still pending. |
+| `7` | **Enable experimental station MAC** | Stage 16 bytes: local MAC at 0, pinned peer at 6, little-endian basic-rate mask at 12, short-slot flag at 14 and profile at 15. Profile 3 selects PSM/IFS/TSF-clocked DIFS/backoff/EIFS and final TX trigger; profile 2 retains Cortex DCF/NAV. Both provide experimental reliable unicast and PSM ACK/CTS handling. Profile 1 retains the older ACK experiment. All require TX enabled and unicast, nonzero addresses. Reconfiguration with command 7 is rejected. |
+| `8` | **Queue station rate/slot policy** | Stage the same 16-byte configuration with unchanged bound addresses and active profile (2 or 3). Updates response rates and slot policy at idle RX/PHY without resetting pending TX identity, NAV or receive transport. Completion acknowledges queueing; `mac_policy_pending` reports whether application is still pending. |
 
 With station MAC enabled, commands 4 and 6 and TX rearm/source-match overrides
 are rejected rather than discarding held captures. Profile 2 requires reliable
@@ -286,7 +286,7 @@ authentication/association retry budget or phase deadline.
 ## 5. Receiving 802.11 Frames on the RP2350 (gSPI Function 2)
 
 Capture-eligible 802.11 frames with good hardware CRC-32 FCS are published to
-the SDIOD Function 2 TX DMA ring. Station profile 2 consumes local ACK control
+the SDIOD Function 2 TX DMA ring. Station profiles 2 and 3 consume local ACK control
 frames internally and rearms directly after an accepted RTS/CTS response;
 those control frames are not application data. A completed station capture
 is held while host credit is occupied, rather than silently discarded.

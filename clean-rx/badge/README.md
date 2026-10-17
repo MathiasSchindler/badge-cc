@@ -128,9 +128,10 @@ audited or production-security-qualified.
 
 ## Milestone A MAC implementation: experimental, not complete
 
-The station diagnostic now selects **profile 2** in controller command 7
-(`config[15] = 2`). Profile 1 remains available for older diagnostic callers;
-raw broadcast/Micro Signal modes do not enable this station MAC. Neither
+The station diagnostic now selects experimental **profile 3** in controller
+command 7 (`config[15] = 3`). Profile 2 retains the Cortex polling scheduler;
+profile 1 remains available for older diagnostic callers;
+raw broadcast/Micro Signal modes do not enable this station MAC. No
 profile is a claim that milestone A in the [roadmap](../../todo.md) is complete.
 All implementation and supporting tests remain inside `clean-rx/`.
 
@@ -141,7 +142,16 @@ Implemented paths:
   xorshift contention draws, freezing/resumption, CW growth through 1023,
   success/new-frame CW reset and unsigned timer wrap. Long unsampled intervals
   are not credited as idle slots.
-- The controller samples D11 PHYDEBUG carrier sense (`PDBG_CRS`, bit 0),
+- Profile 3 executes contention in the PSM, using IFS physical/virtual carrier
+  and active-frame flags and the hardware TSF microsecond clock. It explicitly
+  waits DIFS (28/50 us), then counts 9/20-us backoff slots, freezing the
+  residual and discarding partial slots on busy/RX. Bad-FCS and bad-length
+  paths impose SIFS plus the slow legacy ACK airtime, followed by DIFS.
+  GoodFCS clears EIFS. RX wins over an armed template; automatic responses
+  cancel prepared TX before they can overwrite its TXE configuration.
+  The Cortex still chooses random CW draws and prepares templates, but the
+  PSM performs final arbitration and triggers profile-3 TX.
+- The profile-2 controller samples D11 PHYDEBUG carrier sense (`PDBG_CRS`, bit 0),
   observes the actual PSM idle/receive states, and imports PSM FCS/length
   discard counters. The bit definitions are documented in the public Linux
   [brcmsmac D11 register header](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/broadcom/brcm80211/brcmsmac/d11.h).
@@ -164,11 +174,24 @@ Implemented paths:
   than the RX streaming prefix, which has a compile-time assertion. Wrong
   lengths/addresses, reserved Duration/ID and insufficient Duration do not
   trigger CTS. Profile 1 retains its previous response policy.
+- OFDM response classification reads PHY status 0's frame-type field, retaining
+  the legacy G-PHY OFDM indicator as a fallback. The latter alone is insufficient
+  on this LP PHY: real 6-Mbps receptions had RX flags `0x0440`, without bit 13.
+  Unsupported HT frame types are rejected. The complete ACK/CTS replacement
+  header, masks, byte count and crypto bypass are prepared before TX is armed
+  and explicitly triggered. TXE ownership remains reserved through scheduled
+  start and the physical TX tail, including periods when PHYDEBUG's byte strobe
+  is clear. Cortex template/policy changes defer while that ownership is held.
 - PSM ACK response-rate selection includes residual Duration for
   supported fragmented reception. The ACK acceptance window accounts for the
   complete slowest legacy ACK PPDU in the modulation family, rather than
   assuming a GoodFCS indication arrives at PHY-RXSTART. It is bounded against
-  the local TX trigger, not an independently measured RF end timestamp.
+  local TX, not an independently measured RF end timestamp. Profile 3 anchors
+  its clock to observed IFS TX-active and uses the same TSF clock domain on both
+  processors; the earlier Cortex timer at `D11+0x1c` is not that clock.
+  A bounded 64-us status/pipeline allowance is experimental: the large-frame
+  test measured ACK notification 115 us after predicted data completion, beyond
+  the old allowance. This is not proof that the response meets SIFS.
 - Every RA/TA comparison stages one address word in `r2`: D11 permits only
   one SHM input per instruction. The six former SHM-versus-SHM comparisons
   were invalid, despite passing the flat-memory native interpreter. Response
@@ -180,7 +203,7 @@ Implemented paths:
   Attempts are counted at the actual template trigger, including submissions
   whose subsequent local completion fails. Retries change only Retry/FCS;
   sequence, fragment number, encrypted payload and PN remain intact.
-- In profile 2, valid addressed ACK control frames are consumed directly in
+- In profiles 2 and 3, valid addressed ACK control frames are consumed directly in
   the PSM and counted at SHM `0x639`. They bypass DMA/header publication and
   jump to RX rearm, rather than waiting for Cortex handling or occupying the
   only application RX credit. `ACK_SEEN` is set only during an active ACK wait;
@@ -246,13 +269,18 @@ address readback. It does not overlap the mailbox, ACK status or capture ring.
 New response counts accumulate sampled 16-bit PSM deltas into 32-bit totals;
 the original ACK-status counters retain their existing format.
 
-A separate 40-byte `MCR1` status at `0x20250`, copied to detail offset 1808,
+A separate 100-byte `MCR1` status at `0x20250`, copied to detail offset 1808,
 reports scheduled responses by auth/association/non-QoS-data/other receive
 classes, corresponding bound frames actually published to transport, and
 invalid-FCS published captures. These counters are reset at controller startup
 and exposed as `mac_response_*`, `mac_published_*` and `mac_trace_report`.
 Class counts distinguish PSM response scheduling from later host delivery;
-they do not identify individual RF exchanges or measure SIFS.
+they do not identify individual RF exchanges or measure SIFS. Its original
+40-byte prefix is preserved. Appended words report host/PSM IFS and clock
+samples, the last local-response stage/FC/RX flags, global bad-FCS count and
+last invalid frame identity/length, ACK notification elapsed/window and response
+setup delay. Both station and soak JSON expose these as `mac_*` diagnostics.
+Bad-FCS counts include unrelated channel traffic; they are not bound-peer loss.
 
 Station evidence at detail offset 1680 contains `MAC1` plus unprotected
 delivery, duplicate, fragment, malformed, unsupported, expiry and fragment-error
@@ -298,6 +326,69 @@ qualification of those new paths.
 Loader/DMA-credit, WPA2/crypto, secret-provisioning and Micro Signal regressions
 pass; all ten existing Micro Signal modes build, and both freestanding ELFs
 have no unresolved symbols.
+
+### Continuous raw MAC fixture
+
+Flash the same current clean image onto both badges, leave them in BOOTSEL,
+and use a fresh evidence prefix:
+
+```sh
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-soak 5000
+```
+
+This does not flash or change the Mac's networking. It runs the responder
+first, uses a fresh challenge and pinned local addresses, and alternates
+32/1,500/2,304-byte payloads at 6 Mbps on channel 1. Each endpoint requires
+exact application indices, MAC sequence wrap, payload pattern and FCS,
+and actual ACK-confirmed TX. MAC retries preserve sequence/body; only Retry
+and FCS change. Duplicate application delivery, corruption, ordering errors,
+eight exhausted actual attempts, peer inactivity and overall deadline are
+explicit failures. Zero-attempt BUSY does not consume the retry budget.
+The real station duplicate/reassembly adapter runs before fixture validation.
+
+The loader retains its six-second default for ordinary diagnostics. Only the
+soak selects a longer bounded budget, continues USB/cancellation servicing,
+and renews the existing eight-second BOOTSEL lease every four seconds.
+Native tests cover the unchanged default, long budget, cancellation and wrap.
+Targets are 1..100,000, with a 3,500-second overall radio-test deadline and
+a 3,605-second host limit. At the measured approximately 45 ms per exchange,
+the full 100,000 target needs additional throughput/deadline work.
+This is a raw two-clean-endpoint test, not a vendor interoperability/control
+soak, persistent AP station link or independent RF timing measurement.
+
+Build `2269c6c0`, evidence prefix `build/clean-rx/badge/mac-a-soak-owner`:
+
+| Endpoint | ACK-confirmed / received | TX attempts | ACK timeouts | Deferrals | Elapsed |
+| --- | --- | --- | --- | --- | --- |
+| Initiator | 5,000 / 5,000 | 5,169 | 169 | 6,231 | 225.05 s |
+| Responder | 5,000 / 5,000 | 5,064 | 64 | 3,619 | 228.27 s |
+
+Both reported zero corruption, duplicate application delivery and ordering
+errors, and one suppressed MAC duplicate each. The run crossed sequence
+wrap and repeatedly renewed the watchdog lease. It is not the 100,000-frame
+acceptance gate. Earlier retained failures include `a5c9577d` after 2,615
+frames per direction (controller TX-completion fault), and a `54054044`
+100,000-target attempt near frame 523 (missing initiator USB report and
+responder retry exhaustion). Do not pool different builds or exclude failures.
+
+The same `2269c6c0` image was subsequently tested against unchanged vendor
+AP `0353f1de`, channel 1, with evidence prefix
+`build/clean-rx/badge/mac-a-psm-vendor`. The runner confirmed 3/10 protected
+trials at both endpoints, both wrong-password controls and all three open
+controls. Three additional station reports validated protected echoes but
+lacked the required independent AP observation; the other four protected
+trials lacked a usable station report or AP readiness. Observed failures
+included USB report/transfer errors on the clean station and unchanged vendor
+peer. All six complete positive station reports authenticated/associated on
+their first requests. The runner correctly exited unsuccessfully: seven
+unconfirmed trials are retained, not excluded or counted as passes. These
+fixture/report failures remain unresolved, and do not establish whether every
+unconfirmed trial's RF exchange succeeded.
+
+After these profile-3 tests, badge A's original 33,604-byte application was
+restored and independently compared; badge B's entire 16 MiB flash was read
+back and compared to its original full backup after restoring the modified
+prefix. Both comparisons passed and both badges were left in BOOTSEL.
 
 ### Hardware evidence and remaining gates
 
@@ -416,11 +507,11 @@ no authorization/protected traffic at either endpoint. These 15 connection
 regressions are **not** the 100,000-frame OTA soak.
 
 Initiator RTS/TX chaining is not implemented; ERP transmission uses the CCK
-fallback instead. Current carrier/NAV scheduling
-is a conservative Cortex polling implementation: NAV is anchored to capture
-observation and sampling/trigger gaps are not precise hardware slot timing.
-Moving/qualifying the timing-critical scheduler against RF measurements is
-still necessary. Independent contention/SIFS captures, controlled missing/late
+fallback instead. Current profile-3 carrier/NAV scheduling is PSM/IFS/TSF-based;
+profile 2 retains conservative Cortex polling. Profile 3 anchors NAV to the
+GoodFCS PSM timestamp and mirrors remaining reservations into hardware NAV.
+Independent qualification of its slot/SIFS/turnaround timing is still necessary.
+Independent contention/SIFS captures, controlled missing/late
 ACK and occupied-credit RF trials, and the required large bidirectional OTA
 soak/vendor control have **not** passed. Earlier unexplained response loss
 and no-ACK authentication failures have not been established as resolved.

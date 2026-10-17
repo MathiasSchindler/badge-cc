@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "mac.h"
+#include "mac_soak.h"
 #include "../badge/station_rx.h"
 
 static void fcs(uint8_t *m, uint32_t n) {
@@ -240,8 +241,8 @@ static void station_transmit(void) {
     }
     assert(!clean_ack_airtime_us(0u, 0u));
     for (uint32_t rate = 0u; rate < 12u; ++rate) {
-        assert(clean_ack_timeout_us(rate, 9u) == (rate < 4u ? 343u : 89u));
-        assert(clean_ack_timeout_us(rate, 20u) == (rate < 4u ? 354u : 100u));
+        assert(clean_ack_timeout_us(rate, 9u) == (rate < 4u ? 387u : 133u));
+        assert(clean_ack_timeout_us(rate, 20u) == (rate < 4u ? 398u : 144u));
     }
     assert(!clean_ack_timeout_us(12u, 9u) && !clean_ack_timeout_us(3u, 0u));
     clean_station_ap_t ap = {0};
@@ -323,6 +324,32 @@ static void station_delivery(void) {
     assert(clean_mac_rx(&s, packet, n, 6u) == CLEAN_MAC_INVALID);
 }
 
+static void soak_protocol(void) {
+    uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u,7u,8u,9u,10u,11u,12u,13u,14u};
+    uint8_t packet[CLEAN_TX_STORAGE_BYTES];
+    clean_soak_status_t s = {.target = CLEAN_SOAK_MAX_FRAMES};
+    for (uint32_t i = 0u; i < CLEAN_SOAK_MAX_FRAMES; ++i) {
+        uint32_t n = clean_soak_frame(packet, nonce, 1u, i);
+        assert(n == clean_soak_size(i) + 34u && n <= CLEAN_TX_BYTES);
+        assert(clean_soak_receive(&s, packet + 6u, n - 6u, nonce, 2u) == 1);
+    }
+    assert(s.received == CLEAN_SOAK_MAX_FRAMES && !s.corrupt && !s.duplicates);
+    uint32_t n = clean_soak_frame(packet, nonce, 1u, CLEAN_SOAK_MAX_FRAMES - 1u);
+    assert(clean_soak_receive(&s, packet + 6u, n - 6u, nonce, 2u) == -1 && s.duplicates == 1u);
+    s.received = 0u; s.failure = 0u;
+    n = clean_soak_frame(packet, nonce, 1u, 1u);
+    assert(clean_soak_receive(&s, packet + 6u, n - 6u, nonce, 2u) == -1 && s.out_of_order == 1u);
+    n = clean_soak_frame(packet, nonce, 1u, 0u);
+    packet[40] ^= 1u;
+    fcs(packet + 6u, n - 6u);
+    assert(clean_soak_receive(&s, packet + 6u, n - 6u, nonce, 2u) == -1 && s.corrupt == 1u);
+    n = clean_soak_frame(packet, nonce, 2u, 0u);
+    assert(clean_soak_receive(&s, packet + 6u, n - 6u, nonce, 2u) == 0);
+    for (uint32_t length = 0u; length < 60u; ++length)
+        assert(clean_soak_receive(&s, packet + 6u, length, nonce, 2u) == 0);
+    puts("MAC: continuous-fixture sequence/wrap, all payload sizes, corruption, duplicates and ordering OK; NOT OTA");
+}
+
 int main(void) {
     contention();
     retries_and_nav();
@@ -330,6 +357,7 @@ int main(void) {
     sequence_soak();
     station_delivery();
     station_transmit();
+    soak_protocol();
     puts("MAC: DCF/NAV/EIFS/wrap, retry identity, FCS, duplicates and bounded reassembly OK");
     puts("MAC: 100000 native deliveries per simulated direction across 3 sizes; NOT RF qualification");
     return 0;

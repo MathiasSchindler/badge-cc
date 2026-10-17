@@ -367,7 +367,7 @@ each of the 96 RA/TA address bits. Its former flat-memory interpreter alone
 did not catch this hardware constraint.
 
 `SHM 0x637` response policy bits enable CTS (bit 0), short-preamble selection
-(bit 1), and internal local-ACK consumption (bit 2). Station profile 2 enables
+(bit 1), and internal local-ACK consumption (bit 2). Station profiles 2 and 3 enable
 all three. A valid 14-byte local ACK records `ACK_SEEN` only during an active
 ACK wait, increments `SHM 0x639`, and jumps directly to RX rearm, bypassing
 DMA/header publication and Cortex/host credits. Local ACKs outside an active
@@ -375,11 +375,37 @@ wait are consumed without setting `ACK_SEEN`. Profile 1 retains the older
 capture path.
 
 `SHM 0x67c..0x67f` count scheduled responses by received auth, association,
-non-QoS data and other frame classes. A separate 40-byte `MCR1` report at
+non-QoS data and other frame classes. A separate 100-byte `MCR1` report at
 `0x20250` accumulates those counts and counts matching frames actually posted
-to transport, plus FCS failures detected in those posted captures.
+to transport, plus FCS failures detected in those posted captures. The original
+40-byte prefix is unchanged; appended words expose IFS/clock samples, response
+path, bad-FCS identity and ACK notification timing.
 These are local diagnostics, **not** independent proof of RF/SIFS timing.
 See the [milestone-A evidence and remaining gates](../badge/README.md#milestone-a-mac-implementation-experimental-not-complete).
+
+### 9.6 Experimental PSM-clocked medium access
+
+Profile 3 uses SHM `0x680..0x69d` for TX arbitration, clocks, diagnostics and
+response ownership. The idle hook prioritizes RX-start, samples IFS physical
+and NAV carrier/active-frame flags, explicitly times DIFS (SIFS plus two slots),
+then counts complete 9/20-us backoff slots against TSF. Busy/RX resets partial
+idle time without changing the residual draw. Bad FCS and invalid length start
+EIFS; valid RX clears it. Cortex chooses CW/random draws and prepares templates,
+but an armed request is fired by the PSM, not a Cortex final register write.
+GoodFCS cancels an armed request before response setup can overwrite TXE.
+
+The PSM reads TSF through IHR `0x1119/0x111a`; Cortex reads the same domain at
+`D11+0x180`, not its old timer at `D11+0x1c`. The deadline is refreshed at
+observed physical TX-active. Response format uses PHY status 0, since the old
+G-PHY-only OFDM RX flag is absent on real LP-PHY OFDM receptions. Complete
+response templates are prepared before arming/triggering, and ownership remains
+held through scheduled start and physical tail. The Cortex checks ownership and
+IFS activity before changing templates or policy, including after halting PSM.
+
+An initial hardware-backoff-register experiment did not count down and emitted
+no frames; it was replaced, not treated as working hardware DCF. Profile 2
+retains the old Cortex scheduler. Profile 3 and its bounded ACK-notification
+allowance remain experimental, not independently SIFS/contention-qualified.
 
 ---
 

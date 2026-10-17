@@ -44,7 +44,7 @@ static uint32_t sdio_tx_posted;
 static uint8_t  sdpcm_seq;
 static uint8_t rx_after_explicit_tx;
 static uint8_t station_enabled;
-static uint8_t station_mac, nav_sampled;
+static uint8_t station_mac, station_hw, nav_sampled;
 static clean_dcf_t station_dcf;
 static uint16_t rx_discard_fcs, rx_discard_length;
 static uint8_t nav_frame[CLEAN_MPDU_BYTES], station_address[6];
@@ -480,6 +480,10 @@ static void d11_transmit_ack_frame(const uint8_t ta[6], uint32_t channel, uint32
     shm_write16(0x7afu, (uint16_t)(shm_read16(0x7afu) + 1u));
 }
 
+static uint32_t mac_now(void) {
+    return mmio_read32(D11_BASE + (station_hw ? 0x180u : 0x1cu));
+}
+
 static void station_observe_errors(uint32_t now) {
     uint16_t fcs = shm_read16(0x7a8u), length = shm_read16(0x7a9u);
     if (fcs != rx_discard_fcs || length != rx_discard_length)
@@ -490,6 +494,26 @@ static void station_observe_errors(uint32_t now) {
 
 static int station_rx_idle(uint16_t state) {
     return state == PSM_STATE_READY || state == PSM_STATE_WAIT_RX;
+}
+
+static int station_phy_busy(void) {
+    return shm_read16(CLEAN_RESPONSE_PENDING) ||
+           (mmio_read32(D11_BASE + 0x158u) & 7u) ||
+           (mmio_read16(D11_BASE + 0x690u) & 0xf00u);
+}
+
+static void station_hw_backoff(void) {
+    if (!station_hw) return;
+    shm_write16(CLEAN_DCF_SLOTS, station_dcf.slots);
+    shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
+}
+
+static void station_hw_slot(void) {
+    if (!station_hw) return;
+    mmio_write16(D11_BASE + 0x684u, (uint16_t)(0x1feu + station_dcf.slot_us));
+    shm_write16(CLEAN_DCF_SLOT_US, station_dcf.slot_us);
+    shm_write16(CLEAN_DCF_DIFS_US, (uint16_t)(10u + 2u * station_dcf.slot_us));
+    shm_write16(CLEAN_DCF_EIFS_US, 314u);
 }
 
 static int station_response_rates(uint16_t basic) {
@@ -511,9 +535,10 @@ static void station_apply_policy(uint32_t mac_en) {
     if (!policy_pending || !station_rx_idle(shm_read16(0x601u))) return;
     mmio_write32(D11_MACCONTROL, 0x84020400u);
     (void)mmio_read32(D11_MACCONTROL);
-    if (station_rx_idle(shm_read16(0x601u)) && !(mmio_read32(D11_BASE + 0x158u) & 7u)) {
+    if (station_rx_idle(shm_read16(0x601u)) && !station_phy_busy()) {
         if (station_response_rates(policy_basic)) {
-            clean_dcf_slot(&station_dcf, mmio_read32(D11_BASE + 0x1cu), policy_short_slot);
+            clean_dcf_slot(&station_dcf, mac_now(), policy_short_slot);
+            station_hw_slot();
             policy_pending = 0u;
         }
     }
@@ -523,7 +548,7 @@ static void station_apply_policy(uint32_t mac_en) {
 static void station_publish_mac(void) {
     if (!station_mac) return;
     MAC_RADIO->cw = station_dcf.cw;
-    MAC_RADIO->slots = station_dcf.slots;
+    MAC_RADIO->slots = station_hw ? shm_read16(CLEAN_DCF_SLOTS) : station_dcf.slots;
     MAC_RADIO->nav_until = station_dcf.nav_valid ? station_dcf.nav_until : 0u;
     MAC_RADIO->pending_rx = shm_read16(0x601u) == PSM_STATE_CAPTURED;
     uint16_t cts = shm_read16(CLEAN_CTS_SENT), short_count = shm_read16(CLEAN_SHORT_SENT);
@@ -540,6 +565,23 @@ static void station_publish_mac(void) {
         kinds_sampled[i] = count;
     }
     MAC_RADIO->policy_pending = policy_pending;
+    MAC_TRACE->ack_stage = shm_read16(CLEAN_ACK_STAGE);
+    MAC_TRACE->ack_frame_control = shm_read16(CLEAN_ACK_FRAME_CONTROL);
+    MAC_TRACE->ack_rx_status = shm_read16(CLEAN_ACK_RX_STATUS);
+    MAC_TRACE->bad_fcs = shm_read16(0x7a8u);
+    MAC_TRACE->bad_frame_control = shm_read16(CLEAN_BAD_FRAME_CONTROL);
+    MAC_TRACE->bad_frame_length = shm_read16(CLEAN_BAD_FRAME_LENGTH);
+    MAC_TRACE->ack_elapsed = shm_read16(CLEAN_ACK_ELAPSED);
+    MAC_TRACE->ack_window = shm_read16(CLEAN_ACK_WINDOW);
+    MAC_TRACE->response_delay = shm_read16(CLEAN_RESPONSE_DELAY);
+    if (station_hw) {
+        MAC_TRACE->ifs_status = mmio_read16(D11_BASE + 0x690u);
+        MAC_TRACE->ifs_backoff = mmio_read16(D11_BASE + 0x68au);
+        MAC_TRACE->ifs_idle = mmio_read16(D11_BASE + 0x68eu);
+        MAC_TRACE->psm_ifs = shm_read16(CLEAN_DCF_IFS_SAMPLE);
+        MAC_TRACE->psm_tsf = shm_read16(CLEAN_DCF_CLOCK_SAMPLE);
+        MAC_TRACE->psm_polls = shm_read16(CLEAN_DCF_POLLS);
+    }
     MAC_RADIO->address_lo = (uint32_t)shm_read16(0x612u) |
         ((uint32_t)shm_read16(0x613u) << 16u);
     MAC_RADIO->address_hi = shm_read16(0x614u);
@@ -562,20 +604,24 @@ static void station_consume_ack(void) {
 }
 
 static void station_service_tx(void) {
-    if (mmio_read32(D11_BASE + 0x1cu) - ack_started >= ack_window)
+    if (station_hw && shm_read16(CLEAN_DCF_REQUEST) == CLEAN_DCF_FIRED &&
+        !shm_read16(CLEAN_DCF_TX_PENDING))
+        ack_started = (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
+            ((uint32_t)shm_read16(CLEAN_DCF_TX_HI) << 16u);
+    if (mac_now() - ack_started >= ack_window)
         shm_write16(CLEAN_ACK_WAITING, 0u);
     station_consume_ack();
 }
 
 static void station_observe_capture(void) {
-    station_observe_errors(mmio_read32(D11_BASE + 0x1cu));
+    station_observe_errors(mac_now());
     uint16_t state = shm_read16(0x601u);
     if (state != PSM_STATE_CAPTURED) { nav_sampled = 0u; return; }
     if (nav_sampled) return;
     nav_sampled = 1u;
     uint32_t n = shm_read16(0x606u);
     if (n < 20u || n > CLEAN_RXE_BYTES) {
-        clean_dcf_bad_rx(&station_dcf, mmio_read32(D11_BASE + 0x1cu));
+        clean_dcf_bad_rx(&station_dcf, mac_now());
         return;
     }
     n -= CLEAN_PLCP_BYTES;
@@ -585,51 +631,73 @@ static void station_observe_capture(void) {
         if (i + 1u < n) nav_frame[i + 1u] = (uint8_t)(w >> 8u);
     }
     int duration = clean_mac_nav_duration(nav_frame, n, station_address);
-    uint32_t now = mmio_read32(D11_BASE + 0x1cu);
+    uint32_t now = station_hw ?
+        (uint32_t)shm_read16(CLEAN_DCF_RX_LO) |
+        ((uint32_t)shm_read16(CLEAN_DCF_RX_HI) << 16u) : mac_now();
     station_observe_errors(now);
     if (duration < 0) clean_dcf_bad_rx(&station_dcf, now);
     else {
         clean_dcf_good_rx(&station_dcf);
         clean_dcf_nav(&station_dcf, now, (uint16_t)duration);
         if (station_dcf.nav_valid) shm_write16(CLEAN_CTS_ALLOWED, 0u);
+        if (station_hw && station_dcf.nav_valid) {
+            uint32_t remaining = station_dcf.nav_until - mac_now();
+            if (remaining && remaining <= 32767u) {
+                mmio_write16(D11_BASE + 0x70cu, (uint16_t)remaining);
+                mmio_write16(D11_BASE + 0x700u, 0x103cu);
+            }
+        }
     }
 }
 
 /* Template preparation is deliberately outside the contention interval. The
  * PSM may answer RX while waiting; in that case its TXE setup takes precedence. */
 static int station_wait_access(uint32_t mac_en, uint16_t ack_sent, uint16_t cts_sent) {
+    if (station_hw) shm_write16(CLEAN_DCF_REQUEST, 1u);
     mmio_write32(D11_MACCONTROL, mac_en);
     (void)mmio_read32(D11_MACCONTROL);
     for (uint32_t poll = 0u; poll < 2000000u; ++poll) {
-        uint32_t now = mmio_read32(D11_BASE + 0x1cu);
+        uint32_t now = mac_now();
         uint16_t state = shm_read16(0x601u);
+        if (station_hw && shm_read16(CLEAN_DCF_REQUEST) == CLEAN_DCF_FIRED)
+            return 1;
         int credit = clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
                                                   SDIO_TX_WINDOW);
         if (credit < 0) return fail(0x8cu, FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET, MBOX->f2_consumed);
         if (state == PSM_STATE_FAULT) return fail(0x88u, 0x601u, state);
         if (shm_read16(CLEAN_ACK_ERROR)) return fail(0x87u, CLEAN_ACK_ERROR, shm_read16(CLEAN_ACK_ERROR));
-        if (state == PSM_STATE_CAPTURED || !credit || shm_read16(CLEAN_ACK_SENT) != ack_sent ||
+        if (state == PSM_STATE_CAPTURED || !credit ||
+            (station_hw && shm_read16(CLEAN_DCF_REQUEST) == CLEAN_DCF_DEFERRED) ||
+            shm_read16(CLEAN_ACK_SENT) != ack_sent ||
             shm_read16(CLEAN_CTS_SENT) != cts_sent ||
             now - access_started >= 50000u) {
-            (void)clean_dcf_poll(&station_dcf, now, 1);
+            if (station_hw) {
+                mmio_write32(D11_MACCONTROL, mac_en & ~2u);
+                (void)mmio_read32(D11_MACCONTROL);
+                uint16_t request = shm_read16(CLEAN_DCF_REQUEST);
+                shm_write16(CLEAN_DCF_REQUEST, 0u);
+                mmio_write32(D11_MACCONTROL, mac_en);
+                if (request == CLEAN_DCF_FIRED) return 1;
+            } else (void)clean_dcf_poll(&station_dcf, now, 1);
             return 2;
         }
+        if (station_hw) continue;
         /* PHYDEBUG: CRS, TX byte strobe and MAC TX-frame request. TXA alone
          * is not a whole-PPDU-active indication (brcmsmac d11.h). */
-        uint32_t busy = (mmio_read32(D11_BASE + 0x158u) & 7u) || !station_rx_idle(state);
+        uint32_t busy = station_phy_busy() || !station_rx_idle(state);
         if (!clean_dcf_poll(&station_dcf, now, busy != 0u)) continue;
         mmio_write32(D11_MACCONTROL, 0x84020400u);
         (void)mmio_read32(D11_MACCONTROL);
-        if ((mmio_read32(D11_BASE + 0x158u) & 7u) ||
+        if (station_phy_busy() ||
             !station_rx_idle(shm_read16(0x601u)) || shm_read16(CLEAN_ACK_SENT) != ack_sent ||
             shm_read16(CLEAN_CTS_SENT) != cts_sent) {
-            (void)clean_dcf_poll(&station_dcf, mmio_read32(D11_BASE + 0x1cu), 1);
+            (void)clean_dcf_poll(&station_dcf, mac_now(), 1);
             mmio_write32(D11_MACCONTROL, mac_en);
             return 2;
         }
         return 1;
     }
-    return fail(0x82u, D11_BASE + 0x1cu, mmio_read32(D11_BASE + 0x1cu));
+    return fail(0x82u, D11_BASE + (station_hw ? 0x180u : 0x1cu), mac_now());
 }
 
 /* Returns 2 for a station MAC deferral, 1 for submission, 0 for a fatal error. */
@@ -666,6 +734,12 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
 
     mmio_write32(D11_MACCONTROL, 0x84020400u);
     (void)mmio_read32(D11_MACCONTROL);
+    if (station_mac && (station_phy_busy() || !station_rx_idle(shm_read16(0x601u)))) {
+        mmio_write32(D11_MACCONTROL, mac_tx_ctl | 2u);
+        (void)mmio_read32(D11_MACCONTROL);
+        return 2;
+    }
+    if (station_hw) shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
     MBOX->rc_dacbuf = 0x55550001u;
     phy_tx_hw_configure(channel);
     if (station_mac) phy_tx_set_automatic();
@@ -744,15 +818,26 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     tx_diag.gci_control = mmio_read32(GCI_CONTROL_REG1);
     MBOX->rc_dacbuf = 0x55550004u;
     if (station_mac) {
+        if (station_hw) {
+            uint32_t rate = is_ofdm ? (uint32_t)clean_ofdm_rate_index(tx_buf[0]) + 4u : 3u;
+            uint32_t airtime = is_ofdm ? ofdm_airtime :
+                192u + (uint32_t)tx_buf[2] + ((uint32_t)tx_buf[3] << 8u);
+            shm_write16(CLEAN_DCF_ACK_US,
+                (uint16_t)(airtime + clean_ack_timeout_us(rate, station_dcf.slot_us)));
+        }
         int access = station_wait_access(mac_tx_ctl | 2u, ack_sent, cts_sent);
         if (access != 1) return access;
-        mmio_write32(D11_MACCONTROL, mac_tx_ctl);
-        (void)mmio_read32(D11_MACCONTROL);
-        shm_write16(CLEAN_ACK_SEEN, 0u);
-        shm_write16(CLEAN_ACK_WAITING, 1u);
+        if (!station_hw) {
+            mmio_write32(D11_MACCONTROL, mac_tx_ctl);
+            (void)mmio_read32(D11_MACCONTROL);
+            shm_write16(CLEAN_ACK_SEEN, 0u);
+            shm_write16(CLEAN_ACK_WAITING, 1u);
+        }
     }
     tx_diag.trigger_ticks = ARM_CYCLE_COUNTER;
-    tx_diag.mac_trigger_us = mmio_read32(D11_BASE + 0x1cu);
+    tx_diag.mac_trigger_us = station_hw ?
+        (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
+        ((uint32_t)shm_read16(CLEAN_DCF_TX_HI) << 16u) : mac_now();
     if (station_mac) {
         uint32_t airtime = is_ofdm ? ofdm_airtime :
             192u + (uint32_t)tx_buf[2] + ((uint32_t)tx_buf[3] << 8u);
@@ -760,8 +845,10 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         ack_started = tx_diag.mac_trigger_us;
         ack_window = airtime + clean_ack_timeout_us(rate, station_dcf.slot_us);
     }
-    if (station_mac) mmio_write16(0x18001568u, 0x0826u);
-    mmio_write16(0x18001502u, 0x00d0u);
+    if (!station_hw) {
+        if (station_mac) mmio_write16(0x18001568u, 0x0826u);
+        mmio_write16(0x18001502u, 0x00d0u);
+    }
     if (reliable) ++UNICAST->attempts;
     if (station_mac) {
         last_tx_identity = (uint32_t)tx_buf[28] | ((uint32_t)tx_buf[29] << 8u) |
@@ -817,24 +904,24 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
          * tail measurement: TXA is a byte-transfer strobe, not frame-active. */
         uint32_t airtime = is_ofdm ? ofdm_airtime :
             192u + (uint32_t)tx_buf[2] + ((uint32_t)tx_buf[3] << 8u);
-        uint32_t wait = mmio_read32(D11_BASE + 0x1cu);
+        uint32_t wait = mac_now();
         phy_drained = 0u;
         for (uint32_t poll = 0u; poll < 2000000u; ++poll) {
             station_service_tx();
-            if (mmio_read32(D11_BASE + 0x1cu) - wait >= airtime) {
+            if (mac_now() - wait >= airtime) {
                 phy_drained = 1u;
                 break;
             }
         }
     } else if (station) {
         uint32_t active_seen = tx_diag.phy_debug_first & 2u;
-        uint32_t wait = mmio_read32(D11_BASE + 0x1cu);
+        uint32_t wait = mac_now();
         phy_drained = 0u;
         for (uint32_t poll = 0u; poll < 200000u; ++poll) {
             uint32_t active = mmio_read32(D11_BASE + 0x158u) & 2u;
             active_seen |= active;
             if (active_seen && !active) { phy_drained = 1u; break; }
-            if (mmio_read32(D11_BASE + 0x1cu) - wait >= 5000u) break;
+            if (mac_now() - wait >= 5000u) break;
         }
         mmio_write16(0x18001502u, 0u);
         mmio_write16(0x18001568u, 0u);
@@ -843,17 +930,17 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     if (is_ofdm && !station) {
         /* MAC completion precedes the OFDM PHY tail. Retain TX enable for a
          * complete PPDU after MAC drain, including the ERP signal extension. */
-        uint32_t drain_start = mmio_read32(D11_BASE + 0x1cu);
+        uint32_t drain_start = mac_now();
         phy_drained = 0u;
         for (uint32_t poll = 0u; poll < 2000000u; ++poll) {
-            if (mmio_read32(D11_BASE + 0x1cu) - drain_start >= ofdm_airtime) {
+            if (mac_now() - drain_start >= ofdm_airtime) {
                 phy_drained = 1u;
                 break;
             }
         }
     }
     tx_diag.complete_ticks = ARM_CYCLE_COUNTER;
-    tx_diag.mac_complete_us = mmio_read32(D11_BASE + 0x1cu);
+    tx_diag.mac_complete_us = mac_now();
     tx_diag.status_after = tx_status();
     tx_diag.phy_error = mmio_read16(D11_BASE + 0x3eeu);
     tx_diag.psm_debug = mmio_read32(D11_BASE + 0x154u);
@@ -1175,10 +1262,12 @@ void cyw43_main(void) {
         if (station_mac) {
             station_consume_ack();
             station_observe_capture();
-            uint32_t now = mmio_read32(D11_BASE + 0x1cu);
-            (void)clean_dcf_poll(&station_dcf, now,
-                (mmio_read32(D11_BASE + 0x158u) & 7u) ||
+            uint32_t now = mac_now();
+            if (!station_hw) (void)clean_dcf_poll(&station_dcf, now,
+                station_phy_busy() ||
                 !station_rx_idle(shm_read16(0x601u)));
+            if (station_hw && station_dcf.nav_valid &&
+                now - station_dcf.nav_until < 0x80000000u) station_dcf.nav_valid = 0u;
             if (!station_dcf.nav_valid && !shm_read16(CLEAN_CTS_ALLOWED))
                 shm_write16(CLEAN_CTS_ALLOWED, 1u);
             station_apply_policy(mac_en);
@@ -1269,14 +1358,17 @@ void cyw43_main(void) {
                 UNICAST->result = CLEAN_UNICAST_IDLE;
                 UNICAST->attempts = 0u;
                 UNICAST->ack_received = 0u;
-                UNICAST->started_us = mmio_read32(D11_BASE + 0x1cu);
+                UNICAST->started_us = mac_now();
                 access_started = UNICAST->started_us;
             }
             if (station_mac) {
                 uint32_t identity = (uint32_t)frame[28] | ((uint32_t)frame[29] << 8u) |
                     ((uint32_t)frame[6] << 16u);
-                if (last_tx_valid && identity != last_tx_identity)
-                    clean_dcf_new_frame(&station_dcf, mmio_read32(D11_BASE + 0x1cu));
+                if (last_tx_valid && identity != last_tx_identity) {
+                    uint8_t redraw = station_dcf.cw != station_dcf.cw_min;
+                    clean_dcf_new_frame(&station_dcf, mac_now());
+                    if (redraw) station_hw_backoff();
+                }
                 int credit = clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
                                                           SDIO_TX_WINDOW);
                 if (credit < 0) {
@@ -1284,10 +1376,10 @@ void cyw43_main(void) {
                     break;
                 }
                 if (policy_pending || !credit || !station_rx_idle(shm_read16(0x601u)) ||
-                    (mmio_read32(D11_BASE + 0x158u) & 7u)) {
+                    station_phy_busy()) {
                     UNICAST->result = CLEAN_UNICAST_BUSY;
                     ++MAC_RADIO->deferrals;
-                    UNICAST->finished_us = mmio_read32(D11_BASE + 0x1cu);
+                    UNICAST->finished_us = mac_now();
                     (void)clean_dcf_poll(&station_dcf, UNICAST->finished_us, 1);
                     station_publish_mac();
                     MBOX->host_cmd = 2u;
@@ -1325,7 +1417,7 @@ void cyw43_main(void) {
                 }
                 if (reliable) {
                     mmio_write32(D11_MACCONTROL, mac_en);
-                    uint32_t wait = mmio_read32(D11_BASE + 0x1cu);
+                    uint32_t wait = mac_now();
                     uint32_t ack = 0u;
                     uint32_t timeout = 1500u;
                     if (station_mac) {
@@ -1337,14 +1429,15 @@ void cyw43_main(void) {
                         if (station_mac) station_service_tx();
                         ack = shm_read16(CLEAN_ACK_SEEN);
                         if (ack || (station_mac && !shm_read16(CLEAN_ACK_WAITING)) ||
-                            mmio_read32(D11_BASE + 0x1cu) - wait >= timeout) break;
+                            mac_now() - wait >= timeout) break;
                     }
                     shm_write16(CLEAN_ACK_WAITING, 0u);
                     if (ack) {
                         UNICAST->ack_received = 1u;
                         UNICAST->result = CLEAN_UNICAST_ACKED;
                         if (station_mac) {
-                            clean_dcf_complete(&station_dcf, mmio_read32(D11_BASE + 0x1cu), 1);
+                            clean_dcf_complete(&station_dcf, mac_now(), 1);
+                            station_hw_backoff();
                             /* ACK control frames are consumed by the MAC, not
                              * application traffic occupying the only F2 credit. */
                             station_consume_ack();
@@ -1354,7 +1447,8 @@ void cyw43_main(void) {
                     UNICAST->result = CLEAN_UNICAST_TIMEOUT;
                     if (station_mac) {
                         ++MAC_RADIO->timeouts;
-                        clean_dcf_complete(&station_dcf, mmio_read32(D11_BASE + 0x1cu), 0);
+                        clean_dcf_complete(&station_dcf, mac_now(), 0);
+                        station_hw_backoff();
                     }
                     /* Preserve a management reply even when its preceding ACK
                      * was missed. It must be validated by the station machine. */
@@ -1365,7 +1459,7 @@ void cyw43_main(void) {
                     (void)delay_ticks(180u * 1500u);
             }
             if (reliable) {
-                UNICAST->finished_us = mmio_read32(D11_BASE + 0x1cu);
+                UNICAST->finished_us = mac_now();
                 UNICAST->ack_sent = shm_read16(CLEAN_ACK_SENT);
                 UNICAST->ack_error = shm_read16(CLEAN_ACK_ERROR);
                 station_publish_mac();
@@ -1380,7 +1474,7 @@ void cyw43_main(void) {
             mmio_write32(D11_MACCONTROL, mac_en);
             MBOX->maccontrol_active = mmio_read32(D11_MACCONTROL);
             tx_diag.resume_ticks = ARM_CYCLE_COUNTER;
-            tx_diag.mac_resume_us = mmio_read32(D11_BASE + 0x1cu);
+            tx_diag.mac_resume_us = mac_now();
             tx_diag.psm_after = shm_read16(0x601u);
             publish_tx_diag();
             MBOX->host_cmd = 2u;
@@ -1394,7 +1488,7 @@ void cyw43_main(void) {
             for (uint32_t i = 0u; i < 6u; ++i) { nonzero |= p[i]; peer |= p[6u + i]; }
             if (!(flags & CFG_TX_ENABLE) || !nonzero || !peer || (p[0] & 1u) ||
                 (p[6] & 1u) || clean_ack_rate(basic, 0u) < 0 || p[14] > 1u ||
-                (p[15] != 1u && p[15] != 2u) || station_enabled) {
+                (p[15] < 1u || p[15] > 3u) || station_enabled) {
                 fail(0x85u, FW_TX_BUF_ADDR, basic);
                 break;
             }
@@ -1423,7 +1517,7 @@ void cyw43_main(void) {
             shm_write16(CLEAN_ACK_SEEN, 0u);
             shm_write16(CLEAN_ACK_SENT, 0u);
             shm_write16(CLEAN_ACK_ERROR, 0u);
-            shm_write16(CLEAN_RESPONSE_POLICY, p[15] == 2u ?
+            shm_write16(CLEAN_RESPONSE_POLICY, p[15] >= 2u ?
                         3u | CLEAN_RESPONSE_INTERNAL_ACK : 0u);
             shm_write16(CLEAN_ACK_CONSUMED, 0u);
             MAC_TRACE->magic = CLEAN_MAC_TRACE_MAGIC;
@@ -1433,13 +1527,17 @@ void cyw43_main(void) {
             shm_write16(CLEAN_SHORT_SENT, 0u);
             shm_write16(CLEAN_ACK_ENABLE, 1u);
             station_enabled = 1u;
-            station_mac = (uint8_t)(p[15] == 2u);
+            station_mac = (uint8_t)(p[15] >= 2u);
+            station_hw = (uint8_t)(p[15] == 3u);
             rx_discard_fcs = shm_read16(0x7a8u);
             rx_discard_length = shm_read16(0x7a9u);
             for (uint32_t i = 0u; i < 6u; ++i) station_address[i] = p[i];
-            clean_dcf_init(&station_dcf, mmio_read32(D11_BASE + 0x1cu),
+            clean_dcf_init(&station_dcf, mac_now(),
                 ARM_CYCLE_COUNTER ^ ((uint32_t)p[2] << 24u) ^ ((uint32_t)p[3] << 16u) ^
                 ((uint32_t)p[4] << 8u) ^ p[5], p[14]);
+            station_hw_slot();
+            station_hw_backoff();
+            shm_write16(CLEAN_DCF_ENABLE, station_hw);
             MAC_RADIO->magic = CLEAN_MAC_RADIO_MAGIC;
             MAC_RADIO->profile = p[15];
             station_publish_mac();
@@ -1465,7 +1563,7 @@ void cyw43_main(void) {
                     shm_read16(CLEAN_ACK_PEER+i)) matches = 0u;
             }
             if (!station_mac || !matches || clean_ack_rate(basic, 0u) < 0 ||
-                p[14] > 1u || p[15] != 2u) {
+                p[14] > 1u || p[15] != MAC_RADIO->profile) {
                 fail(0x85u, FW_TX_BUF_ADDR, basic);
                 break;
             }

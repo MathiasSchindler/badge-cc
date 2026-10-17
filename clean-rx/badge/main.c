@@ -6,6 +6,7 @@
 #include "wpa2.h"
 #include "../src/unicast.h"
 #include "../src/tx_diag.h"
+#include "../src/mac_soak.h"
 #include "../../src/shared/bytes.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -30,9 +31,13 @@ static clean_mac_rx_t station_rx;
 static uint8_t wpa_secret[64];
 /* RX consumers run synchronously; share a packet outside the 8 KiB stack. */
 static uint8_t rx_packet[CLEAN_RX_PACKET_BYTES];
+static uint8_t soak_tx[CLEAN_TX_STORAGE_BYTES];
+static uint32_t soak_watchdog_at;
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size);
+static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd);
 
 static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u; }
+static int soak_mode(void) { return detail[2000u]==19u || detail[2000u]==20u; }
 
 static void monitor_packet(const uint8_t *packet, uint32_t size) {
     if (size < 32u || !clean_frame_valid(packet + 18u, size - 18u)) return;
@@ -187,6 +192,14 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
 static int service(void *unused) {
     (void)unused;
     usb_error = live_usb_hw_poll(&control);
+    if (!usb_error && soak_mode()) {
+        const wifi_wire_t *wire = wifi_board_wire();
+        uint32_t now = wire->now_us(wire->context);
+        if (now - soak_watchdog_at >= 4000000u) {
+            usb_error = badger_schedule_bootsel(8000u);
+            if (!usb_error) soak_watchdog_at = now;
+        }
+    }
     return usb_error == 0 && !control.reboot_requested && control.configured &&
            control.probe_generation == generation;
 }
@@ -194,7 +207,7 @@ static int service(void *unused) {
 static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd) {
     uint8_t readback[64], staged[64];
     if (!size || size>CLEAN_TX_STORAGE_BYTES) { l->error=CLEAN_INPUT; return 0; }
-    if ((cmd & 255u) == 5u &&
+    if ((cmd & 255u) == 5u && !soak_mode() &&
         (clean_tx_length(cmd) > size ||
          !clean_station_tx_prepare(bytes,clean_tx_length(cmd),&station_ap,&cmd))) {
         l->error=CLEAN_INPUT; l->actual=cmd; return 0;
@@ -229,6 +242,94 @@ static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uin
     } while (1);
 }
 
+static int soak_receive(clean_loader_t *l, clean_soak_status_t *s,
+                         const uint8_t nonce[14], uint8_t role) {
+    uint32_t size;
+    if (!clean_receive(l, rx_packet, &size)) return 0;
+    if (size < 18u) return 1;
+    uint8_t own[6], peer[6];
+    clean_soak_address(own, nonce, role);
+    clean_soak_address(peer, nonce, (uint8_t)(3u - role));
+    int mac = clean_station_rx(&station_rx, rx_packet, &size, own, peer,
+                               l->wire->now_us(l->wire->context));
+    if (mac < 0 && mac != CLEAN_MAC_PROTECTED) {
+        l->error = CLEAN_INPUT; l->actual = (uint32_t)mac;
+        return 0;
+    }
+    if (size >= 18u && clean_soak_receive(s, rx_packet + 18u, size - 18u, nonce, role) < 0) {
+        l->error = CLEAN_INPUT; l->actual = s->failure;
+        return 0;
+    }
+    return 1;
+}
+
+static int soak_send(clean_loader_t *l, clean_soak_status_t *s,
+                      const uint8_t nonce[14], uint8_t role, uint32_t index) {
+    uint32_t length = clean_soak_frame(soak_tx, nonce, role, index);
+    if (!length) { l->error = CLEAN_INPUT; l->actual = index; return 0; }
+    uint32_t started = l->wire->now_us(l->wire->context), attempts = 0u;
+    while (attempts < 8u) {
+        if (!station_command(l, soak_tx, length,
+            5u | clean_tx_length_bits(length) | (1u << 18u) | (1u << 19u) | CLEAN_TX_ACK_REQUIRED))
+            return 0;
+        clean_unicast_status_t status;
+        if (!clean_block(l, CLEAN_UNICAST_ADDR, (uint8_t *)&status, sizeof(status), 0u)) return 0;
+        if (status.magic != CLEAN_UNICAST_MAGIC || status.attempts > 1u ||
+            (status.result == CLEAN_UNICAST_ACKED && (!status.attempts || !status.ack_received))) {
+            l->error = CLEAN_READBACK; l->actual = status.result; return 0;
+        }
+        attempts += status.attempts;
+        s->tx_attempts += status.attempts;
+        if (status.result == CLEAN_UNICAST_ACKED) { ++s->tx_acked; return 1; }
+        if (status.result == CLEAN_UNICAST_BUSY) ++s->deferrals;
+        else if (status.result == CLEAN_UNICAST_TIMEOUT) ++s->tx_timeouts;
+        else { l->error = CLEAN_CONTROLLER; l->actual = status.result; return 0; }
+        if (status.attempts && !clean_mac_retry(soak_tx + 6u, length - 6u)) {
+            l->error = CLEAN_INPUT; l->actual = index; return 0;
+        }
+        if (!soak_receive(l, s, nonce, role)) return 0;
+        if (l->wire->now_us(l->wire->context) - started >= 2000000u) break;
+    }
+    s->failure = 3u; l->error = CLEAN_TIMEOUT; l->actual = index;
+    return 0;
+}
+
+static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
+    clean_soak_status_t s;
+    badger_bytes_zero((uint8_t *)&s, sizeof(s));
+    s.magic = CLEAN_SOAK_MAGIC;
+    s.target = badger_bytes_load_u32(nonce + 8u);
+    l->budget_us = 3505000000u;
+    uint8_t role = nonce[14] == 19u ? 1u : 2u;
+    uint8_t config[16] = {0};
+    clean_soak_address(config, nonce, role);
+    clean_soak_address(config + 6u, nonce, (uint8_t)(3u - role));
+    config[12] = 0x50u; config[13] = 1u; config[15] = 3u;
+    uint32_t started = l->wire->now_us(l->wire->context);
+    if (!s.target || s.target > CLEAN_SOAK_MAX_FRAMES) {
+        l->error = CLEAN_INPUT; l->actual = s.target;
+    } else if (station_command(l, config, sizeof(config), 7u)) {
+        for (uint32_t index = 0u; index < s.target && l->error == CLEAN_OK; ++index) {
+            if (l->wire->now_us(l->wire->context) - started >= 3500000000u) {
+                s.failure = 5u; l->error = CLEAN_TIMEOUT; l->actual = index;
+                break;
+            }
+            if (role == 1u && !soak_send(l, &s, nonce, role, index)) break;
+            uint32_t waiting = l->wire->now_us(l->wire->context);
+            while (s.received <= index && l->error == CLEAN_OK) {
+                if (!soak_receive(l, &s, nonce, role)) break;
+                if (l->wire->now_us(l->wire->context) - waiting >= 3000000u) {
+                    s.failure = 4u; l->error = CLEAN_TIMEOUT; l->actual = index;
+                }
+            }
+            if (l->error == CLEAN_OK && role == 2u && !soak_send(l, &s, nonce, role, index))
+                break;
+        }
+    }
+    s.elapsed_us = l->wire->now_us(l->wire->context) - started;
+    badger_bytes_copy(detail + CLEAN_SOAK_DETAIL, (const uint8_t *)&s, sizeof(s));
+}
+
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size) {
     if (!clean_receive(l, rx_packet, size)) return 0;
     if (*size >= 58u) {
@@ -248,7 +349,7 @@ static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *si
                 config[12] = (uint8_t)next.basic_rates;
                 config[13] = (uint8_t)(next.basic_rates >> 8u);
                 config[14] = (uint8_t)!!(next.capability & 1024u);
-                config[15] = 2u;
+                config[15] = 3u;
                 if (!station_command(l, config, sizeof(config), 8u)) return 0;
             }
             badger_bytes_copy((uint8_t *)&station_ap, (const uint8_t *)&next, sizeof(next));
@@ -402,7 +503,7 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     config[12] = (uint8_t)station_ap.basic_rates;
     config[13] = (uint8_t)(station_ap.basic_rates >> 8u);
     config[14] = (uint8_t)!!(station_ap.capability & 1024u);
-    config[15] = 2u;
+    config[15] = 3u;
     if (!station_command(l, config, sizeof(config), 7u)) return;
     badger_bytes_store_u32(detail + 524u, 1u);
     uint16_t aid = 0u;
@@ -467,6 +568,7 @@ static void run(const uint8_t nonce[16]) {
     wifi_board_init();
     wifi_board_select_pio(1u);
     clean_loader_init(&l, wifi_board_wire(), service, 0);
+    soak_watchdog_at = l.wire->now_us(l.wire->context);
     if (badger_schedule_bootsel(8000u) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
     clean_mac_rx_init(&station_rx);
@@ -481,7 +583,7 @@ static void run(const uint8_t nonce[16]) {
     wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
-    if (nonce[14] > 18u || !secret_valid) l.error = CLEAN_INPUT;
+    if (nonce[14] > 20u || !secret_valid) l.error = CLEAN_INPUT;
     detail[2000u] = nonce[14];
     badger_bytes_copy(peer_challenge, nonce, sizeof(peer_challenge));
     badger_bytes_copy(station_target, nonce, 6u);
@@ -494,9 +596,10 @@ static void run(const uint8_t nonce[16]) {
         clean_write(&l, 0x18002024u, 0xf0u) &&
         clean_write(&l, CLEAN_MBOX + 24u, 2u) && clean_wait_state(&l, 9u, 100000u)) {
         l.stage = 7u;
-        (void)receive_for(&l, nonce[14] == 13u || nonce[14] == 17u ? 2500000u : 700000u, 0u);
+        if (soak_mode()) mac_soak_run(&l, nonce);
+        else (void)receive_for(&l, nonce[14] == 13u || nonce[14] == 17u ? 2500000u : 700000u, 0u);
         if (l.error == CLEAN_OK && station_mode()) station_run(&l, nonce);
-        if (l.error == CLEAN_OK && nonce[14] != 0u && nonce[14] != 13u &&
+        if (l.error == CLEAN_OK && !soak_mode() && nonce[14] != 0u && nonce[14] != 13u &&
             nonce[14] != 16u && nonce[14] != 17u && nonce[14]!=18u) {
             uint8_t frame[96];
             uint32_t tx_length = 94u;
@@ -593,13 +696,13 @@ static void run(const uint8_t nonce[16]) {
     l.error = CLEAN_OK;
     int snapshot = clean_block(&l, CLEAN_MBOX, detail + 32u, 448u, 0u) &&
                    clean_block(&l, CLEAN_MULTI, detail + 480u, 40u, 0u);
-    if (snapshot && !station_mode() && nonce[14] != 17u)
+    if (snapshot && !station_mode() && !soak_mode() && nonce[14] != 17u)
         snapshot = clean_block(&l, CLEAN_MULTI + 40u, detail + 520u, 568u, 0u);
-    if (snapshot && station_mode()) {
+    if (snapshot && (station_mode() || soak_mode())) {
         uint8_t status[sizeof(clean_unicast_status_t)];
         snapshot = clean_block(&l, CLEAN_UNICAST_ADDR, status, sizeof(status), 0u);
         if (snapshot) {
-            badger_bytes_copy(detail + 552u, status + 16u, 8u);
+            if (station_mode()) badger_bytes_copy(detail + 552u, status + 16u, 8u);
             badger_bytes_copy(detail + 1000u, status, sizeof(status));
             snapshot = clean_block(&l, CLEAN_MAC_RADIO_ADDR,
                 detail + CLEAN_STATION_MAC_DETAIL + 32u, sizeof(clean_mac_radio_status_t), 0u) &&
@@ -607,7 +710,7 @@ static void run(const uint8_t nonce[16]) {
                             sizeof(clean_mac_trace_status_t), 0u);
         }
     }
-    if (station_mode()) clean_station_rx_report(&station_rx, detail);
+    if (station_mode() || soak_mode()) clean_station_rx_report(&station_rx, detail);
     if (saved_error != CLEAN_OK) {
         l.error = saved_error;
         l.address = saved_addr;
