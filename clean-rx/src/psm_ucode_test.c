@@ -46,6 +46,12 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+    restore(original, 138u, WORD(0x785u,0x1780u,0x1780u,139u),
+            WORD(0x785u,0x1780u,0x1780u,257u));
+    restore(original, 143u, WORD(0x77fu,0x1780u,0x1780u,RX_PREFIX_EOI),
+            WORD(0x77fu,0x1780u,0x1780u,147u));
+    restore(original, 164u, WORD(0x785u,0x1780u,0x1780u,165u),
+            WORD(0x785u,0x1780u,0x1780u,257u));
     uint32_t phy_latch = 0u, held_capture = 0u;
     for (uint32_t pc = 198u; pc < 260u; ++pc) {
         if (instruction(pc) == WORD(0x3f0u,0x1009u,0x1800u,CLEAN_SHM_PHY_STATUS0))
@@ -72,7 +78,7 @@ static void capture_layout(uint8_t original[2360]) {
     assert(instruction(310u) ==
            WORD(0xdau,0x100cu,0x1800u | CLEAN_RX_STREAM_PREFIX_BYTES,312u));
     assert(instruction(311u) == WORD(0x310u,0x1802u,0x1004u,0x1004u));
-    assert(instruction(312u) == WORD(0x606u,0x1780u,0x1780u,194u));
+    assert(instruction(312u) == WORD(0x77fu,0x1780u,0x1780u,RX_COMPLETE));
     assert(instruction(313u) == WORD(0x77fu,0x1780u,0x1780u,192u));
     const uint32_t fault_regs[] = {0x100cu,0x102bu,0x100du,0x1002u,
                                   0x607u,0x1004u,0x102au,0x7a2u,
@@ -161,12 +167,12 @@ static int flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t limit) {
     return 0;
 }
 
-static uint16_t stream_prefix(uint16_t rxctl, uint16_t count, int complete,
+static uint16_t stream_prefix(uint16_t rxctl, uint16_t count,
                               uint32_t *writes, uint32_t *next) {
     uint32_t pc = 191u;
     *writes = 0u;
     for (uint32_t step = 0u; step < 8u; ++step) {
-        if (pc == 192u || pc == 194u) {
+        if (pc == RX_COMPLETE) {
             *next = pc;
             return rxctl;
         }
@@ -187,10 +193,7 @@ static uint16_t stream_prefix(uint16_t rxctl, uint16_t count, int complete,
             assert(b == 0x1004u && d == 0x1004u);
             rxctl = (uint16_t)((rxctl & ~3u) | (immediate(a) & 3u));
             ++*writes;
-        } else {
-            assert(op == 0x606u && a == 0x1780u && b == 0x1780u);
-            if (!complete) pc = d;
-        }
+        } else assert(!"Unexpected streaming instruction");
     }
     assert(!"RX streaming prefix did not terminate");
     return 0u;
@@ -201,16 +204,13 @@ static void streaming(void) {
         for (uint32_t state = 0u; state < 256u; ++state) {
             uint16_t before = (uint16_t)(0x2800u | state);
             int enable = (before & 2u) == 0u && count >= CLEAN_RX_STREAM_PREFIX_BYTES;
-            for (int complete = 0; complete <= 1; ++complete) {
-                uint32_t writes, next;
-                uint16_t after = stream_prefix(before, (uint16_t)count, complete, &writes, &next);
-                assert(after == (enable ? (uint16_t)((before & ~3u) | 2u) : before));
-                assert(writes == (uint32_t)enable);
-                assert(next == (complete ? 192u : 194u));
-                uint32_t again;
-                assert(stream_prefix(after, (uint16_t)count, complete, &again, &next) == after);
-                assert(again == 0u);
-            }
+            uint32_t writes, next;
+            uint16_t after = stream_prefix(before, (uint16_t)count, &writes, &next);
+            assert(after == (enable ? (uint16_t)((before & ~3u) | 2u) : before));
+            assert(writes == (uint32_t)enable && next == RX_COMPLETE);
+            uint32_t again;
+            assert(stream_prefix(after, (uint16_t)count, &again, &next) == after);
+            assert(again == 0u);
         }
     }
 }
@@ -219,7 +219,100 @@ static uint16_t ack_operand(const uint16_t regs[0x1800], uint32_t operand) {
     return operand >= 0x1800u ? immediate(operand) : regs[operand];
 }
 
+static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
+                            uint32_t pc, uint32_t *steps) {
+    int body = pc == RX_COMPLETE;
+    for (*steps = 0u; *steps < 1000000u; ++*steps) {
+        if (body && pc == 167u) pc = RX_COMPLETE;
+        if (pc == 147u || pc == 167u || pc == 197u ||
+            pc == 257u || pc == 259u || pc == 262u || pc == 263u) return pc;
+        uint64_t w = instruction(pc++);
+        uint32_t op = (uint32_t)(w >> 39u);
+        uint32_t a = (uint32_t)(w >> 26u) & 0x1fffu;
+        uint32_t b = (uint32_t)(w >> 13u) & 0x1fffu;
+        uint32_t d = (uint32_t)w & 0x1fffu;
+        uint16_t av = ack_operand(r, a), bv = ack_operand(r, b);
+        if (op == 0x77fu) pc = d;
+        else if (op == 0xdau) { if (av < bv) pc = d; }
+        else if (op == 0xdcu) { if (av > bv) pc = d; }
+        else if (op == 0xd1u) { if (av != bv) pc = d; }
+        else if (op == 0x1d0u) r[d] = (uint16_t)(av - bv);
+        else if (op == 0x606u) { if (!(*events & (1u << 6u))) pc = d; }
+        else if ((op & 0x7e0u) == 0x780u || op == 0x703u) {
+            uint32_t event = 1u << (op & 31u);
+            if (*events & event) pc = d;
+            if (op & 0x80u) *events &= ~event;
+        } else {
+            assert((op & 0xf00u) == 0x400u || (op & 0xf00u) == 0x500u);
+            if (((av >> (op & 15u)) & 1u) == (op >> 8u == 5u)) pc = d;
+        }
+    }
+    assert(!"RX completion exceeded bounded wait");
+    return 0u;
+}
+
+static void receive_completion(void) {
+    uint16_t r[0x1800];
+    for (uint32_t event = 0u; event < 4u; ++event) {
+        memset(r, 0, sizeof(r));
+        uint32_t events = ((event & 1u) ? 1u << 5u : 0u) |
+                          ((event & 2u) ? 1u << 6u : 0u);
+        uint32_t steps;
+        r[0x100du] = 0x1000u;
+        r[0x100cu] = 6u;
+        r[CLEAN_SHM_RXE_LIMIT] = CLEAN_RXE_BYTES;
+        assert(receive_run(r, &events, 138u, &steps) == 147u);
+        assert(!(events & ((1u << 5u) | (1u << 6u))) && steps < 12u);
+        /* An ext5 edge alone is not a terminal abort. Explicit RX abort
+         * and FIFO-full checks must still reject before processing a body. */
+        for (uint32_t fault = 0u; fault < 4u; ++fault) {
+            events = 1u << 5u;
+            r[0x100du] = fault == 1u ? 0x8000u : 0x4440u;
+            if (fault == 2u) events |= 1u << 13u;
+            r[0x100cu] = fault == 3u ? CLEAN_RXE_BYTES + 1u : 66u;
+            assert(receive_run(r, &events, 163u, &steps) ==
+                   (fault == 1u || fault == 2u ? 257u :
+                    fault == 3u ? 259u : 167u));
+        }
+    }
+    for (uint32_t count = 0u; count <= CLEAN_RXE_BYTES; ++count) {
+        for (uint32_t flags = 0u; flags < 8u; ++flags) {
+            memset(r, 0, sizeof(r));
+            uint32_t events = ((flags & 1u) ? 1u << 6u : 0u) |
+                              ((flags & 2u) ? 1u << 3u : 0u);
+            uint32_t steps;
+            r[0x100du] = flags & 4u ? 0x4440u : 0x1000u;
+            r[0x100cu] = (uint16_t)count;
+            r[0x1780u] = 1u;
+            uint32_t next = receive_run(r, &events, RX_COMPLETE, &steps);
+            int complete = (flags & 5u) == 5u;
+            assert(next == (!complete ? 262u : count < 14u ? 263u :
+                            flags & 2u ? 197u : 262u));
+            assert(steps < 10u);
+            assert(r[0x1780u] == (complete ? 1u : 0u));
+        }
+    }
+    /* An ended bad frame must not spend the original 65535-poll budget.
+     * A genuinely incomplete frame still has that bounded watchdog. */
+    for (uint32_t flags = 0u; flags < 4u; ++flags) {
+        memset(r, 0, sizeof(r));
+        uint32_t events = flags & 1u ? 1u << 6u : 0u, steps;
+        r[0x100du] = flags & 2u ? 0x4440u : 0x1000u;
+        r[0x100cu] = 66u;
+        r[CLEAN_SHM_RXE_LIMIT] = CLEAN_RXE_BYTES;
+        r[0x1780u] = 65535u;
+        assert(receive_run(r, &events, RX_COMPLETE, &steps) == 262u);
+        assert(flags == 3u ? steps < 10u && r[0x1780u] == 65535u :
+                            steps > 300000u && r[0x1780u] == 0u);
+    }
+    puts("PSM RX: prefix EOI, terminal GoodFCS/bad-FCS, ext5/explicit abort, size and incomplete watchdog gates pass; NOT RF");
+}
+
+static uint32_t slot_reads;
+static uint32_t phy_writes;
+
 static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
+    phy_writes = 0u;
     for (uint32_t step = 0u; step < 10000u; ++step) {
         if (pc == 198u || pc == 266u || pc == 124u || pc == 130u ||
             pc == 118u || pc == 129u ||
@@ -230,6 +323,7 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
         uint32_t a = (uint32_t)(w >> 26u) & 0x1fffu;
         uint32_t b = (uint32_t)(w >> 13u) & 0x1fffu;
         uint32_t d = (uint32_t)w & 0x1fffu;
+        if (a == CLEAN_DCF_SLOTS) ++slot_reads;
         uint16_t av = ack_operand(regs, a), bv = ack_operand(regs, b);
         if (op == 0x3f0u) regs[d] = av;
         else if (op == 0x378u) regs[d] = (uint16_t)((av << 8u) | (bv & 255u));
@@ -254,6 +348,7 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
             assert(op == 0x7a0u);
             if (events & 1u) pc = d;
         }
+        if (op < 0x400u && d == 0x1049u) ++phy_writes;
     }
     assert(!"ACK path failed to terminate");
     return 0u;
@@ -759,6 +854,7 @@ static void contention(void) {
     r[0x1148u] = 0x10fu;
     assert(psm_run(r, 0, DCF_IDLE) == 124u && r[CLEAN_RESPONSE_PENDING] == 2u);
     r[0x1148u] = 15u;
+    r[0x1087u] = 0x400u;
     assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[CLEAN_RESPONSE_PENDING]);
     r[CLEAN_DCF_ENABLE] = 1u; r[CLEAN_DCF_REQUEST] = 1u;
     r[0x1148u] = 0x8fu;
@@ -829,6 +925,11 @@ static void contention(void) {
                 assert(r[CLEAN_DCF_SLOTS] <= draw && !r[CLEAN_ACK_ERROR] && !r[0x1081u]);
             }
             assert(!r[CLEAN_DCF_SLOTS]);
+            assert(r[CLEAN_DCF_IDLE_VALID] == 3u);
+            slot_reads = 0u;
+            for (uint32_t poll = 0u; poll < 1000u; ++poll)
+                assert(psm_run(r, 0, DCF_IDLE) == 124u);
+            assert(!slot_reads && !r[CLEAN_ACK_ERROR] && !r[0x1081u]);
             r[CLEAN_DCF_REQUEST] = 1u;
             assert(psm_run(r, 0, DCF_IDLE) == 124u && r[CLEAN_DCF_REQUEST] == CLEAN_DCF_FIRED);
         }
@@ -1087,7 +1188,60 @@ static void acknowledgements(void) {
     assert(regs[CLEAN_ACK_CONSUMED] == (uint16_t)100000u);
 }
 
+static void transmit_cleanup(void) {
+    uint16_t r[0x1800];
+    for (uint32_t fault = 0u; fault < 5u; ++fault) {
+        memset(r, 0, sizeof(r));
+        r[CLEAN_TX_CLEANUP_REQUEST] = 1u;
+        r[CLEAN_RESPONSE_PENDING] = 2u;
+        r[0x1081u] = 0xd0u; r[0x10b4u] = 6u;
+        r[0x11e0u] = 0x100u; r[0x11e8u] = 0x280u;
+        r[0x1087u] = 0x400u;
+        r[0x1049u] = 0xa5f2u;
+        if (fault == 2u) r[0x100du] = 0x1000u;
+        if (fault == 3u) r[0x1087u] |= 0x80u;
+        if (fault == 4u) r[0x1087u] = 0u;
+        if (fault == 1u) r[0x1148u] = 0x100u;
+        assert(psm_run(r, 0, TX_CLEANUP_ENTER) == 124u);
+        assert(r[0x1049u] == 0xa5f2u);
+        if (fault) {
+            assert(!phy_writes);
+            assert(r[CLEAN_TX_CLEANUP_REQUEST] == 1u && r[CLEAN_RESPONSE_PENDING] == 2u);
+            assert(!r[CLEAN_TX_CLEANUP_COUNT] && r[0x1081u] == 0xd0u &&
+                   r[0x10b4u] == 6u && r[0x11e0u] == 0x100u && r[0x11e8u] == 0x280u);
+        } else {
+            assert(!phy_writes);
+            assert(!r[CLEAN_TX_CLEANUP_REQUEST] && !r[CLEAN_RESPONSE_PENDING]);
+            assert(r[CLEAN_TX_CLEANUP_COUNT] == 1u && !r[0x1081u] && !r[0x10b4u]);
+            assert(r[0x11e0u] == 0x8300u && r[0x11e8u] == 0x300u);
+        }
+    }
+    memset(r, 0, sizeof(r));
+    r[CLEAN_TX_CLEANUP_REQUEST] = 1u;
+    r[0x1081u] = 0xd0u;
+    assert(psm_run(r, 2, TX_CLEANUP_ENTER) == 130u);
+    assert(r[0x1081u] == 0xd0u && r[CLEAN_TX_CLEANUP_REQUEST] &&
+           !r[CLEAN_TX_CLEANUP_COUNT]);
+    memset(r, 0, sizeof(r));
+    r[CLEAN_TX_CLEANUP_REQUEST] = 1u;
+    r[0x1087u] = 0x400u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u);
+    assert(!r[CLEAN_TX_CLEANUP_REQUEST] && r[CLEAN_TX_CLEANUP_COUNT] == 1u);
+    assert(psm_run(r, 0, DCF_IDLE) == 124u);
+    assert(r[CLEAN_TX_CLEANUP_COUNT] == 1u);
+    r[CLEAN_RESPONSE_PENDING] = 1u;
+    r[CLEAN_TX_CLEANUP_REQUEST] = 1u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u && r[CLEAN_TX_CLEANUP_REQUEST] &&
+           r[CLEAN_RESPONSE_PENDING] == 1u);
+    r[CLEAN_RESPONSE_PENDING] = 2u;
+    r[CLEAN_TX_CLEANUP_COUNT] = 65535u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[CLEAN_TX_CLEANUP_REQUEST] &&
+           !r[CLEAN_RESPONSE_PENDING] && !r[CLEAN_TX_CLEANUP_COUNT] && !phy_writes);
+    puts("PSM TX cleanup: RX priority, active RX/TX/drain deferral, owned completion and PHY register preservation; NOT RF");
+}
+
 int main(void) {
+    transmit_cleanup();
     ht_qos_acknowledgements();
     ack_capture_evidence();
     assert(psm_ucode_byte_count == sizeof(psm_ucode_bytes));
@@ -1108,6 +1262,7 @@ int main(void) {
     capture_layout(original);
     assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
     streaming();
+    receive_completion();
     receive_trace();
     ht_receive_trace();
     ht_failure_capture();

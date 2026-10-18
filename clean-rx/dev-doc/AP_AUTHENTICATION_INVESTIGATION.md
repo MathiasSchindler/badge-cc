@@ -610,3 +610,171 @@ equal to their respective original backups. Restore and readback logs are
 
 Both badges remain in BOOTSEL, with their original flash contents restored.
 Generated private AP credentials were removed; no AP helper remains running.
+
+## Follow-up: checking the RF implementation hints
+
+The root `todo-hints.md` supplied several hypotheses. They were checked
+against the source, the compiled PSM image and the existing read-only
+`~/wifi-assets/open-rx/runs/{vendor,cold}_dump.json` observations rather than
+treated as established PHY diagnoses.
+
+### Retained corrections
+
+- The prefix-copy path now acknowledges external completion condition 6
+  before starting body processing. Final completion requires both a fresh
+  external condition 6 and RX status1 bit 14, acknowledges the completion
+  edge and tests GoodFCS once. An ended bad-FCS
+  frame goes directly to the existing discard/evidence/EIFS/rearm path,
+  rather than exhausting the 65,535-poll incomplete-frame watchdog.
+- External condition 5 is still acknowledged in prefix/body waits, but
+  does not by itself jump to the abort path. Explicit status1 bit 15,
+  FIFO-full condition 13, length bounds and incomplete-frame watchdogs
+  remain. Neither publication nor ACK eligibility bypasses GoodFCS.
+- Automatic turnaround now clears the radio `0x79` low three value bits
+  and releases `0xa4` bit 2 as well as the two PHY override enables.
+  Other radio bits and the explicit inhibit/stop paths are preserved.
+  Live TX diagnostics confirm `0x79=0x7f80`, `0xa4=0`, matching the vendor
+  observation, while ordinary bidirectional TX still works. This does
+  not establish the hints' particular PA-noise/EVM explanation.
+- Verified station/peer addresses are retained in controller SRAM instead
+  of repeatedly reading immutable identity words through the live SHM
+  object port. The initial paused SHM readback verification is retained.
+  Backoff publication now pauses the PSM, publishes both the count and idle
+  invalidation, and restores exactly the previous MACCONTROL state.
+- Completed post-backoff is remembered as idle-valid state 3. Busy medium,
+  RX activity and new backoff publication invalidate it as before. Passive
+  post-backoff countdown is preserved even without an armed request, but
+  the PSM no longer repeatedly reloads/range-checks zero on every idle poll.
+  Active countdowns retain the slot range fault. The alleged SHM mux
+  collision mechanism remains unproven; these changes reduce live accesses
+  and make the multiword publication atomic without relying on that claim.
+
+Native tests execute the actual emitted RX instructions across every
+supported count, terminal/incomplete status, completion-edge and GoodFCS
+combination. They check prefix EOI, condition-5 handling, explicit abort,
+FIFO-full, oversize rejection, immediate terminal bad-FCS handling and
+the unchanged full incomplete watchdog. Existing ACK, EIFS and receive
+trace tests still pass. Post-backoff tests verify that 1,000 further idle
+polls do not read the completed slot counter, then an armed request fires.
+
+### Isolated controls and rejected timer hypothesis
+
+All evidence prefixes below are relative to `build/clean-rx/badge/`.
+
+`rf-hints-psm-*` isolates only the receive-state correction. The exact
+retained 1-Mbps, 1,500-byte, 16-per-direction fixture with one deliberately
+suppressed ACK per endpoint passes. The maximum-size 2,304-byte fixture
+still fails, with a 1,589-byte receive count.
+
+`rf-hints-auto-*` adds only the radio automatic-mode correction. The
+same long-CCK retry test passes with the expected radio readbacks.
+Maximum-size 1-Mbps reception still stops at 1,590 bytes. Initial matched
+MCS7 A-to-B and MCS0 B-to-A normal-ACK fixtures pass; those two samples
+alone are not reliability qualification.
+
+The proposed PHY `0x442` low-byte timer is not an established root cause.
+Both supplied vendor and cold observations already have the same full
+value `0x0662`. The isolated `rf-hints-timer-*` experiment changed only the
+configured low byte from `0x62` to `0xff` relative to the automatic-mode
+build. Maximum-size reception still stops at 1,589 bytes, with seven
+bad-FCS frames and no delivered fixture. The change did not move the cutoff
+and was removed. No timer, gain, IQ or miscellaneous vendor-register
+substitutions are retained by this investigation.
+
+### Completion-event correction discovered during regression
+
+The first implementation checked terminal status1 bit 14 without also
+requiring a fresh external completion condition 6. A longer, 32-frame
+1-Mbps retry test (`rf-hints-verify-cck-ab-*`) failed. Terminal status alone
+is not a replacement for the completion event. The final implementation
+requires **both**, then acknowledges the edge and tests GoodFCS. Native
+tests now explicitly require the full incomplete watchdog when either
+the event or terminal status is absent, even if GoodFCS is set.
+
+With that correction, the same 32-frame challenge passes
+(`rf-hints-complete-cck-ab-*` and final `rf-hints-accepted-cck-ab-*`).
+The reverse-role final trial passes as well. This preserves the distinction
+between promptly rejecting a completed bad frame and prematurely deciding
+FCS before completion.
+
+All `rf-hints-psm-*`, `rf-hints-auto-*`, `rf-hints-final*`,
+`rf-hints-matched-*`, `rf-hints-repeat-*`, `rf-hints-phy-auto-*`,
+`rf-hints-bb38-*`, `rf-hints-gain-*`, `rf-hints-timer-*` and
+`rf-hints-length-*` results are intermediate experiments, not final-image
+qualification. In particular:
+
+- MCS7 still failed in one of two PHY-only-automatic replays after removing
+  just the radio release, so those samples did not establish a unique
+  radio-override cause.
+- BBMULT 38 initially passed four MCS7 trials. Three interleaved, identical-
+  challenge rounds then passed only 3/6 at 38 versus 5/6 at 64. This did
+  not support a default amplitude change. These tests used the intermediate
+  completion implementation, so they also cannot establish final-image
+  gain/EVM behavior. The bounded 16/64 profiles and default 64 are unchanged.
+- The isolated 1-Mbps PLCP-derived body-copy-length experiment still failed
+  with a 1,589-byte count. Its partial rate-specific decoder was removed;
+  it is not retained as an unqualified receive-path change.
+- The planned three-round old/new matrix was interrupted during round 2
+  by a hung `picotool info` query before either collector started. The
+  query was stopped and both badges subsequently responded to bounded
+  readiness probes. A later early BOOTSEL load failure was also retained.
+  Neither interruption is counted as an RF outcome.
+
+### Final-image evidence and remaining gates
+
+Final default badge build is `77cfa24f` in `rf-hints-complete/`; the
+full-WMM extended build is `41a565c8` in `rf-hints-complete-gated/`.
+Controller build directories have the corresponding `rf-hints-complete`
+and `rf-hints-complete-gated` names under `build/clean-rx-*`.
+
+| Final evidence prefix | Result |
+| --- | --- |
+| `rf-hints-accepted-cck-ab-*` | 1 Mbps, 1,500-byte MSDU, 32 exact ACKed deliveries per direction, one suppressed ACK each; 36/40 attempts |
+| `rf-hints-accepted-cck-ba-*` | Same challenge with badge roles reversed: 32 exact ACKed deliveries per direction, one suppressed ACK each; 43/42 attempts |
+| `rf-hints-accepted-ofdm-*` | OFDM6, 32/1,500/2,304-byte size cycle, 100 exact ACKed deliveries per direction, one suppressed ACK each; 103/130 attempts |
+| `rf-hints-accepted-ht-{1,2}-m0-{ab,ba}-*` | Four final MCS0 normal-ACK fixtures pass, with exact reception and returned ACK |
+| `rf-hints-accepted-ht-1-m7-{ab,ba}-*` | Both MCS7 directions fail FCS, with 66-byte candidates and 217/245 fixture bit errors |
+| `rf-hints-accepted-ht-2-m7-{ab,ba}-*` | Both MCS7 directions pass on subsequent boots; variability remains |
+| `rf-hints-accepted-wpa2-{1,2,3}-*` | Three independently confirmed vendor-AP WPA2/WMM exchanges pass |
+| `rf-hints-accepted-wpa2-wrong-*` | Wrong-password control associates and sends M2, but neither endpoint authorizes or exchanges protected data |
+| `rf-hints-accepted-large-*` | Maximum-size 2,304-byte 1-Mbps fixture still delivers zero frames |
+
+All final successful legacy tests have zero corruption, duplicate application
+delivery, out-of-order delivery and controller faults. CCK TX intervals are
+12,671..12,672 us and were checked below 15,000 us. Radio diagnostics retain
+`0x79=0x7f80`, `0xa4=0`. These are bounded functional regressions, not the
+roadmap's sustained or independent RF timing qualification.
+
+Each final positive AP trial has one authentication/association attempt,
+one M1/M2/M3/M4 exchange, negotiated WMM, applied EDCA and one protected
+echo. The independent AP reports the same station authorized, one protected
+RX/TX and 49 stable observations. The negative control retains both failing
+endpoint statuses and zero protected traffic. No protected aggregate was
+exercised.
+
+The final maximum-size trial's retained CCK trace contains duration 18,656 us
+and a sampled count of 1,818, without its terminal-time sample. Later ambient
+frames overwrite the general bad-frame-length diagnostic (444 in the final
+report). Thus the final failure must not be described as independently
+confirming a fixed 1,590-byte cutoff. Maximum-size reception remains open,
+and neither the timer nor copy-length experiments establish its cause.
+
+Default, extended EDCA without WMM, and full-WMM controller/badge native
+suites and freestanding builds pass. All six final ELFs have no undefined
+symbols. The new tests validate actual emitted instructions; they do not
+claim measured sub-microsecond discard timing. HT protection, A-MPDU,
+immediate Block ACK, bounded reordering and protected aggregate OTA
+qualification remain open; HT station advertisement stays disabled.
+
+### Flash preservation for the hints investigation
+
+Fresh complete 16-MiB backups `rf-hints-start-{A,B}-full.bin` were saved
+and verified before the first hardware write. After all trials, both
+originals were restored with verification. Independent complete readbacks
+`rf-hints-restored-{A,B}-full.bin` compare byte-for-byte equal to the
+respective original backups. Logs are `rf-hints-backup-{A,B}.log`,
+`rf-hints-restore-{A,B}.log` and `rf-hints-readback-{A,B}.log`.
+
+Both badges remain in BOOTSEL with their original flash contents.
+Generated private fixture credentials were removed and no AP helper
+remains running. No host networking or shared/vendor source was changed.

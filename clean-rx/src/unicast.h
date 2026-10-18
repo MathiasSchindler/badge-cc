@@ -159,6 +159,11 @@ static inline int clean_tx_tail_poll(clean_tx_tail_t *s, int active) {
 #define CLEAN_ACK_PEER 0x63au
 #define CLEAN_ACK_HOOK 314u
 #define CLEAN_DCF_ENABLE 0x680u
+#define CLEAN_TX_CLEANUP_REQUEST 0x6acu
+#define CLEAN_TX_CLEANUP_COUNT 0x6adu
+_Static_assert(CLEAN_TX_CLEANUP_REQUEST >= CLEAN_RX_TRACE_SHM + CLEAN_RX_TRACE_WORDS &&
+               CLEAN_TX_CLEANUP_COUNT + 1u <= CLEAN_HT_EARLY_SHM,
+               "TX cleanup state must not overlap receive evidence");
 #define CLEAN_DCF_REQUEST 0x681u
 #define CLEAN_DCF_SLOTS 0x682u
 #define CLEAN_DCF_TRACE_SHM 0x6bbu

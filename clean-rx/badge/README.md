@@ -42,6 +42,13 @@ See the map's build/run instructions and evidence limits.
 Default builds preserve legacy-only association even when an AP advertises
 HT/WMM. The separate opt-in WMM build described below still omits HT.
 
+For an independent vendor-to-clean HT receive control, see
+[the controlled receive record](../dev-doc/CONTROLLED_HT_RECEIVE.md).
+The clean collector's `--vendor-ht-rx CHALLENGE_HEX_28 MCS:0-7` validates
+fresh broadcast fixtures, their complete FCS and terminal HT metadata;
+the vendor companion and paired runner live in [peer/](../peer/).
+This diagnostic does not enable negotiated HT.
+
 **D2 in progress:** a separate `CLEAN_RX_HT_DATA=1` build adds a versioned,
 one-frame broadcast HT payload API (MCS0-MCS7, 28..2,332-byte MPDUs), validated
 HT RX metadata and capture retention across F2 backpressure. The paired
@@ -103,6 +110,8 @@ channel or enable HT association.
 instead of generating a new one. MCS, MPDU length and an explicitly selected
 `HT_PROBE_TID` must match the saved challenge; mismatches fail before hardware
 access. Use a fresh evidence prefix for every replay.
+Fresh normal-ACK challenges select a TID in 0..7; replayed ACK challenges
+outside that range are rejected before hardware access.
 Further investigation added `failure_repeated_raw`,
 `failure_raw_repeat_match`, `failure_time_us` and `failure_final_*` fields.
 Seventeen new full-length failures had identical independent copies and
@@ -195,6 +204,9 @@ on exit, and requires matching station MACs and protected RX/TX evidence at
 both endpoints. Both USB applications boot before the AP session starts;
 station collection starts immediately on AP readiness, within its bounded
 join window. Set `CLEAN_RX_COLLECTOR` for an isolated matching build.
+The paired HT, MAC-soak and WPA2 runners also accept `CLEAN_RX_PICOTOOL`
+as the path to an alternative executable or diagnostic wrapper; the default is
+`build/picotool-usb/picotool`. A wrapper must preserve arguments and exit status.
 The runner records phase times in `PREFIX-timing.log` and preserves failed
 reports. It does not flash either badge. The AP fixture exports a
 temporary passphrase only with explicit `--credentials-out`; neither collector

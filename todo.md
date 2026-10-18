@@ -121,13 +121,21 @@ and bounded per-category access exist. Association-response/runtime peer
 profiling and bounded station RX staging are implemented. Opt-in non-HT
 WMM negotiation, AP-derived EDCA policy, protected QoS exchanges and bounded
 protected A-MSDU receive software are implemented. Aggregate OTA qualification
-and Block ACK/A-MPDU/reordering integration remain open. Local-AP reply
-delivery and intermittent HT receive corruption remain unresolved.
+and Block ACK/A-MPDU/reordering integration remain open. Receive completion/
+discard handling, radio override ownership and atomic backoff publication
+have been corrected and regression-tested. Local-AP reply delivery and
+intermittent HT receive corruption remain qualification limits.
+Owned station TX cleanup is implemented and regression-tested.
 Negotiated station operation and its mandatory MAC prerequisites are not
 yet qualified.
 See [implementation and remaining gates](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#remaining-d2-work).
 Follow-up receive investigations are recorded in
 [the development record](clean-rx/dev-doc/AP_AUTHENTICATION_INVESTIGATION.md).
+The [remaining RF-hint evaluation](clean-rx/dev-doc/RF_HINT_FOLLOWUP.md)
+tracks isolated PHY/gain controls and TX-cleanup verification.
+The [controlled independent HT receive investigation](clean-rx/dev-doc/CONTROLLED_HT_RECEIVE.md)
+verifies small-frame vendor-to-clean MCS0/MCS7 reception on both badges;
+receive reliability and mandatory HT MAC integration remain open.
 
 - [ ] Complete HT capability/operation negotiation, mixed-mode TX/RX, airtime
   and MCS configuration while preserving explicit legacy fallback.

@@ -11,6 +11,7 @@
 #include "frames.h"
 #include "station.h"
 #include "../src/ht20.h"
+#include "../peer/frame.h"
 #include "../src/wpa2_crypto.h"
 #include "station_rx.h"
 #include "../src/tx_diag.h"
@@ -300,6 +301,45 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+    if (tx == CLEAN_PEER_RX_MODE) {
+        clean_ht_rx_t rx;
+        clean_ht_diag_t diagnostic;
+        memcpy(&rx, detail + CLEAN_HT_DETAIL, sizeof(rx));
+        memcpy(&diagnostic, detail + CLEAN_HT_DIAG_DETAIL, sizeof(diagnostic));
+        uint32_t length = rx.rxe_length >= 6u ? rx.rxe_length - 6u : 0u;
+        int sig = rx.magic == CLEAN_HT_RX_MAGIC && rx.captures &&
+            (rx.phy[0] & 3u) == 2u && rx.sig[0] == nonce[13] &&
+            clean_ht20_rx_sig_valid(rx.sig, length);
+        int trace = sig && length <= sizeof(rx.mpdu) &&
+            clean_peer_mpdu_sequence(rx.mpdu, length, nonce) >= 0;
+        uint32_t saved = usb_report_u32(detail + 1088u);
+        int packet = saved >= 18u && saved <= CLEAN_DETAIL_PACKET_BYTES &&
+            clean_ht_rx_metadata(detail[1119u], detail[1120u], detail[1121u],
+                                 saved - 18u, channel, nonce[13]) &&
+            clean_peer_mpdu_sequence(detail + 1122u, saved - 18u, nonce) >= 0;
+        uint32_t count = usb_report_u32(detail + 1996u);
+        int completed = !usb_report_u32(detail + 8u) && usb_report_u32(detail + 36u) == 10u;
+        int fresh = completed && count && packet && trace &&
+            usb_report_u32(detail + CLEAN_PEER_RX_DETAIL) == CLEAN_PEER_MAGIC;
+        printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"mode\":\"vendor-ht-rx\","
+               "\"channel\":%u,\"mcs\":%u,\"error\":%u,\"fresh_ht_rx\":%s,"
+               "\"fresh_frames\":%u,\"sequence_bitmap\":%u,\"duplicates\":%u,"
+               "\"fresh_terminal_trace\":%s,\"terminal_sig_valid\":%s,"
+               "\"terminal_length\":%u,\"terminal_captures\":%u,"
+               "\"discard_bad_fcs\":%u,\"discard_oversize\":%u,"
+               "\"discard_rx_event\":%u,\"discard_plcp\":%u,"
+               "\"early_starts\":%u,\"early_outcome\":%u,\"early_final_count\":%u,"
+               "\"ht_interoperability_qualified\":false}\n",
+               serial, USB_REPORT_BUILD_ID, channel, nonce[13],
+               usb_report_u32(detail + 8u), fresh ? "true" : "false", count,
+               usb_report_u32(detail + CLEAN_PEER_RX_DETAIL + 8u),
+               usb_report_u32(detail + CLEAN_PEER_RX_DETAIL + 12u),
+               trace ? "true" : "false", sig ? "true" : "false", length, rx.captures,
+               usb_report_u32(detail + 492u), usb_report_u32(detail + 496u),
+               usb_report_u32(detail + 500u), usb_report_u32(detail + 504u),
+               diagnostic.early.starts, diagnostic.early.outcome, diagnostic.early.final_count);
+        return fresh;
+    }
     if (tx >= 21u && tx <= 28u) {
         int data_mode = tx >= 24u;
         int ack_mode = tx >= 26u;
@@ -841,12 +881,13 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint8_t peer_mode = 0u;
+    int vendor_ht = argc == 7 && strcmp(argv[4], "--vendor-ht-rx") == 0;
     int ht_ack = argc == 7 && (strcmp(argv[4], "--ht-ack-tx") == 0 ||
                                strcmp(argv[4], "--ht-ack-clocked-tx") == 0 ||
                                strcmp(argv[4], "--ht-ack-rx") == 0);
     int ht_data = argc == 8 && (strcmp(argv[4], "--ht-data-tx") == 0 ||
                                 strcmp(argv[4], "--ht-data-rx") == 0);
-    int ht_probe = ht_ack || ht_data || (argc == 7 && (strcmp(argv[4], "--ht-probe-tx") == 0 ||
+    int ht_probe = vendor_ht || ht_ack || ht_data || (argc == 7 && (strcmp(argv[4], "--ht-probe-tx") == 0 ||
                                            strcmp(argv[4], "--ht-probe-rx") == 0));
     if (ht_probe) {
         char *end_mcs;
@@ -857,6 +898,7 @@ int main(int argc, char **argv) {
         }
         challenge[13] = (uint8_t)mcs;
         peer_mode = strcmp(argv[4], "--ht-probe-tx") == 0 ? 21u : 22u;
+        if (vendor_ht) peer_mode = CLEAN_PEER_RX_MODE;
         if (ht_ack) {
             if (!CLEAN_RX_HT_RESPONSE) {
                 fputs("HT ACK diagnostics require CLEAN_RX_HT_RESPONSE=1\n", stderr);

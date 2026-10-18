@@ -8,6 +8,7 @@
 #include "../src/tx_diag.h"
 #include "../src/mac_soak.h"
 #include "../src/ht20.h"
+#include "../peer/frame.h"
 #include "../../src/shared/bytes.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -45,7 +46,7 @@ static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uin
 
 static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u; }
 static int soak_mode(void) { return detail[2000u]==19u || detail[2000u]==20u; }
-static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=28u; }
+static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=29u; }
 
 static void screen(const char *status, uint32_t packets, uint32_t error) {
     char number[12];
@@ -125,6 +126,21 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 clean_ht_rx_metadata(packet[15], packet[16], packet[17], size - 18u,
                     detail[2001u], peer_challenge[13]) &&
                 clean_ht_ack_match(packet + 18u, size - 18u, peer_challenge) : 0);
+            if (detail[2000u] == CLEAN_PEER_RX_MODE && size >= 18u &&
+                clean_ht_rx_metadata(packet[15], packet[16], packet[17], size - 18u,
+                                     detail[2001u], peer_challenge[13])) {
+                int sequence = clean_peer_mpdu_sequence(packet + 18u, size - 18u, peer_challenge);
+                if (sequence >= 0) {
+                    uint32_t mask = badger_bytes_load_u32(detail + CLEAN_PEER_RX_DETAIL + 8u);
+                    uint32_t bit = 1u << (uint32_t)sequence;
+                    badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL, CLEAN_PEER_MAGIC);
+                    badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 8u, mask | bit);
+                    if (mask & bit)
+                        badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 12u,
+                            badger_bytes_load_u32(detail + CLEAN_PEER_RX_DETAIL + 12u) + 1u);
+                    peer = 1;
+                }
+            }
             if (peer && (detail[2000u] == 25u || detail[2000u] == 27u)) {
                 badger_bytes_store_u32(detail + 680u, 0x31524448u);
                 badger_bytes_store_u32(detail + 684u, size - 18u);
@@ -189,7 +205,7 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
 static int service(void *unused) {
     (void)unused;
     usb_error = live_usb_hw_poll(&control);
-    if (!usb_error && soak_mode()) {
+    if (!usb_error && (soak_mode() || detail[2000u] == CLEAN_PEER_RX_MODE)) {
         const wifi_wire_t *wire = wifi_board_wire();
         uint32_t now = wire->now_us(wire->context);
         if (now - soak_watchdog_at >= 4000000u) {
@@ -649,11 +665,12 @@ static void run(const uint8_t nonce[16]) {
     wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
-    if (nonce[14] > 28u || !secret_valid ||
+    if (nonce[14] > CLEAN_PEER_RX_MODE || !secret_valid ||
         ((nonce[14] == 21u || nonce[14] == 22u || nonce[14] >= 24u) && nonce[13] >= 8u) ||
-        (nonce[14] >= 26u && (!CLEAN_RX_HT_RESPONSE ||
+        (nonce[14] >= 26u && nonce[14] <= 28u && (!CLEAN_RX_HT_RESPONSE ||
                              clean_ht_data_length(nonce) != CLEAN_HT_ACK_MPDU)) ||
-        (nonce[14] >= 24u && !clean_ht_data_size_valid(clean_ht_data_length(nonce))))
+        (nonce[14] >= 24u && nonce[14] <= 28u &&
+         !clean_ht_data_size_valid(clean_ht_data_length(nonce))))
         l.error = CLEAN_INPUT;
     detail[2000u] = nonce[14];
     detail[2001u] = nonce[15];
@@ -668,7 +685,7 @@ static void run(const uint8_t nonce[16]) {
                    nonce[14] != 0u && nonce[14] != 2u && nonce[14] != 13u &&
                    nonce[14] != 17u &&
                    nonce[14] != 22u && nonce[14] != 23u &&
-                   nonce[14] != 25u) &&
+                   nonce[14] != 25u && nonce[14] != CLEAN_PEER_RX_MODE) &&
         clean_write(&l, 0x18002024u, 0xf0u) &&
         clean_write(&l, CLEAN_MBOX + 24u, 2u) && clean_wait_state(&l, 9u, 100000u)) {
         l.stage = 7u;
@@ -696,7 +713,8 @@ static void run(const uint8_t nonce[16]) {
             }
         }
         if (soak_mode()) mac_soak_run(&l, nonce);
-        else (void)receive_for(&l, nonce[14] == 13u || nonce[14] == 17u ||
+        else (void)receive_for(&l, nonce[14] == CLEAN_PEER_RX_MODE ? 4200000u :
+                              nonce[14] == 13u || nonce[14] == 17u ||
                               nonce[14] == 22u || nonce[14] == 23u ||
                               nonce[14] == 25u || nonce[14] == 27u ? 2500000u : 700000u, 0u);
         if (l.error == CLEAN_OK && (nonce[14] == 24u || nonce[14] == 26u || nonce[14] == 28u)) {

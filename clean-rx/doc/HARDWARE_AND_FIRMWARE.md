@@ -93,7 +93,9 @@ The transmit configuration programs radio bias/filter values, PHY manual
 gain, IQ table entries, IIR filters and channel-specific TX Farrow values.
 `phy_tx_set_inhibit` owns the explicit TX overrides.
 `phy_tx_set_automatic` releases the owned overrides for PHY-sequenced
-turnaround.
+turnaround, including the radio `0x79` low three value bits and `0xa4`
+bit `0x0004`. Unrelated bits are preserved; RX-only and stop paths retain
+the explicit transmit inhibit.
 
 ## PSM receive processing
 
@@ -103,10 +105,16 @@ program. The image is loaded through D11's object selector/data port.
 
 1. Initialize the PSM mailbox, generation token, receive bounds and header
    area. Flush RXE under a bounded countdown and signal ready.
-2. Wait for PLCP-valid, copy six prefix bytes and wait for their RXE count.
+2. Wait for PLCP-valid, copy six prefix bytes and wait for their RXE count,
+   then acknowledge the prefix-copy completion event.
 3. Continue the receive transfer and enable RX-buffer streaming after the
    128-byte prefix threshold.
-4. Require terminal completion and GoodFCS before capture publication.
+4. Require a fresh completion event, terminal RX status and GoodFCS before
+   capture publication.
+   Completed bad-FCS frames enter discard/rearm without spending the
+   incomplete-frame watchdog budget. An external condition 5 edge is
+   acknowledged without treating it alone as an abort; explicit RX abort,
+   FIFO-full and receive-size checks remain active.
 5. Construct the 24-byte receive header in SHM `0x7f4..0x7ff`, including
    RXE length, four PHY words, PLCP and channel.
 6. Publish the header to the RX FIFO and hold the capture until the
@@ -119,6 +127,14 @@ their own bounds.
 
 SHM instructions have one memory input. Address comparisons stage one
 word in a register before comparing it to another SHM word.
+
+Station configuration verifies the local/peer addresses in SHM while the
+PSM is paused, then retains them in controller SRAM for subsequent command,
+receive and diagnostic identity checks. Backoff publication pauses only
+the PSM and restores its previous control state after publishing the slot
+count and invalidating the prior idle interval. The PSM remembers completed
+post-backoff until medium activity or a new publication invalidates it;
+it does not repeatedly reload an already-empty slot counter while idle.
 
 ## DMA and host credits
 
@@ -222,6 +238,11 @@ Rate-specific PHYCTL1 values and airtime helpers are defined in
 [phy_rates.h](../src/phy_rates.h). The [HT20 reference](HT20.md) describes
 its template controls and descriptors.
 
+The badge USB application's independent-peer receive diagnostic is RX-only.
+It checks fresh broadcast data addresses, SNAP/payload, fixture sequence,
+complete MPDU FCS, HT20 metadata and the matching terminal HT-SIG. It
+records the received sequence bitmap and duplicate count separately.
+
 Command 6 copies eight staged 16-bit key words to SHM `0x618..0x61f`
 and sets the hardware-crypto selector at `0x615`. The raw hardware path
 programs D11 key, IV-offset, MIC and frame-length controls. The badge's
@@ -257,6 +278,15 @@ response setup can replace TXE state.
 Response ownership spans scheduled start and physical tail. Cortex checks
 ownership and IFS before replacing templates or policy. Invalid counters
 disable contention and produce an explicit controller error.
+
+After a drained live-station TX, Cortex posts a cleanup request while only
+PSM is paused. A new live TX defers before template preparation until PSM
+consumes that request. PSM also owns cleanup after autonomous ACK/CTS
+completion: it prioritizes new RX and waits for inactive RX, drained MAC TX
+and inactive PHY TX before clearing TXE auxiliary/selection state and restoring
+crypto controls to `0x8300`/`0x0300`. Cleanup returns to the RX poll without
+changing PHY clock/reset controls. SHM words `0x6ac`/`0x6ad` hold the request
+and wrapping completion count, between the RX trace and HT early evidence.
 
 For hardware-timed DSSS/CCK station TX, the CPU airtime guard uses the
 PSM's transmit-start latch once hardware start is observed. MAC drain time

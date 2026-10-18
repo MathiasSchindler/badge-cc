@@ -19,7 +19,8 @@ drop_acks=${5:-0}
 phy=${6:-ofdm6}
 payload=${7:-cycle}
 collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/collector}
-if [[ ! -x $collector || ! -x build/picotool-usb/picotool ]]; then
+picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+if [[ ! -x $collector || ! -x $picotool ]]; then
     echo "Build the matching collector and install its image first" >&2
     exit 1
 fi
@@ -57,7 +58,7 @@ trap 'exit 143' TERM
 start_badge() {
     local serial=$1 attempt
     for ((attempt=0;attempt<30;attempt++)); do
-        if build/picotool-usb/picotool reboot --ser "$serial" > "$prefix-boot-$serial.log" 2>&1; then
+        if "$picotool" reboot --ser "$serial" > "$prefix-boot-$serial.log" 2>&1; then
             sleep 0.5
             return 0
         fi

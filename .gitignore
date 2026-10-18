@@ -16,3 +16,4 @@ __pycache__/
 *.key
 *.p12
 *.pfx
+todo-hints.md

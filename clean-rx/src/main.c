@@ -62,7 +62,7 @@ static clean_dcf_t *station_contention(void) {
 }
 #define station_dcf (*station_contention())
 static uint16_t rx_discard_fcs, rx_discard_length;
-static uint8_t nav_frame[CLEAN_MPDU_BYTES], station_address[6];
+static uint8_t nav_frame[CLEAN_MPDU_BYTES], station_address[6], station_peer[6];
 static uint32_t access_started;
 static uint32_t ack_started, ack_window;
 static uint32_t cck_ack_window;
@@ -530,15 +530,21 @@ static int station_rx_idle(uint16_t state) {
 
 static int station_phy_busy(void) {
     return shm_read16(CLEAN_RESPONSE_PENDING) ||
+           shm_read16(CLEAN_TX_CLEANUP_REQUEST) ||
            (mmio_read32(D11_BASE + 0x158u) & 7u) ||
            (mmio_read16(D11_BASE + 0x690u) & 0xf00u);
 }
 
 static void station_hw_backoff(void) {
     if (!station_hw) return;
+    uint32_t control = mmio_read32(D11_MACCONTROL);
+    mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(control));
+    (void)mmio_read32(D11_MACCONTROL);
     shm_write16(CLEAN_DCF_TRACE_SHM, station_dcf.slots);
     shm_write16(CLEAN_DCF_SLOTS, station_dcf.slots);
     shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
+    mmio_write32(D11_MACCONTROL, control);
+    (void)mmio_read32(D11_MACCONTROL);
 }
 
 static void station_hw_slot(void) {
@@ -680,9 +686,12 @@ static void station_publish_mac(void) {
         MAC_TRACE->psm_polls = shm_read16(CLEAN_DCF_POLLS);
         snapshot_dcf_trace();
     }
-    MAC_RADIO->address_lo = (uint32_t)shm_read16(0x612u) |
-        ((uint32_t)shm_read16(0x613u) << 16u);
-    MAC_RADIO->address_hi = shm_read16(0x614u);
+    MAC_RADIO->address_lo = (uint32_t)station_address[0] |
+        ((uint32_t)station_address[1] << 8u) |
+        ((uint32_t)station_address[2] << 16u) |
+        ((uint32_t)station_address[3] << 24u);
+    MAC_RADIO->address_hi = (uint32_t)station_address[4] |
+        ((uint32_t)station_address[5] << 8u);
 }
 
 static int station_counter_ok(void) {
@@ -695,7 +704,9 @@ static void station_consume_ack(void) {
     if (shm_read16(0x601u) != PSM_STATE_CAPTURED || shm_read16(0x606u) != 20u ||
         shm_read16(CLEAN_SHM_FRAME + 4u) != 0xd4u) return;
     for (uint32_t i = 0u; i < 3u; ++i)
-        if (shm_read16(CLEAN_SHM_FRAME + 6u + i) != shm_read16(0x612u + i)) return;
+        if (shm_read16(CLEAN_SHM_FRAME + 6u + i) !=
+            ((uint16_t)station_address[2u*i] |
+             ((uint16_t)station_address[2u*i + 1u] << 8u))) return;
     if (!capture_prepared) (void)rx_dma_poll_and_reclaim(0);
     else ++MAC_RADIO->prepared_acks;
     /* An ACK can complete between the first state sample and transport
@@ -785,9 +796,7 @@ static int station_publish_capture(uint32_t channel) {
         const volatile uint8_t *m = slot->raw + 8u;
         uint8_t bound = 1u;
         for (uint32_t i = 0u; i < 6u; ++i)
-            if (m[4u + i] != station_address[i] ||
-                m[10u + i] != (uint8_t)(shm_read16(CLEAN_ACK_PEER + i/2u) >>
-                                                      (8u * (i & 1u))))
+            if (m[4u + i] != station_address[i] || m[10u + i] != station_peer[i])
                 bound = 0u;
         if (bound) {
             ++MAC_TRACE->published[clean_mac_frame_kind(m[0])];
@@ -1165,6 +1174,14 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         mmio_write32(D11_MACCONTROL, 0x84020400u);
         (void)mmio_read32(D11_MACCONTROL);
         phy_tx_set_inhibit(1);
+    }
+    if (station_mac && phy_drained && tx_conditions == 7u) {
+        uint32_t control = mmio_read32(D11_MACCONTROL);
+        mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(control));
+        (void)mmio_read32(D11_MACCONTROL);
+        shm_write16(CLEAN_TX_CLEANUP_REQUEST, 1u);
+        mmio_write32(D11_MACCONTROL, control);
+        (void)mmio_read32(D11_MACCONTROL);
     }
     MBOX->rc_dacbuf = 0x55550000u | total_len;
     if (!phy_drained) return fail(0x82u, D11_BASE + 0x1cu, ofdm_airtime);
@@ -1624,6 +1641,11 @@ void cyw43_main(void) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
             }
+            uint8_t addresses_match = 1u;
+            if (reliable && tx_len >= 22u)
+                for (uint32_t i = 0u; i < 6u; ++i)
+                    if (frame[10u + i] != station_peer[i] ||
+                        frame[16u + i] != station_address[i]) addresses_match = 0u;
             if (reliable && (!station_enabled || tx_cnt > 8u ||
                 tx_len < 34u || tx_len > CLEAN_TX_BYTES ||
                 (!ht_clocked && !is_ofdm &&
@@ -1631,13 +1653,7 @@ void cyw43_main(void) {
                 !clean_mac_valid(frame + 6u, tx_len - 6u) ||
                 (frame[10] & 1u) ||
                 (!ht_clocked && tx_tid < 0) ||
-                (frame[28] & 15u) ||
-                ((uint16_t)frame[10] | ((uint16_t)frame[11] << 8u)) != shm_read16(CLEAN_ACK_PEER) ||
-                ((uint16_t)frame[12] | ((uint16_t)frame[13] << 8u)) != shm_read16(CLEAN_ACK_PEER+1u) ||
-                ((uint16_t)frame[14] | ((uint16_t)frame[15] << 8u)) != shm_read16(CLEAN_ACK_PEER+2u) ||
-                ((uint16_t)frame[16] | ((uint16_t)frame[17] << 8u)) != shm_read16(0x612u) ||
-                ((uint16_t)frame[18] | ((uint16_t)frame[19] << 8u)) != shm_read16(0x613u) ||
-                ((uint16_t)frame[20] | ((uint16_t)frame[21] << 8u)) != shm_read16(0x614u))) {
+                (frame[28] & 15u) || !addresses_match)) {
                 fail(0x85u, FW_TX_BUF_ADDR, tx_len);
                 break;
             }
@@ -1853,6 +1869,8 @@ void cyw43_main(void) {
             shm_write16(CLEAN_CTS_ALLOWED, 1u);
             shm_write16(CLEAN_CTS_SENT, 0u);
             shm_write16(CLEAN_SHORT_SENT, 0u);
+            shm_write16(CLEAN_TX_CLEANUP_REQUEST, 0u);
+            shm_write16(CLEAN_TX_CLEANUP_COUNT, 0u);
             shm_write16(CLEAN_ACK_ENABLE, 1u);
             station_enabled = 1u;
             station_mac = (uint8_t)(p[15] >= 2u);
@@ -1860,7 +1878,10 @@ void cyw43_main(void) {
             rx_published_frames = MULTI->captured_frames;
             rx_discard_fcs = shm_read16(0x7a8u);
             rx_discard_length = shm_read16(0x7a9u);
-            for (uint32_t i = 0u; i < 6u; ++i) station_address[i] = p[i];
+            for (uint32_t i = 0u; i < 6u; ++i) {
+                station_address[i] = p[i];
+                station_peer[i] = p[6u + i];
+            }
             clean_dcf_init(&station_dcf, mac_now(),
                 ARM_CYCLE_COUNTER ^ ((uint32_t)p[2] << 24u) ^ ((uint32_t)p[3] << 16u) ^
                 ((uint32_t)p[4] << 8u) ^ p[5], p[14]);
@@ -1887,12 +1908,9 @@ void cyw43_main(void) {
             clean_edca_ac_t next_edca[4];
             uint32_t wmm = (cmd & 0xffu) == CLEAN_WMM_POLICY_CMD;
             uint8_t matches = 1u;
-            for (uint32_t i = 0u; i < 3u; ++i) {
-                if (((uint16_t)p[2u*i] | ((uint16_t)p[2u*i+1u] << 8u)) !=
-                    shm_read16(0x612u+i) ||
-                    ((uint16_t)p[6u+2u*i] | ((uint16_t)p[7u+2u*i] << 8u)) !=
-                    shm_read16(CLEAN_ACK_PEER+i)) matches = 0u;
-            }
+            for (uint32_t i = 0u; i < 6u; ++i)
+                if (p[i] != station_address[i] || p[6u + i] != station_peer[i])
+                    matches = 0u;
             if (!station_mac || !matches || clean_ack_rate(basic, 0u) < 0 ||
                 p[14] > 1u || p[15] != MAC_RADIO->profile ||
                 (wmm && (!station_hw || !clean_wmm_policy_decode(next_edca, cmd,
@@ -2002,16 +2020,10 @@ void cyw43_main(void) {
                     if (held > MAC_TRACE->rx_capture_max_us)
                         MAC_TRACE->rx_capture_max_us = held;
                 }
-                uint8_t peer[6];
-                for (uint32_t i = 0u; i < 3u; ++i) {
-                    uint16_t word = shm_read16(CLEAN_ACK_PEER + i);
-                    peer[2u * i] = (uint8_t)word;
-                    peer[2u * i + 1u] = (uint8_t)(word >> 8u);
-                }
                 uint32_t length = shm_read16(0x606u);
                 if (length < CLEAN_PLCP_BYTES ||
                     !clean_mac_rx_relevant(nav_frame, length - CLEAN_PLCP_BYTES,
-                                           station_address, peer)) {
+                                           station_address, station_peer)) {
                     if (!capture_prepared) (void)rx_dma_poll_and_reclaim(0);
                     capture_prepared = 0u;
                     ++MAC_TRACE->rx_filtered;

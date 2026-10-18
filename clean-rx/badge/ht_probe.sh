@@ -39,7 +39,8 @@ elif [[ $# -ge 5 ]]; then
     if [[ $# -eq 6 ]]; then collector=build/clean-rx/badge/ht-rx/collector; fi
 fi
 collector=${CLEAN_RX_COLLECTOR:-$collector}
-if [[ ! -x $collector || ! -x build/picotool-usb/picotool ]]; then
+picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+if [[ ! -x $collector || ! -x $picotool ]]; then
     echo "Build the matching isolated ht-$mode collector and install its image first" >&2
     exit 1
 fi
@@ -85,6 +86,17 @@ if [[ ${HT_PROBE_TID+x} ]]; then
     fi
     challenge=${challenge:0:12}$(printf '%02x' "$(((byte & 240) | HT_PROBE_TID))")${challenge:14}
 fi
+if [[ $mode == ack ]]; then
+    byte=$((16#${challenge:12:2}))
+    if [[ ${HT_PROBE_CHALLENGE+x} ]]; then
+        if (( (byte & 15) > 7 )); then
+            echo "HT_PROBE_CHALLENGE requires an ACK fixture TID in 0..7" >&2
+            exit 2
+        fi
+    else
+        challenge=${challenge:0:12}$(printf '%02x' "$((byte & 247))")${challenge:14}
+    fi
+fi
 printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"vendor_peer":false,"ht_qualified":false}\n' \
     "$challenge" "$mcs" "$channel" "$mpdu" > "$prefix-config.json" || exit 1
 rx_pid=
@@ -100,7 +112,7 @@ trap 'exit 143' TERM
 start_badge() {
     local serial=$1 attempt
     for ((attempt=0;attempt<30;attempt++)); do
-        if build/picotool-usb/picotool reboot --ser "$serial" > "$prefix-boot-$serial.log" 2>&1; then
+        if "$picotool" reboot --ser "$serial" > "$prefix-boot-$serial.log" 2>&1; then
             sleep 0.5
             return 0
         fi
@@ -112,7 +124,7 @@ start_badge() {
 wait_bootsel() {
     local serial=$1 attempt
     for ((attempt=0;attempt<100;attempt++)); do
-        if build/picotool-usb/picotool info --ser "$serial" > "$prefix-ready-$serial.log" 2>&1; then
+        if "$picotool" info --ser "$serial" > "$prefix-ready-$serial.log" 2>&1; then
             return 0
         fi
         sleep 0.1
