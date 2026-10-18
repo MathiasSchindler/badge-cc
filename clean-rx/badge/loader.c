@@ -82,6 +82,30 @@ int clean_write(clean_loader_t *l, uint32_t address, uint32_t value) {
     return ok;
 }
 
+int clean_wait_command(clean_loader_t *l, uint32_t expected, uint32_t timeout) {
+    if (expected == 2u || !timeout) {
+        l->actual = expected;
+        return fail(l, CLEAN_INPUT);
+    }
+    uint32_t started = l->wire->now_us(l->wire->context);
+    for (;;) {
+        uint32_t command, state;
+        if (!clean_read(l, CLEAN_MBOX + 24u, &command) ||
+            !clean_read(l, CLEAN_MBOX + 4u, &state)) return 0;
+        if (state != 9u || (command != expected && command != 2u)) {
+            l->address = CLEAN_MBOX + (state != 9u ? 4u : 24u);
+            l->actual = state != 9u ? state : command;
+            return fail(l, CLEAN_CONTROLLER);
+        }
+        if (command == 2u) return 1;
+        if (l->wire->now_us(l->wire->context) - started >= timeout) {
+            l->address = CLEAN_MBOX + 24u;
+            l->actual = command;
+            return fail(l, CLEAN_TIMEOUT);
+        }
+    }
+}
+
 int clean_block(clean_loader_t *l, uint32_t address, uint8_t *bytes,
                 uint32_t length, uint8_t write) {
     if (bytes == 0 || length == 0u || write > 1u || (address & 3u) ||

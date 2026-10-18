@@ -12,9 +12,22 @@ retained the first delimiter-stripped MPDU of a three-MPDU diagnostic
 aggregate. It did not recover the others or establish an EOF response
 event. Its finite probe is retained; unsuccessful rearm variants are not.
 The newer [interface campaign](AMPDU_INTERFACE_INVESTIGATION.md) separates
-early MPDU completion from the later terminal latch and demonstrates two
-complete MPDUs in one PPDU. Its isolated diagnostic is not a live
-recipient/transport integration; the third frame remains invalid.
+early MPDU completion from the later terminal latch. Its one-copy handoff
+now retains all three complete diagnostic MPDUs at MCS0..7 in both
+directions, with controlled bad-FCS rejection and continuation. This is
+still not live recipient/transport integration or SIFS-timed BA.
+
+The subsequent default-disabled
+[per-MPDU DMA/F2 experiment](AMPDU_INTERFACE_INVESTIGATION.md#per-mpdu-dma-to-f2-delivery-follow-up)
+does deliver two distinct complete MPDUs to the RP2350 from one PPDU.
+Its six MCS0/3/7 direction controls all miss the final MPDU; it remains
+a fixed fixture, not the production BA recipient. Bad-middle controls
+reject that MPDU without delivery. No BA or protection qualification
+is implied, and the live integration prerequisite remains unchecked.
+The final independently saved-byte campaign validates two deliveries in
+6/7 normal trials, retains one RF miss, and validates both bad-middle
+rejections. Its host independently checks all 14 saved SDIO MPDUs and FCS;
+no trial delivers the complete aggregate.
 
 There is no controller BA-install command, station ADDBA activation, PSM
 aggregate response path or independent on-air aggregate qualification.

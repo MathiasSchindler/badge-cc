@@ -13,6 +13,23 @@
 #ifndef CLEAN_RX_AMPDU_INTERFACE
 #define CLEAN_RX_AMPDU_INTERFACE 0
 #endif
+#ifndef CLEAN_RX_AMPDU_HANDOFF
+#define CLEAN_RX_AMPDU_HANDOFF 0
+#endif
+#ifndef CLEAN_RX_AMPDU_BAD_FCS
+#define CLEAN_RX_AMPDU_BAD_FCS 0
+#endif
+#ifndef CLEAN_RX_AMPDU_DMA
+#define CLEAN_RX_AMPDU_DMA 0
+#endif
+#define CLEAN_AMPDU_DMA_PENDING 0x300u
+#define CLEAN_AMPDU_DMA_SUBMITTED 0x301u
+#define CLEAN_AMPDU_DMA_DETAIL 704u
+#define CLEAN_AMPDU_DMA_PAYLOAD_DETAIL 1664u
+#define CLEAN_AMPDU_DMA_MAGIC 0x314d4441u
+#define CLEAN_AMPDU_HANDOFF_WORD 68u
+#define CLEAN_AMPDU_HANDOFF_WORDS 20u
+#define CLEAN_AMPDU_HANDOFF_COMMIT 128u
 #define CLEAN_AMPDU_IF_SHM 0x200u
 #define CLEAN_AMPDU_IF_RECORDS 16u
 #define CLEAN_AMPDU_IF_WORDS (4u + 8u * CLEAN_AMPDU_IF_RECORDS + 6u + 44u)
@@ -95,6 +112,16 @@
 #define CLEAN_DETAIL_PACKET_BYTES 528u
 
 _Static_assert(CLEAN_RX_HT_RX == 0 || CLEAN_RX_HT_RX == 1, "HT RX build gate");
+_Static_assert(CLEAN_RX_AMPDU_DMA == 0 ||
+               (CLEAN_RX_AMPDU_DMA == 1 && CLEAN_RX_AMPDU_PROBE &&
+                CLEAN_RX_AMPDU_INTERFACE == 3 && CLEAN_RX_AMPDU_HANDOFF == 2),
+               "Aggregate DMA experiment requires the qualified finite handoff");
+_Static_assert(CLEAN_AMPDU_DMA_PENDING >= CLEAN_AMPDU_IF_SHM + CLEAN_AMPDU_IF_WORDS &&
+               CLEAN_AMPDU_DMA_SUBMITTED < 0x600u,
+               "Aggregate DMA controls must not overlap evidence or station SHM");
+_Static_assert(!CLEAN_RX_AMPDU_DMA ||
+               CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * 80u <= 2048u,
+               "Aggregate delivered-payload evidence must fit the USB report");
 _Static_assert(CLEAN_RX_AMPDU_PROBE == 0 ||
                (CLEAN_RX_AMPDU_PROBE == 1 && CLEAN_RX_HT_RX),
                "Aggregate hardware probing requires extended RX");
@@ -102,6 +129,19 @@ _Static_assert(CLEAN_RX_AMPDU_INTERFACE == 0 ||
                (CLEAN_RX_AMPDU_INTERFACE >= 1 && CLEAN_RX_AMPDU_INTERFACE <= 3 &&
                 CLEAN_RX_AMPDU_PROBE),
                "Aggregate interface tracing requires the finite hardware probe");
+_Static_assert(CLEAN_RX_AMPDU_HANDOFF == 0 ||
+               (CLEAN_RX_AMPDU_HANDOFF >= 1 && CLEAN_RX_AMPDU_HANDOFF <= 2 &&
+                CLEAN_RX_AMPDU_INTERFACE == 3),
+               "Handoff snapshots require the isolated early aggregate probe");
+_Static_assert(CLEAN_RX_AMPDU_BAD_FCS == 0 ||
+               (CLEAN_RX_AMPDU_BAD_FCS >= 1 && CLEAN_RX_AMPDU_BAD_FCS <= 7 &&
+                CLEAN_RX_AMPDU_HANDOFF == 2),
+               "Bad-FCS injection requires the finite one-copy diagnostic");
+_Static_assert(CLEAN_AMPDU_HANDOFF_WORD >= 4u + 3u * 8u &&
+               CLEAN_AMPDU_HANDOFF_WORD + 3u * CLEAN_AMPDU_HANDOFF_WORDS <=
+                   CLEAN_AMPDU_HANDOFF_COMMIT &&
+               CLEAN_AMPDU_HANDOFF_COMMIT + 3u <= 132u,
+               "Handoff snapshots must fit unused early-interface rows");
 _Static_assert(CLEAN_AMPDU_IF_SHM >= CLEAN_AMPDU_PROBE_SHM + CLEAN_AMPDU_PROBE_WORDS &&
                CLEAN_AMPDU_IF_SHM + CLEAN_AMPDU_IF_WORDS <= 0x600u &&
                CLEAN_AMPDU_IF_ADDR >= CLEAN_AMPDU_PROBE_ADDR + 4u + 2u*CLEAN_AMPDU_PROBE_WORDS &&

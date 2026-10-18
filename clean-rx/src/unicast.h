@@ -365,4 +365,81 @@ static inline int clean_wmm_policy_decode(clean_edca_ac_t ac[4], uint32_t comman
     return 1;
 }
 
+#define CLEAN_RESPONSE_LEGACY_WORDS 60u
+#define CLEAN_RESPONSE_RATE_WORDS (CLEAN_RESPONSE_LEGACY_WORDS + 8u * CLEAN_HT_ACK_RECORD_WORDS)
+
+typedef struct {
+    uint16_t (*read)(void *context, uint32_t word);
+    void (*write)(void *context, uint32_t word, uint16_t value);
+    void *context;
+    uint32_t failed_word;
+    uint16_t actual;
+} clean_response_io_t;
+
+static inline int clean_response_rates_prepare(uint16_t words[CLEAN_RESPONSE_RATE_WORDS],
+                                                uint16_t basic, uint32_t ht) {
+    if (ht > 1u || clean_ack_rate(basic, 0u) < 0) return 0;
+    uint16_t prepared[CLEAN_RESPONSE_RATE_WORDS];
+    for (uint32_t i = CLEAN_RESPONSE_LEGACY_WORDS; i < CLEAN_RESPONSE_RATE_WORDS; ++i)
+        prepared[i] = 0u;
+    for (uint32_t i = 0u; i < 12u; ++i) {
+        uint8_t plcp[6];
+        uint16_t phy;
+        int rate = clean_ack_rate(basic, i);
+        if (rate < 0 || !clean_ack_template(plcp, (uint32_t)rate, &phy)) return 0;
+        for (uint32_t w = 0u; w < 3u; ++w)
+            prepared[4u*i + w] = (uint16_t)(plcp[2u*w] | ((uint16_t)plcp[2u*w + 1u] << 8u));
+        prepared[4u*i + 3u] = phy;
+        prepared[48u + i] = (uint16_t)clean_ack_airtime_us(basic, i);
+    }
+    if (ht) for (uint32_t i = 0u; i < 8u; ++i) {
+        uint8_t plcp[6];
+        uint16_t phy;
+        int rate = clean_ht_ack_rate(basic, i);
+        if (rate < 0 || !clean_ack_template(plcp, (uint32_t)rate, &phy)) return 0;
+        uint32_t at = CLEAN_RESPONSE_LEGACY_WORDS + CLEAN_HT_ACK_RECORD_WORDS*i;
+        for (uint32_t w = 0u; w < 3u; ++w)
+            prepared[at + w] = (uint16_t)(plcp[2u*w] | ((uint16_t)plcp[2u*w + 1u] << 8u));
+        prepared[at + 3u] = phy;
+        prepared[at + 4u] = rate < 4 ? 0x40u : 0x41u;
+        prepared[at + 5u] = (uint16_t)(rate < 4 ?
+            clean_cck_airtime_us(14u, (uint32_t)rate, 0u) :
+            clean_ofdm_airtime_us(14u, (uint32_t)rate - 4u));
+    }
+    for (uint32_t i = 0u; i < CLEAN_RESPONSE_RATE_WORDS; ++i) words[i] = prepared[i];
+    return 1;
+}
+
+static inline uint32_t clean_response_rate_word(uint32_t index) {
+    return index < CLEAN_RESPONSE_LEGACY_WORDS ? CLEAN_ACK_TABLE + index :
+        CLEAN_HT_ACK_TABLE + index - CLEAN_RESPONSE_LEGACY_WORDS;
+}
+
+/* The caller keeps PSM paused until all policy fields have also been verified. */
+static inline int clean_response_rates_install(clean_response_io_t *io,
+                                                uint16_t basic, uint32_t ht) {
+    uint16_t words[CLEAN_RESPONSE_RATE_WORDS];
+    io->failed_word = 0u;
+    io->actual = basic;
+    if (!clean_response_rates_prepare(words, basic, ht)) return 0;
+    uint32_t count = ht ? CLEAN_RESPONSE_RATE_WORDS : CLEAN_RESPONSE_LEGACY_WORDS;
+    for (uint32_t i = 0u; i < count; ++i)
+        io->write(io->context, clean_response_rate_word(i), words[i]);
+    for (uint32_t i = 0u; i < count; ++i) {
+        uint32_t word = clean_response_rate_word(i);
+        uint16_t actual = io->read(io->context, word);
+        if (actual != words[i]) {
+            io->failed_word = word;
+            io->actual = actual;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+_Static_assert(CLEAN_ACK_AIRTIME == CLEAN_ACK_TABLE + 48u &&
+               CLEAN_ACK_AIRTIME + 12u == CLEAN_ACK_KINDS &&
+               CLEAN_RESPONSE_LEGACY_WORDS == 12u * 5u,
+               "Response table layout must match the PSM rate and airtime loads");
+
 #endif

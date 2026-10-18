@@ -237,8 +237,7 @@ static inline void clean_station_forget_association(clean_station_ap_t *ap) {
     ap->ht_updates = 0u;
 }
 
-static inline void clean_station_ht_report(const clean_station_ap_t *ap, uint32_t channel,
-                                            uint8_t detail[2048]) {
+static inline clean_ht_peer_t clean_station_ht_profile(const clean_station_ap_t *ap) {
     clean_ht_peer_t profile;
     const clean_ht_peer_t *source = ap->association.valid ? &ap->association.ht : &ap->ht;
     badger_bytes_copy((uint8_t *)&profile, (const uint8_t *)source, sizeof(profile));
@@ -257,6 +256,18 @@ static inline void clean_station_ht_report(const clean_station_ap_t *ap, uint32_
         badger_bytes_copy((uint8_t *)&profile.wmm,
                           (const uint8_t *)&ap->ht.wmm, sizeof(profile.wmm));
     }
+    return profile;
+}
+
+static inline clean_ht_candidate_t clean_station_ht_candidate(const clean_station_ap_t *ap,
+        uint32_t channel, uint32_t ceiling) {
+    clean_ht_peer_t profile = clean_station_ht_profile(ap);
+    return clean_ht_peer_candidate(&profile, channel, ceiling);
+}
+
+static inline void clean_station_ht_report(const clean_station_ap_t *ap, uint32_t channel,
+                                            uint8_t detail[2048]) {
+    clean_ht_peer_t profile = clean_station_ht_profile(ap);
     clean_ht_peer_report(&profile, channel, detail);
     detail[CLEAN_HT_PEER_DETAIL + 19u] = !ap->association.valid ? 0u :
         ap->ht_updates ? 2u : 1u;

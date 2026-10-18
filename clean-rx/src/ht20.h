@@ -48,6 +48,11 @@ _Static_assert(CLEAN_RX_HT_CLEAR_SIG_CRC == 0 ||
 #define CLEAN_HT_DATA_STORAGE (CLEAN_HT_DATA_HEADER + CLEAN_TX_STORAGE_BYTES)
 #define CLEAN_HT_DATA_MAX_MPDU (CLEAN_RX_HT_RX ? CLEAN_AMSDU_MPDU_BYTES : CLEAN_MTU_MAX_BYTES)
 #define CLEAN_RX_HT20 0x80u
+#define CLEAN_HT20_MCS_MASK 0xffu
+#define CLEAN_HT20_CAPABILITY_BYTES 28u
+#define CLEAN_HT20_WIDTH_MHZ 20u
+#define CLEAN_HT20_GI_NS 800u
+#define CLEAN_HT20_STREAMS 1u
 
 _Static_assert(CLEAN_RX_HT_DATA == 0 || CLEAN_RX_HT_DATA == 1, "HT data build gate");
 _Static_assert(!CLEAN_RX_AMPDU_PROBE || CLEAN_RX_HT_DATA,
@@ -79,6 +84,12 @@ typedef struct {
 typedef struct {
     uint16_t phyctl, phyctl1, mmplcp[2];
 } clean_ht_tx_t;
+
+typedef struct {
+    clean_ht_tx_t controls;
+    uint32_t symbols, airtime_us, rate_kbps;
+    uint8_t mcs;
+} clean_ht20_config_t;
 
 typedef struct {
     uint32_t magic;
@@ -157,6 +168,38 @@ static inline int clean_ht20_tx_controls(clean_ht_tx_t *tx, uint32_t length, uin
     tx->mmplcp[0] = 0xbu;
     tx->mmplcp[1] = (uint16_t)protection;
     return 1;
+}
+
+static inline int clean_ht20_select_mcs(uint32_t mask, uint32_t ceiling) {
+    if ((mask & ~CLEAN_HT20_MCS_MASK) || ceiling >= 8u) return -1;
+    for (uint32_t n = ceiling + 1u; n; --n)
+        if (mask & (1u << (n - 1u))) return (int)(n - 1u);
+    return -1;
+}
+
+static inline int clean_ht20_configure(clean_ht20_config_t *out, uint32_t length,
+                                        uint32_t mcs, uint32_t allowed_mcs) {
+    if (mcs >= 8u || (allowed_mcs & ~CLEAN_HT20_MCS_MASK) ||
+        !(allowed_mcs & (1u << mcs))) return 0;
+    clean_ht20_config_t next = {0};
+    if (!clean_ht20_tx_controls(&next.controls, length, mcs)) return 0;
+    next.mcs = (uint8_t)mcs;
+    next.symbols = clean_ht20_symbols(length, mcs);
+    next.airtime_us = clean_ht20_airtime_us(length, mcs);
+    next.rate_kbps = 250u * clean_ht20_rates[mcs].ndbps;
+    *out = next;
+    return 1;
+}
+
+/* Unadvertised target IE: activating HT still requires the mandatory MAC. */
+static inline void clean_ht20_capability_ie(uint8_t ie[CLEAN_HT20_CAPABILITY_BYTES]) {
+    for (uint32_t i = 0u; i < CLEAN_HT20_CAPABILITY_BYTES; ++i) ie[i] = 0u;
+    ie[0] = 45u; ie[1] = 26u;
+    ie[2] = 12u; /* SM power save disabled; HT20, long GI, no optional PHY modes. */
+    ie[4] = 28u; /* 8191-byte A-MPDU target, 16-us minimum MPDU spacing. */
+    ie[5] = CLEAN_HT20_MCS_MASK;
+    ie[15] = 65u;
+    ie[17] = 1u; /* Defined TX MCS set, equal to RX. */
 }
 
 static inline uint8_t clean_ht20_crc(const volatile uint8_t sig[6]) {
@@ -252,12 +295,66 @@ static inline int clean_ht_ampdu_probe_sequence(const uint8_t *m, uint32_t lengt
     return (int)sequence;
 }
 
+static inline uint32_t clean_ht_ampdu_delivery_mask(const uint8_t *payloads,
+        uint32_t bytes, uint32_t reported, const uint8_t nonce[14]) {
+    if (!payloads || bytes < 3u * CLEAN_HT_AMPDU_PROBE_MPDU || (reported & ~7u))
+        return 0u;
+    uint32_t mask = 0u;
+    for (uint32_t sequence = 0u; sequence < 3u; ++sequence)
+        if ((reported & (1u << sequence)) &&
+            clean_ht_ampdu_probe_sequence(payloads + CLEAN_HT_AMPDU_PROBE_MPDU * sequence,
+                CLEAN_HT_AMPDU_PROBE_MPDU, nonce) == (int)sequence)
+            mask |= 1u << sequence;
+    return mask;
+}
+
+enum {
+    CLEAN_AMPDU_DMA_NORMAL = 0,
+    CLEAN_AMPDU_DMA_GOOD = 1,
+    CLEAN_AMPDU_DMA_BAD = 2,
+    CLEAN_AMPDU_DMA_HEADER_ERROR = -1,
+    CLEAN_AMPDU_DMA_PREFIX_ERROR = -2,
+    CLEAN_AMPDU_DMA_FCS_ERROR = -3
+};
+
+static inline int clean_ht_ampdu_dma_decode(const volatile uint8_t *buf, uint32_t bytes,
+                                             volatile uint8_t raw[88]) {
+    if (!buf || !raw || bytes < 24u) return CLEAN_AMPDU_DMA_HEADER_ERROR;
+    uint16_t outcome = (uint16_t)(buf[2] | ((uint16_t)buf[3] << 8u));
+    if (!outcome) return CLEAN_AMPDU_DMA_NORMAL;
+    uint16_t length = (uint16_t)(buf[0] | ((uint16_t)buf[1] << 8u));
+    uint16_t ordinal = (uint16_t)(buf[18] | ((uint16_t)buf[19] << 8u));
+    uint16_t magic = (uint16_t)(buf[20] | ((uint16_t)buf[21] << 8u));
+    uint32_t payload = ordinal == 1u ? 44u : 38u;
+    if (outcome > 2u || magic != 0xda15u || !ordinal || ordinal > 3u ||
+        length != (ordinal == 1u ? 86u : 80u) ||
+        bytes < payload + CLEAN_HT_AMPDU_PROBE_MPDU ||
+        ((buf[4] & 3u) != 1u && (buf[4] & 3u) != 2u) ||
+        !clean_ht_ampdu_probe_sig_valid(buf + 12u, CLEAN_HT_AMPDU_PROBE_BYTES))
+        return CLEAN_AMPDU_DMA_HEADER_ERROR;
+    if (outcome == 2u) return CLEAN_AMPDU_DMA_BAD;
+    /* RXE retains the PPDU PLCP in its count; only the first DMA body
+     * carries those six bytes. Continuations begin with their MAC header. */
+    if (ordinal == 1u)
+        for (uint32_t i = 0u; i < CLEAN_PLCP_BYTES; ++i)
+            if (buf[38u + i] != buf[12u + i]) return CLEAN_AMPDU_DMA_PREFIX_ERROR;
+    if (!clean_mac_valid(buf + payload, CLEAN_HT_AMPDU_PROBE_MPDU))
+        return CLEAN_AMPDU_DMA_FCS_ERROR;
+    raw[0] = raw[1] = 0u;
+    for (uint32_t i = 0u; i < CLEAN_PLCP_BYTES; ++i) raw[2u + i] = buf[12u + i];
+    for (uint32_t i = 0u; i < CLEAN_HT_AMPDU_PROBE_MPDU; ++i)
+        raw[8u + i] = buf[payload + i];
+    return CLEAN_AMPDU_DMA_GOOD;
+}
+
 static inline uint32_t clean_ht_ampdu_probe_trace_mask(const clean_ampdu_probe_trace_t *trace,
                                                        const uint8_t nonce[14]) {
     if (trace->magic != CLEAN_AMPDU_PROBE_MAGIC || !trace->count ||
         trace->count > CLEAN_HT_AMPDU_PROBE_COUNT ||
         ((trace->phy & 3u) != 2u &&
-         !(CLEAN_RX_AMPDU_INTERFACE >= 3 && (trace->status1 & 0x100u) &&
+         !(CLEAN_RX_AMPDU_INTERFACE >= 3 &&
+           ((trace->status1 & 0x100u) ||
+            (CLEAN_RX_AMPDU_HANDOFF == 2 && trace->outcome == 2u)) &&
            (trace->status2 & 0x200u))) ||
         trace->length != CLEAN_PLCP_BYTES + CLEAN_HT_AMPDU_PROBE_MPDU) return 0u;
     uint32_t mask = 0u;
@@ -286,6 +383,7 @@ static inline int clean_ht_ampdu_probe_frame(uint8_t packet[CLEAN_HT_AMPDU_PROBE
         delimiter[2] = clean_ampdu_delimiter_crc(delimiter);
         delimiter[3] = 0x4eu;
         if (!clean_ht_ampdu_probe_mpdu(delimiter+4u,nonce,i)) return 0;
+        if (CLEAN_RX_AMPDU_BAD_FCS & (1u << i)) delimiter[4u+79u] ^= 0x80u;
     }
     return 1;
 }
@@ -383,6 +481,12 @@ static inline int clean_ht_rx_metadata(uint8_t rate, uint8_t flags, uint8_t vers
 /* Keep UNSUPPORTED set so legacy metadata consumers cannot mistake MCS for CCK. */
 static inline uint8_t clean_ht_rx_version(uint32_t enabled, uint16_t phy,
         const volatile uint8_t sig[6], uint32_t length) {
+#if CLEAN_RX_AMPDU_DMA
+    if (enabled && ((phy & 3u) == 1u || (phy & 3u) == 2u) &&
+        length == CLEAN_HT_AMPDU_PROBE_MPDU &&
+        clean_ht_ampdu_probe_sig_valid(sig, CLEAN_HT_AMPDU_PROBE_BYTES))
+        return CLEAN_HT_AMPDU_PROBE_VERSION;
+#endif
     return enabled && (phy & 3u) == 2u && clean_ht20_rx_sig_valid(sig, length) ?
         CLEAN_HT_DATA_VERSION : 0u;
 }

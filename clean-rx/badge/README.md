@@ -67,7 +67,7 @@ Block ACK or A-MPDU reception. Negotiated non-HT QoS station dispatch is
 separately enabled by the WMM gate.
 Bounded BA agreements, A-MPDU delimiter-stream parsing and ciphertext
 reordering now have native integration with WPA2 delivery. They are not
-called by the live station dispatcher: actual aggregate capture and
+called by the live station dispatcher: general live aggregate delivery and
 SIFS-timed Immediate BA are still missing, and negotiated HT stays disabled.
 See [the implementation boundary and tests](../dev-doc/BLOCK_ACK_IMPLEMENTATION.md).
 The separate `CLEAN_RX_AMPDU_PROBE=1` gate requires HT data and extended RX
@@ -75,11 +75,33 @@ and adds a finite, nonstation aggregate diagnostic. Use matching images
 and collector with `ht_probe.sh TX RX PREFIX MCS --ampdu-probe`.
 It submits one three-MPDU PPDU; reports distinguish a fresh individual
 capture from all subframes retained and keep BA/HT qualification false.
-An additional `CLEAN_RX_AMPDU_INTERFACE=3` diagnostic now retains two
-complete MPDUs at MCS0; the third loses four leading bytes. Values 1/2
-provide passive post-completion/body timelines. All default to disabled.
+With `CLEAN_RX_AMPDU_INTERFACE=3`, `CLEAN_RX_AMPDU_HANDOFF=2` now retains
+all three complete MPDUs at MCS0..7 in both directions. It avoids repeating
+the prefix/body split and continues after bad per-MPDU FCS. Handoff 1
+traces the old lossy prefix transition. Optional three-bit
+`CLEAN_RX_AMPDU_BAD_FCS` injects controlled FCS faults only in handoff 2;
+invalid snapshots never contribute to the reported sequence bitmap.
+Interface values 1/2 provide passive post/body timelines. All default to
+disabled; the three-slot fixture is not general station delivery or BA.
+The additional default-disabled `CLEAN_RX_AMPDU_DMA=1` gate requires
+probe/interface-3/handoff-2 and publishes individual fixture MPDUs through
+the actual D11 DMA/SRAM/F2 path. Currently only sequences 0 and 1 arrive;
+the final MPDU is still missing. The collector independently checks saved
+delivered payloads, not just capture counters. `actual_multi_mpdu_delivery`
+can therefore be true while `all_subframes_delivered`, `immediate_ba`,
+`sifs_timing_qualified` and `ht_qualified` remain false. This is still a
+bounded experiment, not production station/BA integration.
 See [interface profiles and measured limitations](../dev-doc/AMPDU_INTERFACE_INVESTIGATION.md).
 See [build commands, evidence layout and failed continuations](../dev-doc/AMPDU_RADIO_INVESTIGATION.md).
+The first D2 PHY/association item is now split into completed software
+pieces and pending activation/qualification. A conservative unadvertised
+HT20 target IE, constrained AP/runtime MCS candidate and shared per-frame
+MCS/control/airtime configuration are native-tested. The collector exposes
+the target/candidate without claiming negotiation; default or HT-data-only
+builds explicitly suppress it. HT probe/data/ACK reports distinguish
+calculated airtime from OTA measurement. Actual HT advertisement and
+station activation remain disabled pending the mandatory live MAC.
+See [candidate policy and configuration](../doc/HT20.md#local-target-and-phy-configuration).
 The additional, default-disabled `CLEAN_RX_HT_RESPONSE=1` gate requires
 extended RX and adds pinned-radio QoS/HT normal-ACK response logic.
 `ht_probe.sh TX RX PREFIX MCS --ack` uses its matching `ht-ack` build for a
@@ -204,6 +226,14 @@ validated authentication/association responses. Merely building message 2,
 sending message 4, or observing the AP's authorization does not pass.
 `m2_sent`/`m4_sent` count completed controller submissions, not ACK confirmations.
 The TFT reports the verified protected exchange or an explicit failure.
+
+Station policy command completion is now an applied/readback-verified commit
+barrier, not acknowledgement of deferred queueing.
+`wmm_policy_committed_updates` counts completed commits; the older
+`wmm_policy_queued_updates` JSON name remains an equal compatibility alias.
+Readback, timeout and command-replacement failures are explicit. This does
+not enable HT advertisement or qualify the missing live MAC/BA obligations;
+see the [policy commit campaign](../dev-doc/EDCA_IMPLEMENTATION.md#readback-verified-policy-commit-campaign-2026-10-18).
 
 For a reproducible two-badge test, first load the vendor `usb-wifi-link` image
 on the AP and this image on the station, leaving both in BOOTSEL, then run:

@@ -767,8 +767,96 @@ static void pause_psm(void) {
     puts("MAC control: PSM pause preserves RX enable, filtering and all non-PSM control bits");
 }
 
+typedef struct {
+    uint16_t shm[0x1000u];
+    uint32_t count, writes, reads, fault;
+    uint8_t drop_write, corrupt_read;
+} response_memory_t;
+
+static void response_write(void *context, uint32_t word, uint16_t value) {
+    response_memory_t *m = context;
+    assert(m->writes < m->count && !m->reads);
+    assert(word == clean_response_rate_word(m->writes++));
+    if (word != m->fault || !m->drop_write) m->shm[word] = value;
+}
+
+static uint16_t response_read(void *context, uint32_t word) {
+    response_memory_t *m = context;
+    assert(m->writes == m->count && m->reads < m->count);
+    assert(word == clean_response_rate_word(m->reads++));
+    return m->shm[word] ^ (uint16_t)(word == m->fault && m->corrupt_read);
+}
+
+static void response_policy(void) {
+    uint16_t words[CLEAN_RESPONSE_RATE_WORDS], saved[CLEAN_RESPONSE_RATE_WORDS];
+    memset(words, 0xa5, sizeof(words));
+    memcpy(saved, words, sizeof(saved));
+    assert(!clean_response_rates_prepare(words, 0u, 0u));
+    assert(!clean_response_rates_prepare(words, 0x1000u, 0u));
+    assert(!clean_response_rates_prepare(words, 0x150u, 2u));
+    assert(!memcmp(words, saved, sizeof(words)));
+    for (uint32_t ht = 0u; ht < 2u; ++ht)
+        for (uint32_t basic = 1u; basic < 4096u; ++basic) {
+            assert(clean_response_rates_prepare(words, (uint16_t)basic, ht));
+            for (uint32_t i = 0u; i < 12u; ++i) {
+                uint8_t plcp[6]; uint16_t phy;
+                int rate = clean_ack_rate((uint16_t)basic, i);
+                assert(rate >= 0 && clean_ack_template(plcp, (uint32_t)rate, &phy));
+                assert(!memcmp(words + 4u*i, plcp, sizeof(plcp)));
+                assert(words[4u*i + 3u] == phy);
+                assert(words[48u + i] == clean_ack_airtime_us((uint16_t)basic, i));
+            }
+            if (!ht) for (uint32_t i = CLEAN_RESPONSE_LEGACY_WORDS;
+                          i < CLEAN_RESPONSE_RATE_WORDS; ++i) assert(!words[i]);
+        }
+    assert(clean_response_rates_prepare(words, 0x150u, 1u));
+    static const uint16_t airtime[8] = {50u,38u,38u,34u,34u,34u,34u,34u};
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        uint32_t at = CLEAN_RESPONSE_LEGACY_WORDS + CLEAN_HT_ACK_RECORD_WORDS*i;
+        assert(words[at + 4u] == 0x41u && words[at + 5u] == airtime[i]);
+    }
+    for (uint32_t ht = 0u; ht < 2u; ++ht) {
+        uint32_t count = ht ? CLEAN_RESPONSE_RATE_WORDS : CLEAN_RESPONSE_LEGACY_WORDS;
+        for (uint32_t fault = 0u; fault <= 2u*count; ++fault) {
+            response_memory_t m;
+            memset(&m, 0, sizeof(m));
+            memset(m.shm, 0xa5, sizeof(m.shm));
+            m.count = count;
+            m.fault = fault < 2u*count ? clean_response_rate_word(fault/2u) : 0u;
+            m.drop_write = (uint8_t)(fault < 2u*count && !(fault & 1u));
+            m.corrupt_read = (uint8_t)(fault < 2u*count && (fault & 1u));
+            clean_response_io_t io = {.read=response_read, .write=response_write, .context=&m};
+            int result = clean_response_rates_install(&io, 0x150u, ht);
+            assert(result == (fault == 2u*count));
+            assert(m.writes == count);
+            if (result) {
+                assert(m.reads == count);
+                for (uint32_t i = 0u; i < 0x1000u; ++i) {
+                    if (i >= CLEAN_ACK_TABLE && i < CLEAN_ACK_TABLE + CLEAN_RESPONSE_LEGACY_WORDS)
+                        assert(m.shm[i] == words[i - CLEAN_ACK_TABLE]);
+                    else if (ht && i >= CLEAN_HT_ACK_TABLE &&
+                             i < CLEAN_HT_ACK_TABLE + 8u*CLEAN_HT_ACK_RECORD_WORDS)
+                        assert(m.shm[i] == words[CLEAN_RESPONSE_LEGACY_WORDS + i - CLEAN_HT_ACK_TABLE]);
+                    else assert(m.shm[i] == 0xa5a5u);
+                }
+            } else {
+                assert(io.failed_word == m.fault && m.reads == fault/2u + 1u);
+                assert(io.actual == (m.drop_write ? 0xa5a5u :
+                    (uint16_t)(words[fault/2u] ^ 1u)));
+            }
+        }
+        response_memory_t m;
+        memset(&m, 0, sizeof(m));
+        clean_response_io_t io = {.read=response_read, .write=response_write, .context=&m};
+        assert(!clean_response_rates_install(&io, 0u, ht));
+        assert(!m.reads && !m.writes && !io.failed_word && !io.actual);
+    }
+    puts("Policy response tables: all 4095 basic-rate masks, legacy/HT tables, complete write-before-read, every dropped write/corrupt read, invalid-input atomicity and held-capture preservation pass; NOT SIFS qualification");
+}
+
 int main(void) {
     pause_psm();
+    response_policy();
     fcs_reference();
     contention();
     edca();

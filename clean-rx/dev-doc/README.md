@@ -27,8 +27,9 @@ firmware.
   delimiter-stripped first-MPDU capture, bounded diagnostic evidence,
   unsuccessful continuation trials and remaining aggregate/EOF requirements.
 - [Next-MPDU/aggregate-terminal interface](AMPDU_INTERFACE_INVESTIGATION.md):
-  separate early/terminal events, reproducible two-MPDU capture, preserved
-  short final frame, passive timelines and remaining boundary/EOF limits.
+  separate early/terminal events, fixed one-copy handoff retaining all
+  three diagnostic MPDUs at all MCS in both directions, controlled
+  bad-FCS continuation, passive timelines and remaining live/BA limits.
 - [AP authentication and RX staging investigation](AP_AUTHENTICATION_INVESTIGATION.md):
   independently observed missing replies, timing/rate controls, bounded
   station receive FIFO, legacy regressions, matched-amplitude HT replays

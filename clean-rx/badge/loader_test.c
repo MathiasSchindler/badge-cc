@@ -26,6 +26,8 @@ static int f2_second_error, f2_cancel_next;
 static int f2_check_credit;
 static uint32_t f2_expected_credit;
 static uint8_t ram[0x80000u];
+static uint32_t command_delay, command_reads;
+static int command_simulated, command_replaced;
 
 static uint32_t now(void *context) {
     (void)context;
@@ -103,6 +105,14 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
     }
     uint32_t absolute = base | (addr & 0x7fffu);
     assert(addr & 0x8000u);
+    if (command_simulated && !(cmd >> 31u) && absolute == CLEAN_MBOX + 24u) {
+        assert(count == 4u && rx_length == 4u + WIFI_GSPI_BACKPLANE_PAD);
+        memset(rx, 0, rx_length);
+        uint32_t value = command_replaced ? 8u : command_reads++ < command_delay ?
+            CLEAN_WMM_POLICY_CMD : 2u;
+        badger_bytes_store_u32(rx + WIFI_GSPI_BACKPLANE_PAD, value);
+        return WIFI_BUS_OK;
+    }
     if (ack_error && (cmd >> 31u) && absolute == CLEAN_MBOX + CLEAN_SDIO_ACK_OFFSET)
         return WIFI_BUS_TRANSFER_TIMEOUT;
     if (!(cmd >> 31u) && count == 4u &&
@@ -552,6 +562,11 @@ static void ht_probe_tests(void) {
             assert(controls.phyctl == 0x42u && controls.phyctl1 == phyctl1[mcs]);
             assert(controls.mmplcp[0] == 0xbu);
             assert(controls.mmplcp[1] == 3u * symbols + 9u);
+            clean_ht20_config_t config;
+            assert(clean_ht20_configure(&config,length,mcs,CLEAN_HT20_MCS_MASK));
+            assert(!memcmp(&config.controls,&controls,sizeof(controls)) &&
+                   config.symbols==symbols && config.airtime_us==42u+4u*symbols &&
+                   config.rate_kbps==250u*n && config.mcs==mcs);
             uint32_t signal = lsig[0] | ((uint32_t)lsig[1] << 8u) | ((uint32_t)lsig[2] << 16u);
             assert((signal & 31u) == 0xbu && (signal >> 18u) == 0u);
             assert(((signal >> 5u) & 4095u) == 3u * symbols + 9u);
@@ -700,7 +715,8 @@ static void ht_boundaries(void) {
         assert(clean_station_beacon(beacon, at + 4u, ap.bssid, &parsed) ==
                (secured ? CLEAN_AP_PSK_CCMP : CLEAN_AP_OPEN));
         assert(parsed.ht.capabilities && parsed.ht.operation && parsed.ht.wmm.present);
-        assert(clean_ht_peer_fallback(&parsed.ht, 1u) == CLEAN_HT_FALLBACK_MAC);
+        assert(clean_ht_peer_fallback(&parsed.ht, 1u) == (CLEAN_HT_FALLBACK_MAC |
+               (CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 0u : CLEAN_HT_FALLBACK_LOCAL_PHY)));
         uint32_t wmm_length = clean_station_associate(fallback, 0x123u, own, &parsed);
         assert(wmm_length == length + (CLEAN_RX_WMM ? 9u : 0u));
         assert(clean_frame_valid(fallback + 6u, wmm_length - 6u));
@@ -978,6 +994,53 @@ static void eapol_tests(uint8_t evidence[2048]) {
     }
 }
 
+static void command_completion(const wifi_wire_t *wire) {
+    clean_loader_t l;
+    command_simulated = 1;
+    state = 9u;
+    for (uint32_t delay = 0u; delay <= 64u; ++delay) {
+        command_delay = delay; command_reads = 0u;
+        clean_loader_init(&l, wire, service, NULL);
+        assert(clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 100000u));
+        assert(l.error == CLEAN_OK && command_reads == delay + 1u);
+    }
+    ticks = UINT32_MAX - 8u;
+    command_delay = 64u; command_reads = 0u;
+    clean_loader_init(&l, wire, service, NULL);
+    assert(clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 100000u) && ticks < 1000u);
+    command_delay = UINT32_MAX; command_reads = 0u;
+    clean_loader_init(&l, wire, service, NULL);
+    assert(!clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 100u));
+    assert(l.error == CLEAN_TIMEOUT && l.address == CLEAN_MBOX + 24u &&
+           l.actual == CLEAN_WMM_POLICY_CMD);
+    command_replaced = 1;
+    clean_loader_init(&l, wire, service, NULL);
+    assert(!clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 100u));
+    assert(l.error == CLEAN_CONTROLLER && l.address == CLEAN_MBOX + 24u && l.actual == 8u);
+    command_replaced = 0; command_delay = 0u;
+    state = 10u;
+    clean_loader_init(&l, wire, service, NULL);
+    assert(!clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 100u));
+    assert(l.error == CLEAN_CONTROLLER && l.address == CLEAN_MBOX + 4u && l.actual == 10u);
+    state = 9u;
+    cancel = 1;
+    clean_loader_init(&l, wire, service, NULL);
+    assert(!clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 100u) && l.error == CLEAN_CANCELLED);
+    cancel = 0; bus_error = 1;
+    clean_loader_init(&l, wire, service, NULL);
+    assert(!clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 100u) && l.error == CLEAN_BUS);
+    bus_error = 0;
+    clean_loader_init(&l, wire, service, NULL);
+    uint32_t before = calls;
+    assert(!clean_wait_command(&l, 2u, 100u) && l.error == CLEAN_INPUT && calls == before);
+    clean_loader_init(&l, wire, service, NULL);
+    assert(!clean_wait_command(&l, CLEAN_WMM_POLICY_CMD, 0u) && l.error == CLEAN_INPUT &&
+           calls == before);
+    command_simulated = 0; command_reads = command_delay = 0u;
+    state = ticks = 0u;
+    puts("Controller command completion: delayed commit, timeout, replacement, failed controller, cancellation, bus error and timer wrap pass");
+}
+
 int main(void) {
     cck_rates();
     ht_probe_tests();
@@ -985,6 +1048,7 @@ int main(void) {
     station_tests();
     wifi_wire_t wire = {.now_us = now, .transfer = mock_transfer,
         .write = write_signal, .data_output = output, .read_data = read_signal};
+    command_completion(&wire);
     fragments(&wire);
     ht_transport(&wire);
     protected_aggregate_transport(&wire);

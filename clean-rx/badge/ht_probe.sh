@@ -167,9 +167,17 @@ if [[ $mode == ampdu-probe ]]; then
           local_tx_submission:$tx[0].local_tx_submission,
           fresh_radio_capture:$rx[0].fresh_radio_capture,
           retained_subframe_bitmap:$rx[0].retained_subframe_bitmap,
+          fixture_bad_fcs_mask:$tx[0].fixture_bad_fcs_mask,
           multi_mpdu_radio_capture:$rx[0].multi_mpdu_radio_capture,
           all_subframes_retained:($rx[0].retained_subframe_bitmap==7),
-          actual_multi_mpdu_delivery:false,immediate_ba:false,ht_qualified:false}' \
+          dma_experiment_enabled:$rx[0].dma_experiment_enabled,
+          delivered_subframe_bitmap:$rx[0].delivered_subframe_bitmap,
+          delivered_subframes:$rx[0].delivered_subframes,
+          actual_multi_mpdu_delivery:($tx[0].local_tx_submission and
+                                     $rx[0].actual_multi_mpdu_delivery),
+          all_subframes_delivered:($tx[0].local_tx_submission and
+                                  $rx[0].all_subframes_delivered),
+          immediate_ba:false,sifs_timing_qualified:false,ht_qualified:false}' \
         | tee "$prefix-pair.json"
     exit "$?"
 fi

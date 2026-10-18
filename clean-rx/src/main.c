@@ -5,6 +5,7 @@
 #include "unicast.h"
 #include "mac.h"
 #include "ht20.h"
+#include "../../src/shared/bytes.h"
 #ifdef CLEAN_SDIO_SELF_TEST
 #include "sdio_test.h"
 #endif
@@ -73,9 +74,11 @@ static uint8_t capture_prepared;
 static uint32_t rx_published_frames;
 static uint8_t policy_pending, policy_short_slot, policy_response;
 static uint16_t policy_basic;
+static uint32_t policy_command;
 static uint16_t cts_sampled, short_sampled, ack_sampled;
 static uint16_t kinds_sampled[4];
 static clean_tx_diag_t tx_diag;
+static void station_publish_mac(void);
 
 static void publish_tx_diag(void) {
     const uint8_t *bytes = (const uint8_t *)&tx_diag;
@@ -404,7 +407,9 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
         pkt[16] = clean_rx_phy_metadata(slot->phy_status0, slot->rxe_status2, channel);
         pkt[17] = clean_ht_rx_version(CLEAN_RX_HT_DATA, slot->phy_status0,
                                       slot->raw + 2u, mpdu_len);
-        if (pkt[17]) pkt[16] |= CLEAN_RX_HT20;
+        if (pkt[17] == CLEAN_HT_AMPDU_PROBE_VERSION)
+            pkt[16] = CLEAN_RX_HT20 | CLEAN_RX_UNSUPPORTED_PHY | (uint8_t)channel;
+        else if (pkt[17]) pkt[16] |= CLEAN_RX_HT20;
 
         if (fragments > 1u) {
             pkt[18] = (uint8_t)mpdu_len;
@@ -555,73 +560,116 @@ static void station_hw_slot(void) {
     shm_write16(CLEAN_DCF_EIFS_US, 314u);
 }
 
+static uint16_t station_response_read(void *context, uint32_t word) {
+    (void)context;
+    return shm_read16(word);
+}
+
+static void station_response_write(void *context, uint32_t word, uint16_t value) {
+    (void)context;
+    shm_write16(word, value);
+}
+
 static int station_response_rates(uint16_t basic) {
-    for (uint32_t i = 0u; i < 12u; ++i) {
-        uint8_t plcp[6];
-        uint16_t phyctl1;
-        if (!clean_ack_template(plcp, (uint32_t)clean_ack_rate(basic, i), &phyctl1))
-            return fail(0x85u, FW_TX_BUF_ADDR, i);
-        for (uint32_t w = 0u; w < 3u; ++w)
-            shm_write16(CLEAN_ACK_TABLE + 4u*i + w,
-                (uint16_t)((uint16_t)plcp[2u*w] | ((uint16_t)plcp[2u*w + 1u] << 8u)));
-        shm_write16(CLEAN_ACK_TABLE + 4u*i + 3u, phyctl1);
-        shm_write16(CLEAN_ACK_AIRTIME + i, (uint16_t)clean_ack_airtime_us(basic, i));
-    }
-    if (CLEAN_RX_HT_RESPONSE) {
-        for (uint32_t i = 0u; i < 8u; ++i) {
-            uint8_t plcp[6];
-            uint16_t phyctl1;
-            int rate = clean_ht_ack_rate(basic, i);
-            if (rate < 0 || !clean_ack_template(plcp, (uint32_t)rate, &phyctl1))
-                return fail(0x85u, FW_TX_BUF_ADDR, i);
-            uint32_t base = CLEAN_HT_ACK_TABLE + CLEAN_HT_ACK_RECORD_WORDS * i;
-            for (uint32_t w = 0u; w < 3u; ++w)
-                shm_write16(base + w, (uint16_t)(plcp[2u*w] |
-                    ((uint16_t)plcp[2u*w + 1u] << 8u)));
-            shm_write16(base + 3u, phyctl1);
-            shm_write16(base + 4u, rate < 4 ? 0x40u : 0x41u);
-            shm_write16(base + 5u, (uint16_t)(rate < 4 ?
-                clean_cck_airtime_us(14u, (uint32_t)rate, 0u) :
-                clean_ofdm_airtime_us(14u, (uint32_t)rate - 4u)));
-        }
-    }
-    return 1;
+    clean_response_io_t io = {.read = station_response_read, .write = station_response_write,
+                              .context = 0};
+    if (clean_response_rates_install(&io, basic, CLEAN_RX_HT_RESPONSE)) return 1;
+    return fail(0x85u, io.failed_word ? io.failed_word : FW_TX_BUF_ADDR, io.actual);
+}
+
+static int station_policy_boundary(uint16_t state) {
+    return station_rx_idle(state) || state == PSM_STATE_CAPTURED;
+}
+
+static int station_policy_word(uint32_t word, uint16_t expected) {
+    uint16_t actual = shm_read16(word);
+    return actual == expected ? 1 : fail(0x85u, word, actual);
 }
 
 static void station_apply_policy(uint32_t mac_en) {
-    if (!policy_pending || !station_rx_idle(shm_read16(0x601u))) return;
+    if (!policy_pending || !station_policy_boundary(shm_read16(0x601u))) return;
+    uint32_t now = mac_now();
+    clean_edca_t next_edca;
+    badger_bytes_copy((uint8_t *)&next_edca, (const uint8_t *)&station_edca, sizeof(next_edca));
+    clean_dcf_t next_legacy, previous;
+    badger_bytes_copy((uint8_t *)&next_legacy, (const uint8_t *)&station_legacy_dcf,
+                      sizeof(next_legacy));
+    badger_bytes_copy((uint8_t *)&previous, (const uint8_t *)&station_dcf, sizeof(previous));
+    if (policy_edca_pending) {
+        if (!clean_edca_configure(&next_edca, policy_edca, now,
+                                  previous.random, policy_short_slot)) {
+            fail(0x85u, FW_TX_BUF_ADDR, policy_command);
+            return;
+        }
+        for (uint32_t i = 0u; i < 4u; ++i) {
+            clean_dcf_t *d = &next_edca.ac[i];
+            uint32_t remaining = previous.nav_until - now;
+            if (previous.nav_valid && remaining && remaining <= 32767u)
+                clean_dcf_nav(d, now, (uint16_t)remaining);
+            if (previous.ifs_us > 10u + previous.aifsn * previous.slot_us)
+                clean_dcf_bad_rx(d, now);
+        }
+    } else if (next_edca.enabled) {
+        for (uint32_t i = 0u; i < 4u; ++i)
+            clean_dcf_slot(&next_edca.ac[i], now, policy_short_slot);
+    } else clean_dcf_slot(&next_legacy, now, policy_short_slot);
     mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
-    (void)mmio_read32(D11_MACCONTROL);
-    if (station_rx_idle(shm_read16(0x601u)) && !station_phy_busy()) {
-        if (station_response_rates(policy_basic)) {
-            uint32_t now = mac_now();
-            if (policy_edca_pending) {
-                clean_dcf_t previous = station_dcf;
-                if (!clean_edca_configure(&station_edca, policy_edca, now,
-                                          previous.random, policy_short_slot)) {
-                    fail(0x85u, FW_TX_BUF_ADDR, CLEAN_EDCA_CMD);
-                    return;
-                }
-                for (uint32_t i = 0u; i < 4u; ++i) {
-                    clean_dcf_t *d = &station_edca.ac[i];
-                    uint32_t remaining = previous.nav_until - now;
-                    if (previous.nav_valid && remaining && remaining <= 32767u)
-                        clean_dcf_nav(d, now, (uint16_t)remaining);
-                    if (previous.ifs_us > 10u + previous.aifsn * previous.slot_us)
-                        clean_dcf_bad_rx(d, now);
-                }
-                policy_edca_pending = 0u;
-                station_hw_backoff();
-            } else if (station_edca.enabled) {
-                for (uint32_t i = 0u; i < 4u; ++i)
-                    clean_dcf_slot(&station_edca.ac[i], now, policy_short_slot);
-            } else clean_dcf_slot(&station_dcf, now, policy_short_slot);
-            station_hw_slot();
-            shm_write16(CLEAN_QOS_RESPONSE_POLICY, policy_response);
-            policy_pending = 0u;
+    uint32_t control = mmio_read32(D11_MACCONTROL);
+    if ((control & 3u) != (clean_mac_pause_psm(mac_en) & 3u)) {
+        fail(0x85u, D11_MACCONTROL, control);
+        return;
+    }
+    if (!station_policy_boundary(shm_read16(0x601u)) || station_phy_busy()) {
+        mmio_write32(D11_MACCONTROL, mac_en);
+        return;
+    }
+    if (station_hw && !policy_edca_pending) {
+        uint16_t slots = shm_read16(CLEAN_DCF_SLOTS);
+        if (slots > CLEAN_DCF_MAX_SLOTS) {
+            fail(0x85u, CLEAN_DCF_SLOTS, slots);
+            return;
+        }
+        if (next_edca.enabled) next_edca.ac[next_edca.selected].slots = slots;
+        else next_legacy.slots = slots;
+    }
+    if (!station_response_rates(policy_basic)) return;
+    for (uint32_t i = 0u; i < 3u; ++i)
+        if (!station_policy_word(0x612u + i, (uint16_t)(station_address[2u*i] |
+                ((uint16_t)station_address[2u*i + 1u] << 8u))) ||
+            !station_policy_word(CLEAN_ACK_PEER + i, (uint16_t)(station_peer[2u*i] |
+                ((uint16_t)station_peer[2u*i + 1u] << 8u)))) return;
+    badger_bytes_copy((uint8_t *)&station_edca, (const uint8_t *)&next_edca, sizeof(station_edca));
+    badger_bytes_copy((uint8_t *)&station_legacy_dcf, (const uint8_t *)&next_legacy,
+                      sizeof(station_legacy_dcf));
+    station_hw_slot();
+    station_hw_backoff();
+    shm_write16(CLEAN_QOS_RESPONSE_POLICY, policy_response);
+    if (!station_policy_word(CLEAN_QOS_RESPONSE_POLICY, policy_response)) return;
+    if (station_hw &&
+        (!station_policy_word(CLEAN_DCF_SLOT_US, station_dcf.slot_us) ||
+         !station_policy_word(CLEAN_DCF_DIFS_US,
+             (uint16_t)(10u + station_dcf.aifsn * station_dcf.slot_us)) ||
+         !station_policy_word(CLEAN_DCF_EIFS_US, 314u) ||
+         !station_policy_word(CLEAN_DCF_SLOTS, station_dcf.slots) ||
+         !station_policy_word(CLEAN_DCF_IDLE_VALID, 0u))) return;
+    if (station_hw) {
+        uint16_t slot = mmio_read16(D11_BASE + 0x684u);
+        if (slot != 0x1feu + station_dcf.slot_us) {
+            fail(0x85u, D11_BASE + 0x684u, slot);
+            return;
         }
     }
+    policy_edca_pending = policy_pending = 0u;
+    station_publish_mac();
+    __asm__ volatile("dsb" ::: "memory");
     mmio_write32(D11_MACCONTROL, mac_en);
+    control = mmio_read32(D11_MACCONTROL);
+    if ((control & 3u) != (mac_en & 3u)) {
+        fail(0x85u, D11_MACCONTROL, control);
+        return;
+    }
+    MBOX->host_cmd = 2u;
+    __asm__ volatile("dsb" ::: "memory");
 }
 
 static void snapshot_dcf_trace(void) {
@@ -808,6 +856,51 @@ static int station_publish_capture(uint32_t channel) {
     return 1;
 }
 
+#if CLEAN_RX_AMPDU_DMA
+static int ampdu_dma_receive(uint32_t rx_start) {
+    uint32_t status = mmio_read32(D11_RX_DMA_STATUS0);
+    uint32_t current = ((status & 0x1fffu) -
+        (FW_D11_DMA_RING_ADDR & 0x1fffu)) >> 4u;
+    if (current >= 32u) return fail(0x8du, D11_RX_DMA_STATUS0, status);
+    if (current == dma_consumer) return 1;
+    const volatile uint8_t *buf = (const volatile uint8_t *)(uintptr_t)
+        (FW_D11_DMA_BUF_ADDR + dma_consumer * FW_D11_DMA_BUF_BYTES);
+    __asm__ volatile("dsb" ::: "memory");
+    uint16_t outcome = (uint16_t)(buf[2] | ((uint16_t)buf[3] << 8u));
+    if (!outcome) return 1;
+    uint32_t total = MULTI->captured_frames;
+    int credit = clean_sdio_credit_available(total, rx_published_frames, FW_MAX_FRAMES);
+    if (credit < 0) return fail(0x8cu, FW_MULTI_ADDR, total - rx_published_frames);
+    if (!credit) return 1;
+    volatile fw_frame_slot_t *slot = &MULTI->frames[total & (FW_MAX_FRAMES - 1u)];
+    int decoded = clean_ht_ampdu_dma_decode(buf, FW_D11_DMA_BUF_BYTES, slot->raw);
+    if (decoded == CLEAN_AMPDU_DMA_BAD) {
+        (void)rx_dma_poll_and_reclaim(0);
+        return 1;
+    }
+    if (decoded != CLEAN_AMPDU_DMA_GOOD) {
+        uint32_t error = decoded == CLEAN_AMPDU_DMA_FCS_ERROR ? 0x8eu :
+            decoded == CLEAN_AMPDU_DMA_PREFIX_ERROR ? 0x8fu : 0x8du;
+        return fail(error, FW_D11_DMA_BUF_ADDR +
+                    dma_consumer * FW_D11_DMA_BUF_BYTES + 38u,
+                    (uint32_t)buf[0] | ((uint32_t)buf[1] << 8u));
+    }
+    slot->frame_index = (uint16_t)(total + 1u);
+    slot->rxe_len = CLEAN_HT_AMPDU_PROBE_MPDU + CLEAN_PLCP_BYTES;
+    slot->rxe_status1 = 0u;
+    slot->rxe_status2 = 0u;
+    slot->phy_status0 = (uint16_t)(buf[4] | ((uint16_t)buf[5] << 8u));
+    slot->rx_tick_hi = (uint16_t)((ARM_CYCLE_COUNTER - rx_start) >> 16u);
+    slot->f2_received = 0u;
+    slot->f2_sdpcm_len = 0u;
+    if (!rx_dma_poll_and_reclaim(slot))
+        return fail(0x8du, D11_RX_DMA_STATUS0, status);
+    __asm__ volatile("dsb" ::: "memory");
+    MULTI->captured_frames = total + 1u;
+    return 1;
+}
+#endif
+
 /* Template preparation is deliberately outside the contention interval. The
  * PSM may answer RX while waiting; in that case its TXE setup takes precedence. */
 static int station_edca_select(uint32_t mac_en, uint32_t tid, uint32_t exchange_us) {
@@ -898,13 +991,15 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         uint32_t aggregate_probe = ht_probe == 2u && CLEAN_RX_AMPDU_PROBE &&
             ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_AMPDU_PROBE_VERSION;
         uint32_t ht_length = total_len - CLEAN_PLCP_BYTES;
+        clean_ht20_config_t config;
         if (!(ht_probe == 2u ? CLEAN_RX_HT_DATA : CLEAN_RX_HT_PROBE) ||
             !(aggregate_probe ? clean_ht_ampdu_probe_sig_valid(tx_buf, ht_length) :
                                 clean_ht20_sig_valid(tx_buf, ht_length)) ||
-            !clean_ht20_tx_controls(&ht_tx, ht_length, tx_buf[0]))
+            !clean_ht20_configure(&config, ht_length, tx_buf[0], CLEAN_HT20_MCS_MASK))
             return fail(0x83u, FW_TX_BUF_ADDR, total_len);
-        phyctl1 = clean_ht20_rates[tx_buf[0]].phyctl1;
-        ofdm_airtime = clean_ht20_airtime_us(ht_length, tx_buf[0]);
+        ht_tx = config.controls;
+        phyctl1 = config.controls.phyctl1;
+        ofdm_airtime = config.airtime_us;
     } else if (is_ofdm) {
         int rate = clean_ofdm_rate_index(tx_buf[0]);
         if (rate < 0 || !clean_ofdm_plcp_valid(tx_buf, total_len - CLEAN_PLCP_BYTES))
@@ -1272,6 +1367,10 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
         shm_write16(CLEAN_AMPDU_IF_SHM + i, 0u);
     ((volatile clean_ampdu_interface_t *)CLEAN_AMPDU_IF_ADDR)->magic = 0u;
 #endif
+#if CLEAN_RX_AMPDU_DMA
+    shm_write16(CLEAN_AMPDU_DMA_PENDING, 0u);
+    shm_write16(CLEAN_AMPDU_DMA_SUBMITTED, 0u);
+#endif
     volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
     for (uint32_t i = 0u; i < 4u; ++i) tail[i] = 0u;
     volatile uint8_t *ht_bytes = (volatile uint8_t *)HT_RX;
@@ -1552,7 +1651,15 @@ void cyw43_main(void) {
             station_publish_mac();
         }
         uint32_t cmd = MBOX->host_cmd;
+#if CLEAN_RX_AMPDU_DMA
+        if (!station_mac &&
+            (!ampdu_dma_receive(rx_start) || !station_publish_capture(channel))) break;
+#endif
         if (station_mac) {
+            if (policy_pending && cmd != policy_command) {
+                fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+                break;
+            }
             if (!station_publish_capture(channel)) break;
             if (capture_target_reached &&
                 MULTI->captured_frames == rx_published_frames) break;
@@ -1569,6 +1676,7 @@ void cyw43_main(void) {
                 shm_write16(CLEAN_CTS_ALLOWED, 1u);
             station_apply_policy(mac_en);
             if (MBOX->fw_state == FW_STATE_ERROR) break;
+            cmd = policy_pending ? 2u : MBOX->host_cmd;
         }
         if (station_enabled && shm_read16(CLEAN_ACK_ERROR)) {
             fail(0x87u, CLEAN_ACK_ERROR, shm_read16(CLEAN_ACK_ERROR));
@@ -1869,6 +1977,7 @@ void cyw43_main(void) {
             policy_basic = basic;
             policy_short_slot = p[14];
             policy_response = policy_pending = 0u;
+            policy_command = 0u;
             station_edca.enabled = policy_edca_pending = 0u;
             shm_write16(CLEAN_ACK_WAITING, 0u);
             shm_write16(CLEAN_ACK_SEEN, 0u);
@@ -1940,8 +2049,7 @@ void cyw43_main(void) {
                 policy_edca_pending = 1u;
             }
             policy_pending = 1u;
-            MBOX->host_cmd = 2u;
-            __asm__ volatile("dsb" ::: "memory");
+            policy_command = cmd;
             continue;
         }
         if ((cmd & 0xffu) == CLEAN_HT_RESPONSE_CMD) {
@@ -1953,8 +2061,7 @@ void cyw43_main(void) {
             }
             policy_response = (uint8_t)policy;
             policy_pending = 1u;
-            MBOX->host_cmd = 2u;
-            __asm__ volatile("dsb" ::: "memory");
+            policy_command = cmd;
             continue;
         }
         if ((cmd & 0xffu) == CLEAN_EDCA_CMD) {
@@ -1966,8 +2073,7 @@ void cyw43_main(void) {
                 break;
             }
             policy_edca_pending = policy_pending = 1u;
-            MBOX->host_cmd = 2u;
-            __asm__ volatile("dsb" ::: "memory");
+            policy_command = cmd;
             continue;
         }
         if ((cmd & 0xffu) == 9u) {
@@ -2141,6 +2247,9 @@ void cyw43_main(void) {
             }
             capture_prepared = 0u;
             MULTI->captured_frames = total + 1u;
+#if CLEAN_RX_AMPDU_DMA
+            rx_published_frames = total + 1u;
+#endif
             if (!scanner_mode && total + 1u >= target_frames)
                 break;
             shm_write16(0x601u, 0u);

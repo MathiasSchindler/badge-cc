@@ -41,7 +41,7 @@ The additional default-off `CLEAN_RX_WMM=1` gate negotiates non-HT WMM
 without HT capability advertisement. A usable beacon Parameter element
 permits a WMM Information request with no U-APSD. Accepted association
 response parameters, basic rates, short-slot policy and QoS-only ACKs
-are installed together through command 16 at an idle RX/response boundary.
+are installed together through command 16 at a quiescent RX/response boundary.
 Beacon changes use the same atomic payload. Withdrawal, unsupported
 parameters and information-only responses after an offer fail explicitly.
 An association response omitting WMM remains a legacy association.
@@ -53,9 +53,121 @@ after negotiation and retains its original non-QoS behavior otherwise.
 This is not a general application TX queue, TSPEC implementation or
 negotiated HT/Block ACK/aggregation support.
 
-Command completion acknowledges deferred queueing. The EDCA status reports
-the selected parameters, including an actual SHM readback of programmed
-PSM AIFS. It does not measure on-air spacing.
+Command completion now acknowledges an applied, readback-verified policy,
+not deferred queueing. Commands 8, 14, 15 and 16 retain their mailbox command
+until commit; a different command while one is pending is an explicit
+controller error. The receiver continues servicing retained captures while
+waiting. A held complete capture is also a valid commit boundary once the
+response/PHY is quiescent; its bytes and ownership are not changed.
+
+The controller prepares software contention state before publication, pauses
+PSM, rechecks the boundary, writes all response-rate/airtime records, and reads
+every programmed word back. It also verifies the pinned addresses, QoS response
+policy and PSM slot/AIFS/EIFS/backoff fields. Only then does it resume PSM and
+acknowledge the command. A policy-data verification failure leaves PSM paused and reports
+the failing word/value instead of acknowledging a partially installed policy.
+Updates which do not reconfigure EDCA preserve the current hardware backoff
+slots, rather than restarting from a stale software sample. PSM pause/resume
+and the hardware slot register also require matching readback.
+
+The host waits on that exact command and reports timeout, cancellation, bus,
+controller or unexpected-command failures. The EDCA status reports the
+selected parameters, including an actual SHM readback of programmed PSM AIFS.
+It does not measure on-air spacing. `wmm_policy_committed_updates` counts
+successful station-side commits; `wmm_policy_queued_updates` remains an equal
+compatibility alias in matching current builds. Historical evidence below
+predates this stronger completion contract.
+
+## Readback-verified policy commit campaign (2026-10-18)
+
+This implements an activation **prerequisite**, not actual HT activation.
+There is still no live aggregate/Immediate BA station path, qualified
+receive-size/protection implementation or real HT association advertisement.
+The unconditional mandatory-MAC fallback remains in place. No readiness
+override or new way to advertise the target capability IE was added.
+
+The former mailbox success meant that a policy was queued. The station could
+therefore publish its accepted profile or send its next frame before the
+controller applied that policy. The stronger completion contract above removes
+that gap for the existing legacy/WMM and diagnostic response/EDCA policies.
+It does not supply the missing HT activation transaction or its lifecycle.
+
+### Software validation
+
+Three isolated controller/badge profiles pass `all test`: default, full
+HT-data/extended-RX/response/EDCA/WMM, and finite aggregate interface-3/handoff-2.
+Their existing native and ASan/UBSan suites pass. All six firmware ELFs have
+no undefined symbols.
+
+New response-table tests cover all 4,095 nonempty basic-rate masks with and
+without HT responses, independent airtime vectors, write-all-before-read order,
+all 336 dropped-write/corrupted-read cases, invalid-input nonpublication, and
+preservation of SHM outside the response tables, including capture storage.
+Host command tests cover immediate/delayed completion, unexpected replacement,
+controller failure despite an apparent acknowledgement, timeout, cancellation,
+bus failure and timer wrap.
+
+The first link exposed compiler-generated `__aeabi_memcpy` from contention
+structure assignments. Reusing the existing byte-copy helper removed that
+dependency; no libc or new runtime implementation was added. Initial failed
+link logs are retained.
+
+Builds are `build/clean-rx-d2-policy-{default,wmm,handoff}/` and
+`build/clean-rx/badge/d2-policy-{default,wmm,handoff}/`. Logs are
+`build/clean-rx/badge/d2-policy-{default,wmm,handoff}-{controller,badge}.log`.
+Use the existing controller/badge `all test` commands with these isolated
+directories and the corresponding build flags; the finite handoff flags are
+unchanged from the [interface investigation](AMPDU_INTERFACE_INVESTIGATION.md).
+
+### Final radio results
+
+Final WMM build `fbfe4a23`, default build `8c4605c1`:
+
+| Prefix under `build/clean-rx/badge/` | Result |
+| --- | --- |
+| `d2-policy-final-wpa2-A` | Independent vendor AP: WMM negotiated, one committed policy, pending zero, four-way handshake and one protected echo at both endpoints |
+| `d2-policy-final-wrong-A` | WMM policy committed, but wrong password rejected; no AP authorization or protected delivery |
+| `d2-policy-final-default-wpa2-A` | Legacy/non-WMM association, zero WMM commits, successful handshake and protected echo |
+| `d2-policy-final-ack-ab-m0`, `...-r1` | Applied policies and one local launch each; no fresh matching HT receive or returned ACK |
+| `d2-policy-final-ack-ab-m0-r2` | Exact HT receive and returned ACK; BE/TID 0/MCS0 |
+| `d2-policy-final-ack-ba-m7` | Exact HT receive and response start, but no fresh returned ACK |
+| `d2-policy-final-ack-ba-m7-r1` | Exact HT receive and returned ACK; VO/TID 6/MCS7 |
+
+All five final HT trials have distinct challenges, zero controller/response
+errors, a readback-valid EDCA selection and no pending sender policy.
+Only **2/5** complete the exchange; **3/5** retain an exact HT MPDU.
+Failed trials remain in the evidence. These are normal-ACK diagnostic fixtures,
+not BA, measured SIFS, independent HT interoperability, or reliability/size/
+protection qualification. No cause for the radio misses is inferred from this
+small matrix.
+
+`d2-policy-evidence-assertions.log` independently checks the final JSON results,
+matching peer identities/builds, commit/compatibility counts, authorization and
+all five HT outcomes. Initial WMM positive/negative trials are retained under
+`d2-policy-wpa2-A-r1` and `d2-policy-wpa2-wrong-A-r0`. The earlier
+`d2-policy-wpa2-A-r0` failed before AP readiness because the original badge
+application was booted rather than the vendor test image; it is not an RF
+or policy result. The user returned both badges to BOOTSEL before the correct
+bounded vendor AP image was installed.
+
+### Flash preservation
+
+Before the first write, both complete 16-MiB flashes were saved, verified by
+picotool and independently read again for byte comparison. All test writes
+belong to that bounded campaign. Afterward, both originals were restored,
+independently read back and compared across all 16,777,216 bytes. Both badges
+remain in BOOTSEL.
+
+- A (`08DA26F86E57F5EA`): `d2-policy-start-A-full.bin` and
+  `d2-policy-restored-A-full.bin`; SHA-256
+  `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`.
+- B (`9BBF88DD17D66E7D`): `d2-policy-start-B-full.bin` and
+  `d2-policy-restored-B-full.bin`; SHA-256
+  `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`.
+
+Paths are under `build/clean-rx/badge/`; backup and restore logs use
+`d2-policy-backup-*` and `d2-policy-restore-*`. No hardware writes remain
+pending, and no full D2/HT activation claim is made.
 
 ## Native verification
 

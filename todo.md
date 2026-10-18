@@ -122,9 +122,15 @@ profiling and bounded station RX staging are implemented. Opt-in non-HT
 WMM negotiation, AP-derived EDCA policy, protected QoS exchanges and bounded
 protected A-MSDU receive software are implemented. Bounded Block ACK agreement,
 A-MPDU stream parsing and ciphertext reordering are native-tested with WPA2
-delivery. Partial multi-MPDU radio capture is demonstrated in the finite
-diagnostic; complete live aggregate reception, Immediate BA and station/controller integration
-remain open. Receive completion/
+delivery. Complete three-MPDU radio capture and bad-FCS continuation are
+demonstrated in the finite diagnostic at all MCS in both directions;
+general live aggregate reception, Immediate BA and station/controller integration
+remain open. A separate gated per-MPDU DMA/F2 experiment now delivers the
+first two complete diagnostic MPDUs to the RP2350 at MCS0/3/7 in both
+directions. The final byte-evidence campaign has 6/7 normal two-MPDU
+deliveries, one retained RF miss and two successful bad-middle rejections;
+the last MPDU remains missing. This is not production live
+reception, BA or mandatory receive/protection qualification. Receive completion/
 discard handling, radio override ownership and atomic backoff publication
 have been corrected and regression-tested. Local-AP reply delivery and
 intermittent HT receive corruption remain qualification limits.
@@ -142,12 +148,38 @@ receive reliability and mandatory HT MAC integration remain open.
 See the [aggregate radio investigation](clean-rx/dev-doc/AMPDU_RADIO_INVESTIGATION.md)
 for current capture evidence and remaining hardware gates.
 The [next-MPDU interface investigation](clean-rx/dev-doc/AMPDU_INTERFACE_INVESTIGATION.md)
-records the latest diagnostic progress and unresolved terminal-frame boundary.
+records the fixed next/last-frame diagnostic handoff and remaining live/BA gates.
 The [Block ACK implementation record](clean-rx/dev-doc/BLOCK_ACK_IMPLEMENTATION.md)
 separates tested software from the remaining live receive/response work.
 
-- [ ] Complete HT capability/operation negotiation, mixed-mode TX/RX, airtime
-  and MCS configuration while preserving explicit legacy fallback.
+- [ ] Complete HT capability/operation negotiation and PHY configuration:
+  - [x] Prepare a conservative, unadvertised HT20/800-ns/BCC/one-stream
+    capability element, with optional PHY modes disabled.
+  - [x] Parse AP HT capabilities/operation and WMM independently of legacy
+    association; reject malformed optional elements for HT without
+    invalidating an otherwise usable legacy response.
+  - [x] Constrain the candidate PHY profile by the accepted response and
+    subsequent beacon changes, including channel, basic MCS and protection.
+  - [x] Select a common MCS under an explicit ceiling; validate exact
+    per-frame MCS requests without silently changing the requested rate.
+  - [x] Implement bounded/raw HT mixed-format TX/RX at MCS0..7 while keeping
+    legacy PHY formats and receive metadata distinct.
+  - [x] Use one validated configuration for HT PHY controls, symbol count,
+    mixed-format airtime and L-SIG length; apply airtime to TX deadlines.
+  - [x] Preserve legacy-only association and explicit fallback reasons,
+    including disabled local HT/extended-RX builds and missing mandatory MAC.
+  - [ ] Activate the candidate through atomic station/controller policy and
+    actual HT association advertisement only after mandatory MAC/BA,
+    receive-size and protection obligations are implemented and qualified.
+    - [x] Make existing station/controller policy completion acknowledge an
+      applied, readback-verified policy rather than deferred queueing; keep
+      pending requests single-flight and report failures explicitly.
+    - [ ] Integrate and qualify live aggregate delivery/Immediate BA and
+      mandatory receive/protection before adding real HT policy activation
+      or association advertisement; the commit barrier alone is insufficient.
+  - [ ] Qualify interleaved legacy/HT traffic, rate/mode transitions and
+    recovery against an independent peer; raw mixed-format captures alone
+    do not qualify negotiated mixed traffic.
 - [ ] Integrate actual WMM/EDCA, protection, QoS and required receive-size,
   Block ACK/A-MPDU/reordering obligations jointly with D3.
 - [ ] Verify negotiated association and actual HT OTA framing against an

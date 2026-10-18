@@ -2,21 +2,350 @@
 
 ## Current result
 
-**Partial multi-MPDU radio capture is now demonstrated.** An isolated,
-default-disabled PSM path retained two distinct, fresh, full-FCS MPDUs
-from one three-MPDU PPDU. Three final B -> A MCS0 trials reproduced this.
-This advances the earlier [first-MPDU investigation](AMPDU_RADIO_INVESTIGATION.md).
+**Complete finite three-MPDU radio capture is now demonstrated at MCS0..7
+in both directions.** The 2026-10-18 handoff campaign fixes the leading-byte
+loss by continuing body copies within the PPDU, instead of repeating the
+PLCP-prefix/body split. Bad per-MPDU FCS no longer stalls until EOF.
 
-The third capture is not a valid complete MPDU: its first four MAC bytes
-are missing. Its remaining 76 bytes exactly match sequence 2, including
-that MPDU's expected FCS. This is a leading-byte/boundary problem, not
-evidence that the last four FCS bytes were missing.
+The final normal campaign retained all three fresh, full-FCS MPDUs in
+17/21 one-PPDU trials. Four trials captured nothing; repeats demonstrate
+every MCS/direction cell, not loss-free reception. Controlled first,
+middle and last bad-FCS tests reject invalid MPDUs and retain later valid
+ones. Additional RF corruption is also rejected.
 
-MCS7 retained only sequence 0 in the final trial; the reverse direction
-captured neither rate. No Immediate BA was transmitted or timed. There is
+No Immediate BA was transmitted or timed. There is
 no production multi-MPDU credit/DMA/station integration, and negotiated HT
 remains disabled. Both endpoints use clean firmware; this is not an
 independent-vendor or RF-analyzer qualification.
+
+## Per-MPDU DMA-to-F2 delivery follow-up
+
+**The requested production aggregate/Immediate-BA integration is not
+complete.** A separate, default-disabled `CLEAN_RX_AMPDU_DMA=1` experiment
+now publishes individual MPDUs through the real D11 DMA ring, controller
+SRAM FIFO, SDIO/F2 transport and RP2350 receive dispatcher. It requires
+the existing probe, interface 3 and handoff 2 gates; it is still restricted
+to the three-by-80-byte fixture. It does not install a BA agreement,
+transmit BA, implement mandatory protection, or enable HT association.
+
+### Implemented path and hardware findings
+
+- At each retained per-MPDU completion, preserve the good/bad decision in
+  the DMA header before advancing. Explicitly start RX-buffer streaming
+  even for these short MPDUs; the ordinary 128-byte streaming threshold
+  otherwise leaves a header-only DMA buffer with zero payload.
+- Publish the ordinary receive header without entering the Cortex-held
+  capture state between MPDUs. After header publication, restore the
+  existing receive context and continue the direct body copy, bounded
+  by the fixture's three records and observed terminal condition.
+- Header word 1 carries the sampled outcome, word 9 the ordinal. The
+  physical first body has six PLCP bytes followed by its 80-byte MPDU.
+  Continuation DMA bodies start directly with their MAC header. Their
+  physical header length is therefore 80, rather than the RXE logical
+  count of 86. The first body's PLCP must match the retained header;
+  later normalized transport prefixes copy those actual retained bytes.
+  No MAC bytes or FCS are synthesized.
+- The controller validates header identity, ordinal, length, complete
+  HT-SIG/CRC and the entire MPDU/FCS before publishing an SRAM slot.
+  Bad-FCS outcomes are reclaimed without F2 delivery. Invalid metadata,
+  mismatched first-body PLCP and invalid FCS produce explicit controller
+  errors `0x8d`, `0x8f` and `0x8e`, respectively.
+- Validated frames remain in the DMA ring when the eight-slot controller
+  FIFO is full, and in SRAM until F2 accepts them. Normal single-frame
+  publication and the experiment share consistent published-frame
+  accounting. This is not a general PSM admission/credit protocol.
+- Early intermediate PHY format can still be 1; terminal format is 2.
+  Only this gated, exact aggregate signature admits that early form.
+  F2 version 5 explicitly identifies the diagnostic, retains the
+  unsupported-legacy-consumer flag, and derives its HT identity from the
+  complete validated aggregate HT-SIG. Raw PHY observations are not
+  rewritten. Ordinary nonaggregate version-2 validation is unchanged.
+
+The RP2350 validates the received SDIO MPDU's metadata, complete challenge,
+sequence, payload and FCS. It separately saves each delivered 80-byte MPDU
+at detail offsets `1664 + 80 * sequence` in the actual 2,048-byte USB report.
+Only this diagnostic receiver disables its unrelated beacon inventory,
+whose storage is reserved for the delivered payloads. Both badge and host
+assert the record against the actual USB trace capacity. The host collector independently
+reconstructs the delivery bitmap from these bytes, rather than accepting
+an observation count or the RP2350 bitmap alone. Duplicate or stale
+sequence-zero copies cannot satisfy sequence one or two.
+
+Reports distinguish `multi_mpdu_radio_capture`,
+`reported_delivered_subframe_bitmap`, `delivered_subframe_bitmap`,
+`delivery_payloads_valid`, `actual_multi_mpdu_delivery` (at least two
+distinct complete delivered MPDUs), and `all_subframes_delivered`
+(all three). Immediate BA, SIFS qualification and HT qualification remain
+explicitly false in both endpoint and pair output.
+
+### Radio evidence and remaining failure
+
+The initial final delivery matrix, build `ea86b5cd`, used fresh challenges
+at MCS0, MCS3 and MCS7 in both directions. Prefixes under
+`build/clean-rx/badge/` are `d2-live-mac-delivery-{ab,ba}-m{0,3,7}-r0`.
+All six delivered sequences 0 and 1, with bitmap 3 and no controller
+error. **None delivered sequence 2.** An additional record can occur
+later with bad-FCS status and stale sequence-one bytes; it is not a third
+valid receipt and is not published.
+
+The bad-middle controls, build `da868164`, are
+`d2-live-mac-bad-{ab,ba}-m0-r0`. Both delivered only sequence zero,
+reported the middle MPDU bad, and had no controller error. They prove
+rejection, not successful continuation to the missing final MPDU.
+
+The final self-contained byte-evidence campaign uses normal build
+`c74df883` and bad-middle build `e5cce64e`. Its prefixes are
+`d2-live-mac-verified-{ab,ba}-m{0,3,7}-r0`,
+`d2-live-mac-verified-ba-m7-r1`, and
+`d2-live-mac-verified-bad-{ab,ba}-m0-r0`.
+
+| Final control | Trials | Independently validated delivery |
+| --- | --- | --- |
+| Normal MCS0, both directions | 2 | Sequences 0/1 in both |
+| Normal MCS3, both directions | 2 | Sequences 0/1 in both |
+| Normal MCS7, both directions, including repeat | 3 | Sequences 0/1 in two; reverse `r0` captured/delivered none |
+| Bad middle, MCS0, both directions | 2 | Sequence 0 only; middle rejected |
+
+Thus **6/7 normal trials deliver two distinct MPDUs, 0/7 deliver all
+three**, and both bad-middle controls reject the middle MPDU. The failed
+reverse-MCS7 trial is retained, returns failure from the pair runner, and
+has no success-shaped pair summary. The fresh repeat demonstrates the
+cell, not loss-free operation.
+
+An independent Node assertion pass reconstructs all expected MAC bytes
+and IEEE FCS from each fresh challenge, compares the actual saved SDIO
+payload records, checks both endpoint build/error status, and verifies
+the endpoint/pair flags. It checks **14 full delivered MPDUs across nine
+trials**. Results are in
+`build/clean-rx/badge/d2-live-mac-evidence-assertions.log`.
+The independent check also rejected an initial out-of-report
+payload-evidence placement (`d2-live-mac-proof-*`); that placement was
+removed. Final storage uses the actual 2,048-byte USB ABI and has
+compile-time checks on badge and host. A negative compilation test
+rejects a 1,024-byte production collector trace.
+
+The final PSM publication delta in these captures is about 3 us from the
+retained observation timestamp. This is **not** an EOF-to-air response
+measurement, does not include every preceding operation, and cannot
+qualify SIFS.
+
+Earlier failed experiments remain under `d2-live-mac-dma-*`. They include
+header-only DMA, the continuation's missing PLCP, an initially incorrect
+mixed publication counter, misses, and an unsuccessful attempt to bypass
+the receive crypto-reset sequence. That bypass produced invalid payloads
+and was removed. Neither changing header length nor restoring the
+receive-context bit established final-MPDU delivery; do not attribute
+the remaining loss to either change as a demonstrated cause.
+
+The next hardware prerequisite is preserving the last MPDU through the
+DMA/header/EOF transition without a stale completion, followed by general
+lengths, bounded admission and abort/BAR recovery. A BA bitmap must not
+acknowledge this missing frame. Controller agreement installation, PSM
+compressed BA transmission and measured SIFS, station ADDBA/DELBA/key
+lifecycle wiring, mandatory receive-size and protection qualification
+all remain open. The existing policy commit barrier does not supply them.
+
+### Native validation and reproduction
+
+Default, existing handoff, DMA and bad-middle controller suites pass;
+default, DMA and bad-middle badge suites pass, including ASan/UBSan.
+Tests exercise first/continuation layout, every single-bit corruption in
+each 80-byte MPDU, all HT-SIG and magic bits, every truncated DMA body,
+bad-FCS suppression, atomic invalid-output preservation, independent
+delivery-payload validation, header-length selection, publication bounds
+and counter wrap. Existing default and handoff PSM objects remain
+byte-identical to the preceding policy campaign.
+
+```sh
+FLAGS='-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_AMPDU_PROBE=1 -DCLEAN_RX_AMPDU_INTERFACE=3 -DCLEAN_RX_AMPDU_HANDOFF=2 -DCLEAN_RX_AMPDU_DMA=1'
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx-d2-live-mac \
+  EXTRA_CFLAGS="$FLAGS" all test
+make -C clean-rx/badge BUILD=../../build/clean-rx/badge/d2-live-mac \
+  CONTROLLER_BIN=../../build/clean-rx-d2-live-mac/cyw43_rx_fw.bin \
+  EXTRA_CFLAGS="$FLAGS" all test
+```
+
+After fresh verified full-flash backups and deliberate installation, use
+the existing `--ampdu-probe` pair command with this matching collector.
+Add `-DCLEAN_RX_AMPDU_BAD_FCS=2` to both builds for the bad-middle control.
+Always restore and independently compare both complete original flashes.
+
+### DMA campaign preservation
+
+Fresh `d2-live-mac-start-{A,B}-full.bin` originals were independently
+read twice before testing. Full-range verified restoration and separate
+complete readbacks passed both after the initial delivery campaign and
+after the final byte-evidence campaign. The final readbacks are
+`d2-live-mac-proof-restored-{A,B}-full.bin`; both are 16,777,216 bytes and
+compare byte-for-byte with the start originals. Their SHA256 hashes are:
+
+- A: `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`
+- B: `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`
+
+The final restore log is `d2-live-mac-proof-restoration.log` under
+`build/clean-rx/badge/`. Both badges remain in BOOTSEL with their original
+flash contents; original applications were not booted. Originals,
+readbacks, positive evidence and failed RF experiments are retained.
+
+## Next/last-frame handoff campaign (2026-10-18)
+
+### Locating and fixing the loss
+
+`CLEAN_RX_AMPDU_HANDOFF=1`, with interface profile 3, records state after
+the original `SPR02b` read and before body-copy arm. It preserves the
+original store and copies the already-read r2 value, without rereading a
+potentially side-effecting FIFO register. Each one-shot record holds TSF,
+RX count, SHM base, copy end/control, FIFO control, actual RDF and status2,
+followed by the first 24 SHM bytes.
+
+Build `ac656c81`, prefix `d2-handoff-prefix-ba-m0-r0`, reproduced the old
+two-good/short-third result:
+
+| Prefix ordinal | Elapsed us | RX count | Requested copy end | Actual RDF |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | 6 | 6 | 80 |
+| 1 | 105 | 6 | 6 | 80 |
+| 2 | 215 | 10 | 6 | 80 |
+
+SHM base stays `0x800`, copy control `0x0800` and FIFO control `0x0c02`.
+The last prefix reaches count 10 despite the six-byte request; actual RDF
+is still **80**, not 76. The subsequent short body contains expected MAC
+bytes 4..79. The failing software sequence is reentering the prefix/body
+split inside the aggregate, not transmitting a shorter frame or omitting
+trailing FCS. The internal FIFO/copy reason for the prefix overrun remains
+undocumented; the fix does not invent a register bit definition.
+
+`CLEAN_RX_AMPDU_HANDOFF=2` requires interface profile 3 and implements:
+
+1. Retain the complete current raw slot before advancing.
+2. Keep the PPDU's captured HT-SIG, reset the SHM base, arm an 80-byte body
+   copy with the existing body-copy operation, reset the bounded wait
+   budget and enter the ordinary body-wait path.
+3. Do not issue another prefix copy, Cortex hold or whole-RX flush between
+   MPDUs. Stop at three retained snapshots or the terminal condition.
+
+Build `9512d93d` first retained all three MPDUs, including MCS7 in both
+directions. A reverse MCS0 trial exposed another failure: a corrupted
+middle snapshot waited until EOF and was classified using later GoodFCS
+status. Independent byte/FCS validation correctly rejected that snapshot.
+
+The hardened implementation consumes a fresh body-completion event at
+count 86 without requiring status1 bit 8. Controlled faults demonstrate
+bit 8 set for good MPDUs and clear for bad ones: it is **not a general
+completion-ready gate**. GoodFCS is checked immediately after event-6 EOI.
+Full-sized good/bad diagnostic snapshots carry outcomes 1/2 and both may
+advance while capacity remains. Invalid bytes never enter the collector's
+receipt bitmap. Ordinary nonfixture failure handling is unchanged.
+The host validator also preserves earlier valid slots when the last
+retained observation is early/bad rather than terminal; it still validates
+each complete expected MPDU/FCS independently, never the snapshot count.
+
+### Final RF matrix
+
+Prefixes are relative to `build/clean-rx/badge/`. Each trial sends exactly
+one PPDU with a fresh challenge. Final normal build: `913cea35`.
+
+| Direction | MCS | `d2-handoff-robust-*` result |
+| --- | --- | --- |
+| B -> A | 0..6 | `ba-m{0..6}-r0`: all three, bitmap 7 |
+| B -> A | 7 | r0 no capture; r1/r2 all three |
+| A -> B | 0..4, 6 | `ab-m{0..4,6}-r0`: all three |
+| A -> B | 5 | r0 no capture; r1 all three |
+| A -> B | 7 | r0/r2 no capture; r1 all three |
+
+At MCS0 the three good completions are around 103/213/283 us after prefix;
+at MCS7, around 12/24/31 us. All RX counts are 86, with first/second
+status1 `0x1922` and final `0x4122`. Raw PHY progresses from 1 to terminal
+2. All 80 bytes of every accepted MPDU are exact, including the formerly
+missing four leading bytes. No bytes are synthesized or reconstructed.
+
+`CLEAN_RX_AMPDU_BAD_FCS` is a compile-time three-bit fixture fault mask,
+default 0, permitted only with handoff profile 2. Selected MPDUs have their
+last FCS byte toggled after correct construction. Payloads, delimiters
+and lengths are unchanged. Command validation accepts only that exact
+build's fixture, never arbitrary malformed transmissions.
+
+| Build | Fault | Prefixes/results |
+| --- | --- | --- |
+| `ac3d8e54` | First, mask 1 | `d2-handoff-bad-1-ba-m{0,7}-r0`: bitmap 6, outcomes 2/1/1 |
+| `8e6bbefb` | Middle, mask 2 | `d2-handoff-bad-middle-ba-m0-r{1,2}`, `ba-m7-r0`, `ab-m7-r0`: bitmap 5, outcomes 1/2/1; `ba-m0-r0` captured nothing |
+| `376ed250` | Last, mask 4 | `d2-handoff-bad-4-ba-m0-r0`, `ba-m7-r1`: bitmap 3, outcomes 1/1/2 |
+| `376ed250` | Last plus RF error | `ba-m7-r0`: bitmap 2, outcomes 2/1/2; first MPDU also fails software FCS |
+
+Early bad status1 is `0x1822`; final bad status1 is `0x4022`. Bit 14 still
+belongs to the final capture even when its FCS is bad. This strengthens
+the terminal-event evidence for this fixture; it does not qualify
+truncation, delimiter loss, PHY aborts, variable lengths or SIFS timing.
+
+Independent assertions over **31 final normal/fault trials** check fresh
+challenges, every expected byte, CRC-32, outcomes, count 86, copy end 80,
+terminal-bit placement and exact bitmaps. Normal: 17/21 complete and four
+no-capture. Faults: 9/10 captured, with the extra RF error explicitly
+rejected. Failed trials are retained. The assertion output is
+`d2-handoff-evidence-assertions.log`.
+
+### Layout, reproduction and validation
+
+`ADP2`/`AIF2` sizes are unchanged. Handoff-profile-1 records use unused
+early-interface SHM words 68..127, 20 words each, with commit words
+128..130; the collector exports `interface.handoff`. Passive profiles
+never share this instrumentation. Current early-interface row word 7
+stores MPDU outcome; passive rows retain their event mask. Older early
+rows used zero. Reports expose `fixture_bad_fcs_mask`; count 3 includes
+bad snapshots and is not equivalent to bitmap 7.
+
+```
+FLAGS='-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_AMPDU_PROBE=1 -DCLEAN_RX_AMPDU_INTERFACE=3 -DCLEAN_RX_AMPDU_HANDOFF=2'
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx-d2-handoff-robust EXTRA_CFLAGS="$FLAGS" all test
+make -C clean-rx/badge BUILD=../../build/clean-rx/badge/d2-handoff-robust \
+  CONTROLLER_BIN=../../build/clean-rx-d2-handoff-robust/cyw43_rx_fw.bin \
+  EXTRA_CFLAGS="$FLAGS" all test
+```
+
+After fresh full-flash backups and installation of matching images:
+
+```
+CLEAN_RX_COLLECTOR=build/clean-rx/badge/d2-handoff-robust/collector \
+  bash clean-rx/badge/ht_probe.sh TX_SERIAL RX_SERIAL NEW_PREFIX 7 --ampdu-probe
+```
+
+Use separate build directories and add `-DCLEAN_RX_AMPDU_BAD_FCS=1`, `=2`
+or `=4` for fault positions. Handoff profile 1 reproduces the instrumented
+old prefix transition; profile 2 fixes it. All gates default to zero.
+
+Ten controller/badge build and native-test profiles passed: default,
+HT/response/EDCA/WMM, passive post/body, original early capture, prefix
+instrumentation, hardened continuation and each individual fault
+position. Sanitizer-enabled suites are included. Additional HT/fixture
+sanitizer tests cover masks 3/5/6/7, including all-invalid MPDUs. Tests cover
+original PC153 preservation, one-shot SHM-only snapshots, direct body arm,
+wait-budget reset, fresh bad completion without bit 8, bad-slot retention
+and nonfixture fallback. Default baseline-image identity still passes.
+After the RF matrix, a host-validator-only corner case was added for
+early/bad last metadata, plus its native test. Controller image byte
+identity is checked against the RF builds; no radio/PSM behavior changed.
+
+Fresh `d2-handoff-start-{A,B}-full.bin` originals and independent
+`d2-handoff-restored-{A,B}-full.bin` readbacks are all 16,777,216 bytes.
+Full-range verified restores and byte comparisons passed on both badges.
+Hashes match the originals listed in the preservation section below.
+One image-install attempt encountered USB re-enumeration; waiting for
+BOOTSEL readiness and retrying succeeded. Its failed log is retained.
+
+### D2 boundary
+
+This fixes the **finite diagnostic next/last-frame byte-loss problem**,
+not D2 as a whole. The pinned 80-byte/three-slot path is not general
+station reception. Variable-length ownership and retained credits,
+multi-MPDU DMA delivery, atomic agreements, station lifecycle/CCMP/reorder
+integration, protection and SIFS-timed compressed BA remain unimplemented
+or unqualified. No response is emitted; negotiated HT remains disabled.
+
+## Earlier prefix-continuation campaign
+
+The following sections preserve the earlier two-MPDU results. Their
+short-third-frame limit applies to the original prefix continuation,
+not the new handoff-profile-2 body continuation.
 
 ## Why the old continuation attempts were too late
 
@@ -73,9 +402,10 @@ path, rather than looping indefinitely. Profile 2 deliberately pauses
 normal PSM receive processing while sampling; it is instrumentation, not
 a working live receive path.
 
-Profile 3 only admits the pinned 252-byte/80-byte diagnostic:
+Original profile 3 without the newer handoff gate admits the pinned
+252-byte/80-byte diagnostic:
 
-1. Observe event 6, ready bit 8 and RX count 86, or fall back to the
+1. Observe event 6, good-only bit 8 and RX count 86, or fall back to the
    original bit-14 terminal check.
 2. Consume the completion through the existing event-6 EOI.
 3. Require GoodFCS event 3. Preserve actual PHY status, bypassing the
@@ -225,9 +555,9 @@ applications or host networking were changed.
 
 ## Next D2 work
 
-1. Trace the last-frame prefix/body handoff and copy ownership around the
-   four leading bytes. Distinguish a late capture/copy window from a
-   different last-MPDU FIFO/header convention; neither cause is proven.
+1. Generalize the demonstrated one-copy continuation to per-MPDU lengths
+   and explicit bounded buffer ownership; do not turn the fixed diagnostic
+   into production reception by merely removing its gates.
 2. Verify the completion/terminal handshake across variable MPDU sizes,
    bad FCS, delimiter errors, truncation and abort, ideally with an
    independent aggregate source/capture.

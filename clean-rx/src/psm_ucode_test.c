@@ -46,6 +46,20 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+#if CLEAN_RX_AMPDU_DMA
+    restore(original,219u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_DMA_LENGTH),
+            WORD(0x3f0u,0x1781u,0x1800u,0x7f4u));
+    restore(original,220u,WORD(0x3f0u,CLEAN_AMPDU_DMA_PENDING,0x1800u,0x7f5u),
+            WORD(0x3f0u,0x1800u,0x1800u,0x7f5u));
+    restore(original,228u,WORD(0x3f0u,CLEAN_AMPDU_PROBE_SHM,0x1800u,0x7fdu),
+            WORD(0x3f0u,0x1800u,0x1800u,0x7fdu));
+    restore(original,252u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_DMA_DONE),
+            WORD(0x3f0u,0x180eu,0x1800u,0x601u));
+#endif
+#if CLEAN_RX_AMPDU_HANDOFF == 1
+    restore(original,153u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_HDR_ENTER),
+            WORD(0x3f0u,0x1782u,0x1800u,0x7a1u));
+#endif
 #if CLEAN_RX_AMPDU_INTERFACE == 2
     restore(original,162u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_IF_BODY),
             WORD(0x3f0u,0x1fffu,0x1800u,0x1780u));
@@ -56,7 +70,7 @@ static void capture_layout(uint8_t original[2360]) {
             WORD(0x77fu,0x1780u,0x1780u,147u));
     restore(original, 164u, WORD(0x785u,0x1780u,0x1780u,165u),
             WORD(0x785u,0x1780u,0x1780u,257u));
-    uint32_t phy_latch = 0u, held_capture = 0u;
+    uint32_t phy_latch = 0u, held_capture = CLEAN_RX_AMPDU_DMA ? 252u : 0u;
     for (uint32_t pc = 198u; pc < 260u; ++pc) {
         if (instruction(pc) == WORD(0x3f0u,0x1009u,0x1800u,CLEAN_SHM_PHY_STATUS0))
             phy_latch = pc;
@@ -230,6 +244,9 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
 #if CLEAN_RX_AMPDU_INTERFACE >= 3
         if (pc == AMPDU_IF_GOOD) return 197u;
 #endif
+#if CLEAN_RX_AMPDU_HANDOFF == 2
+        if (pc == AMPDU_IF_BAD) return 262u;
+#endif
         if (body && pc == 167u) pc = RX_COMPLETE;
         if (pc == 147u || pc == 167u || pc == 197u ||
             pc == 257u || pc == 259u || pc == 262u || pc == 263u) return pc;
@@ -324,8 +341,9 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
     phy_writes = 0u;
     for (uint32_t step = 0u; step < 10000u; ++step) {
         if (pc == 198u || pc == 266u || pc == 124u || pc == 130u ||
+            (CLEAN_RX_AMPDU_DMA && (pc == 253u || pc == 220u)) ||
             pc == 118u || pc == 129u || pc == 163u ||
-            pc == 148u || pc == 263u) return pc;
+            pc == 148u || pc == 154u || pc == 262u || pc == 263u) return pc;
         assert(pc >= ACK_ENTER && pc < ACK_PROGRAM_END);
         uint64_t w = instruction(pc++);
         uint32_t op = (uint32_t)(w >> 39u);
@@ -337,6 +355,9 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
         uint16_t av = ack_operand(regs, a), bv = ack_operand(regs, b);
         if (op == 0x3f0u) regs[d] = av;
         else if (op == 0x378u) regs[d] = (uint16_t)((av << 8u) | (bv & 255u));
+        else if (op == 0x376u) regs[d] =
+            (uint16_t)((bv & ~0x3fc0u) | ((av << 6u) & 0x3fc0u));
+        else if (op == 0x310u) regs[d] = (uint16_t)((bv & ~3u) | (av & 3u));
         else if (op == 0x77fu) pc = d;
         else if (op == 0xd0u) { if (av == bv) pc = d; }
         else if (op == 0xd1u) { if (av != bv) pc = d; }
@@ -1254,6 +1275,46 @@ static void transmit_cleanup(void) {
     puts("PSM TX cleanup: RX priority, active RX/TX/drain deferral, owned completion and PHY register preservation; NOT RF");
 }
 
+static void aggregate_handoff_trace(void) {
+#if CLEAN_RX_AMPDU_HANDOFF == 1
+    uint16_t r[0x1800]={0};
+    r[0x1782u]=80u;
+    assert(psm_run(r,0,AMPDU_HDR_ENTER)==154u && r[0x7a1u]==80u);
+    assert(!r[CLEAN_AMPDU_IF_SHM+CLEAN_AMPDU_HANDOFF_COMMIT]);
+    r[CLEAN_AMPDU_IF_SHM]=1u;
+    for (uint32_t slot=0u;slot<3u;++slot) {
+        r[CLEAN_AMPDU_PROBE_SHM]=(uint16_t)slot;
+        r[0x1119u]=(uint16_t)(100u+slot);
+        r[0x100cu]=(uint16_t)(6u+4u*slot);
+        r[0x1001u]=CLEAN_SHM_FRAME;
+        r[0x102au]=6u;
+        r[0x1004u]=0x800u;
+        r[0x1024u]=0xc02u;
+        r[0x1782u]=(uint16_t)(80u-4u*slot);
+        r[0x100eu]=0xa00u;
+        for (uint32_t i=0u;i<12u;++i)
+            r[CLEAN_SHM_FRAME+i]=(uint16_t)(slot*100u+i);
+        uint16_t before[0x1800];
+        memcpy(before,r,sizeof(r));
+        assert(psm_run(r,0,AMPDU_HDR_ENTER)==154u);
+        const uint16_t *p=r+CLEAN_AMPDU_IF_SHM+CLEAN_AMPDU_HANDOFF_WORD+
+            CLEAN_AMPDU_HANDOFF_WORDS*slot;
+        assert(p[0]==100u+slot && p[1]==6u+4u*slot &&
+               p[2]==CLEAN_SHM_FRAME && p[3]==6u && p[4]==0x800u &&
+               p[5]==0xc02u && p[6]==80u-4u*slot && p[7]==0xa00u);
+        for (uint32_t i=0u;i<12u;++i) assert(p[8u+i]==slot*100u+i);
+        assert(r[0x7a1u]==r[0x1782u] &&
+               r[CLEAN_AMPDU_IF_SHM+CLEAN_AMPDU_HANDOFF_COMMIT+slot]==1u);
+        assert(!memcmp(r+0x1000u,before+0x1000u,0x800u*sizeof(uint16_t)));
+        r[0x1119u]=1000u;
+        assert(psm_run(r,0,AMPDU_HDR_ENTER)==154u && p[0]==100u+slot);
+    }
+    r[CLEAN_AMPDU_PROBE_SHM]=3u;
+    assert(psm_run(r,0,AMPDU_HDR_ENTER)==154u);
+    puts("PSM handoff: prefix SHM/RDF snapshots, original store, one-shot commits, no hardware writes; NOT RF");
+#endif
+}
+
 static void aggregate_probe_trace(void) {
 #if CLEAN_RX_AMPDU_PROBE
     uint16_t base[0x1800]={0}, r[0x1800];
@@ -1270,7 +1331,9 @@ static void aggregate_probe_trace(void) {
         if (fault==2u) r[CLEAN_SHM_FRAME+2u]^=0x0800u;
         if (fault==3u) r[CLEAN_SHM_FRAME+1u]^=0x0100u;
         if (fault==4u) r[CLEAN_SHM_FRAME+2u]|=1u;
-        assert(psm_run(r,0,AMPDU_TRACE_BAD)==263u);
+        assert(psm_run(r,0,AMPDU_TRACE_BAD)==
+               (!fault && CLEAN_RX_AMPDU_HANDOFF==2 ?
+                    (CLEAN_RX_AMPDU_DMA ? 198u : 163u) : 263u));
         assert(r[CLEAN_AMPDU_PROBE_SHM]==(fault==0u));
         if (!fault) {
             assert(r[CLEAN_AMPDU_PROBE_SHM+1u]==2u &&
@@ -1282,16 +1345,18 @@ static void aggregate_probe_trace(void) {
     }
     memcpy(r,base,sizeof(r));
     assert(psm_run(r,0,AMPDU_TRACE_GOOD)==
-           (CLEAN_RX_AMPDU_INTERFACE==3 ? 130u : 198u));
+           (CLEAN_RX_AMPDU_INTERFACE==3 && !CLEAN_RX_AMPDU_DMA ?
+                (CLEAN_RX_AMPDU_HANDOFF==2 ? 163u : 130u) : 198u));
     assert(r[CLEAN_AMPDU_PROBE_SHM]==1u && r[CLEAN_AMPDU_PROBE_SHM+1u]==1u);
     assert(psm_run(r,0,AMPDU_TRACE_GOOD)==
-           (CLEAN_RX_AMPDU_INTERFACE==3 ? 130u : 198u) &&
+           (CLEAN_RX_AMPDU_INTERFACE==3 && !CLEAN_RX_AMPDU_DMA ?
+                (CLEAN_RX_AMPDU_HANDOFF==2 ? 163u : 130u) : 198u) &&
            r[CLEAN_AMPDU_PROBE_SHM]==2u);
     assert(psm_run(r,0,AMPDU_TRACE_GOOD)==198u && r[CLEAN_AMPDU_PROBE_SHM]==3u);
     assert(psm_run(r,0,AMPDU_TRACE_GOOD)==198u && r[CLEAN_AMPDU_PROBE_SHM]==3u);
     for (uint32_t i=0u;i<132u;++i)
         assert(r[CLEAN_AMPDU_PROBE_SHM+8u+i]==base[CLEAN_SHM_FRAME+i%44u]);
-    puts("PSM A-MPDU probe: terminal-only three-slot retention, bounded commits, no response; NOT RF");
+    puts("PSM A-MPDU probe: three-slot retention, bounded commits, FCS paths and no response; NOT RF");
 #endif
 }
 
@@ -1350,8 +1415,14 @@ static void aggregate_interface_trace(void) {
     r[0x100du]=0x1822u;
     r[0x1780u]=1u;
     pending=(1u<<6u)|(1u<<3u);
+    assert(receive_run(r,&pending,RX_COMPLETE,&steps)==
+           (CLEAN_RX_AMPDU_HANDOFF==2 ? 197u : 262u));
+    assert(!!(pending&(1u<<6u))==(CLEAN_RX_AMPDU_HANDOFF!=2));
+#if CLEAN_RX_AMPDU_HANDOFF == 2
+    pending=1u<<6u;
     assert(receive_run(r,&pending,RX_COMPLETE,&steps)==262u);
-    assert(pending&(1u<<6u));
+    assert(!(pending&(1u<<6u)));
+#endif
     uint16_t early[0x1800]={0};
     early[CLEAN_SHM_FRAME+1u]=0xfc00u;
     early[CLEAN_SHM_FRAME+2u]=0x0f00u;
@@ -1359,7 +1430,36 @@ static void aggregate_interface_trace(void) {
     early[0x100cu]=86u;
     early[0x100du]=0x1922u;
     early[0x100eu]=0x0a41u;
-    assert(psm_run(early,0,AMPDU_IF_GOOD)==130u);
+    assert(psm_run(early,0,AMPDU_IF_GOOD)==
+           (CLEAN_RX_AMPDU_DMA ? 198u : CLEAN_RX_AMPDU_HANDOFF==2 ? 163u : 130u));
+#if CLEAN_RX_AMPDU_DMA
+    assert(early[CLEAN_AMPDU_DMA_PENDING]==1u);
+    assert((early[0x1004u]&3u)==2u);
+    early[0x1004u]&=(uint16_t)~3u;
+    assert(psm_run(early,0,AMPDU_DMA_DONE)==163u);
+    assert(!early[CLEAN_AMPDU_DMA_PENDING] && early[CLEAN_AMPDU_DMA_SUBMITTED]==1u);
+#endif
+#if CLEAN_RX_AMPDU_HANDOFF == 2
+    assert(early[0x102au]==80u && early[0x1004u]==0x20c0u &&
+           early[0x1780u]==65535u && early[0x1001u]==CLEAN_SHM_FRAME);
+    early[0x100du]=0x1822u;
+    assert(psm_run(early,0,AMPDU_IF_BAD)==(CLEAN_RX_AMPDU_DMA ? 198u : 163u));
+#if CLEAN_RX_AMPDU_DMA
+    assert(early[CLEAN_AMPDU_DMA_PENDING]==2u);
+    assert((early[0x1004u]&3u)==2u);
+    early[0x1004u]&=(uint16_t)~3u;
+    assert(psm_run(early,0,AMPDU_DMA_DONE)==163u);
+    assert(!early[CLEAN_AMPDU_DMA_PENDING] && early[CLEAN_AMPDU_DMA_SUBMITTED]==2u);
+#endif
+    assert(early[CLEAN_AMPDU_PROBE_SHM]==2u &&
+           early[CLEAN_AMPDU_PROBE_SHM+1u]==2u &&
+           early[CLEAN_AMPDU_IF_SHM+19u]==2u);
+    early[0x100cu]=82u;
+    assert(psm_run(early,0,AMPDU_IF_BAD)==262u &&
+           early[CLEAN_AMPDU_PROBE_SHM]==2u);
+    early[CLEAN_AMPDU_PROBE_SHM]=1u;
+    early[0x100cu]=86u;
+#endif
     assert(early[CLEAN_AMPDU_PROBE_SHM]==1u &&
            early[CLEAN_AMPDU_PROBE_SHM+5u]==0u &&
            early[CLEAN_AMPDU_IF_SHM]==CLEAN_RX_AMPDU_INTERFACE);
@@ -1385,6 +1485,27 @@ static void aggregate_interface_trace(void) {
 }
 
 int main(void) {
+#if CLEAN_RX_AMPDU_DMA
+    for (uint32_t outcome=0u;outcome<=2u;++outcome)
+        for (uint32_t count=1u;count<=3u;++count)
+            for (uint32_t eof=0u;eof<2u;++eof) {
+                uint16_t r[0x1800]={0};
+                r[CLEAN_AMPDU_DMA_PENDING]=(uint16_t)outcome;
+                r[CLEAN_AMPDU_PROBE_SHM]=(uint16_t)count;
+                r[CLEAN_AMPDU_PROBE_SHM+3u]=(uint16_t)(eof<<14u);
+                r[CLEAN_AMPDU_DMA_SUBMITTED]=65535u;
+                r[0x1781u]=86u;
+                assert(psm_run(r,0,AMPDU_DMA_LENGTH)==220u);
+                assert(r[0x7f4u]==(!outcome || count==1u ? 86u : 80u));
+                assert(psm_run(r,0,AMPDU_DMA_DONE)==
+                       (!outcome ? 253u : count==3u || eof ? 266u : 163u));
+                assert(!r[CLEAN_AMPDU_DMA_PENDING]);
+                assert(r[CLEAN_AMPDU_DMA_SUBMITTED]==(outcome ? 0u : 65535u));
+                assert(r[0x601u]==(outcome ? 0u : 14u));
+                assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
+            }
+#endif
+    aggregate_handoff_trace();
     aggregate_interface_trace();
     aggregate_probe_trace();
     transmit_cleanup();

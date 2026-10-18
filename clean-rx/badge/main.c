@@ -26,6 +26,9 @@ static live_usb_control_t control;
 static int32_t usb_error;
 static uint32_t generation;
 static uint8_t detail[WIFI_TRACE_SIZE];
+_Static_assert(!CLEAN_RX_AMPDU_DMA ||
+               CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * CLEAN_HT_AMPDU_PROBE_MPDU <= sizeof(detail),
+               "Aggregate payload evidence must fit the actual USB trace");
 static badger_canvas_t canvas;
 static uint8_t peer_challenge[14];
 static clean_station_ap_t station_ap;
@@ -69,6 +72,7 @@ static void screen(const char *status, uint32_t packets, uint32_t error) {
 }
 
 static void beacon(const uint8_t *packet, uint32_t size) {
+    if (CLEAN_RX_AMPDU_DMA && detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE) return;
     if (station_mode())
         clean_station_discover(packet, size, station_target, &station_ap, &station_ap_status);
     uint8_t entry[40];
@@ -114,6 +118,28 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 }
             }
             uint32_t packets = badger_bytes_load_u32(detail + 1636u);
+#if CLEAN_RX_AMPDU_DMA
+            if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE && size >= 18u &&
+                packet[15] == peer_challenge[13] &&
+                packet[16] == (CLEAN_RX_HT20 | CLEAN_RX_UNSUPPORTED_PHY | detail[2001u]) &&
+                packet[17] == CLEAN_HT_AMPDU_PROBE_VERSION) {
+                int sequence = clean_ht_ampdu_probe_sequence(packet + 18u, size - 18u,
+                                                              peer_challenge);
+                if (sequence >= 0) {
+                    uint32_t mask = badger_bytes_load_u32(detail + CLEAN_AMPDU_DMA_DETAIL + 4u);
+                    uint32_t bit = 1u << (uint32_t)sequence;
+                    badger_bytes_copy(detail + CLEAN_AMPDU_DMA_PAYLOAD_DETAIL +
+                                      80u * (uint32_t)sequence, packet + 18u, 80u);
+                    badger_bytes_store_u32(detail + CLEAN_AMPDU_DMA_DETAIL, CLEAN_AMPDU_DMA_MAGIC);
+                    badger_bytes_store_u32(detail + CLEAN_AMPDU_DMA_DETAIL + 4u, mask | bit);
+                    badger_bytes_store_u32(detail + CLEAN_AMPDU_DMA_DETAIL + 8u,
+                        badger_bytes_load_u32(detail + CLEAN_AMPDU_DMA_DETAIL + 8u) + 1u);
+                    if (mask & bit)
+                        badger_bytes_store_u32(detail + CLEAN_AMPDU_DMA_DETAIL + 12u,
+                            badger_bytes_load_u32(detail + CLEAN_AMPDU_DMA_DETAIL + 12u) + 1u);
+                }
+            }
+#endif
             int peer = size >= 18u && (detail[2000u] == 13u ?
                 clean_peer_reply(packet + 18u, size - 18u, peer_challenge) :
                 detail[2000u] == 22u ?
@@ -242,20 +268,7 @@ static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uin
         }
     }
     if (!clean_write(l, CLEAN_MBOX + 24u, cmd)) return 0;
-    uint32_t started = l->wire->now_us(l->wire->context), command, state;
-    do {
-        if (!clean_read(l, CLEAN_MBOX + 24u, &command) ||
-            !clean_read(l, CLEAN_MBOX + 4u, &state)) return 0;
-        if (state != 9u) {
-            l->error = CLEAN_CONTROLLER; l->actual = state;
-            return 0;
-        }
-        if (command == 2u) return 1;
-        if (l->wire->now_us(l->wire->context) - started >= 100000u) {
-            l->error = CLEAN_TIMEOUT; l->address = CLEAN_MBOX + 24u;
-            return 0;
-        }
-    } while (1);
+    return clean_wait_command(l, cmd, 100000u);
 }
 
 static int soak_receive(clean_loader_t *l, clean_soak_status_t *s,
@@ -893,6 +906,17 @@ static void run(const uint8_t nonce[16]) {
 #if CLEAN_RX_AMPDU_INTERFACE
         if (snapshot) snapshot = clean_block(&l, CLEAN_AMPDU_IF_ADDR,
             detail + CLEAN_AMPDU_IF_DETAIL, sizeof(clean_ampdu_interface_t), 0u);
+#endif
+#if CLEAN_RX_AMPDU_DMA
+        uint32_t fault_address = badger_bytes_load_u32(detail + 48u);
+        uint32_t fault_code = badger_bytes_load_u32(detail + 44u);
+        if (snapshot && fault_code >= 0x8du && fault_code <= 0x8fu &&
+            fault_address >= CLEAN_D11_BUFFER_ADDR + 38u &&
+            fault_address < CLEAN_D11_BUFFER_ADDR + 32u * CLEAN_D11_BUFFER_BYTES &&
+            (fault_address - CLEAN_D11_BUFFER_ADDR - 38u) % CLEAN_D11_BUFFER_BYTES == 0u) {
+            snapshot = clean_block(&l, fault_address - 38u, detail + 1480u, 128u, 0u);
+            if (snapshot) badger_bytes_store_u32(detail + 736u, CLEAN_AMPDU_DMA_MAGIC);
+        }
 #endif
     }
     if (snapshot && (nonce[14] == 27u || nonce[14] == 28u))

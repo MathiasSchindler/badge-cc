@@ -5,14 +5,156 @@
 #include "../src/ht20.h"
 #include "station.h"
 
+static uint32_t ht_base_fallback(void) {
+    return CLEAN_HT_FALLBACK_MAC |
+        (CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 0u : CLEAN_HT_FALLBACK_LOCAL_PHY);
+}
+
+static void aggregate_dma_tests(void) {
+    uint8_t nonce[14]={4u,3u,2u,1u,9u,8u,7u,6u,5u,4u,3u,80u,0u,0u};
+    for (uint32_t mcs=0u;mcs<8u;++mcs)
+        for (uint32_t ordinal=1u;ordinal<=3u;++ordinal) {
+            uint8_t buf[128]={0}, raw[88], original[128], expected[80];
+            uint32_t payload=ordinal==1u ? 44u : 38u;
+            nonce[13]=(uint8_t)mcs;
+            buf[0]=ordinal==1u ? 86u : 80u;
+            buf[2]=1u; buf[4]=1u; buf[18]=(uint8_t)ordinal;
+            buf[20]=0x15u; buf[21]=0xdau;
+            assert(clean_ht_ampdu_probe_sig(buf+12u,mcs));
+            assert(clean_ht_ampdu_probe_mpdu(expected,nonce,ordinal-1u));
+            if (ordinal==1u) memcpy(buf+38u,buf+12u,6u);
+            memcpy(buf+payload,expected,80u);
+            memcpy(original,buf,sizeof(buf));
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_GOOD);
+            assert(!raw[0] && !raw[1] && !memcmp(raw+2u,buf+12u,6u) &&
+                   !memcmp(raw+8u,expected,80u));
+            memset(raw,0xa5,sizeof(raw));
+            for (uint32_t n=0u;n<payload+80u;++n)
+                assert(clean_ht_ampdu_dma_decode(buf,n,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            for (uint32_t bit=0u;bit<640u;++bit) {
+                buf[payload+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+                assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_FCS_ERROR);
+                buf[payload+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+            }
+            for (uint32_t bit=0u;bit<48u;++bit) {
+                buf[12u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+                assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+                buf[12u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+            }
+            for (uint32_t bit=0u;bit<16u;++bit) {
+                buf[20u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+                assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+                buf[20u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+            }
+            if (ordinal==1u) {
+                buf[38]^=1u;
+                assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_PREFIX_ERROR);
+                buf[38]^=1u;
+            }
+            buf[2]=0u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_NORMAL);
+            buf[2]=2u; buf[payload]^=1u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_BAD);
+            buf[2]=3u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            memcpy(buf,original,sizeof(buf));
+            buf[18]=0u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            buf[18]=4u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            for (uint32_t i=0u;i<sizeof(raw);++i) assert(raw[i]==0xa5u);
+            assert(clean_ht_ampdu_dma_decode(0,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),0)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+        }
+    uint8_t payloads[240];
+    for (uint32_t sequence=0u;sequence<3u;++sequence)
+        assert(clean_ht_ampdu_probe_mpdu(payloads+80u*sequence,nonce,sequence));
+    for (uint32_t reported=0u;reported<8u;++reported)
+        assert(clean_ht_ampdu_delivery_mask(payloads,sizeof(payloads),reported,nonce)==reported);
+    assert(!clean_ht_ampdu_delivery_mask(payloads,239u,7u,nonce));
+    assert(!clean_ht_ampdu_delivery_mask(payloads,sizeof(payloads),8u,nonce));
+    payloads[0]^=1u;
+    assert(clean_ht_ampdu_delivery_mask(payloads,sizeof(payloads),7u,nonce)==6u);
+    payloads[0]^=1u;
+    memcpy(payloads+80u,payloads,80u);
+    assert(clean_ht_ampdu_delivery_mask(payloads,sizeof(payloads),7u,nonce)==5u);
+    nonce[0]^=1u;
+    assert(!clean_ht_ampdu_delivery_mask(payloads,sizeof(payloads),7u,nonce));
+    puts("Aggregate DMA: first/continuation layout, complete FCS, truncation, corrupted metadata, atomic rejection and independent delivered-payload validation pass; NOT live qualification");
+}
+
+static void configuration_tests(void) {
+    static const uint32_t kbps[8]={6500u,13000u,19500u,26000u,39000u,52000u,58500u,65000u};
+    static const uint32_t airtime[8]={154u,98u,82u,70u,62u,58u,58u,54u};
+    for (uint32_t mask=0u;mask<=255u;++mask) {
+        for (uint32_t ceiling=0u;ceiling<8u;++ceiling) {
+            int expected=-1;
+            for (uint32_t mcs=0u;mcs<=ceiling;++mcs)
+                if (mask & (1u<<mcs)) expected=(int)mcs;
+            assert(clean_ht20_select_mcs(mask,ceiling)==expected);
+        }
+        for (uint32_t mcs=0u;mcs<8u;++mcs) {
+            clean_ht20_config_t config, before;
+            memset(&config,0xa5,sizeof(config));
+            memcpy(&before,&config,sizeof(before));
+            int supported=!!(mask & (1u<<mcs));
+            assert(clean_ht20_configure(&config,88u,mcs,mask)==supported);
+            if (!supported) assert(!memcmp(&config,&before,sizeof(config)));
+            else {
+                clean_ht_tx_t controls;
+                assert(clean_ht20_tx_controls(&controls,88u,mcs));
+                assert(!memcmp(&config.controls,&controls,sizeof(controls)));
+                assert(config.mcs==mcs && config.rate_kbps==kbps[mcs] &&
+                       config.airtime_us==airtime[mcs]);
+                assert(config.symbols*4u+42u==config.airtime_us);
+            }
+        }
+    }
+    assert(clean_ht20_select_mcs(256u,7u)==-1);
+    assert(clean_ht20_select_mcs(255u,8u)==-1);
+    assert(clean_ht20_select_mcs(UINT32_MAX,UINT32_MAX)==-1);
+    clean_ht20_config_t config, saved;
+    memset(&config,0xa5,sizeof(config));
+    memcpy(&saved,&config,sizeof(saved));
+    assert(!clean_ht20_configure(&config,13u,0u,255u));
+    assert(!clean_ht20_configure(&config,CLEAN_MPDU_BYTES+1u,0u,255u));
+    assert(!clean_ht20_configure(&config,UINT32_MAX,0u,255u));
+    assert(!clean_ht20_configure(&config,88u,8u,255u));
+    assert(!clean_ht20_configure(&config,88u,0u,256u));
+    assert(!clean_ht20_configure(&config,88u,0u,UINT32_MAX));
+    assert(!memcmp(&config,&saved,sizeof(config)));
+    uint8_t ie[CLEAN_HT20_CAPABILITY_BYTES];
+    static const uint8_t expected[CLEAN_HT20_CAPABILITY_BYTES]={
+        45u,26u,12u,0u,28u,255u, [15]=65u, [17]=1u
+    };
+    clean_ht20_capability_ie(ie);
+    assert(!memcmp(ie,expected,sizeof(ie)));
+    clean_ht_peer_t parsed={0};
+    clean_ht_peer_ie(&parsed,ie[0],ie+2u,ie[1]);
+    assert(parsed.capabilities && parsed.capability==12u &&
+           parsed.rx_mcs==255u && parsed.ampdu_exponent==0u && parsed.mpdu_spacing==7u);
+    assert(CLEAN_HT20_WIDTH_MHZ==20u && CLEAN_HT20_GI_NS==800u && CLEAN_HT20_STREAMS==1u);
+    puts("HT20 configuration: all mask/ceiling pairs, exact MCS selection, atomic invalid-input rejection, airtime/control vectors and unadvertised target IE pass; NOT negotiated HT");
+}
+
 static void aggregate_probe_tests(void) {
     uint8_t packet[CLEAN_HT_AMPDU_PROBE_STORAGE], nonce[14]={1u,2u,3u,4u,5u};
     uint32_t command=CLEAN_HT_DATA_CMD |
         clean_tx_length_bits(CLEAN_HT_AMPDU_PROBE_TX_BYTES) | (1u << 19u);
+    const uint32_t expected_mask=7u & ~CLEAN_RX_AMPDU_BAD_FCS;
     for (uint32_t mcs=0u;mcs<8u;++mcs) {
         nonce[13]=(uint8_t)mcs;
         assert(clean_ht_ampdu_probe_frame(packet,nonce));
         assert(clean_ht_ampdu_probe_sig_valid(packet+8u,252u));
+        assert(clean_ht_rx_version(1u,2u,packet+8u,80u)==
+               (CLEAN_RX_AMPDU_DMA ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
+        assert(!clean_ht_rx_version(0u,2u,packet+8u,80u));
+        assert(clean_ht_rx_version(1u,1u,packet+8u,80u)==
+               (CLEAN_RX_AMPDU_DMA ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
+        assert(!clean_ht_rx_version(1u,0u,packet+8u,80u));
+        assert(!clean_ht_rx_version(1u,3u,packet+8u,80u));
+        assert(!clean_ht_rx_version(1u,2u,packet+8u,79u));
+        assert(!clean_ht_rx_version(1u,2u,packet+8u,81u));
         assert(!clean_ht20_sig_valid(packet+8u,252u));
         assert(!clean_ht20_rx_sig_valid(packet+8u,252u));
         assert(clean_ht_data_command_valid(command,1u,0u,packet)==CLEAN_RX_AMPDU_PROBE);
@@ -22,8 +164,10 @@ static void aggregate_probe_tests(void) {
             const uint8_t *delimiter=packet+14u+i*84u;
             assert(delimiter[0]==0u && delimiter[1]==5u && delimiter[3]==0x4eu);
             assert(delimiter[2]==clean_ampdu_delimiter_crc(delimiter));
-            assert(clean_mac_valid(delimiter+4u,80u));
-            assert(clean_ht_ampdu_probe_sequence(delimiter+4u,80u,nonce)==(int)i);
+            int bad=!!(CLEAN_RX_AMPDU_BAD_FCS & (1u << i));
+            assert(clean_mac_valid(delimiter+4u,80u)==!bad);
+            assert(clean_ht_ampdu_probe_sequence(delimiter+4u,80u,nonce)==
+                   (bad ? -1 : (int)i));
             assert(memcmp(delimiter+8u,delimiter+14u,6u));
         }
         clean_ampdu_probe_trace_t trace = {.magic=CLEAN_AMPDU_PROBE_MAGIC,
@@ -33,7 +177,8 @@ static void aggregate_probe_tests(void) {
             memcpy(raw+2u,packet+8u,6u);
             memcpy(raw+8u,packet+18u+i*84u,80u);
             trace.count=(uint16_t)(i+1u);
-            assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==(1u << (i+1u))-1u);
+            assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==
+                   (((1u << (i+1u))-1u) & expected_mask));
         }
         trace.count=4u;
         assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
@@ -52,20 +197,28 @@ static void aggregate_probe_tests(void) {
         trace.status1=0x1922u;
         trace.status2=0x0a41u;
         assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==
-               (CLEAN_RX_AMPDU_INTERFACE>=3 ? 7u : 0u));
+               (CLEAN_RX_AMPDU_INTERFACE>=3 ? expected_mask : 0u));
+        trace.status1=0x1822u;
+        trace.outcome=2u;
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==
+               (CLEAN_RX_AMPDU_HANDOFF==2 ? expected_mask : 0u));
+        trace.status2^=0x200u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        trace.status2^=0x200u;
+        trace.outcome=0u;
         trace.status1=0u;
         assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
         trace.phy=2u;
         trace.raw[8u]^=1u;
-        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==6u);
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==(6u & expected_mask));
         trace.raw[8u]^=1u;
         trace.raw[CLEAN_HT_AMPDU_PROBE_SLOT_BYTES+2u]^=1u;
-        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==5u);
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==(5u & expected_mask));
         memcpy(trace.raw+CLEAN_HT_AMPDU_PROBE_SLOT_BYTES,trace.raw,
                CLEAN_HT_AMPDU_PROBE_SLOT_BYTES);
         memcpy(trace.raw+2u*CLEAN_HT_AMPDU_PROBE_SLOT_BYTES,trace.raw,
                CLEAN_HT_AMPDU_PROBE_SLOT_BYTES);
-        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==1u);
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==(1u & expected_mask));
         trace.raw[8u+26u]^=1u;
         trace.count=1u;
         assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
@@ -204,7 +357,7 @@ static void association_tests(const uint8_t cap[26], const uint8_t op[22],
     assert(!clean_station_response_profile(response, length, mac, bssid, 1u, &aid, &parsed));
     assert(aid == 38u && parsed.valid && parsed.aid == 38u && parsed.capability == 1u);
     assert(parsed.ht.capabilities && parsed.ht.operation && parsed.ht.wmm.present);
-    assert(clean_ht_peer_fallback(&parsed.ht, 1u) == CLEAN_HT_FALLBACK_MAC);
+    assert(clean_ht_peer_fallback(&parsed.ht, 1u) == ht_base_fallback());
     clean_station_association_t saved = parsed;
     clean_edca_t edca = {0};
     assert(clean_edca_configure(&edca, parsed.ht.wmm.ac, 0u, 1u, 1u));
@@ -333,7 +486,7 @@ static void association_tests(const uint8_t cap[26], const uint8_t op[22],
     ap.association = saved;
     clean_station_ht_report(&ap, 1u, detail);
     assert(detail[CLEAN_HT_PEER_DETAIL + 19u] == 1u);
-    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) == CLEAN_HT_FALLBACK_MAC);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) == ht_base_fallback());
     assert(!clean_station_refresh(&ap, beacon, beacon_length));
 
     /* WMM-only updates must reach the caller even with unchanged legacy IEs. */
@@ -433,15 +586,70 @@ static void peer_tests(void) {
     clean_ht_peer_ie(&peer, 45u, cap, sizeof(cap));
     clean_ht_peer_ie(&peer, 61u, op, sizeof(op));
     clean_ht_peer_ie(&peer, 221u, wmm, sizeof(wmm));
-    assert(clean_ht_peer_fallback(&peer, 1u) == CLEAN_HT_FALLBACK_MAC);
+    assert(clean_ht_peer_fallback(&peer, 1u) == ht_base_fallback());
     assert(peer.rx_mcs == 255u && peer.basic_mcs == 1u && peer.width40 == 1u);
     assert(peer.ampdu_exponent == 3u && peer.mpdu_spacing == 6u);
     assert(peer.wmm.present && peer.wmm.parameter_set == 3u && peer.wmm.uapsd);
     assert(peer.wmm.ac[0].aifsn == 3u && peer.wmm.ac[1].aifsn == 7u);
     assert(peer.wmm.ac[2].txop_32us == 94u && peer.wmm.ac[3].txop_32us == 47u);
+    clean_ht_candidate_t candidate=clean_ht_peer_candidate(&peer,1u,2u);
+    assert(candidate.fallback==ht_base_fallback() && candidate.rx_mcs==255u);
+    assert(candidate.tx_mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 255u : 0u));
+    assert(candidate.mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 2 : -1));
+    candidate=clean_ht_peer_candidate(&peer,1u,8u);
+    assert(candidate.mcs==-1 && !candidate.tx_mcs &&
+           (candidate.fallback & CLEAN_HT_FALLBACK_MCS));
+    clean_station_ap_t ap={0};
+    ap.ht=peer;
+    ap.association.valid=1u;
+    ap.association.ht=peer;
+    ap.association.ht.rx_mcs=0x55u;
+    ap.ht.rx_mcs=0x0fu;
+    candidate=clean_station_ht_candidate(&ap,1u,7u);
+    assert(candidate.tx_mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 0x55u : 0u));
+    ap.ht_updates=1u;
+    candidate=clean_station_ht_candidate(&ap,1u,7u);
+    assert(candidate.fallback==ht_base_fallback() &&
+           candidate.tx_mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 5u : 0u) &&
+           candidate.mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 2 : -1));
+    candidate=clean_station_ht_candidate(&ap,1u,1u);
+    assert(candidate.mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 0 : -1));
+    ap.ht.primary=6u;
+    candidate=clean_station_ht_candidate(&ap,1u,7u);
+    assert(candidate.mcs==-1 && !candidate.tx_mcs &&
+           (candidate.fallback & CLEAN_HT_FALLBACK_CHANNEL));
+    ap.ht.primary=1u;
+    ap.ht.operation=0u;
+    candidate=clean_station_ht_candidate(&ap,1u,7u);
+    assert(candidate.mcs==-1 && (candidate.fallback & CLEAN_HT_FALLBACK_NO_HT));
+    ap.ht.operation=1u;
+    ap.ht.basic_mcs=0x80u;
+    candidate=clean_station_ht_candidate(&ap,1u,7u);
+    assert(candidate.mcs==-1 && (candidate.fallback & CLEAN_HT_FALLBACK_MCS));
+    ap.ht.basic_mcs=1u;
+    clean_station_forget_association(&ap);
+    candidate=clean_station_ht_candidate(&ap,1u,7u);
+    assert(!ap.association.valid && !ap.ht_updates &&
+           candidate.tx_mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 15u : 0u));
     assert(clean_ht_peer_fallback(&peer, 6u) & CLEAN_HT_FALLBACK_CHANNEL);
     assert(clean_ht_peer_fallback(&peer, 0u) & CLEAN_HT_FALLBACK_CHANNEL);
     clean_ht_peer_t next = peer;
+    for (uint32_t fault=0u;fault<2u;++fault) {
+        uint8_t bad_cap[26];
+        memcpy(bad_cap,cap,sizeof(bad_cap));
+        if (!fault) bad_cap[0]=(uint8_t)((bad_cap[0] & ~12u) | 8u);
+        else bad_cap[2]|=0x20u;
+        memset(&next,0,sizeof(next));
+        clean_ht_peer_ie(&next,45u,bad_cap,sizeof(bad_cap));
+        assert(next.invalid &&
+               (clean_ht_peer_candidate(&next,1u,7u).fallback & CLEAN_HT_FALLBACK_MALFORMED));
+    }
+    next=peer;
+    next.capability|=0x03f1u;
+    candidate=clean_ht_peer_candidate(&next,1u,7u);
+    assert(candidate.fallback==ht_base_fallback() &&
+           candidate.mcs==(CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX ? 7 : -1));
+    next=peer;
     next.unsupported_basic = 1u;
     assert(clean_ht_peer_fallback(&next, 1u) & CLEAN_HT_FALLBACK_MCS);
     next = peer; next.rx_mcs = 0xfeu;
@@ -513,7 +721,7 @@ static void peer_tests(void) {
     clean_ht_peer_report(&peer, 1u, detail);
     assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL) == CLEAN_HT_PEER_MAGIC);
     association_tests(cap, op, wmm);
-    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) == CLEAN_HT_FALLBACK_MAC);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) == ht_base_fallback());
     for (uint32_t i = 0u; i < sizeof(detail); ++i)
         if (i < CLEAN_HT_PEER_DETAIL || i >= CLEAN_HT_PEER_DETAIL + CLEAN_HT_PEER_BYTES)
             assert(detail[i] == 0xa5u);
@@ -771,6 +979,8 @@ static void monitor_tests(void) {
 }
 
 int main(void) {
+    aggregate_dma_tests();
+    configuration_tests();
     aggregate_probe_tests();
     packet_tests();
     ack_packet_tests();

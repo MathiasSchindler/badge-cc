@@ -1,9 +1,10 @@
 # Finite A-MPDU radio investigation
 
 The follow-up [interface investigation](AMPDU_INTERFACE_INVESTIGATION.md)
-now demonstrates two complete MPDUs from one PPDU with an opt-in early
-completion path. The third loses four leading MAC bytes; full reception
-and Immediate BA remain incomplete. The record below describes the
+now demonstrates all three complete diagnostic MPDUs with the fixed
+direct-body handoff. Its additional gated DMA/F2 experiment actually
+delivers the first two to the RP2350 but still misses the last; production
+reception and Immediate BA remain incomplete. The record below describes the
 earlier, first-MPDU-only campaign and its evidence layouts.
 
 ## Initial campaign result and limits

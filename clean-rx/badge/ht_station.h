@@ -3,6 +3,7 @@
 
 #include "../../src/shared/bytes.h"
 #include "../src/mac.h"
+#include "../src/ht20.h"
 
 #define CLEAN_HT_PEER_DETAIL 1040u
 #define CLEAN_HT_PEER_BYTES 48u
@@ -34,8 +35,15 @@ enum {
     CLEAN_HT_FALLBACK_MCS = 8u,
     CLEAN_HT_FALLBACK_WMM = 16u,
     CLEAN_HT_FALLBACK_MAC = 32u,
-    CLEAN_HT_FALLBACK_PROTECTION = 64u
+    CLEAN_HT_FALLBACK_PROTECTION = 64u,
+    CLEAN_HT_FALLBACK_LOCAL_PHY = 128u
 };
+
+typedef struct {
+    uint32_t fallback;
+    uint8_t tx_mcs, rx_mcs;
+    int mcs;
+} clean_ht_candidate_t;
 
 static inline int clean_ht_peer_equal(const clean_ht_peer_t *a, const clean_ht_peer_t *b) {
     if (a->capability != b->capability || a->protection != b->protection ||
@@ -63,6 +71,7 @@ static inline void clean_ht_peer_ie(clean_ht_peer_t *s, uint32_t id,
         if (s->capabilities || size != 26u) { s->invalid = 1u; return; }
         s->capabilities = 1u;
         s->capability = (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8u));
+        if ((s->capability & 12u) == 8u || (p[2] & 0xe0u)) s->invalid = 1u;
         s->ampdu_exponent = p[2] & 3u;
         s->mpdu_spacing = (p[2] >> 2u) & 7u;
         s->rx_mcs = p[3];
@@ -108,9 +117,26 @@ static inline uint32_t clean_ht_peer_fallback(const clean_ht_peer_t *s, uint32_t
         reason |= CLEAN_HT_FALLBACK_WMM;
     /* No association advertisement until actual EDCA/BA/receive-size support. */
     reason |= CLEAN_HT_FALLBACK_MAC;
+    if (!CLEAN_RX_HT_DATA || !CLEAN_RX_HT_RX)
+        reason |= CLEAN_HT_FALLBACK_LOCAL_PHY;
     if ((s->protection & 3u) || (s->protection & 0x10u))
         reason |= CLEAN_HT_FALLBACK_PROTECTION;
     return reason;
+}
+
+static inline clean_ht_candidate_t clean_ht_peer_candidate(const clean_ht_peer_t *s,
+        uint32_t channel, uint32_t ceiling) {
+    clean_ht_candidate_t candidate = {0};
+    candidate.fallback = clean_ht_peer_fallback(s, channel);
+    candidate.rx_mcs = CLEAN_HT20_MCS_MASK;
+    candidate.tx_mcs = s->rx_mcs & CLEAN_HT20_MCS_MASK;
+    candidate.mcs = clean_ht20_select_mcs(candidate.tx_mcs, ceiling);
+    if (candidate.mcs < 0) candidate.fallback |= CLEAN_HT_FALLBACK_MCS;
+    if (candidate.fallback & ~CLEAN_HT_FALLBACK_MAC) {
+        candidate.tx_mcs = 0u;
+        candidate.mcs = -1;
+    }
+    return candidate;
 }
 
 static inline void clean_ht_peer_report(const clean_ht_peer_t *s, uint32_t channel,
@@ -118,7 +144,8 @@ static inline void clean_ht_peer_report(const clean_ht_peer_t *s, uint32_t chann
     uint8_t *p = detail + CLEAN_HT_PEER_DETAIL;
     badger_bytes_zero(p, CLEAN_HT_PEER_BYTES);
     badger_bytes_store_u32(p, CLEAN_HT_PEER_MAGIC);
-    badger_bytes_store_u32(p + 4u, clean_ht_peer_fallback(s, channel));
+    clean_ht_candidate_t candidate = clean_ht_peer_candidate(s, channel, 7u);
+    badger_bytes_store_u32(p + 4u, candidate.fallback);
     p[8] = s->rx_mcs; p[9] = s->basic_mcs; p[10] = s->width40; p[11] = s->primary;
     p[12] = (uint8_t)s->capability; p[13] = (uint8_t)(s->capability >> 8u);
     p[14] = (uint8_t)s->protection; p[15] = (uint8_t)(s->protection >> 8u);
