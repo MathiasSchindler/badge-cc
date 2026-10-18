@@ -27,6 +27,9 @@ void wpa_ptk(const uint8_t pmk[32], const uint8_t ap[6], const uint8_t sta[6],
 void wpa_aes_init(wpa_aes_t *a, const uint8_t key[16]);
 void wpa_aes_encrypt(const wpa_aes_t *a, const uint8_t in[16], uint8_t out[16]);
 int wpa_unwrap(const uint8_t key[16], const uint8_t *in, uint32_t n, uint8_t *out);
+/* Ordinary payloads are bounded to 2304 bytes; unfragmented QoS A-MSDUs to
+ * 3839. MIC verification does not authenticate the A-MSDU header bit: callers
+ * must validate the entire plaintext aggregate before exposing subframes. */
 int wpa_ccmp(const uint8_t key[16], const uint8_t *header, uint32_t hn,
               const uint8_t pn[6], const uint8_t *in, uint32_t n,
               uint8_t *out, uint8_t tag[8], int decrypt);

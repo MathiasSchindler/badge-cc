@@ -147,15 +147,16 @@ uint32_t clean_wpa_probe(clean_wpa_t *s, uint8_t frame[512]) {
     badger_bytes_zero(frame,512u);
     static const uint8_t prefix[16]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',0u};
     uint8_t *m=frame+6u, payload[32];
+    uint32_t h=s->tx_qos?26u:24u;
     badger_bytes_copy(payload,prefix,16u);
-    clean_station_header(m,8u,s->sequence++,s->mac,s->bssid); m[1]=0x41u;
-    m[24]=s->tx_pn[0]; m[25]=s->tx_pn[1]; m[27]=32u;
-    badger_bytes_copy(m+28u,s->tx_pn+2u,4u);
+    clean_station_header(m,s->tx_qos?0x88u:8u,s->sequence++,s->mac,s->bssid); m[1]=0x41u;
+    m[h]=s->tx_pn[0]; m[h+1u]=s->tx_pn[1]; m[h+3u]=32u;
+    badger_bytes_copy(m+h+4u,s->tx_pn+2u,4u);
     badger_bytes_copy(payload+16u,s->snonce,16u);
-    if (!wpa_ccmp(s->ptk+32u,m,24u,s->tx_pn,payload,32u,m+32u,m+64u,0)) return 0u;
-    badger_bytes_store_u32(m+72u,diag_crc32(m,72u));
-    (void)clean_ofdm_plcp_rate(frame,76u,0u);
-    return 82u;
+    if (!wpa_ccmp(s->ptk+32u,m,h,s->tx_pn,payload,32u,m+h+8u,m+h+40u,0)) return 0u;
+    badger_bytes_store_u32(m+h+48u,diag_crc32(m,h+48u));
+    (void)clean_ofdm_plcp_rate(frame,h+52u,0u);
+    return h+58u;
 }
 
 void clean_wpa_rx_expire(clean_wpa_t *s, uint32_t now) {
@@ -167,13 +168,25 @@ void clean_wpa_rx_expire(clean_wpa_t *s, uint32_t now) {
             wpa_wipe(s->qos_fragment_pn[i],sizeof(s->qos_fragment_pn[i]));
 }
 
+static int protected_reply(const clean_wpa_t *s, const volatile uint8_t *plain,
+                            uint32_t payload) {
+    static const uint8_t reply[16]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
+    if (payload<32u) return 0;
+    uint8_t different=0u;
+    for (uint32_t i=0u;i<32u;++i)
+        different|=plain[i]^(i<16u?reply[i]:s->snonce[i-16u]);
+    return !different;
+}
+
 int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t now) {
     clean_wpa_rx_expire(s,now);
     if (!s->installed || s->error || n<44u || !clean_frame_valid(m,n) ||
         (m[0]!=8u && m[0]!=0x88u) || (m[1]&0xc3u)!=0x42u ||
         !wpa_equal(m+4u,s->mac,6u) || !wpa_equal(m+10u,s->bssid,6u)) return 0;
     uint32_t h=m[0]==0x88u?26u:24u;
-    if (n<h+20u || (h==26u && ((m[24]&128u) || (m[24]&0x60u)>=0x40u)))
+    int aggregate=h==26u && (m[24]&128u);
+    if (n<h+20u || (h==26u && (m[24]&0x60u)>=0x40u) ||
+        (aggregate && (!s->rx_amsdu || (m[1]&4u) || (m[22]&15u))))
         return failure(s,WPA_FORMAT);
     const uint8_t *c=m+h;
     if (c[2] || c[3]!=32u) return failure(s,WPA_FORMAT);
@@ -184,11 +197,25 @@ int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t n
     for (uint32_t i=0u;i<6u;++i) { big[i]=pn[5u-i]; old[i]=s->rx_pn[tid][5u-i]; }
     if (!greater(big,old,6u)) return 0; /* A valid MAC retry must not reset replay state. */
     uint32_t payload=n-h-20u;
-    if (payload>CLEAN_MSDU_BYTES) return failure(s,WPA_FORMAT);
+    if (payload>(aggregate?CLEAN_AMSDU_BYTES:CLEAN_MSDU_BYTES))
+        return failure(s,WPA_FORMAT);
     uint8_t *plain=s->rx_mpdu+h;
     badger_bytes_copy(s->rx_mpdu,m,h);
     badger_bytes_copy(tag,m+n-12u,8u);
     if (!wpa_ccmp(s->ptk+32u,m,h,pn,c+8u,payload,plain,tag,1)) return failure(s,WPA_MIC);
+    uint32_t subframes=0u;
+    int matched=0;
+    if (aggregate) {
+        clean_amsdu_t body;
+        clean_amsdu_subframe_t subframe;
+        if (!clean_amsdu_open(&body,plain,payload)) return failure(s,WPA_FORMAT);
+        while (clean_amsdu_next(&body,&subframe)) {
+            for (uint32_t i=0u;i<6u;++i)
+                if (subframe.destination[i]!=s->mac[i]) return failure(s,WPA_FORMAT);
+            ++subframes;
+            matched|=protected_reply(s,subframe.payload,subframe.length);
+        }
+    }
     badger_bytes_copy(s->rx_pn[tid],pn,6u);
     if (m[22]&15u) {
         uint8_t expected[6];
@@ -210,8 +237,10 @@ int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t n
         plain=assembly->frame+h;
         payload=assembly->length-h-4u;
     }
-    static const uint8_t reply[16]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
-    int matched=payload>=32u && wpa_equal(plain,reply,16u) && wpa_equal(plain+16u,s->snonce,16u);
+    if (aggregate) {
+        ++s->amsdu_rx;
+        s->amsdu_subframes+=subframes;
+    } else matched=protected_reply(s,plain,payload);
     wpa_wipe(s->rx_mpdu,sizeof(s->rx_mpdu));
     if (!assembly->active) {
         wpa_wipe(assembly->frame,sizeof(assembly->frame));

@@ -9,7 +9,7 @@
 typedef struct {
     clean_ht_peer_t ht;
     uint16_t aid, capability;
-    uint8_t valid;
+    uint8_t valid, wmm;
 } clean_station_association_t;
 
 typedef struct {
@@ -32,6 +32,49 @@ static const uint8_t clean_station_rates[12] = {
 
 static inline uint16_t clean_station_u16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8u));
+}
+
+static inline int clean_station_wmm_usable(const clean_ht_peer_t *peer) {
+    return !peer->invalid && peer->wmm.present && clean_edca_valid(peer->wmm.ac) &&
+           !(peer->wmm.ac[0].acm && peer->wmm.ac[1].acm);
+}
+
+static inline int clean_station_wmm_offer(const clean_station_ap_t *ap) {
+    return CLEAN_RX_WMM && clean_station_wmm_usable(&ap->ht);
+}
+
+static inline int clean_station_wmm_accept(const clean_station_association_t *response,
+                                          uint32_t offered) {
+    if (!CLEAN_RX_WMM || !offered) return 0;
+    if (!response->valid) return -1;
+    if (!response->ht.wmm.present && !response->ht.wmm.information && !response->ht.invalid)
+        return 0;
+    return clean_station_wmm_usable(&response->ht) ? 1 : -1;
+}
+
+/* Address/rate/slot, QoS response and all four ACs form one controller policy. */
+static inline int clean_station_wmm_policy(uint8_t bytes[CLEAN_WMM_POLICY_BYTES],
+        const uint8_t own[6], const clean_station_ap_t *ap) {
+    if (!CLEAN_RX_WMM || !ap->association.valid || !ap->association.wmm) return 0;
+    const clean_ht_peer_t *peer = ap->ht_updates ? &ap->ht : &ap->association.ht;
+    if (!clean_station_wmm_usable(peer)) return -1;
+    badger_bytes_zero(bytes, CLEAN_WMM_POLICY_BYTES);
+    badger_bytes_copy(bytes, own, 6u);
+    badger_bytes_copy(bytes + 6u, ap->bssid, 6u);
+    bytes[12] = (uint8_t)ap->basic_rates;
+    bytes[13] = (uint8_t)(ap->basic_rates >> 8u);
+    bytes[14] = (uint8_t)!!(ap->capability & 1024u);
+    bytes[15] = 3u;
+    bytes[16] = 1u; /* QoS normal ACK only, not HT responses. */
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        const clean_edca_ac_t *ac = &peer->wmm.ac[i];
+        uint8_t *p = bytes + 20u + 4u*i;
+        p[0] = (uint8_t)((i << 5u) | (ac->acm << 4u) | ac->aifsn);
+        p[1] = (uint8_t)((ac->ecw_max << 4u) | ac->ecw_min);
+        p[2] = (uint8_t)ac->txop_32us;
+        p[3] = (uint8_t)(ac->txop_32us >> 8u);
+    }
+    return 1;
 }
 
 static inline int clean_station_suite(const uint8_t *p, uint8_t type) {
@@ -277,6 +320,11 @@ static inline uint32_t clean_station_associate(uint8_t frame[160], uint16_t sequ
         };
         badger_bytes_copy(m + at, rsn, sizeof(rsn));
         at += sizeof(rsn);
+    }
+    if (clean_station_wmm_offer(ap)) {
+        static const uint8_t wmm[9] = {221u,7u,0u,0x50u,0xf2u,2u,0u,1u,0u};
+        badger_bytes_copy(m + at, wmm, sizeof(wmm));
+        at += sizeof(wmm);
     }
     badger_bytes_store_u32(m + at, diag_crc32(m, at));
     (void)clean_ofdm_plcp_rate(frame, at + 4u, 0u);

@@ -32,6 +32,9 @@ static uint8_t station_target[6];
 static int station_ap_status;
 static clean_wpa_t wpa;
 static clean_mac_rx_t station_rx;
+static clean_qos_rx_t station_qos;
+static uint32_t station_wmm_updates;
+static uint8_t station_wmm_offered;
 static uint8_t wpa_secret[64];
 /* RX consumers run synchronously; share a packet outside the 8 KiB stack. */
 static uint8_t rx_packet[CLEAN_RX_PACKET_BYTES];
@@ -341,6 +344,8 @@ static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
 
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size) {
     if (wpa.installed) clean_wpa_rx_expire(&wpa, l->wire->now_us(l->wire->context));
+    if (CLEAN_RX_WMM) clean_qos_rx_expire(&station_qos,
+                                        l->wire->now_us(l->wire->context));
     if (!clean_receive(l, rx_packet, size)) return 0;
     if (*size >= 58u) {
         clean_station_ap_t next;
@@ -351,7 +356,19 @@ static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *si
             return 0;
         }
         if (changed) {
-            if (next.basic_rates != station_ap.basic_rates ||
+            if (CLEAN_RX_WMM && next.association.wmm) {
+                uint8_t previous[CLEAN_WMM_POLICY_BYTES], config[CLEAN_WMM_POLICY_BYTES];
+                if (clean_station_wmm_policy(previous, mac, &station_ap) != 1 ||
+                    clean_station_wmm_policy(config, mac, &next) != 1) {
+                    l->error = CLEAN_INPUT; l->actual = CLEAN_WMM_POLICY_CMD;
+                    return 0;
+                }
+                if (!badger_bytes_equal(previous, config, sizeof(config))) {
+                    if (!station_command(l, config, sizeof(config), CLEAN_WMM_POLICY_CMD))
+                        return 0;
+                    if (station_wmm_updates != 0xffffffffu) ++station_wmm_updates;
+                }
+            } else if (next.basic_rates != station_ap.basic_rates ||
                 ((next.capability ^ station_ap.capability) & 1024u)) {
                 uint8_t config[16];
                 badger_bytes_copy(config, mac, 6u);
@@ -365,8 +382,9 @@ static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *si
             badger_bytes_copy((uint8_t *)&station_ap, (const uint8_t *)&next, sizeof(next));
         }
     }
-    int result = clean_station_rx(&station_rx, rx_packet, size, mac, station_ap.bssid,
-                                  l->wire->now_us(l->wire->context));
+    int result = clean_station_qos_rx(&station_rx,
+        CLEAN_RX_WMM && station_ap.association.wmm ? &station_qos : 0,
+        rx_packet, size, mac, station_ap.bssid, l->wire->now_us(l->wire->context));
     if (result == CLEAN_MAC_UNSUPPORTED) {
         l->error = CLEAN_INPUT;
         l->actual = (uint32_t)result;
@@ -415,6 +433,12 @@ static int station_wait(clean_loader_t *l, const uint8_t mac[6], uint8_t associa
                                                      association, aid, &profile);
         if (status < 0) continue;
         if (association && !status) {
+            int wmm = clean_station_wmm_accept(&profile, station_wmm_offered);
+            if (wmm < 0) {
+                l->error = CLEAN_INPUT; l->actual = CLEAN_WMM_POLICY_CMD;
+                return -1;
+            }
+            profile.wmm = (uint8_t)wmm;
             badger_bytes_copy((uint8_t *)&station_ap.association,
                               (const uint8_t *)&profile, sizeof(profile));
             station_ap.ht_updates = 0u;
@@ -430,6 +454,8 @@ static int station_wait(clean_loader_t *l, const uint8_t mac[6], uint8_t associa
 
 static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     clean_wpa_init(&wpa,wpa_secret,mac,station_ap.bssid,station_ap.rsn,station_ap.rsn_length);
+    wpa.tx_qos = station_ap.association.wmm;
+    wpa.rx_amsdu = (uint8_t)(CLEAN_RX_HT_RX && station_ap.association.wmm);
     wpa_wipe(wpa_secret,sizeof(wpa_secret));
     uint32_t started=l->wire->now_us(l->wire->context), last_probe=started;
     uint8_t *packet=rx_packet;
@@ -495,6 +521,8 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     badger_bytes_store_u32(detail+1664u,wpa.m4);
     badger_bytes_store_u32(detail+1668u,wpa.protected_rx);
     badger_bytes_store_u32(detail+1672u,wpa.gtk_info);
+    badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+16u,wpa.amsdu_rx);
+    badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+20u,wpa.amsdu_subframes);
     clean_station_qos_report_at(&wpa.rx_mac,&wpa.rx_qos,detail,CLEAN_STATION_PROTECTED_DETAIL);
     wpa_wipe(&wpa,sizeof(wpa));
 }
@@ -529,6 +557,14 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     clean_station_request_t request = {.sequence = clean_station_u16(nonce + 11u)};
     for (uint8_t association = 0u; association < 2u; ++association) {
         if (association && !receive_for(l,10000u,0u)) return;
+        if (association) {
+            station_wmm_offered = (uint8_t)clean_station_wmm_offer(&station_ap);
+            if (station_wmm_offered) {
+                uint8_t unused[4] = {0};
+                if (!station_command(l, unused, sizeof(unused),
+                                     CLEAN_HT_RESPONSE_CMD | (1u << 8u))) return;
+            }
+        }
         uint8_t frame[160];
         request.pending = 0u;
         badger_bytes_store_u32(detail + 1092u, 1u);
@@ -576,6 +612,15 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
         badger_bytes_store_u32(detail + 524u, association ? 3u : 2u);
         if (status != 0 || l->error) return;
     }
+    if (station_ap.association.wmm) {
+        uint8_t policy[CLEAN_WMM_POLICY_BYTES];
+        if (clean_station_wmm_policy(policy, mac, &station_ap) != 1) {
+            l->error = CLEAN_INPUT; l->actual = CLEAN_WMM_POLICY_CMD;
+            return;
+        }
+        if (!station_command(l, policy, sizeof(policy), CLEAN_WMM_POLICY_CMD)) return;
+        ++station_wmm_updates;
+    }
     badger_bytes_store_u32(detail + 536u, aid);
     badger_bytes_store_u32(detail + 524u, 4u);
     if (nonce[14]==18u) station_wpa(l,mac);
@@ -591,6 +636,8 @@ static void run(const uint8_t nonce[16]) {
     if (badger_schedule_bootsel(8000u) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
     clean_mac_rx_init(&station_rx);
+    if (CLEAN_RX_WMM) clean_qos_rx_init(&station_qos);
+    station_wmm_updates = station_wmm_offered = 0u;
     int secret_valid=1;
     if (nonce[14]==18u) {
         uint8_t digest[20];
@@ -853,7 +900,18 @@ static void run(const uint8_t nonce[16]) {
     if (snapshot && station_mode() && !badger_bytes_load_u32(detail + 596u))
         snapshot = clean_block(&l, CLEAN_AUTH_FAILURE_ADDR, detail + CLEAN_AUTH_FAILURE_DETAIL,
                                sizeof(clean_auth_failure_t), 0u);
-    if (station_mode() || soak_mode()) clean_station_rx_report(&station_rx, detail);
+    if (station_mode() || soak_mode())
+        clean_station_qos_report_at(&station_rx, CLEAN_RX_WMM ? &station_qos : 0,
+                                   detail, CLEAN_STATION_MAC_DETAIL);
+    if (station_mode()) {
+        badger_bytes_store_u32(detail + CLEAN_WMM_DETAIL, CLEAN_WMM_MAGIC);
+        badger_bytes_store_u32(detail + CLEAN_WMM_DETAIL + 4u, station_wmm_offered);
+        badger_bytes_store_u32(detail + CLEAN_WMM_DETAIL + 8u, station_ap.association.wmm);
+        badger_bytes_store_u32(detail + CLEAN_WMM_DETAIL + 12u, station_wmm_updates);
+        if (snapshot && CLEAN_RX_WMM)
+            snapshot = clean_block(&l, CLEAN_EDCA_STATUS_ADDR, detail + CLEAN_EDCA_DETAIL,
+                                   sizeof(clean_edca_status_t), 0u);
+    }
     if (saved_error != CLEAN_OK) {
         l.error = saved_error;
         l.address = saved_addr;

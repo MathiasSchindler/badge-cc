@@ -9,6 +9,8 @@
 #include "../src/tx_diag.h"
 #include "../src/mac_soak.h"
 #include "../src/ht20.h"
+#include "station_rx.h"
+#include "wpa2.h"
 
 static uint32_t ticks, calls, blocks, state, base;
 static int cancel, mismatch, bus_error, terminate_error, f2_post_status, ack_error;
@@ -332,6 +334,86 @@ static void ht_transport(const wifi_wire_t *wire) {
            CLEAN_F2_MAX_FRAGMENTS);
 }
 
+static void protected_aggregate_transport(const wifi_wire_t *wire) {
+#if CLEAN_RX_HT_RX
+    const uint32_t mpdu=26u+8u+CLEAN_AMSDU_BYTES+8u+4u;
+    uint8_t encrypted[26u+8u+CLEAN_AMSDU_BYTES+8u+4u];
+    uint8_t body[CLEAN_AMSDU_BYTES], packet[CLEAN_RX_PACKET_BYTES];
+    const uint8_t nonce[14]={1u,2u,3u,4u,5u,6u}, pn[6]={1u};
+    static const uint8_t reply[16]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
+    for (uint32_t mcs=0u;mcs<8u;mcs+=7u)
+        for (uint32_t rounded=0u;rounded<2u;++rounded)
+            for (uint32_t fault=0u;fault<3u;++fault) {
+                clean_wpa_t s;
+                clean_mac_rx_t legacy;
+                clean_qos_rx_t qos;
+                clean_loader_t l;
+                memset(&s,0,sizeof(s)); memset(encrypted,0,sizeof(encrypted));
+                clean_mac_rx_init(&legacy); clean_qos_rx_init(&qos);
+                for (uint32_t i=0u;i<26u;++i)
+                    encrypted[i]=clean_ht_amsdu_byte(i,nonce);
+                for (uint32_t i=0u;i<sizeof(body);++i)
+                    body[i]=clean_ht_amsdu_byte(i+26u,nonce);
+                encrypted[1]=0x42u; encrypted[24]=0x85u;
+                memcpy(s.mac,encrypted+4u,6u); memcpy(s.bssid,encrypted+10u,6u);
+                memcpy(encrypted+16u,s.bssid,6u);
+                s.installed=s.rx_amsdu=1u;
+                memcpy(body+14u,reply,sizeof(reply));
+                memcpy(body+30u,s.snonce,16u);
+                if (fault==2u) ++body[2333u];
+                encrypted[26]=1u; encrypted[29]=32u;
+                assert(wpa_ccmp(s.ptk+32u,encrypted,26u,pn,body,sizeof(body),
+                                encrypted+34u,encrypted+34u+sizeof(body),0));
+                if (fault==1u) encrypted[mpdu-12u]^=1u;
+                badger_bytes_store_u32(encrypted+mpdu-4u,diag_crc32(encrypted,mpdu-4u));
+                uint32_t physical[3];
+                uint8_t *parts[3]={f2_packet,f2_next,f2_last};
+                for (uint32_t part=0u;part<3u;++part) {
+                    uint32_t offset=part*CLEAN_F2_FRAGMENT_BYTES;
+                    physical[part]=fragment(parts[part],mpdu,offset);
+                    uint32_t count=physical[part]-CLEAN_F2_FRAGMENT_HEADER;
+                    memcpy(parts[part]+CLEAN_F2_FRAGMENT_HEADER,encrypted+offset,count);
+                    parts[part][15]=(uint8_t)mcs;
+                    parts[part][16]=CLEAN_RX_HT20|CLEAN_RX_UNSUPPORTED_PHY|1u;
+                    parts[part][17]=CLEAN_HT_DATA_VERSION;
+                    if (rounded) physical[part]=(physical[part]+3u)&~3u;
+                }
+                f2_next_size=physical[1]; f2_last_size=physical[2];
+                f2_status=0x100u|(physical[0]<<9u);
+                f2_post_status=f2_check_credit=1; f2_after_status=f2_reads=0u;
+                f2_expected_credit=77u;
+                badger_bytes_store_u32(ram+CLEAN_MBOX+CLEAN_SDIO_ACK_OFFSET,77u);
+                clean_loader_init(&l,wire,service,NULL);
+                l.rx_credit=1u; l.rx_consumed=77u;
+                uint32_t size=0u;
+                assert(clean_receive(&l,packet,&size));
+                assert(size==18u+mpdu && f2_reads==3u);
+                assert(clean_ht_rx_metadata(packet[15],packet[16],packet[17],mpdu,1u,mcs));
+                assert(!memcmp(packet+18u,encrypted,mpdu) && clean_frame_valid(packet+18u,mpdu));
+#ifndef CLEAN_RX_STRICT_TEST
+                assert(l.rx_consumed==78u);
+                assert(badger_bytes_load_u32(ram+CLEAN_MBOX+CLEAN_SDIO_ACK_OFFSET)==78u);
+#else
+                assert(l.rx_consumed==77u);
+#endif
+                assert(clean_station_qos_rx(&legacy,&qos,packet,&size,s.mac,s.bssid,0u)==
+                       CLEAN_MAC_PROTECTED);
+                assert(size==18u+mpdu && !qos.tid[5].delivered);
+                assert(clean_wpa_protected(&s,packet+18u,size-18u,0u)==(fault?-1:1));
+                assert(s.amsdu_rx==(fault?0u:1u) && s.amsdu_subframes==(fault?0u:2u));
+                assert(s.protected_rx==(fault?0u:1u) && s.rx_pn[5][0]==(fault?0u:1u));
+                if (fault) assert(s.error==(fault==1u?WPA_MIC:WPA_FORMAT) && !s.installed);
+                else assert(!s.error && s.installed && s.rx_qos.tid[5].delivered==1u);
+                for (uint32_t i=0u;i<sizeof(s.rx_mpdu);++i) assert(!s.rx_mpdu[i]);
+                f2_check_credit=0;
+            }
+    f2_post_status=0; f2_status=f2_next_size=f2_last_size=0u;
+    puts("Protected aggregate transport: 3885-byte encrypted MPDU, three F2 fragments, exact bytes/metadata/credit, station bypass and all-or-nothing MIC/subframe delivery pass; NOT RF");
+#else
+    (void)wire;
+#endif
+}
+
 static void cck_rates(void) {
     clean_tx_tail_t tail = {0};
     assert(!clean_tx_tail_poll(&tail, 0) && !tail.ended);
@@ -619,14 +701,22 @@ static void ht_boundaries(void) {
                (secured ? CLEAN_AP_PSK_CCMP : CLEAN_AP_OPEN));
         assert(parsed.ht.capabilities && parsed.ht.operation && parsed.ht.wmm.present);
         assert(clean_ht_peer_fallback(&parsed.ht, 1u) == CLEAN_HT_FALLBACK_MAC);
-        assert(clean_station_associate(fallback, 0x123u, own, &parsed) == length);
-        assert(!memcmp(frame, fallback, sizeof(frame)));
+        uint32_t wmm_length = clean_station_associate(fallback, 0x123u, own, &parsed);
+        assert(wmm_length == length + (CLEAN_RX_WMM ? 9u : 0u));
+        assert(clean_frame_valid(fallback + 6u, wmm_length - 6u));
+        assert(!memcmp(frame + 6u, fallback + 6u, length - 10u));
+        if (CLEAN_RX_WMM) {
+            static const uint8_t information[9] = {221u,7u,0u,0x50u,0xf2u,2u,0u,1u,0u};
+            assert(!memcmp(fallback + length - 4u, information, sizeof(information)));
+        } else assert(!memcmp(frame, fallback, sizeof(frame)));
         beacon[at - sizeof(wmm) + 8u] ^= 1u;
         badger_bytes_store_u32(beacon + at, diag_crc32(beacon, at));
         assert(clean_station_refresh(&parsed, beacon, at + 4u) == 1);
         assert(parsed.ht.wmm.parameter_set == 1u);
-        assert(clean_station_associate(fallback, 0x123u, own, &parsed) == length);
-        assert(!memcmp(frame, fallback, sizeof(frame)));
+        uint8_t wmm_request[160];
+        memcpy(wmm_request, fallback, sizeof(fallback));
+        assert(clean_station_associate(fallback, 0x123u, own, &parsed) == wmm_length);
+        assert(!memcmp(wmm_request, fallback, sizeof(fallback)));
         memcpy(beacon + at, ht_cap, sizeof(ht_cap));
         at += sizeof(ht_cap);
         assert(at + 4u <= sizeof(beacon));
@@ -638,7 +728,7 @@ static void ht_boundaries(void) {
         assert(clean_station_associate(fallback, 0x123u, own, &parsed) == length);
         assert(!memcmp(frame, fallback, sizeof(frame)));
     }
-    puts("HT boundary: nonlegacy RX stays unsupported; HT/WMM peers do not enable advertisements; NOT HT RF");
+    puts("HT boundary: HT advertisement stays disabled; WMM information requires its explicit station gate; NOT HT RF");
 }
 
 static void station_tests(void) {
@@ -897,6 +987,7 @@ int main(void) {
         .write = write_signal, .data_output = output, .read_data = read_signal};
     fragments(&wire);
     ht_transport(&wire);
+    protected_aggregate_transport(&wire);
     layout_tests(&wire);
     calls = blocks = 0u;
     clean_loader_t l;

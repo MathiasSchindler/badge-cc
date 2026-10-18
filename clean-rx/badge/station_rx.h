@@ -40,29 +40,35 @@ static inline void clean_station_rx_report(const clean_mac_rx_t *s, uint8_t *det
     clean_station_rx_report_at(s, detail, CLEAN_STATION_MAC_DETAIL);
 }
 
-static inline int clean_station_rx(clean_mac_rx_t *s, uint8_t *packet, uint32_t *size,
-                                    const uint8_t own[6], const uint8_t peer[6], uint32_t now) {
+static inline int clean_station_qos_rx(clean_mac_rx_t *s, clean_qos_rx_t *qos,
+        uint8_t *packet, uint32_t *size, const uint8_t own[6], const uint8_t peer[6],
+        uint32_t now) {
     if (*size < 46u) return CLEAN_MAC_IGNORED;
     uint8_t *m = packet + 18u;
     uint32_t n = *size - 18u;
     if (!badger_bytes_equal(m + 4u, own, 6u) ||
         !badger_bytes_equal(m + 10u, peer, 6u)) return CLEAN_MAC_IGNORED;
-    /* Preserve the existing WPA per-TID path. QoS MAC reassembly is not yet
-     * negotiated or implemented by the non-QoS station profile. */
-    if (m[0] == 0x88u) return CLEAN_MAC_IGNORED;
-    int result = clean_mac_rx(s, m, n, now);
+    int is_qos = m[0] == 0x88u || m[0] == 0xc8u;
+    if (is_qos && !qos) return CLEAN_MAC_IGNORED;
+    int result = is_qos ? clean_qos_rx(qos, m, n, now) : clean_mac_rx(s, m, n, now);
     if (result == CLEAN_MAC_PROTECTED) return result;
     if (result != CLEAN_MAC_DELIVER) {
         *size = 0u;
         return result;
     }
     if (m[22] & 15u) {
-        badger_bytes_copy(m, s->frame, s->length);
-        *size = 18u + s->length;
+        const clean_mac_rx_t *assembly = is_qos ? &qos->tid[m[24] & 15u] : s;
+        badger_bytes_copy(m, assembly->frame, assembly->length);
+        *size = 18u + assembly->length;
         badger_bytes_store_u32(packet, *size | ((*size ^ 0xffffu) << 16u));
         packet[17] = CLEAN_RX_REASSEMBLED;
     }
     return result;
+}
+
+static inline int clean_station_rx(clean_mac_rx_t *s, uint8_t *packet, uint32_t *size,
+        const uint8_t own[6], const uint8_t peer[6], uint32_t now) {
+    return clean_station_qos_rx(s, 0, packet, size, own, peer, now);
 }
 
 #endif

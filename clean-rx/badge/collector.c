@@ -704,6 +704,18 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(ht) == CLEAN_HT_PEER_MAGIC ? "true" : "false",
                usb_report_u32(ht + 4u), ht[8], ht[9], ht[11], ht[10] ? "true" : "false",
                ht[16] ? "true" : "false", ht[17], ht[19], usb_report_u32(ht + 44u));
+        const uint8_t *wmm = detail + CLEAN_WMM_DETAIL;
+        const uint8_t *edca = detail + CLEAN_EDCA_DETAIL;
+        printf(",\"wmm_report_valid\":%s,\"wmm_offered\":%s,\"wmm_negotiated\":%s,"
+               "\"wmm_policy_queued_updates\":%u,\"wmm_edca_enabled\":%s,"
+               "\"protected_amsdu_frames\":%u,\"protected_amsdu_subframes\":%u",
+               usb_report_u32(wmm) == CLEAN_WMM_MAGIC ? "true" : "false",
+               usb_report_u32(wmm + 4u) == 1u ? "true" : "false",
+               usb_report_u32(wmm + 8u) == 1u ? "true" : "false",
+               usb_report_u32(wmm + 12u),
+               usb_report_u32(edca) == CLEAN_EDCA_STATUS_MAGIC && edca[14] == 1u ?
+                   "true" : "false",
+               usb_report_u32(wmm + 16u), usb_report_u32(wmm + 20u));
         clean_auth_failure_t failure;
         memcpy(&failure, detail + CLEAN_AUTH_FAILURE_DETAIL, sizeof(failure));
         int failure_valid = !usb_report_u32(detail + 596u) &&

@@ -24,15 +24,34 @@ session, aggregate frames or send a multi-frame TXOP.
 
 The controller applies parameters at an idle RX/response boundary. NAV
 and bad-reception deferral propagate across contexts. Category switching
-pauses the MAC/PSM, preserves the outgoing hardware residual counter,
+pauses PSM while preserving MAC receive enable and the outgoing hardware residual counter,
 selects the incoming bank and installs its AIFS and slots before resuming.
 The original fail-closed 1,023-slot guard remains active.
 New-frame identity includes TID; retry/new-frame CW updates use the selected
-bank. Positive TXOP limits bound the single HT-data/SIFS/ACK exchange.
+bank. Positive TXOP limits bound the single data/SIFS/ACK exchange.
 
-Enabling the policy restricts TX to the existing fixed, unprotected
-version-4 normal-ACK fixture with TID 0..7. It does not enable HT/WMM
-association advertisement or general QoS TX.
+EDCA accepts the existing version-4 normal-ACK fixture and reliable
+legacy-PHY management, non-QoS and bounded QoS Data/Null transmissions.
+Management selects VO, non-QoS data selects BE and QoS selects by TID.
+Legacy TXOP accounting uses the actual length, rate and preamble.
+Protected QoS headers are constructed before encryption; controller
+selection and retries do not rewrite ciphertext, PN or QoS control.
+
+The additional default-off `CLEAN_RX_WMM=1` gate negotiates non-HT WMM
+without HT capability advertisement. A usable beacon Parameter element
+permits a WMM Information request with no U-APSD. Accepted association
+response parameters, basic rates, short-slot policy and QoS-only ACKs
+are installed together through command 16 at an idle RX/response boundary.
+Beacon changes use the same atomic payload. Withdrawal, unsupported
+parameters and information-only responses after an offer fail explicitly.
+An association response omitting WMM remains a legacy association.
+
+The host dispatches negotiated unprotected QoS into the existing per-TID
+duplicate/reassembly contexts. Protected reception still authenticates
+before entering those contexts. The WPA2 fixture sends a TID-0 QoS probe
+after negotiation and retains its original non-QoS behavior otherwise.
+This is not a general application TX queue, TSPEC implementation or
+negotiated HT/Block ACK/aggregation support.
 
 Command completion acknowledges deferred queueing. The EDCA status reports
 the selected parameters, including an actual SHM readback of programmed
@@ -58,11 +77,11 @@ strict FIFO fault handling, secret lifecycle, WPA2/CCMP and per-TID state,
 HT descriptors/responses, WMM parsing and A-MSDU validation.
 These are native checks, not RF timing or negotiated-association evidence.
 
-Final controller text/BSS sizes are 38,488/4,896 bytes by default and
+Earlier fixed-fixture controller text/BSS sizes were 38,488/4,896 bytes by default and
 41,688/6,416 bytes for the gated build. Both are freestanding builds with
 no new dependencies.
 
-## Paired hardware matrix
+## Earlier fixed-fixture paired hardware matrix
 
 Two USB-connected RP2350 badges were used:
 
@@ -161,16 +180,201 @@ CWmin/CWmax, AIFS readback and TXOP as well as a fresh returned ACK.
 
 ## Remaining D2 gates
 
-- Actual AP-derived policy installation, association-response negotiation
-  and runtime beacon/parameter updates.
+- RF qualification of runtime AP policy changes and error/recovery behavior
+  beyond the bounded non-HT WMM trials below.
 - General QoS TX queueing/admission behavior, HT protection and independently
   measured SIFS/ACK timing.
 - Negotiated protected aggregates, required A-MPDU reception, immediate
   Block ACK sessions/windows, bounded receive reordering and recovery.
 - Independent HT peer association/framing with explicit legacy fallback.
+
+## AP-driven non-HT WMM integration
+
+Matching controller/badge flags are `CLEAN_RX_HT_DATA=1`,
+`CLEAN_RX_HT_RX=1`, `CLEAN_RX_HT_RESPONSE=1`, `CLEAN_RX_EDCA=1`
+and `CLEAN_RX_WMM=1`. The HT data flag retains the separate diagnostic;
+the WMM station itself uses only legacy PHY rates and QoS-only responses.
+Default builds continue to omit both HT and WMM advertisement.
+
+Native ASan/UBSan tests cover the exact WMM request IE, no HT advertisement,
+response acceptance/omission/rejection, combined-policy encoding/decoding,
+unchanged output on invalid input, runtime parameter/rate/slot updates,
+withdrawal and association teardown. MAC tests cover all TIDs' TX
+selection, unsupported headers, all legacy rate/preamble airtimes, and
+interleaved per-TID station reassembly with exact F2 length and FCS.
+CCMP tests decrypt the QoS probe independently through the crypto API and
+verify byte-identical encrypted bodies/PN across Retry updates.
+
+The opt-in controller initially linked against an implicit
+`__aeabi_memclr4` from an aggregate zero-initializer. Removing that
+unnecessary initialization, rather than introducing a runtime dependency,
+kept the build freestanding. The candidate EDCA state is fully initialized
+by the existing configure function before use.
+
+### Independent vendor AP trials
+
+Build `5501529f` ran as station on A against the unmodified vendor AP on B.
+
+- `build/clean-rx/badge/d2-wmm-open-2-*`: open authentication and association
+  succeeded in one attempt per phase; WMM was offered and accepted,
+  one combined policy was queued, and controller readback confirmed EDCA
+  enabled. The independent AP also confirmed the station connection.
+- `build/clean-rx/badge/d2-wmm-wpa2-1-*`: WMM association and the WPA2
+  handshake succeeded. The station validated one protected echo; the
+  independent vendor AP reported authorization, one protected RX and one
+  protected TX. The station's protected probe uses the new QoS/TID-0
+  header and CCMP nonce/AAD. Both bounded helpers exited successfully.
+  The generated AP credential file was private and deleted.
+
+These are bounded non-HT WMM exchanges, not measured EDCA/SIFS timing,
+runtime-beacon RF qualification, long-duration reliability, HT protection,
+Block ACK, A-MPDU or reordering qualification. D2's second checklist
+point remains incomplete.
+
+### Regression and final build boundaries
+
+The same WMM build passed the existing clocked HT/EDCA fixture for
+BE/TID-0/MCS0 from A to B and VO/TID-6/MCS7 from B to A. Each used one
+actual launch, an exact fresh receive and a returned ACK. Independent
+`zlib.crc32` checks of the saved binary MPDUs and returned ACKs passed,
+including the expected TID. Evidence prefixes are
+`d2-wmm-ht-be-mcs0-ab-*` and `d2-wmm-ht-vo-mcs7-ba-*` under
+`build/clean-rx/badge/`.
+
+Default build `75f9beb7` passed the legacy OFDM6/cycle control with
+16 exact deliveries per direction, one deliberately suppressed ACK per
+endpoint, zero corruptions and zero duplicate deliveries. Actual attempt
+counts were 17 and 23, not merely 16 local command completions.
+Evidence prefix: `build/clean-rx/badge/d2-wmm-default-soak-*`.
+
+After these RF trials, an additional QoS TX guard enforces the exact
+2,304-byte MSDU limit plus the protected frame's 16-byte CCMP envelope,
+and rejects truncated protected frames. Native positive/negative boundary
+tests cover that guard. Final default `c9823311` and WMM `dbd7c67a`
+builds pass all native suites and freestanding builds; the existing
+HT/EDCA-without-WMM profile also passes. All six resulting ELFs have no
+undefined symbols. The RF trials above used the preceding builds, not
+these final guard-tightened binaries.
+
+### Full-flash preservation
+
+Fresh full 16-MiB backups were saved and verified before any writes:
+`build/clean-rx/badge/d2-wmm-start-{A,B}-full.bin`. After all trials, both
+entire originals were restored with verification. Independent full
+readbacks `d2-wmm-restored-{A,B}-full.bin` compare byte-for-byte with those
+backups. Restore logs are `d2-wmm-restore-{A,B}.log` in the same directory.
+All USB flash operations were serialized. Both badges remain in BOOTSEL;
+no AP helper is left running.
 - Resolution and all-rate qualification of receive corruption and broader
   contention/operand-visibility failures.
 
 D1 remains complete only at its previously documented conservative
-control/framing scope. D2 remains incomplete; HT/WMM station advertisements
-remain disabled.
+control/framing scope. D2 remains incomplete; HT station advertisement
+remains disabled, and WMM requires its explicit opt-in build.
+
+## Protected A-MSDU receive integration
+
+The next D2 increment connects the existing whole-body A-MSDU parser to
+software CCMP and the actual protected station receive path. It does not
+implement A-MPDU reception, immediate Block ACK or reordering, and does
+not enable HT advertisement.
+
+### Implementation and admission
+
+- Ordinary CCMP payloads retain the 2,304-byte MSDU bound. Unfragmented
+  three-address QoS A-MSDUs permit a 3,839-byte body. With the 26-byte
+  header, 8-byte CCMP header, 8-byte MIC and 4-byte FCS, the encrypted
+  MPDU is at most 3,885 bytes, within the extended 3,896-byte capture.
+- The station enables aggregate admission only with extended RX and a
+  retained WMM association. Protected bytes bypass unauthenticated MAC
+  delivery and remain unchanged until CCMP processing.
+- After MIC verification, the complete aggregate must validate and every
+  subframe DA must equal the local station MAC. Existing source-address,
+  LLC/SNAP-as-DA, length and padding checks apply to protected aggregates.
+  Only after all subframes pass does the code commit PN state and enter
+  authenticated per-TID duplicate processing.
+- The existing CCMP AAD does not authenticate the A-MSDU-present bit.
+  Therefore MIC success alone is not aggregate admission. A negative test
+  flips that bit on a valid ordinary encrypted LLC/SNAP payload, repairs
+  the outer FCS, and requires explicit format rejection without delivery,
+  PN commitment or duplicate-cache entry. This is not SPP negotiation.
+- Matching the protected reply marker in an early subframe is provisional
+  until the entire aggregate validates. A malformed last subframe cannot
+  partially increment delivery counters. Successful delivery and terminal
+  failure wipe plaintext; replay and Retry duplicates do not deliver again.
+- Station detail offsets 784/788 retain newly delivered protected aggregate
+  and subframe counts, exposed as `protected_amsdu_frames` and
+  `protected_amsdu_subframes`. They are not A-MPDU or BA counters.
+
+### Native evidence and build boundaries
+
+Independent AES-128-CCM vectors were generated with Node's built-in
+OpenSSL-backed `node:crypto`, not the firmware implementation. Key bytes
+are 0..15, plaintext byte `i` is `(17*i+3)&255`, and the fixed QoS
+header/PN are recorded in `aggregate_crypto()` in `wpa2_test.c`.
+Ciphertext SHA-1 and the complete 8-byte tag match at lengths
+15, 16, 17, 2,304, 2,305 and 3,839. Sentinel guards and invalid-MIC wiping
+are checked independently of the round-trip tests.
+
+The ASan/UBSan protected receive suite covers all 16 TIDs, full-size
+two-subframe aggregates, replay, a newer-PN Retry duplicate, sequence
+4095-to-0 wrap, malformed final subframes, invalid DA/SA, LLC-as-DA,
+MIC/header/key-ID/policy faults, disabled admission and plaintext wiping.
+Authenticated MAC tests now admit fully validated aggregates while still
+rejecting fragmented aggregates.
+
+Extended loader and strict-loader tests send the exact 3,885-byte encrypted
+MPDU through three physical F2 fragments, with exact and rounded physical
+lengths and MCS0/MCS7 metadata. They check complete ciphertext/FCS,
+unchanged station protected bypass and a single logical credit, then run
+the real protected receive function. Positive delivery produces one
+aggregate, two subframes and one reply; bad-MIC and valid-MIC malformed-last-
+subframe controls produce no delivery or PN commitment. The strict-loader
+build retains its intentionally disabled credit-write path.
+
+All controller and badge native suites and freestanding builds pass for:
+
+| Profile | Badge build | Badge BSS |
+| --- | --- | --- |
+| Default | `2b8bee11` | 221,320 bytes |
+| Extended HT/response/EDCA, WMM station disabled | `be7d73e3` | 225,808 bytes |
+| Extended HT/response/EDCA plus WMM station | `326a4152` | 272,024 bytes |
+
+All six controller/badge ELFs have no undefined symbols. No runtime,
+allocator or dependency was added. The additional loader-test crypto
+linkage is native-test-only.
+
+### Bounded RF regression failures
+
+Both trials used final WMM build `326a4152` and an unmodified independent
+vendor AP. Neither trial reached encrypted data processing:
+
+- `build/clean-rx/badge/d2-amsdu-wpa2-regression-*`: station A/AP B.
+  Four authentication attempts, four ACK timeouts, no accepted
+  authentication response and no association. Station reports 42 bad-FCS
+  events. The AP reports no retained associated or authorized peer.
+- `build/clean-rx/badge/d2-amsdu-wpa2-reverse-*`: station B/AP A.
+  Authentication/association each completed in one attempt. WMM was offered
+  and accepted, one combined policy was queued and EDCA readback enabled.
+  No EAPOL M1 was delivered; WPA timed out before M2, with 68 bad-FCS
+  events. The independent AP did not retain a stable associated peer.
+
+Both station collectors and AP helpers exited unsuccessfully. These
+failures are retained, not retried into a passing result. They neither
+exercise nor qualify protected aggregate reception and do not establish
+the cause of the missed replies. Native crypto/transport success must not
+be presented as an OTA substitute. Protected A-MSDU OTA qualification,
+HT protection, hardware A-MPDU reception, immediate BA agreement/window
+handling and bounded reordering remain open.
+
+### Aggregate-increment flash preservation
+
+Fresh complete 16-MiB backups were saved and verified before any writes:
+`build/clean-rx/badge/d2-amsdu-start-{A,B}-full.bin`. After both bounded
+trials, the entire originals were restored with `--ignore-partitions` and
+verified. Independent complete reads
+`d2-amsdu-restored-{A,B}-full.bin` compare byte-for-byte with their respective
+fresh backups. Backup, restore and readback logs use the corresponding
+`d2-amsdu-*` prefixes in the same build directory. All flash operations
+were serialized. Both badges are left in BOOTSEL, both AP helpers have
+exited, and the private generated credential file/directory were removed.

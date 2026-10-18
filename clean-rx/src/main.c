@@ -801,7 +801,7 @@ static int station_publish_capture(uint32_t channel) {
 
 /* Template preparation is deliberately outside the contention interval. The
  * PSM may answer RX while waiting; in that case its TXE setup takes precedence. */
-static int station_edca_select(uint32_t mac_en, uint32_t tid, uint32_t mcs) {
+static int station_edca_select(uint32_t mac_en, uint32_t tid, uint32_t exchange_us) {
     mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
     (void)mmio_read32(D11_MACCONTROL);
     if (!station_rx_idle(shm_read16(0x601u)) || station_phy_busy()) {
@@ -814,12 +814,7 @@ static int station_edca_select(uint32_t mac_en, uint32_t tid, uint32_t mcs) {
     station_dcf.slots = slots;
     if (clean_edca_select(&station_edca, tid, mac_now()) < 0)
         return fail(0x85u, FW_TX_BUF_ADDR, tid);
-    int rate = clean_ht_ack_rate(policy_basic, mcs);
-    uint32_t ack = rate < 0 ? 0u : rate < 4 ?
-        clean_cck_airtime_us(14u, (uint32_t)rate, 0u) :
-        clean_ofdm_airtime_us(14u, (uint32_t)rate - 4u);
-    if (!ack || !clean_edca_txop_valid(&station_edca,
-            clean_ht20_airtime_us(CLEAN_HT_ACK_MPDU, mcs) + 10u + ack))
+    if (!exchange_us || !clean_edca_txop_valid(&station_edca, exchange_us))
         return fail(0x85u, FW_TX_BUF_ADDR, tid);
     station_hw_slot();
     station_hw_backoff();
@@ -1614,7 +1609,11 @@ void cyw43_main(void) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
             }
-            if (station_edca.enabled && (!ht_clocked || (frame[30] & 15u) >= 8u)) {
+            int tx_tid = ht_clocked ? (int)(frame[30] & 15u) :
+                clean_station_tx_tid(frame + 6u, tx_len >= 6u ? tx_len - 6u : 0u,
+                                     station_edca.enabled);
+            if (station_edca.enabled && (tx_tid < 0 || tx_tid >= 8 ||
+                                         (ht_probe && !ht_clocked))) {
                 fail(0x85u, FW_TX_BUF_ADDR, cmd);
                 break;
             }
@@ -1628,8 +1627,7 @@ void cyw43_main(void) {
                     (!station_mac || !clean_cck_plcp_valid(frame, tx_len - 6u))) ||
                 !clean_mac_valid(frame + 6u, tx_len - 6u) ||
                 (frame[10] & 1u) ||
-                (!ht_clocked && !(((frame[6] & 0x0fu)==0u && (frame[7]&7u)==0u) ||
-                  (frame[6]==8u && (frame[7]&7u)==1u))) ||
+                (!ht_clocked && tx_tid < 0) ||
                 (frame[28] & 15u) ||
                 ((uint16_t)frame[10] | ((uint16_t)frame[11] << 8u)) != shm_read16(CLEAN_ACK_PEER) ||
                 ((uint16_t)frame[12] | ((uint16_t)frame[13] << 8u)) != shm_read16(CLEAN_ACK_PEER+1u) ||
@@ -1661,12 +1659,23 @@ void cyw43_main(void) {
             if (station_mac) {
                 int selected = 1;
                 if (station_edca.enabled && !policy_pending) {
-                    selected = station_edca_select(mac_en, frame[30] & 15u, frame[0]);
+                    uint32_t exchange;
+                    if (ht_clocked) {
+                        int rate = clean_ht_ack_rate(policy_basic, frame[0]);
+                        uint32_t ack = rate < 0 ? 0u : rate < 4 ?
+                            clean_cck_airtime_us(14u, (uint32_t)rate, 0u) :
+                            clean_ofdm_airtime_us(14u, (uint32_t)rate - 4u);
+                        exchange = ack ? clean_ht20_airtime_us(CLEAN_HT_ACK_MPDU,
+                                                               frame[0]) + 10u + ack : 0u;
+                    } else exchange = clean_legacy_exchange_us(frame, tx_len, is_ofdm,
+                                                               short_preamble, policy_basic);
+                    selected = station_edca_select(mac_en, (uint32_t)tx_tid, exchange);
                     if (!selected) break;
                 }
                 uint32_t identity = (uint32_t)frame[28] | ((uint32_t)frame[29] << 8u) |
                     ((uint32_t)frame[6] << 16u) |
-                    (ht_clocked ? (uint32_t)(frame[30] & 15u) << 24u : 0u);
+                    (frame[6] == 0x88u || frame[6] == 0xc8u ?
+                        (uint32_t)(frame[30] & 15u) << 24u : 0u);
                 if (last_tx_valid && identity != last_tx_identity) {
                     uint8_t redraw = station_dcf.cw != station_dcf.cw_min;
                     clean_dcf_new_frame(&station_dcf, mac_now());
@@ -1827,6 +1836,7 @@ void cyw43_main(void) {
             policy_basic = basic;
             policy_short_slot = p[14];
             policy_response = policy_pending = 0u;
+            station_edca.enabled = policy_edca_pending = 0u;
             shm_write16(CLEAN_ACK_WAITING, 0u);
             shm_write16(CLEAN_ACK_SEEN, 0u);
             shm_write16(CLEAN_ACK_SENT, 0u);
@@ -1868,9 +1878,11 @@ void cyw43_main(void) {
             __asm__ volatile("dsb" ::: "memory");
             continue;
         }
-        if ((cmd & 0xffu) == 8u) {
+        if ((cmd & 0xffu) == 8u || (cmd & 0xffu) == CLEAN_WMM_POLICY_CMD) {
             const volatile uint8_t *p = (const volatile uint8_t *)FW_TX_BUF_ADDR;
             uint16_t basic = (uint16_t)((uint16_t)p[12] | ((uint16_t)p[13] << 8u));
+            clean_edca_ac_t next_edca[4];
+            uint32_t wmm = (cmd & 0xffu) == CLEAN_WMM_POLICY_CMD;
             uint8_t matches = 1u;
             for (uint32_t i = 0u; i < 3u; ++i) {
                 if (((uint16_t)p[2u*i] | ((uint16_t)p[2u*i+1u] << 8u)) !=
@@ -1879,12 +1891,19 @@ void cyw43_main(void) {
                     shm_read16(CLEAN_ACK_PEER+i)) matches = 0u;
             }
             if (!station_mac || !matches || clean_ack_rate(basic, 0u) < 0 ||
-                p[14] > 1u || p[15] != MAC_RADIO->profile) {
+                p[14] > 1u || p[15] != MAC_RADIO->profile ||
+                (wmm && (!station_hw || !clean_wmm_policy_decode(next_edca, cmd,
+                    CLEAN_RX_WMM, MAC_RADIO->profile, p)))) {
                 fail(0x85u, FW_TX_BUF_ADDR, basic);
                 break;
             }
             policy_basic = basic;
             policy_short_slot = p[14];
+            if (wmm) {
+                for (uint32_t i = 0u; i < 4u; ++i) policy_edca[i] = next_edca[i];
+                policy_response = p[16];
+                policy_edca_pending = 1u;
+            }
             policy_pending = 1u;
             MBOX->host_cmd = 2u;
             __asm__ volatile("dsb" ::: "memory");

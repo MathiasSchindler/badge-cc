@@ -39,22 +39,25 @@ trials had 39 exact raw captures and 38 F2 deliveries, so this is a bounded
 D1 mapping result, not reliable/general HT operation or independent-peer
 qualification.
 See the map's build/run instructions and evidence limits.
-Native tests preserve legacy-only association even when an AP advertises
-HT/WMM.
+Default builds preserve legacy-only association even when an AP advertises
+HT/WMM. The separate opt-in WMM build described below still omits HT.
 
 **D2 in progress:** a separate `CLEAN_RX_HT_DATA=1` build adds a versioned,
 one-frame broadcast HT payload API (MCS0-MCS7, 28..2,332-byte MPDUs), validated
 HT RX metadata and capture retention across F2 backpressure. The paired
 `ht_probe.sh` accepts an optional fifth MPDU-length argument to select this
 path. HT/WMM beacon profiling records peer EDCA parameters and explicit
-fallback reasons, but does not enable HT association or execute EDCA.
+fallback reasons, without enabling HT association. The opt-in
+`CLEAN_RX_EDCA=1` gate executes per-category contention, and the additional
+`CLEAN_RX_WMM=1` gate negotiates non-HT WMM and installs actual AP parameters.
 An additional `CLEAN_RX_HT_RX=1` build expands raw receive storage to
 3,896-byte MPDUs, checks upper SHM on chip and validates host/controller
 layout compatibility. Passing `3869 --extended-rx` to the paired script
 selects its fixed version-2, No-Ack QoS A-MSDU diagnostic: two MSDUs inside
 the mandatory-minimum 3,839-byte aggregate, delivered through three F2
 fragments and validated/deaggregated on the badge. It is not negotiated HT,
-Block ACK, A-MPDU reception or general QoS station delivery.
+Block ACK or A-MPDU reception. Negotiated non-HT QoS station dispatch is
+separately enabled by the WMM gate.
 The additional, default-disabled `CLEAN_RX_HT_RESPONSE=1` gate requires
 extended RX and adds pinned-radio QoS/HT normal-ACK response logic.
 `ht_probe.sh TX RX PREFIX MCS --ack` uses its matching `ht-ack` build for a
@@ -113,8 +116,11 @@ and two zero-attempt access faults remain. New halted counter evidence
 (`dcf_guard_latched`, `dcf_final_slots`) confirms that access faults can
 still occur; they are not receive losses or a completed backoff repair.
 See the [follow-up evidence and limits](../dev-doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog).
-RF SIFS/reliability qualification, EDCA, protection and Block ACK remain
-open; neither this diagnostic nor a response counter enables HT/WMM association.
+RF SIFS/reliability qualification, complete EDCA scheduling, HT protection
+and Block ACK remain open. The separate opt-in
+[non-HT WMM integration](../dev-doc/EDCA_IMPLEMENTATION.md#ap-driven-non-ht-wmm-integration)
+has bounded independent-AP association and protected-exchange evidence;
+neither it nor a response counter enables HT association.
 See [D2 API, build instructions and remaining gates](../dev-doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
 
 ## Source layout and maintenance
@@ -311,7 +317,8 @@ Implemented paths:
   application capture. These fixes do not explain all observed response loss.
 - [`station_rx.h`](station_rx.h) applies the shared non-QoS duplicate cache
   and bounded unprotected reassembly to station waits, drains, post-association
-  reception and the WPA loop. The pinned-peer cache tracks subtype, sequence
+  reception and the WPA loop. Its negotiated WMM path additionally dispatches
+  unprotected QoS through per-TID contexts. The pinned-peer cache tracks subtype, sequence
   and fragment identity across sequence wrap. Delivered identities persist
   until their bounded history slot is replaced or a fresh non-Retry frame
   reuses the identity; they do not expire during a long retransmission exchange.
@@ -331,10 +338,18 @@ Implemented paths:
   internal, and plaintext is wiped on delivery, expiry or terminal protocol failure.
   QoS reception has 16 independent TID duplicate/fragment contexts, now used
   by the existing WPA QoS receive path. Idle station polling expires assemblies
-  without requiring another packet on the same TID. Protected A-MSDUs,
+  without requiring another packet on the same TID. With extended RX and
+  negotiated WMM, unfragmented protected A-MSDUs support a 3,839-byte body
+  (3,885-byte encrypted MPDU). After MIC verification, complete aggregate
+  structure and every subframe's local destination must validate before PN
+  commitment or duplicate processing. LLC/SNAP-as-destination rejection
+  also guards against changing the unauthenticated A-MSDU-present bit.
+  Delivery increments `protected_amsdu_frames` and
+  `protected_amsdu_subframes`; retry duplicates do not increment either.
   Block ACK/No Explicit Ack policy, four-address and HT Control frames remain
-  unsupported; this does not enable WMM/HT negotiation. The isolated response
-  prototype described above is separately gated, not an EDCA scheduler.
+  unsupported. The opt-in non-HT WMM station gate negotiates QoS separately;
+  no HT capability is advertised. The isolated response prototype described
+  above is separately gated, not a four-queue EDCA scheduler.
   Pending WPA transmissions
   survive zero-attempt `BUSY` results without advancing submission counters or
   allocating another protected PN.
@@ -355,6 +370,8 @@ Implemented paths:
   the same 16-byte bound-address configuration as command 7. Response-table
   updates wait for idle RX/PHY; pending updates defer new TX. Slot changes
   preserve CW, remaining slots, NAV and pending EIFS, but restart idle sampling.
+  A WMM association instead combines rates, slots, QoS responses and all
+  four AP contention records in command 16, including runtime WMM changes.
   Changes of advertised rate set, SSID or RSN are explicitly unsupported rather
   than silently changing the established profile.
 - Association accepts either setting of the reserved upper AID bits, while
@@ -455,8 +472,15 @@ WPA tests exercise authenticated 16-fragment reception at 32, 1,500 and
 2,304 payload bytes, both legacy and 16 simultaneously interleaved QoS TIDs,
 PN carry/continuity, MIC/header/key-ID/order failures, per-TID duplicates,
 idle expiry across timer wrap, overflow and plaintext wiping. The shared
-QoS core also covers normal/No Ack policy, QoS Null and plaintext A-MSDUs;
-unsupported Block ACK policies and protected aggregates remain rejected.
+QoS core also covers normal/No Ack policy, QoS Null and plaintext A-MSDUs.
+Protected aggregate tests cover all TIDs, the exact 3,839-byte bound,
+whole-body/local-destination validation, no partial delivery, sequence
+wrap, replay/Retry separation, MIC failures and aggregate-bit injection.
+Independent OpenSSL CCM vectors cover AES block and ordinary/aggregate
+size boundaries. Extended loader tests pass a 3,885-byte encrypted MPDU
+through three F2 fragments, station protected bypass and authenticated
+delivery, including bad-MIC and malformed-final-subframe controls.
+Unsupported Block ACK policies remain rejected.
 These are native tests, not OTA
 qualification of those new paths.
 Loader/DMA-credit, WPA2/crypto, secret-provisioning and Micro Signal regressions

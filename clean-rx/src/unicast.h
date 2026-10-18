@@ -2,6 +2,7 @@
 #define CLEAN_RX_UNICAST_H
 
 #include "phy_rates.h"
+#include "mac.h"
 
 #define CLEAN_UNICAST_ADDR 0x201e0u
 #define CLEAN_UNICAST_MAGIC 0x314b4341u
@@ -35,6 +36,16 @@
 #define CLEAN_EDCA_STATUS_ADDR 0x204a0u
 #define CLEAN_EDCA_STATUS_MAGIC 0x31434445u
 #define CLEAN_EDCA_DETAIL 752u
+#ifndef CLEAN_RX_WMM
+#define CLEAN_RX_WMM 0
+#endif
+#define CLEAN_WMM_POLICY_CMD 16u
+#define CLEAN_WMM_POLICY_BYTES 36u
+#define CLEAN_WMM_DETAIL 768u
+#define CLEAN_WMM_MAGIC 0x314d4d57u
+
+_Static_assert(CLEAN_RX_WMM == 0 || (CLEAN_RX_WMM == 1 && CLEAN_RX_EDCA),
+               "WMM station operation requires EDCA and QoS responses");
 
 typedef struct {
     uint32_t magic;
@@ -46,7 +57,8 @@ _Static_assert(CLEAN_RX_EDCA == 0 || (CLEAN_RX_EDCA == 1 && CLEAN_RX_HT_RESPONSE
                "EDCA requires the gated QoS response build");
 _Static_assert(sizeof(clean_edca_status_t) == 16u &&
                CLEAN_EDCA_DETAIL >= CLEAN_ACK_RX_DETAIL + 32u &&
-               CLEAN_EDCA_DETAIL + sizeof(clean_edca_status_t) <= 800u,
+               CLEAN_EDCA_DETAIL + sizeof(clean_edca_status_t) <= CLEAN_WMM_DETAIL &&
+               CLEAN_WMM_DETAIL + 24u <= 796u,
                "EDCA evidence must fit before MAC reports");
 
 static inline int clean_edca_command_valid(uint32_t command, uint32_t enabled,
@@ -302,6 +314,50 @@ static inline uint32_t clean_ack_timeout_us(uint32_t received, uint8_t slot_us) 
 
 static inline int clean_cck11_valid(const volatile uint8_t *plcp, uint32_t mpdu) {
     return plcp[0] == 110u && clean_cck_plcp_valid(plcp, mpdu);
+}
+
+/* Header selection only; callers must independently validate FCS and peers. */
+static inline int clean_station_tx_tid(const volatile uint8_t *m, uint32_t n,
+                                       uint32_t qos_enabled) {
+    if (n < 28u || (m[22] & 15u)) return -1;
+    if ((m[0] & 15u) == 0u && !(m[1] & 7u)) return 6;
+    if (m[0] == 8u && (m[1] & 7u) == 1u) return 0;
+    if (!qos_enabled || n < 30u || (m[0] != 0x88u && m[0] != 0xc8u) ||
+        (m[1] & 0x87u) != 1u || (m[24] & 0xf8u) || m[25] ||
+        ((m[1] & 64u) && n < 46u) ||
+        n > 30u + CLEAN_MSDU_BYTES + ((m[1] & 64u) ? 16u : 0u) ||
+        (m[0] == 0xc8u && (n != 30u || (m[1] & 64u)))) return -1;
+    return m[24] & 7u;
+}
+
+static inline uint32_t clean_legacy_exchange_us(const volatile uint8_t *frame,
+        uint32_t length, uint32_t ofdm, uint32_t short_preamble, uint16_t basic) {
+    if (length < 20u || length > CLEAN_TX_BYTES || ofdm > 1u || short_preamble > 1u)
+        return 0u;
+    int index = ofdm ? clean_ofdm_rate_index(frame[0]) : clean_cck_rate_index(frame[0]);
+    if (index < 0 || (ofdm ? short_preamble || !clean_ofdm_plcp_valid(frame, length - 6u) :
+        !clean_cck_preamble_valid((uint32_t)index, short_preamble) ||
+        !clean_cck_plcp_valid(frame, length - 6u))) return 0u;
+    uint32_t data = ofdm ? clean_ofdm_airtime_us(length - 6u, (uint32_t)index) :
+        clean_cck_airtime_us(length - 6u, (uint32_t)index, short_preamble);
+    uint32_t ack = clean_ack_airtime_us(basic, (uint32_t)index + (ofdm ? 4u : 0u));
+    return data && ack ? data + 10u + ack : 0u;
+}
+
+static inline int clean_wmm_policy_decode(clean_edca_ac_t ac[4], uint32_t command,
+        uint32_t enabled, uint32_t profile, const volatile uint8_t *bytes) {
+    if (!enabled || profile != 3u || command != CLEAN_WMM_POLICY_CMD ||
+        bytes[14] > 1u || bytes[15] != 3u || bytes[16] != 1u ||
+        bytes[17] || bytes[18] || bytes[19] ||
+        clean_ack_rate((uint16_t)(bytes[12] | ((uint16_t)bytes[13] << 8u)), 0u) < 0)
+        return 0;
+    clean_edca_ac_t decoded[4];
+    clean_edca_t candidate;
+    if (!clean_edca_decode(decoded, bytes + 20u) || !clean_edca_valid(decoded) ||
+        !clean_edca_configure(&candidate, decoded, 0u, 1u, bytes[14]) ||
+        clean_edca_select(&candidate, 0u, 0u) < 0) return 0;
+    for (uint32_t i = 0u; i < 4u; ++i) ac[i] = decoded[i];
+    return 1;
 }
 
 #endif

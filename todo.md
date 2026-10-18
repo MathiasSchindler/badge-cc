@@ -115,10 +115,13 @@ See [target mapping and evidence](clean-rx/dev-doc/HT20_IMPLEMENTATION.md).
 
 ### D2. HT PHY and association
 
-**Status: in progress; HT/WMM station advertisement remains disabled.**
+**Status: in progress; HT station advertisement remains disabled.**
 Raw HT20, extended reception, per-TID receive/CCMP state, gated responses
 and bounded per-category access exist. Association-response/runtime peer
-profiling and bounded station RX staging are implemented. Local-AP reply
+profiling and bounded station RX staging are implemented. Opt-in non-HT
+WMM negotiation, AP-derived EDCA policy, protected QoS exchanges and bounded
+protected A-MSDU receive software are implemented. Aggregate OTA qualification
+and Block ACK/A-MPDU/reordering integration remain open. Local-AP reply
 delivery and intermittent HT receive corruption remain unresolved.
 Negotiated station operation and its mandatory MAC prerequisites are not
 yet qualified.

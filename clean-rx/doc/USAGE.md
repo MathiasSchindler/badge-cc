@@ -156,6 +156,8 @@ software channel confirms the physical tuning state.
 Station mode rejects channel/key changes and raw rearm/address-match
 overrides. Reliable legacy unicast uses `CLEAN_TX_ACK_REQUIRED`, at most
 eight attempts and a bound-peer management or non-QoS ToDS data frame.
+An active EDCA policy additionally accepts the bounded normal-ACK QoS
+ToDS Data/Null headers described in the [HT20 reference](HT20.md).
 The status at `CLEAN_UNICAST_ADDR` distinguishes idle, ACKed, timeout and
 busy. Busy with zero attempts is a deferral.
 
@@ -166,7 +168,8 @@ version-0 non-DS management frames with a unicast source and total template
 length of at least 34 bytes. These flags do not change the SHM auto-ACK
 address. The hardware matcher persists until reprogrammed or reset.
 
-The [HT20 reference](HT20.md) describes commands 12, 14 and 15.
+The [HT20 reference](HT20.md) describes commands 12, 14, 15 and 16,
+including the opt-in non-HT WMM station build.
 Developer-only fixtures and test commands are documented in
 [dev-doc](../dev-doc/README.md).
 

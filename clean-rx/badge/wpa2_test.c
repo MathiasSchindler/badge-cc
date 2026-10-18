@@ -181,6 +181,18 @@ static void protected_traffic(clean_wpa_t before) {
     s=before;
     assert(clean_wpa_probe(&s,tx)==82u && s.tx_pn[0]==1u);
     assert(clean_wpa_probe(&s,tx)==82u && s.tx_pn[0]==2u);
+    s.tx_qos=1u;
+    assert(clean_wpa_probe(&s,tx)==84u && s.tx_pn[0]==3u);
+    assert(tx[6]==0x88u && tx[30]==0u && tx[31]==0u &&
+           clean_frame_valid(tx+6u,78u) && clean_station_tx_tid(tx+6u,78u,1u)==0);
+    uint8_t plain[32], tag[8], original[84];
+    memcpy(original,tx,sizeof(original)); memcpy(tag,tx+72u,8u);
+    assert(wpa_ccmp(s.ptk+32u,tx+6u,26u,s.tx_pn,tx+40u,32u,plain,tag,1));
+    assert(!memcmp(plain+16u,s.snonce,16u));
+    assert(clean_mac_retry(tx+6u,78u));
+    assert(!memcmp(tx+32u,original+32u,48u) && s.tx_pn[0]==3u);
+    memcpy(tag,tx+72u,8u);
+    assert(wpa_ccmp(s.ptk+32u,tx+6u,26u,s.tx_pn,tx+40u,32u,plain,tag,1));
     memset(s.tx_pn,255u,6u);
     assert(!clean_wpa_probe(&s,tx) && s.error==WPA_EXHAUSTED && !s.installed);
 }
@@ -271,6 +283,155 @@ static void qos_plaintext_wiped(const clean_wpa_t *s) {
         for (uint32_t i=0u;i<6u;++i) assert(!s->qos_fragment_pn[tid][i]);
     }
     for (uint32_t i=0u;i<sizeof(s->rx_mpdu);++i) assert(!s->rx_mpdu[i]);
+}
+
+static void aggregate_crypto(void) {
+    static const uint32_t lengths[]={15u,16u,17u,2304u,2305u,3839u};
+    static const char *hashes[]={
+        "acfb7a95d788536b17142ab3f5a44fdd9fbd0eb5",
+        "7f572d9363794862832ef1296f13a47fe4d1e4bb",
+        "6bbf2739ce6a9dd04f172f1bb8b93a179173585d",
+        "092f7d54b362fbe647c7ad3277fd744bcb178260",
+        "ae32392d8942b32713f62f0822487774bf94914b",
+        "46c72dcf4b8cf6f3417cf375fe7cc591175dd2b9"
+    };
+    static const char *tags[]={
+        "1c5180f2b0de0756","bbd2ff2f99a21997","eb35f48930c7b204",
+        "8df77fdeefdfbca9","f529c6ffa618b4a0","6ada419d268db7a6"
+    };
+    uint8_t h[26]={0x88u,0x42u}, key[16], pn[6]={1u,2u,3u,4u,5u,6u};
+    uint8_t in[CLEAN_AMSDU_BYTES], out[CLEAN_AMSDU_BYTES+1u], plain[CLEAN_AMSDU_BYTES+1u];
+    uint8_t tag[8], hash[20];
+    for (uint32_t i=4u;i<22u;++i) h[i]=(uint8_t)i;
+    h[24]=0x87u;
+    for (uint32_t i=0u;i<16u;++i) key[i]=(uint8_t)i;
+    for (uint32_t i=0u;i<sizeof(in);++i) in[i]=(uint8_t)(i*17u+3u);
+    for (uint32_t i=0u;i<sizeof(lengths)/sizeof(lengths[0]);++i) {
+        uint32_t n=lengths[i];
+        memset(out,0xa5,sizeof(out)); memset(plain,0xa5,sizeof(plain));
+        assert(wpa_ccmp(key,h,26u,pn,in,n,out,tag,0));
+        wpa_sha1(out,n,hash); expected(hash,hashes[i]); expected(tag,tags[i]);
+        assert(out[n]==0xa5u);
+        assert(wpa_ccmp(key,h,26u,pn,out,n,plain,tag,1));
+        assert(!memcmp(in,plain,n) && plain[n]==0xa5u);
+        tag[0]^=1u;
+        assert(!wpa_ccmp(key,h,26u,pn,out,n,plain,tag,1));
+        for (uint32_t j=0u;j<n;++j) assert(!plain[j]);
+        assert(plain[n]==0xa5u);
+    }
+    for (uint32_t fault=0u;fault<5u;++fault) {
+        uint8_t header[26]; memcpy(header,h,sizeof(h));
+        uint32_t n=2305u;
+        if (fault==0u) header[24]&=127u;
+        if (fault==1u) header[1]|=4u;
+        if (fault==2u) header[22]=1u;
+        if (fault==3u) header[1]|=128u;
+        if (fault==4u) n=CLEAN_AMSDU_BYTES+1u;
+        memset(out,0xa5,sizeof(out));
+        assert(!wpa_ccmp(key,header,26u,pn,in,n,out,tag,0));
+        for (uint32_t i=0u;i<sizeof(out);++i) assert(out[i]==0xa5u);
+    }
+    puts("CCMP A-MSDU: independent OpenSSL vectors across AES/MSDU/3839-byte boundaries, guard bytes, malformed headers and MIC-failure wiping pass");
+}
+
+static uint32_t aggregate_body(uint8_t body[CLEAN_AMSDU_BYTES], const clean_wpa_t *s,
+                                uint32_t length) {
+    assert(length>=94u && length<=CLEAN_AMSDU_BYTES);
+    memset(body,0x5a,length);
+    memcpy(body,s->mac,6u); memcpy(body+6u,s->bssid,6u);
+    body[12]=0u; body[13]=32u;
+    static const uint8_t reply[16]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
+    memcpy(body+14u,reply,16u); memcpy(body+30u,s->snonce,16u);
+    body[46]=0x89u; body[47]=0xacu;
+    uint32_t second=length-62u;
+    if (second>CLEAN_MSDU_BYTES) {
+        /* Keep the first MSDU at the legacy maximum for a full aggregate. */
+        uint32_t first=2304u, at=2320u;
+        memset(body+46u,0x5a,length-46u);
+        body[12]=(uint8_t)(first>>8u); body[13]=(uint8_t)first;
+        memcpy(body+at,s->mac,6u); memcpy(body+at+6u,s->bssid,6u);
+        second=length-at-14u;
+        body[at+12u]=(uint8_t)(second>>8u); body[at+13u]=(uint8_t)second;
+        return at;
+    }
+    memcpy(body+48u,s->mac,6u); memcpy(body+54u,s->bssid,6u);
+    body[60]=(uint8_t)(second>>8u); body[61]=(uint8_t)second;
+    return 48u;
+}
+
+static uint32_t protected_aggregate(clean_wpa_t *s, uint8_t *m, uint8_t tid,
+        uint16_t sequence, uint8_t number, const uint8_t *body, uint32_t payload) {
+    memset(m,0,46u+payload);
+    m[0]=0x88u; m[1]=0x42u;
+    memcpy(m+4u,s->mac,6u); memcpy(m+10u,s->bssid,6u); memcpy(m+16u,s->bssid,6u);
+    m[22]=(uint8_t)(sequence<<4u); m[23]=(uint8_t)(sequence>>4u);
+    m[24]=(uint8_t)(128u|tid);
+    m[26]=number; m[29]=32u;
+    uint8_t pn[6]={number};
+    assert(wpa_ccmp(s->ptk+32u,m,26u,pn,body,payload,m+34u,m+34u+payload,0));
+    badger_bytes_store_u32(m+42u+payload,diag_crc32(m,42u+payload));
+    return 46u+payload;
+}
+
+static void protected_aggregates(clean_wpa_t before) {
+    uint8_t body[CLEAN_AMSDU_BYTES], m[46u+CLEAN_AMSDU_BYTES];
+    uint32_t maximum=CLEAN_MPDU_BYTES-46u;
+    if (maximum>CLEAN_AMSDU_BYTES) maximum=CLEAN_AMSDU_BYTES;
+    const uint32_t sizes[]={94u,1500u,maximum};
+    for (uint32_t size=0u;size<3u;++size) {
+        clean_wpa_t s=before; s.rx_amsdu=1u;
+        aggregate_body(body,&s,sizes[size]);
+        for (uint8_t tid=0u;tid<16u;++tid) {
+            uint32_t n=protected_aggregate(&s,m,tid,4095u,1u,body,sizes[size]);
+            assert(clean_wpa_protected(&s,m,n,0u)==1 && !s.error);
+            assert(s.amsdu_rx==2u*tid+1u && s.amsdu_subframes==2u*(2u*tid+1u));
+            assert(s.rx_qos.tid[tid].delivered==1u && s.rx_pn[tid][0]==1u);
+            qos_plaintext_wiped(&s);
+            assert(clean_mac_retry(m,n));
+            assert(!clean_wpa_protected(&s,m,n,1u) && !s.error);
+            n=protected_aggregate(&s,m,tid,4095u,2u,body,sizes[size]);
+            assert(clean_mac_retry(m,n));
+            assert(!clean_wpa_protected(&s,m,n,2u) && !s.error);
+            assert(s.rx_pn[tid][0]==2u && s.rx_qos.tid[tid].duplicates==1u);
+            n=protected_aggregate(&s,m,tid,0u,3u,body,sizes[size]);
+            assert(clean_wpa_protected(&s,m,n,3u)==1 && s.rx_pn[tid][0]==3u);
+            qos_plaintext_wiped(&s);
+        }
+        assert(s.protected_rx==32u && s.amsdu_rx==32u && s.amsdu_subframes==64u);
+    }
+    for (uint32_t fault=0u;fault<12u;++fault) {
+        clean_wpa_t s=before; s.rx_amsdu=1u;
+        uint32_t at=aggregate_body(body,&s,maximum);
+        if (fault==0u) ++body[at+13u];
+        if (fault==1u) body[at+6u]|=1u;
+        if (fault==2u) body[at+12u]=body[at+13u]=0u;
+        if (fault==3u) body[at]^=2u;
+        if (fault==4u) memcpy(body,"\xaa\xaa\x03\x00\x00\x00",6u);
+        uint32_t n=protected_aggregate(&s,m,7u,1u,1u,body,maximum);
+        if (fault==5u) m[n-12u]^=1u;
+        if (fault==6u) m[1]|=4u;
+        if (fault==7u) m[22]|=1u;
+        if (fault==8u) m[24]|=0x60u;
+        if (fault==9u) s.rx_amsdu=0u;
+        if (fault==10u) m[29]=96u;
+        if (fault==11u) m[24]^=1u;
+        badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+        assert(clean_wpa_protected(&s,m,n,0u)==-1);
+        assert(s.error==((fault==5u||fault==11u)?WPA_MIC:WPA_FORMAT));
+        assert(!s.installed && !s.protected_rx && !s.amsdu_rx && !s.amsdu_subframes);
+        assert(!s.rx_pn[7][0] && !s.rx_qos.tid[7].delivered);
+        qos_plaintext_wiped(&s);
+    }
+    clean_wpa_t s=before; s.rx_amsdu=1u;
+    uint8_t plain[32]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
+    memcpy(plain+16u,s.snonce,16u);
+    uint32_t n=protected_qos_fragment(&s,m,0u,1u,0u,0,1u,plain,32u);
+    m[24]|=128u;
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_protected(&s,m,n,0u)==-1 && s.error==WPA_FORMAT);
+    assert(!s.protected_rx && !s.amsdu_rx && !s.rx_pn[0][0]);
+    qos_plaintext_wiped(&s);
+    puts("Protected A-MSDU: all TIDs, full receive bound, per-subframe addresses, no partial delivery, replay/Retry/wrap, MIC and unauthenticated aggregate-bit flip rejection pass");
 }
 
 static void protected_qos(clean_wpa_t before) {
@@ -372,6 +533,7 @@ static void handshake(void) {
     protected_traffic(s);
     protected_fragments(s);
     protected_qos(s);
+    protected_aggregates(s);
     s.tx_pn[0]=5u; s.rx_pn[0][0]=9u;
     assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && s.tx_pn[0]==5u && s.rx_pn[0][0]==9u);
     s=before; m[32u+81u]^=1u; badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
@@ -382,7 +544,7 @@ static void handshake(void) {
 }
 
 int main(void) {
-    crypto(); binding(); handshake();
+    crypto(); aggregate_crypto(); binding(); handshake();
     puts("WPA2: independent crypto vectors, handshake, MIC/replay and no reinstall pass");
     puts("WPA2: authenticated 16-fragment RX, 2304-byte bounds, PN carry/continuity, expiry and plaintext wiping pass");
     return 0;

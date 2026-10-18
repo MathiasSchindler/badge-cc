@@ -131,6 +131,77 @@ static void association_tests(const uint8_t cap[26], const uint8_t op[22],
     clean_edca_t edca = {0};
     assert(clean_edca_configure(&edca, parsed.ht.wmm.ac, 0u, 1u, 1u));
     assert(clean_edca_select(&edca, 1u, 0u) == 1 && edca.ac[1].aifsn == 7u);
+    clean_station_ap_t wmm_ap = {.rates=0xfffu, .basic_rates=0x150u, .capability=1025u};
+    memcpy(wmm_ap.bssid, bssid, 6u);
+    wmm_ap.ssid_length = 1u; wmm_ap.ssid[0] = 'x';
+    wmm_ap.ht = parsed.ht;
+    assert(clean_station_wmm_offer(&wmm_ap) == CLEAN_RX_WMM);
+    uint8_t request[160];
+    uint32_t request_length = clean_station_associate(request, 0u, mac, &wmm_ap);
+    uint32_t wmm_ies = 0u;
+    for (uint32_t at = 34u; at < request_length - 4u;) {
+        uint32_t size = request[at + 1u];
+        assert(size <= request_length - 4u - at - 2u);
+        assert(request[at] != 45u && request[at] != 61u);
+        if (request[at] == 221u) {
+            static const uint8_t information[7] = {0u,0x50u,0xf2u,2u,0u,1u,0u};
+            assert(size == 7u && !memcmp(request + at + 2u, information, 7u));
+            ++wmm_ies;
+        }
+        at += 2u + size;
+    }
+    assert(wmm_ies == CLEAN_RX_WMM && clean_frame_valid(request + 6u, request_length - 6u));
+    assert(clean_station_wmm_accept(&parsed, 1u) == CLEAN_RX_WMM);
+    assert(!clean_station_wmm_accept(&parsed, 0u));
+    wmm_ap.association = parsed;
+    wmm_ap.association.wmm = CLEAN_RX_WMM;
+    uint8_t policy[CLEAN_WMM_POLICY_BYTES] = {0};
+    assert(clean_station_wmm_policy(policy, mac, &wmm_ap) == CLEAN_RX_WMM);
+    if (CLEAN_RX_WMM) {
+        clean_edca_ac_t decoded[4], original_ac[4];
+        assert(clean_wmm_policy_decode(decoded, CLEAN_WMM_POLICY_CMD, 1u, 3u, policy));
+        assert(!memcmp(decoded, parsed.ht.wmm.ac, sizeof(decoded)));
+        memcpy(original_ac, decoded, sizeof(decoded));
+        const uint8_t faults[] = {12u,14u,15u,16u,17u,18u,19u,20u,21u,24u};
+        for (uint32_t i = 0u; i < sizeof(faults); ++i) {
+            uint8_t changed[CLEAN_WMM_POLICY_BYTES];
+            memcpy(changed, policy, sizeof(changed));
+            if (faults[i] == 12u) changed[12] = changed[13] = 0u;
+            if (faults[i] == 14u || faults[i] == 15u || faults[i] == 16u)
+                changed[faults[i]] = 4u;
+            if (faults[i] >= 17u && faults[i] <= 19u) changed[faults[i]] = 1u;
+            if (faults[i] == 20u) changed[20] |= 0x80u;
+            if (faults[i] == 21u) changed[21] = 0xb4u;
+            if (faults[i] == 24u) changed[24] = changed[20];
+            assert(!clean_wmm_policy_decode(decoded, CLEAN_WMM_POLICY_CMD, 1u, 3u, changed));
+            assert(!memcmp(decoded, original_ac, sizeof(decoded)));
+        }
+        for (uint32_t profile = 0u; profile < 4u; ++profile)
+            assert(clean_wmm_policy_decode(decoded, CLEAN_WMM_POLICY_CMD, 1u,
+                                            profile, policy) == (profile == 3u));
+        assert(!clean_wmm_policy_decode(decoded, CLEAN_WMM_POLICY_CMD, 0u, 3u, policy));
+        assert(!clean_wmm_policy_decode(decoded, CLEAN_WMM_POLICY_CMD | 256u, 1u, 3u, policy));
+        wmm_ap.ht_updates = 1u;
+        wmm_ap.ht.wmm.ac[0].aifsn = 5u;
+        wmm_ap.basic_rates = 0x15fu; wmm_ap.capability &= (uint16_t)~1024u;
+        assert(clean_station_wmm_policy(policy, mac, &wmm_ap) == 1);
+        assert(policy[12] == 0x5fu && policy[13] == 1u && !policy[14]);
+        assert(clean_wmm_policy_decode(decoded, CLEAN_WMM_POLICY_CMD, 1u, 3u, policy));
+        assert(decoded[0].aifsn == 5u && wmm_ap.association.ht.wmm.ac[0].aifsn == 3u);
+        wmm_ap.ht.wmm.present = 0u;
+        assert(clean_station_wmm_policy(policy, mac, &wmm_ap) == -1);
+        wmm_ap.ht = parsed.ht; wmm_ap.ht.invalid = 1u;
+        assert(clean_station_wmm_policy(policy, mac, &wmm_ap) == -1);
+        clean_station_association_t refused = parsed;
+        refused.ht.wmm.ac[0].ecw_max = 11u;
+        assert(clean_station_wmm_accept(&refused, 1u) == -1);
+        memset(&refused.ht, 0, sizeof(refused.ht));
+        assert(!clean_station_wmm_accept(&refused, 1u));
+        refused.ht.wmm.information = 1u;
+        assert(clean_station_wmm_accept(&refused, 1u) == -1);
+        clean_station_forget_association(&wmm_ap);
+        assert(!wmm_ap.association.wmm && !clean_station_wmm_policy(policy, mac, &wmm_ap));
+    }
 
     for (uint32_t end = 0u; end < length - 4u; ++end) {
         uint8_t truncated[256];

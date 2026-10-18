@@ -20,7 +20,7 @@ VPATH := $(sort $(dir $(SOURCES)))
 HEADERS := $(wildcard *.h ../src/*.h $(ROOT)/src/tools/diagnostics_logic.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test)
-LOADER_TEST_SOURCES := loader_test.c loader.c ../src/mac.c \
+LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/tools/diagnostics_logic.c
 

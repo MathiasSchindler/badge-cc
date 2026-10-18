@@ -555,8 +555,114 @@ static void qos_receive(void) {
     m[39] = 4u; fcs(m, n);
     assert(clean_qos_rx(&s, m, n, 4u) == CLEAN_MAC_INVALID);
     m[39] = 3u; m[1] |= 64u; fcs(m, n);
-    assert(clean_qos_rx_authenticated(&s, m, n, 5u) == CLEAN_MAC_UNSUPPORTED);
+    assert(clean_qos_rx_authenticated(&s, m, n, 5u) == CLEAN_MAC_DELIVER);
     puts("QoS RX: independent TID sequences/fragments, duplicate/wrap, bounds, policy gates and expiry/wiping pass; NOT EDCA or Block ACK");
+}
+
+static void station_qos_delivery(void) {
+    clean_mac_rx_t legacy;
+    clean_qos_rx_t qos;
+    clean_mac_rx_init(&legacy);
+    clean_qos_rx_init(&qos);
+    uint8_t packet[CLEAN_RX_PACKET_BYTES] = {0};
+    const uint8_t own[6] = {2u}, peer[6] = {4u};
+    uint32_t size = 18u + qos_frame(packet + 18u, 7u, 0u, 0u, 0u, 32u);
+    uint32_t original = size;
+    assert(clean_station_qos_rx(&legacy, 0, packet, &size, own, peer, 0u) ==
+           CLEAN_MAC_IGNORED && size == original && !qos.tid[0].delivered);
+    for (uint32_t tid = 0u; tid < 8u; ++tid) {
+        size = 18u + qos_frame(packet + 18u, 4095u, 0u, 6u, (uint8_t)tid, 32u);
+        assert(clean_station_qos_rx(&legacy, &qos, packet, &size, own, peer, tid) ==
+               CLEAN_MAC_FRAGMENT && !size);
+    }
+    for (uint32_t tid = 0u; tid < 8u; ++tid) {
+        size = 18u + qos_frame(packet + 18u, 4095u, 1u, 2u, (uint8_t)tid, 32u);
+        assert(clean_station_qos_rx(&legacy, &qos, packet, &size, own, peer, 20u + tid) ==
+               CLEAN_MAC_DELIVER);
+        assert(size == 18u + 30u + 64u && packet[17] == CLEAN_RX_REASSEMBLED);
+        assert(packet[42] == tid && clean_mac_valid(packet + 18u, size - 18u));
+        assert(badger_bytes_load_u32(packet) == (size | ((size ^ 0xffffu) << 16u)));
+        size = 18u + qos_frame(packet + 18u, 4095u, 1u, 10u, (uint8_t)tid, 32u);
+        assert(clean_station_qos_rx(&legacy, &qos, packet, &size, own, peer, 40u + tid) ==
+               CLEAN_MAC_DUPLICATE && !size);
+    }
+    size = 18u + qos_frame(packet + 18u, 0u, 0u, 0x42u, 0u, 32u);
+    original = size;
+    assert(clean_station_qos_rx(&legacy, &qos, packet, &size, own, peer, 60u) ==
+           CLEAN_MAC_PROTECTED && size == original && qos.tid[0].delivered == 1u);
+    packet[22] = 8u;
+    assert(clean_station_qos_rx(&legacy, &qos, packet, &size, own, peer, 61u) ==
+           CLEAN_MAC_IGNORED && size == original);
+    assert(!legacy.delivered);
+    puts("Station QoS: negotiated dispatch, interleaved TID reassembly, rewritten F2 length/FCS, duplicates and protected bypass pass");
+}
+
+static void station_edca_tx(void) {
+    uint8_t tx[CLEAN_TX_BYTES] = {0};
+    uint8_t *m = tx + 6u;
+    uint32_t n = qos_frame(m, 1u, 0u, 1u, 0u, 32u);
+    for (uint32_t tid = 0u; tid < 8u; ++tid) {
+        m[24] = (uint8_t)tid;
+        assert(clean_station_tx_tid(m, n, 1u) == (int)tid);
+        m[1] |= 64u;
+        assert(clean_station_tx_tid(m, n, 1u) == (int)tid);
+        m[1] &= (uint8_t)~64u;
+        assert(clean_station_tx_tid(m, n, 0u) == -1);
+    }
+    for (uint32_t size = 0u; size < 30u; ++size)
+        assert(clean_station_tx_tid(m, size, 1u) == -1);
+    const uint8_t bad_control[] = {8u, 16u, 32u, 64u, 128u};
+    for (uint32_t i = 0u; i < sizeof(bad_control); ++i) {
+        m[24] = bad_control[i];
+        assert(clean_station_tx_tid(m, n, 1u) == -1);
+    }
+    m[24] = 0u;
+    m[25] = 1u; assert(clean_station_tx_tid(m, n, 1u) == -1); m[25] = 0u;
+    for (uint32_t bit = 0u; bit < 8u; ++bit) {
+        if (!(0x87u & (1u << bit))) continue;
+        m[1] ^= (uint8_t)(1u << bit);
+        assert(clean_station_tx_tid(m, n, 1u) == -1);
+        m[1] ^= (uint8_t)(1u << bit);
+    }
+    m[0] = 0xc8u;
+    assert(clean_station_tx_tid(m, 30u, 1u) == 0);
+    assert(clean_station_tx_tid(m, n, 1u) == -1);
+    m[0] = 0x88u;
+    assert(clean_station_tx_tid(m, 30u + CLEAN_MSDU_BYTES, 1u) == 0);
+    assert(clean_station_tx_tid(m, 31u + CLEAN_MSDU_BYTES, 1u) == -1);
+    m[1] |= 64u;
+    assert(clean_station_tx_tid(m, 45u, 1u) == -1);
+    assert(clean_station_tx_tid(m, 46u, 1u) == 0);
+    assert(clean_station_tx_tid(m, 46u + CLEAN_MSDU_BYTES, 1u) == 0);
+    assert(clean_station_tx_tid(m, 47u + CLEAN_MSDU_BYTES, 1u) == -1);
+    m[1] &= (uint8_t)~64u;
+    m[0] = 8u; assert(clean_station_tx_tid(m, n, 0u) == 0);
+    m[0] = 0xd0u; m[1] = 0u; assert(clean_station_tx_tid(m, n, 0u) == 6);
+    m[22] |= 1u; assert(clean_station_tx_tid(m, n, 1u) == -1);
+    const uint32_t lengths[] = {36u, 1510u, CLEAN_TX_BYTES};
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        uint32_t length = lengths[i], mpdu = length - 6u;
+        for (uint32_t rate = 0u; rate < 8u; ++rate) {
+            assert(clean_ofdm_plcp_rate(tx, mpdu, rate));
+            assert(clean_legacy_exchange_us(tx, length, 1u, 0u, 0xfffu) ==
+                   clean_ofdm_airtime_us(mpdu, rate) + 10u +
+                   clean_ofdm_airtime_us(14u, rate));
+            assert(!clean_legacy_exchange_us(tx, length, 1u, 1u, 0xfffu));
+        }
+        for (uint32_t rate = 0u; rate < 4u; ++rate) {
+            assert(clean_cck_plcp_rate(tx, mpdu, rate));
+            for (uint32_t short_plcp = 0u; short_plcp < 2u; ++short_plcp) {
+                uint32_t expected = rate || !short_plcp ?
+                    clean_cck_airtime_us(mpdu, rate, short_plcp) + 10u +
+                    clean_cck_airtime_us(14u, rate, 0u) : 0u;
+                assert(clean_legacy_exchange_us(tx, length, 0u, short_plcp, 0xfffu) == expected);
+            }
+        }
+    }
+    assert(!clean_legacy_exchange_us(tx, 0u, 0u, 0u, 0xfffu));
+    assert(!clean_legacy_exchange_us(tx, CLEAN_TX_BYTES + 1u, 0u, 0u, 0xfffu));
+    assert(!clean_legacy_exchange_us(tx, 36u, 0u, 0u, 0u));
+    puts("Station EDCA TX: management/legacy/QoS selection, fail-closed headers and exact all-rate/size/preamble exchange airtimes pass");
 }
 
 static void receive_relevance(void) {
@@ -673,6 +779,8 @@ int main(void) {
     station_transmit();
     soak_protocol();
     qos_receive();
+    station_qos_delivery();
+    station_edca_tx();
     receive_relevance();
     capture_queue();
     puts("MAC: DCF/NAV/EIFS/wrap, retry identity, FCS, duplicates and bounded reassembly OK");

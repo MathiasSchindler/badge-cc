@@ -1,4 +1,5 @@
 #include "wpa2_crypto.h"
+#include "frame_limits.h"
 #include "../../src/shared/bytes.h"
 
 void wpa_wipe(void *p, uint32_t n) {
@@ -228,8 +229,12 @@ static void cbc(const wpa_aes_t *a, uint8_t mac[16], const uint8_t block[16]) {
 int wpa_ccmp(const uint8_t key[16], const uint8_t *header, uint32_t hn,
               const uint8_t pn[6], const uint8_t *in, uint32_t n,
               uint8_t *out, uint8_t tag[8], int decrypt) {
-    if ((hn!=24u && hn!=26u) || n>2304u || (header[1]&3u)==3u ||
+    if ((hn!=24u && hn!=26u) || (header[1]&3u)==3u ||
         (header[0]&0x8fu)!=(hn==24u?8u:0x88u)) return 0;
+    int aggregate=hn==26u && (header[24]&128u);
+    if (n>(aggregate?CLEAN_AMSDU_BYTES:CLEAN_MSDU_BYTES) ||
+        (aggregate && (header[0]!=0x88u || (header[1]&0x84u) || (header[22]&15u))))
+        return 0;
     wpa_aes_t aes;
     wpa_aes_init(&aes,key);
     uint8_t nonce[13], block[16], mac[16], stream[16], aad[32], expected[8];

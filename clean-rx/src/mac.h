@@ -92,7 +92,8 @@ void clean_qos_rx_expire(clean_qos_rx_t *s, uint32_t now);
  * uses the original input. Block ACK/HT Control require separate support. */
 int clean_qos_rx(clean_qos_rx_t *s, const uint8_t *mpdu, uint32_t length, uint32_t now);
 /* Authenticated plaintext with Protected retained and reconstructed FCS.
- * Protected A-MSDUs remain disabled until negotiated crypto handling exists. */
+ * A-MSDUs undergo whole-body validation and cannot be fragmented. The caller
+ * must enforce aggregate admission and subframe destination policy. */
 int clean_qos_rx_authenticated(clean_qos_rx_t *s, const uint8_t *mpdu,
                                uint32_t length, uint32_t now);
 uint32_t clean_mac_fcs(const volatile uint8_t *bytes, uint32_t length);

@@ -281,7 +281,7 @@ static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now
     uint8_t frag = m[22] & 15u, more = m[1] & 4u;
     uint32_t payload = n - header - 4u;
     int aggregate = qos && (m[24] & 128u);
-    if (qos && ((m[24] & 0x60u) >= 0x40u || (aggregate && authenticated)))
+    if (qos && (m[24] & 0x60u) >= 0x40u)
         return rx_error(s, CLEAN_MAC_UNSUPPORTED);
     if ((m[0] == 0x48u || m[0] == 0xc8u) && (payload || frag || more || aggregate))
         return rx_error(s, CLEAN_MAC_INVALID);

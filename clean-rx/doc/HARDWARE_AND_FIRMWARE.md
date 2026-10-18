@@ -264,6 +264,10 @@ disable contention and produce an explicit controller error.
 bounded fragmentation and receive expiry. QoS reception has 16 independent
 TID contexts, each with 64 duplicate-history entries, one active MSDU,
 up to 16 fragments, a 2,304-byte payload bound and a 512-ms lifetime.
+The opt-in WMM station path dispatches accepted unprotected QoS frames to
+these contexts and rewrites the F2 length/FCS after reassembly. Protected
+QoS frames retain their original encrypted bytes for CCMP processing.
+Default non-WMM station operation does not use this QoS dispatch.
 
 [wpa2.c](../badge/wpa2.c) authenticates and decrypts software CCMP before
 passing plaintext to authenticated MAC processing. It maintains per-TID
@@ -271,6 +275,18 @@ PN replay state and requires consecutive fragment PNs and consistent
 header identity. Completion, expiry and terminal failure wipe plaintext
 assembly state.
 
-The plaintext A-MSDU parser validates the entire aggregate before exposing
+The A-MSDU parser validates the entire aggregate before exposing
 zero-copy subframes. It checks source addresses, big-endian payload
 lengths, aggregate/MSDU bounds and padding boundaries.
+
+The WMM station with extended reception also admits unfragmented protected
+QoS A-MSDUs: up to 3,839 aggregate bytes, or a 3,885-byte MPDU including
+the QoS header, CCMP envelope and FCS. Ordinary CCMP MSDUs retain their
+2,304-byte bound. After MIC verification, the entire decrypted aggregate
+and every subframe destination are checked before committing replay state
+or entering the authenticated duplicate cache. Every subframe must target
+the local station. The parser rejects LLC/SNAP bytes used as a subframe
+destination, as the CCMP MIC does not authenticate the A-MSDU-present bit.
+Only a newly delivered aggregate increments the aggregate/subframe counters;
+replays and valid-MIC Retry duplicates do not deliver again. Plaintext is
+wiped on delivery or terminal failure.

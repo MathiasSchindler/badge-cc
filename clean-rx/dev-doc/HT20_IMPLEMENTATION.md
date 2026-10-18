@@ -140,7 +140,7 @@ fresh peer captures below provide that evidence.
 | Host metadata | Packet byte 15 and byte 16 currently encode legacy rate/channel/flags; [phy_rates.h](../src/phy_rates.h) marks formats 2/3 unsupported (`0x40`) | Design explicit/versioned MCS, bandwidth, GI, mixed-mode and aggregation evidence in D2. Do not alias HT onto OFDM flag `0x10` or treat CCK short-preamble flag `0x20` as SGI. Preserve fragment metadata. |
 | ACK/CTS/IFS | [psm_ack.h](../src/psm_ack.h) rejects HT/QoS by default; a separately gated normal-ACK prototype adds QoS policy and HT-to-legacy response-rate tables | Qualify returned ACKs/SIFS, HT protection/NAV, EOF anchoring and retries. Local response starts are not RF timing qualification. |
 | Association/QoS | [station.h](../badge/station.h) emits SSID, legacy rates and optional RSN; HT/WMM peer IEs do not enable local capabilities. Shared per-TID duplicate/reassembly state is integrated with existing protected QoS RX; plaintext station negotiation/delivery remains gated | D2 still needs AP-driven EDCA, HT responses/protection, Block ACK/reordering and negotiated QoS/HT operation. A receive state machine or WMM IE alone is insufficient. |
-| Buffers/aggregation | [frame_limits.h](../src/frame_limits.h) retains the default 2,400-byte MPDU bound; the opt-in extended RX profile supports 3,896 bytes and three F2 fragments | Minimum A-MSDU validation/deaggregation is implemented in the diagnostic path below. D3 still needs bounded A-MPDU parsing, per-MPDU CRC, BA negotiation/BAR/window/reordering and negotiated delivery/replay integration. F2 fragmentation is neither 802.11 fragmentation nor aggregation. |
+| Buffers/aggregation | [frame_limits.h](../src/frame_limits.h) retains the default 2,400-byte MPDU bound; the opt-in extended RX profile supports 3,896 bytes and three F2 fragments | Minimum A-MSDU validation/deaggregation and bounded protected station reception are implemented below. D3 still needs bounded A-MPDU parsing, per-MPDU CRC, BA negotiation/BAR/window/reordering and negotiated delivery/replay integration. F2 fragmentation is neither 802.11 fragmentation nor aggregation. |
 
 Important association constraint: an HT Capability element with the maximum
 A-MSDU bit clear still declares a 3,839-byte A-MSDU limit, not "disabled".
@@ -611,8 +611,11 @@ This supports three-address QoS Data/Null and normal/No Ack policy.
 HT Control, four-address and Block ACK/No Explicit Ack policy need separate
 implementation and remain rejected. Unprotected A-MSDUs must pass complete
 aggregate validation before their identity can enter the duplicate cache;
-fragmented aggregates are invalid. Protected A-MSDUs remain disabled until
-negotiated crypto/aggregate-injection handling is implemented.
+fragmented aggregates are invalid. The subsequent
+[protected A-MSDU integration](EDCA_IMPLEMENTATION.md#protected-a-msdu-receive-integration)
+adds bounded authenticated aggregate reception, explicit station admission
+and aggregate-injection rejection. It does not qualify negotiated HT/BA
+operation.
 
 The existing software CCMP QoS path now authenticates/decrypts, enforces its
 per-TID PN replay counter, reconstructs an internal plaintext FCS, then uses
@@ -627,9 +630,10 @@ plaintext assembly does not need another packet on its TID to expire.
 Expiry, terminal protocol failure and delivery wipe the corresponding
 plaintext/fragment PN state. A terminal crypto/protocol failure clears all
 TID plaintext assemblies. The fixed protected receive report keeps its
-layout and sums legacy plus QoS counters. State is static: default and
-extended badge BSS is 221,256 and 225,744 bytes respectively; no allocator
-or new library dependency was added.
+layout and sums legacy plus QoS counters. State is static; this increment's
+default and extended badge BSS was 221,256 and 225,744 bytes respectively.
+Later WMM/aggregate build sizes are recorded with their own evidence.
+No allocator or new library dependency was added.
 
 Native ASan/UBSan tests cover all 16 TIDs with interleaved 16-fragment
 32/1,500/2,304-byte MSDUs, sequence wrap and PN carry, duplicate/replay
@@ -1297,16 +1301,18 @@ complete negotiated HT operation.
 
 ### Remaining D2 work
 
-- Integrate the [bounded EDCA command](EDCA_IMPLEMENTATION.md) with actual
-  AP negotiation and runtime updates; implement HT protection and qualify the gated ACK
+- Qualify [AP-driven non-HT WMM/EDCA integration](EDCA_IMPLEMENTATION.md#ap-driven-non-ht-wmm-integration)
+  beyond its bounded open/WPA2 exchanges, including runtime policy
+  changes and recovery; implement HT protection and qualify the gated ACK
   prototype's returned responses, SIFS timing and EOF anchoring.
-- Qualify the implemented per-TID receive/CCMP state over the air and
-  integrate negotiated protected aggregates; preserve legacy fallback.
+- Qualify the implemented per-TID receive/CCMP and protected A-MSDU software
+  over the air, and integrate negotiated aggregate operation; preserve
+  legacy fallback.
 - Meet HT receive-size and required MAC/Block ACK obligations jointly with
   D3 before constructing/advertising an HT association profile.
-- Use the implemented association-response/runtime profiles for actual
-  local capability/operation negotiation and AP-driven policy activation;
-  profile capture alone does not enable negotiated HT operation.
+- Extend the implemented non-HT WMM association-response/runtime policy
+  activation to actual HT capability/operation negotiation only after
+  the required MAC obligations are met.
 - Verify negotiated association and actual HT OTA framing with an independent
   HT20 implementation, including explicit legacy fallback.
 - Diagnose remaining RX losses; no all-rate reliability threshold is passed.

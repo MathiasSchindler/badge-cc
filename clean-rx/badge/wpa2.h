@@ -13,9 +13,10 @@ typedef struct {
     uint8_t pmk[32], snonce[32], anonce[32], ptk[48], gtk[16], gtk_id;
     uint8_t replay[8], m3_hash[20], tx_pn[6], rx_pn[17][6];
     uint8_t mac[6], bssid[6], rsn[128], rsn_length;
-    uint8_t stage, error, installed;
+    uint8_t stage, error, installed, tx_qos, rx_amsdu;
     uint32_t m1, m3, m2, m4, protected_rx;
     uint32_t gtk_info;
+    uint32_t amsdu_rx, amsdu_subframes;
     uint16_t sequence;
     clean_mac_rx_t rx_mac;
     clean_qos_rx_t rx_qos;
