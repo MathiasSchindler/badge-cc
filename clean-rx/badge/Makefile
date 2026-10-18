@@ -84,6 +84,7 @@ test: $(NATIVE_TESTS)
 	bash -n mac_trials.sh
 	bash -n mac_soak.sh
 	bash -n ht_probe.sh
+	bash -n wpa2_trial.sh
 
 $(NATIVE_TESTS): $(HEADERS) $(ROOT)/src/tools/diagnostics_logic.c $(BUILD)/build_id.h | $(BUILD)
 

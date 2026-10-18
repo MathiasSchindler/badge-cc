@@ -258,6 +258,13 @@ Response ownership spans scheduled start and physical tail. Cortex checks
 ownership and IFS before replacing templates or policy. Invalid counters
 disable contention and produce an explicit controller error.
 
+For hardware-timed DSSS/CCK station TX, the CPU airtime guard uses the
+PSM's transmit-start latch once hardware start is observed. MAC drain time
+overlaps that guard rather than starting a second full-airtime wait.
+Other PHYs, and a pending hardware start, retain the conservative
+post-drain guard. RX and PSM remain live throughout; the guard is not an
+independent PHY-tail or SIFS-timing measurement.
+
 ## Host MAC and protected reception
 
 [mac.c](../src/mac.c) implements duplicate tracking, sequence wrap,

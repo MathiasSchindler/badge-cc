@@ -1111,9 +1111,12 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     MBOX->fw_substage = tx_conditions;
     uint32_t phy_drained = 1u;
     if (station_mac) {
-        /* RX/PSM are already live. This conservative CPU guard is not a PHY
-         * tail measurement: TXA is a byte-transfer strobe, not frame-active. */
+        /* CCK drain overlaps the PPDU; do not hold its reply for a second
+         * airtime. Other PHYs retain their conservative post-drain guard. */
         uint32_t wait = mac_now();
+        if (cck_ack_window && !shm_read16(CLEAN_DCF_TX_PENDING))
+            wait = (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
+                ((uint32_t)shm_read16(CLEAN_DCF_TX_HI) << 16u);
         phy_drained = 0u;
         for (uint32_t poll = 0u; poll < 2000000u; ++poll) {
             station_service_tx();

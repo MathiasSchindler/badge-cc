@@ -480,3 +480,133 @@ are `rx-live-restore-{A,B}.log`. Both badges remain in BOOTSEL.
 The live-RX control repair is implemented and regression checked. The exact
 cause of the remaining upstream HT corruption and intermittent missing AP
 replies is still unidentified; D2 receive qualification remains incomplete.
+
+## Follow-up: CCK turnaround repair and synchronized AP trials
+
+### Reproduced CCK defect
+
+The station TX function waited one complete calculated airtime **after**
+its MAC-drain polling loops. Drain already overlaps the PPDU. At 1 Mbps
+with a 1,500-byte MSDU, the resulting controller TX interval was about
+25,082..25,088 us instead of roughly 12,671 us. While the controller was
+inside that redundant wait, completed data could remain in the single PSM
+capture rather than returning promptly to the existing staging path.
+ACK consumption alone was serviced in those loops.
+
+`rf-repair-baseline-1m-*` reproduced failure with one deliberately suppressed
+ACK at each endpoint: one received application frame each, retry exhaustion,
+and a TX-completion controller fault at the initiator. The corresponding
+`rf-repair-baseline-1m-no-drop-*` control delivered 16 frames each way.
+The dropped-ACK challenge was then held constant across interleaved old/new
+builds, not regenerated to obtain passing payloads.
+
+The retained change is deliberately PHY-specific:
+
+- For hardware-timed CCK, after the PSM has observed hardware TX start,
+  use its latched start for the existing full-airtime CPU guard.
+- If start remains pending, keep the previous conservative post-drain guard.
+  OFDM and HT retain that guard as well.
+- RX/PSM stay live, existing ACK deadlines remain, and all capture FCS,
+  peer, duplicate, retry and payload checks remain mandatory.
+- No PHY/radio register, amplitude, receive-size bound or success predicate
+  is changed. This is not independent physical-tail/SIFS qualification.
+
+The first broader experiment shortened all station PHY guards. Its MCS7
+controls failed and were subsequently successful on an old-build replay.
+That broader change was **not retained**. Later interleaved controls also
+reproduced MCS7 failure on both builds, so those first samples cannot
+establish a unique HT cause. They do justify keeping the correction
+restricted to the causally tested CCK case.
+
+### Matched RF evidence
+
+All evidence prefixes in this section are relative to
+`build/clean-rx/badge/`.
+
+| Prefix | Result |
+| --- | --- |
+| `rf-guard-ab-{1,2,3}-old-*` | Original `326a4152`: all three same-challenge trials fail; initiator receives zero, responder one, both exhaust eight attempts |
+| `rf-guard-ab-{1,2,3}-new-*` | Initial guard experiment: all three deliver/ACK 16 frames per direction with one suppressed ACK each, zero corruption/duplicate delivery |
+| `rf-scoped-cck-{1,2,3}-*` | Final CCK-only `14ac6112`: all three pass the same 16-per-direction test, including reversed badge roles in trial 3 |
+| `rf-default-cck-*` | Final default `6f3c8c23`: same challenge, 16 exact ACKed deliveries per direction, 18/17 attempts, zero corruption/duplicate delivery |
+| `rf-default-ofdm-*` | Final default OFDM6/cycle: 16 exact ACKed deliveries per direction, 17 attempts each, one suppressed ACK each, zero corruption/duplicate delivery |
+
+Final scoped CCK TX intervals are 12,671..12,672 us; default intervals
+are 12,675 us. The automated comparison requires intervals below 15,000 us
+as well as exact delivery/ACK counts and zero corruption/duplicate delivery.
+Final scoped sampled maximum capture ages are 1,230..1,231 us, rather than
+the initial failed trial's 12,361/10,750 us. These are sampled software
+observations, not RF timing guarantees.
+
+`MAC_SOAK_CHALLENGE` now makes controlled fixture replay reproducible.
+Unset still means a new random challenge. Empty, uppercase, non-hexadecimal
+and wrong-length values were checked to fail before hardware access.
+
+### AP-window investigation and runner repair
+
+The unmodified vendor AP application has an eight-second join deadline after
+configuration while it is not connected. Its host helper independently
+collects a bounded series of observations. Starting AP and station in separate
+interactive tool calls spends part of the AP window before the station's
+own cold initialization and discovery even begin.
+
+`rf-repair-baseline-*` prebooted both USB applications and started station
+collection immediately on AP readiness, using unchanged `326a4152`.
+Authentication, association and WPA2 all passed in one attempt per phase,
+with one independently confirmed protected exchange. AP readiness occurred
+at 4 s, station completion at 11 s, and AP observation completion at 15 s.
+
+The controlled `rf-repair-late-*` trial inserted eight seconds **after**
+AP readiness: station collection began at 12 s, discovery/association failed,
+and neither endpoint authorized. This establishes a real orchestration
+failure mode; the earlier `d2-amsdu-wpa2-*` trials did not record phase times,
+so their individual causes cannot retrospectively be assigned to that delay.
+
+The clean-owned `wpa2_trial.sh` now boots both USB applications before
+starting the AP session and invokes the matching collector immediately on
+readiness. It records phase times, checks independent peer identity and both
+exit statuses, retains failed reports, and removes generated private
+credentials. It does not change the vendor application or host networking.
+
+Final `14ac6112` trials `rf-scoped-wpa2-{1,2,3}-*` all pass:
+one authentication/association attempt, negotiated WMM, applied EDCA,
+one M1/M2/M3/M4 exchange and one protected echo. Each independent vendor AP
+reports authorization, one protected RX/TX and 49 stable observations.
+The `rf-scoped-wpa2-wrong-*` negative control associates and sends M2, but
+both endpoints reject authorization and report zero protected traffic.
+Both expected failing helper exit statuses are retained.
+
+### Remaining PHY failures and validation limits
+
+- `rf-final-large-*` retains the separate maximum-size 1-Mbps failure on an
+  intermediate build with the same CCK guard: 2,304-byte MSDU, PLCP duration
+  18,656 us, receive count stops at 1,590 bytes and no complete fixture is
+  delivered. Shortening redundant CPU waiting does not fix this PHY/RXE loss.
+- `rf-scoped-ht-m0-ab-*` passes with an exact frame and returned ACK.
+  `rf-scoped-ht-m0-ba-*` and both final MCS7 controls fail.
+- The follow-up `rf-ht-ab-{1,2}-{old,new}-*` interleaves the original and final
+  scoped builds with identical challenges: MCS0 B-to-A passes both rounds
+  on both builds; MCS7 A-to-B fails both rounds on both builds.
+  Earlier `rf-old-ht-m7-{ab,ba}-*` replays passed. This retains the
+  boot-to-boot HT variability rather than selecting only successful runs.
+
+The CCK retry/turnaround defect is repaired and RF regression checked.
+General HT receive reliability, maximum-size 1-Mbps reception and protected
+aggregate OTA qualification remain unresolved. No all-rate RF qualification
+or complete D2 claim follows.
+
+Final default/WMM controller and badge native suites and freestanding builds
+pass, including shell syntax for the new runner. All four final ELFs have
+no undefined symbols. Build logs are `rf-final-{default,gated}-build.log`.
+
+### Flash preservation
+
+Before hardware writes, fresh complete 16-MiB backups were saved and verified
+as `rf-repair-start-{A,B}-full.bin`. After the investigation, both originals
+were restored with verification, then independently read back in full as
+`rf-repair-restored-{A,B}-full.bin`. Both readbacks compare byte-for-byte
+equal to their respective original backups. Restore and readback logs are
+`rf-repair-restore-{A,B}.log` and `rf-repair-readback-{A,B}.log`.
+
+Both badges remain in BOOTSEL, with their original flash contents restored.
+Generated private AP credentials were removed; no AP helper remains running.

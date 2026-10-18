@@ -33,8 +33,15 @@ if [[ -e $prefix-config.json || -e $prefix-init.json || -e $prefix-reply.json ]]
     exit 1
 fi
 mkdir -p "$(dirname "$prefix")" || exit 1
-challenge=$(od -An -N14 -tx1 /dev/urandom | tr -d ' \n') || exit 1
-if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]]; then echo "Challenge generation failed" >&2; exit 1; fi
+if [[ ${MAC_SOAK_CHALLENGE+x} ]]; then
+    challenge=$MAC_SOAK_CHALLENGE
+else
+    challenge=$(od -An -N14 -tx1 /dev/urandom | tr -d ' \n') || exit 1
+fi
+if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]]; then
+    echo "Challenge must be exactly 28 lowercase hexadecimal digits" >&2
+    exit 2
+fi
 printf '{"challenge":"%s","frames_per_direction":%s,"drop_acks_per_endpoint":%s,"channel":1,"phy":"%s","rate_mbps":%s,"payloads":[%s],"vendor_control":false}\n' \
     "$challenge" "$count" "$drop_acks" "$phy" "$rate" "$payloads" > "$prefix-config.json" || exit 1
 reply_pid=

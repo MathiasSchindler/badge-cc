@@ -236,3 +236,19 @@ contains exactly two LF-terminated lines: SSID (1..32 bytes) and passphrase
 SNonce through the dedicated secret-control path, bound to the BSSID,
 channel and request. This is separate from the controller's raw
 hardware-key command.
+
+For a paired WPA2 fixture, install the unmodified vendor `usb-wifi-link`
+image on one badge and the clean image on the other, leaving both in
+BOOTSEL. Run:
+
+```sh
+CLEAN_RX_COLLECTOR=build/clean-rx/badge/collector \
+  bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/new-wpa2-trial
+```
+
+The runner boots both USB applications before starting the AP, starts
+station collection at AP readiness, and requires independent matching-peer
+authorization and protected traffic. It writes phase times and both
+endpoints' evidence under the new prefix. `--wrong-password` selects the
+negative control. Temporary credentials are private and removed on exit;
+the runner does not flash either badge.

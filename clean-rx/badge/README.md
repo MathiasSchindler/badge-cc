@@ -185,14 +185,18 @@ For a reproducible two-badge test, first load the vendor `usb-wifi-link` image
 on the AP and this image on the station, leaving both in BOOTSEL, then run:
 
 ```sh
-bash src/host/tools/usb_wifi_clean_wpa2_run.sh AP_SERIAL STATION_SERIAL build/wpa2-trial
+bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/wpa2-trial
 # Negative control, with a fresh temporary network:
-bash src/host/tools/usb_wifi_clean_wpa2_run.sh AP_SERIAL STATION_SERIAL build/wpa2-wrong --wrong-password
+bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/wpa2-wrong --wrong-password
 ```
 
 The runner creates temporary credentials in a private directory, removes them
 on exit, and requires matching station MACs and protected RX/TX evidence at
-both endpoints. It does not flash either badge. The AP fixture exports a
+both endpoints. Both USB applications boot before the AP session starts;
+station collection starts immediately on AP readiness, within its bounded
+join window. Set `CLEAN_RX_COLLECTOR` for an isolated matching build.
+The runner records phase times in `PREFIX-timing.log` and preserves failed
+reports. It does not flash either badge. The AP fixture exports a
 temporary passphrase only with explicit `--credentials-out`; neither collector
 logs passwords, PMKs, PTKs or GTKs.
 
@@ -507,6 +511,13 @@ and FCS change. Duplicate application delivery, corruption, ordering errors,
 eight exhausted actual attempts, peer inactivity and overall deadline are
 explicit failures. Zero-attempt BUSY does not consume the retry budget.
 The real station duplicate/reassembly adapter runs before fixture validation.
+
+For controlled old/new comparisons, `MAC_SOAK_CHALLENGE` accepts exactly
+28 lowercase hexadecimal digits from a saved `PREFIX-config.json`.
+Use the same count, ACK-suppression, PHY and payload arguments as the
+saved run. Invalid values fail before hardware access. Leaving the variable
+unset generates a fresh random challenge; intentional replays are comparison
+evidence, not new independent freshness trials.
 
 The optional fifth argument, `DROP_ACKS`, is 0..16 and defaults to zero.
 Both collectors also accept it after `COUNT`. Only the
