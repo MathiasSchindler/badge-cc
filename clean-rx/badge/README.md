@@ -95,6 +95,11 @@ Set `HT_PROBE_CHANNEL=6` (validated range 1..11, default 1) before the paired
 script for controlled channel comparisons; it selects both endpoints and
 their saved channel evidence. These bounded trials do not qualify any
 channel or enable HT association.
+
+`HT_PROBE_CHALLENGE` reuses a saved 28-digit lowercase hexadecimal challenge
+instead of generating a new one. MCS, MPDU length and an explicitly selected
+`HT_PROBE_TID` must match the saved challenge; mismatches fail before hardware
+access. Use a fresh evidence prefix for every replay.
 Further investigation added `failure_repeated_raw`,
 `failure_raw_repeat_match`, `failure_time_us` and `failure_final_*` fields.
 Seventeen new full-length failures had identical independent copies and
@@ -385,6 +390,18 @@ is a service observation, not an RF/SIFS measurement. Both station and soak
 JSON expose these as `mac_*` diagnostics. Soak fault evidence starts at 1920,
 after the trace.
 Bad-FCS counts include unrelated channel traffic; they are not bound-peer loss.
+
+For station profiles 2/3, the controller also snapshots rejected, 40-byte
+RXE authentication candidates matching either the local RA or pinned-peer
+TA. The 60-byte `BAF1` record at `0x204b0` includes a wrapping 16-bit count,
+sampled TSF, status and the six PLCP plus 34 MPDU bytes. A candidate is not a
+validated AP reply. The badge copies this record to detail offset 600 only
+if the saved authentication-response length at 596 is zero, so successful
+response evidence remains intact. JSON exposes `auth_bad_fcs_report`,
+`auth_bad_fcs_count` and, for a nonempty record, `auth_bad_fcs_raw`,
+`auth_bad_fcs_phy`, `auth_bad_fcs_status1`, `auth_bad_fcs_status2`,
+`auth_bad_fcs_time_us` and `auth_bad_fcs_fcs_valid`. A zero count does not
+exclude failures before a matching header/length is available.
 
 Station evidence at detail offset 1680 contains `MAC1` plus unprotected
 delivery, duplicate, fragment, malformed, unsupported, expiry and fragment-error

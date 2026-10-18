@@ -1289,6 +1289,12 @@ passed 10/16 cells; identical-payload old/new replays passed 2/4 each and
 retain independently invalid, repeat-identical SHM captures. Neither
 negotiated HT operation nor receive reliability is qualified.
 
+The subsequent
+[matched-amplitude and rejected-authentication controls](AP_AUTHENTICATION_INVESTIGATION.md#follow-up-amplitude-controls-and-rejected-authentication-capture)
+retain the original default amplitude. They add exact challenge replay and
+pre-host rejection evidence, but do not resolve receive reliability or
+complete negotiated HT operation.
+
 ### Remaining D2 work
 
 - Integrate the [bounded EDCA command](EDCA_IMPLEMENTATION.md) with actual

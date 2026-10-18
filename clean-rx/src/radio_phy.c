@@ -1,5 +1,11 @@
 #include "cyw43_hw.h"
 
+#ifndef CLEAN_RX_TX_BBMULT
+#define CLEAN_RX_TX_BBMULT 64u
+#endif
+_Static_assert(CLEAN_RX_TX_BBMULT == 16u || CLEAN_RX_TX_BBMULT == 64u,
+               "TX amplitude control supports only the bounded 16/64 profiles");
+
 enum {
     OP_PHY_MOD = 0u,
     OP_PHY_AND = 1u,
@@ -713,8 +719,8 @@ void phy_tx_hw_configure(uint32_t channel) {
         mmio_write16(0x18001554u, 0xafffu);
         mmio_write16(0x1800155eu, 0x1000u);
 
-        static const uint32_t iq_ofdm[4] = {0x0400u, 0x0000u, 0x0000u, 0x0040u};
-        static const uint32_t iq_bphy[4] = {0x4000u, 0x0000u, 0x0000u, 0x0040u};
+        static const uint32_t iq_ofdm[4] = {0x0400u, 0x0000u, 0x0000u, CLEAN_RX_TX_BBMULT};
+        static const uint32_t iq_bphy[4] = {0x4000u, 0x0000u, 0x0000u, CLEAN_RX_TX_BBMULT};
         phy_table_write(0u, 96u,  16u, iq_ofdm, 4u);
         phy_table_write(0u, 112u, 16u, iq_bphy, 4u);
         phy_reg_mod(0x631u, 0x0014u, 0x0014u);

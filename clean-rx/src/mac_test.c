@@ -648,7 +648,21 @@ static void fcs_reference(void) {
     puts("MAC FCS: nibble implementation matches independent bitwise CRC for known vector, every byte and every supported length");
 }
 
+static void pause_psm(void) {
+    const uint32_t controls[] = {0xc0020403u, 0xc1d20403u, 0xc1d20401u,
+                                 0x84020400u, 0xffffffffu};
+    for (uint32_t i = 0u; i < sizeof(controls) / sizeof(controls[0]); ++i) {
+        uint32_t running = controls[i], paused = clean_mac_pause_psm(running);
+        assert(!(paused & 2u));
+        assert((paused & 1u) == (running & 1u));
+        assert((paused ^ running) == (running & 2u));
+        assert(clean_mac_pause_psm(paused) == paused);
+    }
+    puts("MAC control: PSM pause preserves RX enable, filtering and all non-PSM control bits");
+}
+
 int main(void) {
+    pause_psm();
     fcs_reference();
     contention();
     edca();

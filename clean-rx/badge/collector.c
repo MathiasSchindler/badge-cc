@@ -704,6 +704,24 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(ht) == CLEAN_HT_PEER_MAGIC ? "true" : "false",
                usb_report_u32(ht + 4u), ht[8], ht[9], ht[11], ht[10] ? "true" : "false",
                ht[16] ? "true" : "false", ht[17], ht[19], usb_report_u32(ht + 44u));
+        clean_auth_failure_t failure;
+        memcpy(&failure, detail + CLEAN_AUTH_FAILURE_DETAIL, sizeof(failure));
+        int failure_valid = !usb_report_u32(detail + 596u) &&
+            failure.magic == CLEAN_AUTH_FAILURE_MAGIC && !failure.reserved &&
+            (!failure.count || failure.length == sizeof(failure.raw));
+        printf(",\"auth_bad_fcs_report\":%s,\"auth_bad_fcs_count\":%u",
+               failure_valid ? "true" : "false", failure_valid ? failure.count : 0u);
+        if (failure_valid && failure.count) {
+            printf(",\"auth_bad_fcs_phy\":%u,\"auth_bad_fcs_status1\":%u,"
+                   "\"auth_bad_fcs_status2\":%u,\"auth_bad_fcs_time_us\":%u,"
+                   "\"auth_bad_fcs_fcs_valid\":%s,\"auth_bad_fcs_raw\":\"",
+                   failure.phy, failure.status1, failure.status2,
+                   (uint32_t)failure.time_lo | ((uint32_t)failure.time_hi << 16u),
+                   clean_frame_valid(failure.raw + 6u, 34u) ? "true" : "false");
+            for (uint32_t i = 0u; i < sizeof(failure.raw); ++i)
+                printf("%02x", failure.raw[i]);
+            putchar('"');
+        }
         puts("}");
         if (!associated) fputs("No validated successful association exchange\n", stderr);
         if (tx==18u && !authorized) fputs("WPA2 protected round trip not established\n",stderr);

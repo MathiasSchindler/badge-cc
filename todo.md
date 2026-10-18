@@ -123,6 +123,8 @@ delivery and intermittent HT receive corruption remain unresolved.
 Negotiated station operation and its mandatory MAC prerequisites are not
 yet qualified.
 See [implementation and remaining gates](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#remaining-d2-work).
+Follow-up receive investigations are recorded in
+[the development record](clean-rx/dev-doc/AP_AUTHENTICATION_INVESTIGATION.md).
 
 - [ ] Complete HT capability/operation negotiation, mixed-mode TX/RX, airtime
   and MCS configuration while preserving explicit legacy fallback.

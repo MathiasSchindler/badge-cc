@@ -140,6 +140,12 @@ trace includes the filtered-capture count and, for profile 3, maximum
 sampled capture age in microseconds. These are service diagnostics, not
 RF timing or packet-loss measurements.
 
+When no validated authentication response is saved, station reports can
+include `auth_bad_fcs_report` and `auth_bad_fcs_count`. A nonzero count adds
+the candidate's raw PLCP/MPDU, PHY/RXE status, sampled TSF value and independent
+software FCS result. This diagnostic does not deliver rejected frames or
+relax authentication validation.
+
 Command 4 uses the channel field at bits 15..8. Values outside 1..14 are
 acknowledged without a retune. For in-range values, the controller updates
 its software channel only when the tuning routine succeeds, but returns

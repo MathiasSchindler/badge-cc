@@ -22,7 +22,8 @@ firmware.
   per-category access, native tests, paired RF matrix and remaining D2 gates.
 - [AP authentication and RX staging investigation](AP_AUTHENTICATION_INVESTIGATION.md):
   independently observed missing replies, timing/rate controls, bounded
-  station receive FIFO, legacy regressions and HT corruption replays.
+  station receive FIFO, legacy regressions, matched-amplitude HT replays
+  and rejected authentication capture.
 
 Keep experiment commands, build IDs, trial counts, logs, unresolved behavior
 and proposed changes here. Document current user-visible behavior and

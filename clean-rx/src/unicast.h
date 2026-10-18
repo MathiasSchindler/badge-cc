@@ -60,6 +60,26 @@ static inline int clean_edca_command_valid(uint32_t command, uint32_t enabled,
 #define CLEAN_HT_FAILURE_MAGIC 0x32464848u
 #define CLEAN_HT_FAILURE_DETAIL 1640u
 
+#define CLEAN_AUTH_FAILURE_SHM 0x750u
+#define CLEAN_AUTH_FAILURE_WORDS 28u
+#define CLEAN_AUTH_FAILURE_ADDR 0x204b0u
+#define CLEAN_AUTH_FAILURE_MAGIC 0x31464142u
+#define CLEAN_AUTH_FAILURE_DETAIL 600u
+
+typedef struct {
+    uint32_t magic;
+    uint16_t count, length, phy, status1, status2, time_lo, time_hi, reserved;
+    uint8_t raw[40];
+} clean_auth_failure_t;
+
+_Static_assert(sizeof(clean_auth_failure_t) == 4u + 2u * CLEAN_AUTH_FAILURE_WORDS &&
+               CLEAN_AUTH_FAILURE_SHM >= CLEAN_HT_FAILURE_SHM + CLEAN_HT_FAILURE_WORDS &&
+               CLEAN_AUTH_FAILURE_SHM + CLEAN_AUTH_FAILURE_WORDS <= 0x7a0u &&
+               CLEAN_AUTH_FAILURE_ADDR >= CLEAN_EDCA_STATUS_ADDR + sizeof(clean_edca_status_t) &&
+               CLEAN_AUTH_FAILURE_ADDR + sizeof(clean_auth_failure_t) <= 0x20d80u &&
+               CLEAN_AUTH_FAILURE_DETAIL + sizeof(clean_auth_failure_t) <= 796u,
+               "Rejected authentication evidence must not overlap other records");
+
 typedef struct {
     uint32_t magic;
     uint16_t count, cause, time_lo, time_hi, length, status1, status2, phy;

@@ -263,6 +263,61 @@ static uint32_t ack_run(uint16_t regs[0x1800], int tx_now) {
     return psm_run(regs, tx_now, ACK_ENTER);
 }
 
+static void authentication_failure_capture(void) {
+    uint16_t r[0x1800], base[0x1800];
+    memset(base, 0, sizeof(base));
+    base[CLEAN_ACK_ENABLE] = 1u;
+    base[0x100cu] = 40u;
+    base[0x1009u] = 0x1234u;
+    base[0x100du] = 0x4321u;
+    base[0x100eu] = 0x5678u;
+    base[0x1119u] = 0xabcdu;
+    base[0x111au] = 0x6789u;
+    for (uint32_t i = 0u; i < 20u; ++i)
+        base[CLEAN_SHM_FRAME + 1u + i] = (uint16_t)(0x1020u + i);
+    base[CLEAN_SHM_FRAME + 4u] = 0x08b0u;
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        base[0x612u + i] = base[CLEAN_SHM_FRAME + 6u + i];
+        base[CLEAN_ACK_PEER + i] = base[CLEAN_SHM_FRAME + 9u + i];
+    }
+    for (uint32_t fault = 0u; fault < 14u; ++fault) {
+        memcpy(r, base, sizeof(r));
+        if (fault == 1u) r[CLEAN_ACK_ENABLE] = 0u;
+        if (fault == 2u) r[0x100cu] = 39u;
+        if (fault == 3u) r[0x100cu] = 41u;
+        if (fault == 4u) r[CLEAN_SHM_FRAME + 4u] = 0x80u;
+        if (fault == 5u) r[CLEAN_SHM_FRAME + 4u] = 0xb0u;
+        if (fault >= 6u && fault < 9u) r[0x612u + fault - 6u] ^= 1u;
+        if (fault >= 9u && fault < 12u) r[CLEAN_ACK_PEER + fault - 9u] ^= 1u;
+        if (fault >= 12u) {
+            r[0x612u + fault - 12u] ^= 1u;
+            r[CLEAN_ACK_PEER + fault - 12u] ^= 1u;
+        }
+        assert(psm_run(r, 0, DCF_BAD) == 266u);
+        int captured = fault == 0u || (fault >= 5u && fault < 12u);
+        assert(r[CLEAN_AUTH_FAILURE_SHM] == captured);
+        assert(r[0x7a8u] == 1u && !r[CLEAN_ACK_SENT] && !r[CLEAN_ACK_SEEN]);
+        if (captured) {
+            assert(r[CLEAN_AUTH_FAILURE_SHM + 1u] == 40u);
+            assert(r[CLEAN_AUTH_FAILURE_SHM + 2u] == 0x1234u);
+            assert(r[CLEAN_AUTH_FAILURE_SHM + 3u] == 0x4321u);
+            assert(r[CLEAN_AUTH_FAILURE_SHM + 4u] == 0x5678u);
+            assert(r[CLEAN_AUTH_FAILURE_SHM + 5u] == 0xabcdu);
+            assert(r[CLEAN_AUTH_FAILURE_SHM + 6u] == 0x6789u);
+            for (uint32_t i = 0u; i < 20u; ++i)
+                assert(r[CLEAN_AUTH_FAILURE_SHM + 8u + i] == r[CLEAN_SHM_FRAME + 1u + i]);
+        }
+    }
+    memcpy(r, base, sizeof(r));
+    r[CLEAN_DCF_ENABLE] = 1u;
+    r[CLEAN_DCF_EIFS_US] = 94u;
+    r[CLEAN_DCF_REQUEST] = 1u;
+    assert(psm_run(r, 0, DCF_BAD) == 266u);
+    assert(r[CLEAN_DCF_EIFS] && r[CLEAN_DCF_REQUEST] == CLEAN_DCF_DEFERRED);
+    assert(r[CLEAN_AUTH_FAILURE_SHM] == 1u);
+    puts("PSM bad authentication: bounded raw evidence, either bound address, no ACK/delivery, EIFS retained; NOT RF");
+}
+
 static void idle_watchdog(void) {
     uint16_t r[0x1800];
     const uint32_t old_poll_budget = 64u * 65535u;
@@ -1056,6 +1111,7 @@ int main(void) {
     receive_trace();
     ht_receive_trace();
     ht_failure_capture();
+    authentication_failure_capture();
     idle_watchdog();
     acknowledgements();
     contention();

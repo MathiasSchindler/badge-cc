@@ -8,6 +8,10 @@ station, then reduces receive-service coupling to host backpressure. It does
 HT/WMM advertisement remains disabled, explicit legacy fallback remains, and
 D2 is incomplete.
 
+A subsequent source audit repaired a concrete MAC-control receive-interruption
+hazard, described in [the live-RX repair](#live-rx-control-repair). Missing AP
+replies and upstream corrupt HT captures are not completely resolved.
+
 Two badges were used only for bounded trials. Badge A is
 `08DA26F86E57F5EA`, badge B `9BBF88DD17D66E7D`. Their RP2350 A4 identity
 does not identify the Wi-Fi silicon version/revision. Local credentials were
@@ -173,3 +177,306 @@ Remaining work is tracked in the
 resolve receive losses, implement/qualify actual negotiated HT/WMM policy,
 protection and required Block ACK/A-MPDU/reordering obligations, and pass
 independent negotiated-peer and sustained receive qualification.
+
+## Follow-up: amplitude controls and rejected authentication capture
+
+This follow-up did not complete D2. The final default build is `974503ec`;
+the gated build is `8112616b`, under `d2-finish-{default,edca}/`.
+HT advertisement remains disabled. The legacy/default baseband multiplier
+remains 64; no unproven PHY correction was made the default.
+
+### Matched transmit-amplitude controls
+
+The existing transmit IQ-local table's baseband multiplier was reduced
+from 64 to 16 for a bounded RF control, without changing PSM bytes.
+Four MCS7/60-byte/normal-ACK challenges, TIDs 0/4 in both directions,
+were then replayed unchanged with the original setting and again with
+the reduced setting:
+
+| Chronological control | Valid payload and returned ACK |
+| --- | --- |
+| Multiplier 16 | 4/4 |
+| Multiplier 64, identical challenges | 2/4 |
+| Multiplier 16, identical challenges repeated | 3/4 |
+
+Prefixes: `d2-finish-{bb16,bb64,bb16-repeat}-t{0,4}-{ab,ba}`.
+`d2-finish-amplitude-verification.json` independently checks challenge
+identity, delivered payload bytes, MPDU/ACK CRC32 and ACK destination.
+All three failed exchanges retain repeat-identical, independently invalid
+FCS captures. The remaining reduced-amplitude failure has 45 fixture bit
+errors, not a valid reception.
+
+The result suggests transmit distortion or receive overload deserves
+investigation, but the small, single-placement sample establishes neither
+the mechanism nor a reliable power setting. It does not qualify MCS7 or
+negotiated HT. The explicit controller build control
+`-DCLEAN_RX_TX_BBMULT=16` preserves reproducibility; only the tested 16/64
+settings compile, and 64 remains the default. Values are baseband table
+coefficients, not calibrated RF power in dBm.
+
+`HT_PROBE_CHALLENGE` now supplies a saved challenge to the paired script.
+It rejects malformed/uppercase values and MCS, length or explicit-TID
+mismatches before hardware access. Five negative configurations and real
+matched replays were checked. Random generation remains the default.
+
+### Rejected authentication evidence and radio control
+
+The PSM bad-FCS path now records authentication-sized candidates matching
+either bound address before rearm. The independently bounded record holds
+the complete six-byte PLCP and 34-byte MPDU, status and sampled TSF. Native
+tests execute the emitted instructions and cover both address alternatives,
+every address word, disabled mode, length/subtype rejection, retry-bit
+acceptance, raw/metadata copies, no ACK/delivery and retained EIFS deferral.
+
+The record uses SHM `0x750..0x76b` and SRAM `0x204b0`, with compile-time
+overlap checks. It is copied after reception stops. Badge detail offset 600
+is reused only when the authentication-response length at 596 is zero.
+Successful authentication evidence takes precedence; the collector reports
+the record's identity and independent FCS result separately.
+
+In `d2-finish-auth-ch6`, the independent monitor saw one successful AP
+reply while the active station saw zero own-RA candidates and no matching
+bad-FCS authentication candidate. The diagnostic is not an exhaustive loss
+detector: corrupt headers, wrong lengths or earlier PHY/capture failure can
+evade its match. This trial does not identify which occurred.
+
+`d2-finish-idle-inhibit` temporarily reapplied known TX-off guards after
+explicit TX, releasing them at the next request. Authentication still
+failed, but the monitor saw no reply, so this was not a useful positive-reply
+control. That branch was removed; it would interfere with autonomous
+responses if kept. `d2-finish-auth-bb16` also failed authentication without
+an independently observed reply; reduced request amplitude did not establish
+recovery. Neither negative control proves AP silence.
+
+### Final verification and restoration
+
+Default/gated controller and badge sanitizer suites and freestanding builds
+passed. Final legacy OFDM6/cycle regressions each delivered 16 frames per
+direction with 16 attempts per endpoint, zero corruption/order/controller
+errors. A first gated-load attempt ran before badge A had re-entered
+BOOTSEL; its failure log is retained and is not an RF failure. Retrying
+after readiness completed the gated regression.
+
+`d2-finish-vendor` successfully authenticated/associated with an unmodified
+vendor AP in one attempt per phase. The AP independently confirmed the
+correct station. The collector correctly reported no overlaid rejected-frame
+record, preserving successful authentication evidence.
+
+Fresh verified full 16-MiB backups are
+`d2-finish-start-{A,B}-full.bin`. Both original flashes were restored after
+testing; independent full readbacks `d2-finish-restored-{A,B}-full.bin`
+compare byte-for-byte. Both badges remain in BOOTSEL.
+
+Receive reliability, negotiated policy/protection and mandatory
+Block ACK/A-MPDU/reordering work remain open; none is satisfied by these
+diagnostics or controls.
+
+## Follow-up: receive-path and turnaround controls
+
+This investigation retains the missing-reply failure but has **not identified
+a causal firmware repair**. Temporary PLCP-selection, PHY-reset, TX-inhibit,
+automatic-control and PA-field experiments were removed. No new radio
+register setting is retained as a fix.
+
+Evidence prefixes below remain relative to `build/clean-rx/badge/`.
+The unchanged gated baseline is `8112616b`.
+
+### Baseline and rate controls
+
+| Prefix | Observation |
+| --- | --- |
+| `rx-cause-baseline-ofdm` | 16 exact deliveries per direction with the OFDM6/cycle fixture |
+| `rx-cause-baseline-t{0,4}-{ab,ba}` | All four MCS7 exchanges passed with the exact earlier amplitude-test challenges and returned ACKs |
+| `rx-cause-baseline-1m` | Short 1-Mbps soak failed: initiator exhausted eight attempts, responder delivered no fixture |
+| `rx-cause-baseline-2m` | Eight exact deliveries per direction at 2 Mbps |
+| `rx-cause-cck-control` / `rx-cause-cck-repeat` | Subsequent short 1-Mbps trials delivered eight and sixteen frames per direction |
+
+The later 1-Mbps trials used a temporary PLCP-selected rejection snapshot,
+not a PHY change or relaxed receive validation. They used different random
+soak payloads and boots. They do not establish that the diagnostic repaired
+anything, nor that the initial failure was exclusively RX. In particular,
+neither rate alone nor a deterministic failure of all 1-Mbps reception
+explains these results.
+
+`rx-cause-ap-base` used the raw `--ap-auth` role, not the station state
+machine: one request, no observed reply. The actual station trial
+`rx-cause-ap-sta` used `--ap-assoc`: four requests, one independently observed
+successful AP authentication reply, and no own-address candidate at the
+active station. Independent decoding verifies the reply's destination,
+open-authentication sequence 2/status 0 and CRC32. Its delivered metadata
+reports the 1-Mbps CCK SIGNAL value. This differs from the successful
+vendor-AP OFDM control, but is not by itself a causal rate diagnosis.
+
+### Rejected-PLCP and turnaround controls
+
+- `rx-cause-plcp` temporarily selected rejected 1-Mbps, 272-us-PLCP
+  candidates without relying on the MAC header or an exact 40-byte count.
+  No candidate was saved, but the monitor also observed no AP reply. This
+  is not a positive-reply control and does not exclude earlier RX aborts.
+- `rx-cause-cck-control` and `rx-cause-cck-repeat` selected the 480-us PLCP
+  of the short soak fixture, with a temporary SRAM-report copy at detail
+  offset 720. No matching rejected candidate was recorded in the passing
+  trials. This diagnostic was removed along with the report copy.
+- `rx-cause-recovery` conditionally applied the existing PHY reset sequence
+  after explicit TX when sampled PHY/IFS state was idle. The monitor saw
+  two AP replies, while the station had no own-address candidate. The saved
+  reply independently validates destination, authentication status and FCS.
+  The reset was not a reliable fix; individual guard execution was not
+  separately instrumented.
+- `rx-cause-inhibit-1` reapplied explicit TX-off guards after TX and
+  released them before the next request. The station recovered one valid,
+  successful authentication reply, then failed all four association
+  requests. Its saved authentication frame independently validates the
+  station destination, AP transmitter, sequence/status and CRC32.
+  The monitor saw no reply. This isolated success is not an A/B proof of
+  the cause. In particular, retaining forced inhibition would prevent
+  dependable autonomous ACK transmission.
+- `rx-cause-inhibit-2` again failed authentication. The monitor collector
+  could not find its badge because its reboot raced BOOTSEL readiness.
+  Its empty report is an orchestration failure, not evidence of AP silence.
+- `rx-cause-auto-t0-ba` started automatic PHY control from the complete
+  explicit-off state. Local TX counters advanced, but no fresh HT reception
+  or returned ACK was established.
+- `rx-cause-phy-auto-t0-ba` cleared only the two PHY TX data bits before
+  releasing their overrides, retaining radio power setup. It still
+  produced a full-length corrupt HT capture. The corresponding local-AP
+  trial saw four requests but no independently observed reply.
+- `rx-cause-pa32-t{0,4}-{ab,ba}` changed only the existing TX `0x4fb`
+  field masked by `0x7f00` to `0x2000`. All four matched HT exchanges passed,
+  just as on the unchanged baseline in this session. The local-AP trial
+  observed four requests but no reply. This does not demonstrate an
+  improvement or establish that field's RF meaning on the unidentified
+  Wi-Fi silicon revision; the setting was removed.
+
+The successful forced-off authentication is a turnaround lead, not a
+justified production workaround. Intermittent results across unchanged
+baseline boots also leave RF placement, interference and acquisition state
+unresolved. A controlled placement comparison is needed before attributing
+these differences to firmware or selecting another RF setting.
+
+### Control cleanup before the live-RX repair
+
+After removing every temporary control, controller and badge native suites
+and freestanding builds passed. That pre-repair controller binary is byte-identical
+to the preserved gated baseline. The badge binary differs only in two build-ID
+words: its build hash includes the controller binary filename, which differs
+for the isolated verification directory. Replacing only those two build-ID
+words yields byte-identical badge binaries.
+
+Fresh, verified full-flash backups for this investigation are
+`rx-cause-start-{A,B}-full.bin`. Restoration logs and independent full
+readbacks use `rx-cause-restore-{A,B}.log` and
+`rx-cause-restored-{A,B}-full.bin`.
+Both original 16-MiB flashes were restored and independently compared
+byte-for-byte; both badges remain in BOOTSEL.
+
+## Live-RX control repair
+
+### Identified source defect and implementation
+
+Live station control handoffs used MACCONTROL `0x84020400`, which clears
+MAC receive enable as well as PSM run. In template preparation and policy/
+EDCA selection this happened **before** the post-freeze busy check. A
+receive racing that check could therefore be disabled before the code
+decided to defer. The reliable-TX timeout path also stopped MAC unless a
+reply was already completely captured; it did not preserve an in-progress
+reply.
+
+The repair distinguishes PSM ownership from receive enable:
+
+- `clean_mac_pause_psm()` clears only `PSM_RUN` (`0x2`), retaining receive
+  enable (`0x1`) and every other running control/filter bit.
+- Station configuration, policy application, EDCA selection, live template
+  preparation and ACK-suppression configuration use that PSM-only pause.
+  Existing post-freeze receive/response ownership checks still defer work.
+- Station TX no longer takes the redundant outer whole-MAC stop before
+  entering template preparation. The template function owns PSM freezing.
+- A station ACK timeout leaves receive enabled, including while a reply
+  is incomplete. Raw transmission, retuning, raw key setup and explicit
+  shutdown keep their existing whole-MAC-stop behavior.
+
+This fixes a concrete receive-control hazard; it does not repair corrupted
+PHY bytes or prove that this hazard caused every missing AP reply. PSM-only
+freezing is not a guarantee against arbitrary receive-service latency.
+No RF register experiment or transmit-amplitude default change is included.
+
+### Physical placement controls
+
+The user reported the original badges side by side about 10 cm apart, moved
+them to 60 cm, then returned them to the original placement for a control.
+All used unchanged `8112616b`, replaying the original MCS7 challenges:
+
+| Placement / prefix | Observation |
+| --- | --- |
+| 60 cm, `rx-placement-r{1,2,3}-t{0,4}-{ab,ba}` | Channel 1: 12/12 strict payload plus returned-ACK exchanges |
+| 60 cm, `rx-placement-1m` | Short 1-Mbps fixture: 16 deliveries per direction |
+| 60 cm, `rx-placement-ch6-t{0,4}-{ab,ba}` | Channel 6: 3/4 strict exchanges; TID0 B-to-A has a full-length, repeat-identical corrupt capture with 11 fixture bit differences |
+| 60 cm, `rx-placement-ap-{ab,ba}` | Both active station trials failed authentication; monitors saw no AP reply, and one saw no request either |
+| Original 10 cm, `rx-near-r{1,2}-t{0,4}-{ab,ba}` | Channel 1: 8/8 strict exchanges |
+| Original 10 cm, `rx-near-ch6-t{0,4}-{ab,ba}` | Channel 6: 4/4 strict exchanges |
+
+These results do not demonstrate spacing alone as the cause, or establish
+overload/interference as the mechanism. The channel-6 corruption remains
+independent of host transport. Do not turn the passing channel-1 subset
+into a general receive-reliability claim.
+
+### Intermediate timeout-only control
+
+`rx-live-timeout` changed only the unconditional stop after ACK timeout.
+One of three local-AP trials authenticated and associated successfully, then
+received deauthentication reason 15. Both requests had their ACKs recorded,
+so the changed timeout branch did **not** explain that successful exchange.
+The other two trials still missed replies observed by the monitor. This is
+why the final repair addresses the other live-station freeze surfaces too,
+and why this intermediate success is not causal proof.
+
+### Final implementation checks and remaining failures
+
+Final default build: `a5352d8d`, directory `rx-live-default/`.
+Final gated build: `e255c26c`, directory `rx-live-psm/`.
+Both controller and badge native suites and freestanding builds pass.
+All four final ELFs have no undefined symbols. New native tests check that
+PSM pause preserves receive enable and every non-PSM control bit, including
+promiscuous and already-paused/stopped inputs, and is idempotent.
+
+| Prefix | Observation |
+| --- | --- |
+| `rx-live-default-retry` | Default: 16 exact OFDM6/cycle deliveries per direction with one deliberately suppressed ACK per endpoint |
+| `rx-live-psm-retry` | Gated: the same 16-per-direction result, with 17/18 attempts and one suppressed ACK per endpoint |
+| `rx-live-final-1m` | Gated: 16 exact short 1-Mbps deliveries per direction |
+| `rx-live-final-t{0,4}-{ab,ba}` | Gated: 4/4 matched MCS7 exchanges with independently checked payload bytes, MPDU CRC32, returned ACK CRC32 and ACK destination |
+| `rx-live-psm-{1,2,3}` | Local AP: authentication and association status 0 in trials 1 and 3, each in one attempt per phase; trial 2 missed two replies observed by its monitor |
+| `rx-live-vendor-retry` | Final default authenticated/associated with the unmodified vendor AP in one attempt per phase; the AP independently confirmed association |
+
+The two local-AP association-only successes later received deauthentication
+reason 15 (four-way-handshake timeout). This role does not run WPA2, so its
+final `associated:false` does not mean the association reply was missing.
+Saved authentication and association frames in trials 1 and 3 independently
+validate their destination, successful status and CRC32. They do not prove
+WPA2 connectivity. Trial 2 still shows zero own-address candidates and zero
+matching rejected-authentication snapshots despite independently monitored
+replies.
+
+A long 1-Mbps, 1,500-byte-MSDU retry stress remains failed on **both** old
+and repaired firmware. `rx-live-psm-cck-retry` delivered one fixture per
+direction, then exhausted retries. Replaying the same challenge on the old
+build (`rx-old-cck-retry`) delivered zero at the initiator and one at the
+responder. Neither meets its 16-frame target; this is not a long-CCK repair
+or reliable A/B attribution.
+
+The first final vendor-AP trial (`rx-live-vendor`) missed the helper's
+bounded independent reporting window: the station associated but the AP
+helper did not retain confirmation. The retry started both sides within
+that window and confirmed both endpoints. The helper exited; none was
+left running.
+
+### Final hardware state
+
+After all placement and repaired-firmware tests, the original backups
+`rx-cause-start-{A,B}-full.bin` were restored. Independent full 16-MiB
+readbacks `rx-live-restored-{A,B}-full.bin` compare byte-for-byte; logs
+are `rx-live-restore-{A,B}.log`. Both badges remain in BOOTSEL.
+
+The live-RX control repair is implemented and regression checked. The exact
+cause of the remaining upstream HT corruption and intermittent missing AP
+replies is still unidentified; D2 receive qualification remains incomplete.

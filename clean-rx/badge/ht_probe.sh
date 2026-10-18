@@ -10,6 +10,7 @@ if [[ ( $# -ne 4 && $# -ne 5 && $# -ne 6 ) ||
     echo "Use --ack for the clocked 60-byte normal-ACK fixture; --ack-raw retains the raw-TX control" >&2
     echo "HT_PROBE_CHANNEL selects channel 1..11 for controlled comparisons (default 1)" >&2
     echo "HT_PROBE_TID pins the normal-ACK fixture TID to 0..7" >&2
+    echo "HT_PROBE_CHALLENGE replays a matching 28-hex-digit challenge unchanged" >&2
     exit 2
 fi
 cd "$(dirname "$0")/../.." || exit 1
@@ -49,8 +50,22 @@ for suffix in config.json tx.bin rx.bin tx.json rx.json pair.json tx.stderr rx.s
     fi
 done
 mkdir -p "$(dirname "$prefix")" || exit 1
-challenge=$(od -An -N13 -tx1 /dev/urandom | tr -d ' \n') || exit 1
-challenge=$challenge$(printf '%02x' "$mcs")
+if [[ ${HT_PROBE_CHALLENGE+x} ]]; then
+    challenge=$HT_PROBE_CHALLENGE
+    if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]] ||
+       (( 16#${challenge:26:2} != mcs )); then
+        echo "HT_PROBE_CHALLENGE must be 28 lowercase hex digits with the requested MCS" >&2
+        exit 2
+    fi
+    if [[ $mode != probe ]] &&
+       (( 16#${challenge:22:2} + 256 * 16#${challenge:24:2} != mpdu )); then
+        echo "HT_PROBE_CHALLENGE length does not match the requested fixture" >&2
+        exit 2
+    fi
+else
+    challenge=$(od -An -N13 -tx1 /dev/urandom | tr -d ' \n') || exit 1
+    challenge=$challenge$(printf '%02x' "$mcs")
+fi
 if [[ $mode != probe ]]; then
     challenge=${challenge:0:22}$(printf '%02x%02x%02x' "$((mpdu & 255))" "$((mpdu >> 8))" "$mcs")
 fi
@@ -64,6 +79,10 @@ if [[ ${HT_PROBE_TID+x} ]]; then
         exit 2
     fi
     byte=$((16#${challenge:12:2}))
+    if [[ ${HT_PROBE_CHALLENGE+x} ]] && (( (byte & 15) != HT_PROBE_TID )); then
+        echo "HT_PROBE_CHALLENGE TID does not match HT_PROBE_TID" >&2
+        exit 2
+    fi
     challenge=${challenge:0:12}$(printf '%02x' "$(((byte & 240) | HT_PROBE_TID))")${challenge:14}
 fi
 printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"vendor_peer":false,"ht_qualified":false}\n' \

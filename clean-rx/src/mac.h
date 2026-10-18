@@ -8,6 +8,11 @@
 #define CLEAN_MAC_RX_LIFETIME_US 512000u
 #define CLEAN_MAC_RX_HISTORY 64u
 
+/* Freeze PSM register ownership without disabling an in-progress reception. */
+static inline uint32_t clean_mac_pause_psm(uint32_t control) {
+    return control & ~2u;
+}
+
 typedef struct {
     uint32_t sampled_us, idle_us, nav_until, random;
     uint16_t cw, cw_min, cw_max, slots, ifs_us;

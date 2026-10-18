@@ -153,6 +153,21 @@ Other receive paths retain their prepared capture until publication.
 Raw TX/rearm, retuning and key commands clear prepared transport state when
 discarding a capture.
 
+### Rejected authentication evidence
+
+The PSM bad-FCS path retains a bounded candidate snapshot for active station
+profiles 2/3: RXE length 40, authentication subtype, and either local RA or
+pinned-peer TA. The record contains six PLCP bytes and the 34-byte MPDU,
+RXE/PHY status, a sampled TSF value and a wrapping 16-bit count. It does not
+ACK or publish rejected data and does not validate the candidate's identity.
+
+On reception shutdown the controller copies this 28-word SHM record
+(`0x750`) into a 60-byte `BAF1` SRAM record at `0x204b0`. The badge copies it
+to USB detail offset 600 only when no validated authentication response is
+saved there; the authentication-response length at offset 596 remains zero.
+The collector distinguishes this record from successful response evidence
+with `auth_bad_fcs_report`. These sampled times are not RF/SIFS timestamps.
+
 ## Function 2 packet format
 
 An ordinary packet has an 18-byte SDPCM/BDC header:
@@ -217,6 +232,15 @@ WPA2 station uses its separate software-crypto implementation.
 The raw profile uses a Cortex-driven ACK template for matching unicast
 management/data frames. Station command 7 selects the pinned-peer PSM
 response path instead.
+
+Station configuration, live template preparation and policy/EDCA updates
+freeze PSM register ownership by clearing only `PSM_RUN` in MACCONTROL.
+They preserve MAC receive enable and the running filter/control bits.
+After freezing PSM, live transmit/policy paths check receive state and
+response ownership before replacing hardware state. A busy receive defers TX.
+An ACK timeout does not disable station RX: a management or data reply may
+still be arriving. Raw TX/rearm and explicit shutdown retain their separate
+MAC-stop behavior.
 
 The PSM checks GoodFCS, local RA, pinned TA, frame class and response policy
 before scheduling an ACK or CTS. Profiles 2 and 3 consume local ACKs

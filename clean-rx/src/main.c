@@ -584,7 +584,7 @@ static int station_response_rates(uint16_t basic) {
 
 static void station_apply_policy(uint32_t mac_en) {
     if (!policy_pending || !station_rx_idle(shm_read16(0x601u))) return;
-    mmio_write32(D11_MACCONTROL, 0x84020400u);
+    mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
     (void)mmio_read32(D11_MACCONTROL);
     if (station_rx_idle(shm_read16(0x601u)) && !station_phy_busy()) {
         if (station_response_rates(policy_basic)) {
@@ -802,7 +802,7 @@ static int station_publish_capture(uint32_t channel) {
 /* Template preparation is deliberately outside the contention interval. The
  * PSM may answer RX while waiting; in that case its TXE setup takes precedence. */
 static int station_edca_select(uint32_t mac_en, uint32_t tid, uint32_t mcs) {
-    mmio_write32(D11_MACCONTROL, 0x84020400u);
+    mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
     (void)mmio_read32(D11_MACCONTROL);
     if (!station_rx_idle(shm_read16(0x601u)) || station_phy_busy()) {
         mmio_write32(D11_MACCONTROL, mac_en);
@@ -928,7 +928,8 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     tx_diag.psm_before = shm_read16(0x601u);
     tx_diag.status_before = tx_status();
 
-    mmio_write32(D11_MACCONTROL, 0x84020400u);
+    mmio_write32(D11_MACCONTROL, station_mac ?
+                 clean_mac_pause_psm(mac_tx_ctl) : 0x84020400u);
     (void)mmio_read32(D11_MACCONTROL);
     if (station_mac && (station_phy_busy() || !station_rx_idle(shm_read16(0x601u)))) {
         mmio_write32(D11_MACCONTROL, mac_tx_ctl | 2u);
@@ -1250,6 +1251,7 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
     volatile uint8_t *ht_diag_bytes = (volatile uint8_t *)HT_DIAG;
     for (uint32_t i = 0u; i < sizeof(*HT_DIAG); ++i) ht_diag_bytes[i] = 0u;
     ((volatile clean_ht_failure_t *)CLEAN_HT_FAILURE_ADDR)->magic = 0u;
+    ((volatile clean_auth_failure_t *)CLEAN_AUTH_FAILURE_ADDR)->magic = 0u;
     HT_DIAG->magic = CLEAN_HT_DIAG_MAGIC;
     shm_write16(CLEAN_SHM_CAPTURE_LIMIT, CLEAN_RAW_BYTES);
     shm_write16(CLEAN_SHM_RXE_LIMIT, CLEAN_RXE_BYTES);
@@ -1688,9 +1690,11 @@ void cyw43_main(void) {
                     continue;
                 }
             }
-            mmio_write32(D11_MACCONTROL, 0x84020400u);
-            (void)mmio_read32(D11_MACCONTROL);
-            (void)delay_ticks(2000u);
+            if (!station_mac) {
+                mmio_write32(D11_MACCONTROL, 0x84020400u);
+                (void)mmio_read32(D11_MACCONTROL);
+                (void)delay_ticks(2000u);
+            }
             if (cmd & CLEAN_TX_MATCH_SOURCE) {
                 d11_set_addrmatch(0u, frame + 16u);
                 d11_set_addrmatch(3u, frame + 22u);
@@ -1755,10 +1759,11 @@ void cyw43_main(void) {
                         clean_dcf_complete(&station_dcf, mac_now(), 0);
                         station_hw_backoff();
                     }
-                    /* Preserve a management reply even when its preceding ACK
-                     * was missed. It must be validated by the station machine. */
+                    /* A reply can still be arriving after an ACK timeout.
+                     * Keep station RX live, not just completed captures. */
                     if (shm_read16(0x601u) == PSM_STATE_CAPTURED) break;
-                    mmio_write32(D11_MACCONTROL, 0x84020400u);
+                    if (!station_mac)
+                        mmio_write32(D11_MACCONTROL, 0x84020400u);
                 }
                 if (!station_mac && t + 1u < tx_cnt)
                     (void)delay_ticks(180u * 1500u);
@@ -1798,7 +1803,7 @@ void cyw43_main(void) {
                 fail(0x85u, FW_TX_BUF_ADDR, basic);
                 break;
             }
-            mmio_write32(D11_MACCONTROL, 0x84020400u);
+            mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
             (void)mmio_read32(D11_MACCONTROL);
             for (uint32_t i = 0u; i < 3u; ++i)
                 shm_write16(0x612u + i, (uint16_t)((uint16_t)p[2u*i] |
@@ -1917,7 +1922,7 @@ void cyw43_main(void) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
             }
-            mmio_write32(D11_MACCONTROL, 0x84020400u);
+            mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
             (void)mmio_read32(D11_MACCONTROL);
             shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
             shm_write16(CLEAN_TEST_ACK_REMAINING, (uint16_t)count);
@@ -2107,6 +2112,14 @@ void cyw43_main(void) {
     rx_dma_stop();
 
     if (station_hw) snapshot_dcf_trace();
+    if (station_mac) {
+        volatile clean_auth_failure_t *failure =
+            (volatile clean_auth_failure_t *)CLEAN_AUTH_FAILURE_ADDR;
+        volatile uint16_t *words = (volatile uint16_t *)(CLEAN_AUTH_FAILURE_ADDR + 4u);
+        for (uint32_t i = 0u; i < CLEAN_AUTH_FAILURE_WORDS; ++i)
+            words[i] = shm_read16(CLEAN_AUTH_FAILURE_SHM + i);
+        failure->magic = CLEAN_AUTH_FAILURE_MAGIC;
+    }
     volatile uint16_t *early = (volatile uint16_t *)&HT_DIAG->early;
     for (uint32_t i = 0u; i < CLEAN_HT_EARLY_WORDS; ++i)
         early[i] = shm_read16(CLEAN_HT_EARLY_SHM + i);

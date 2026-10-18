@@ -850,6 +850,9 @@ static void run(const uint8_t nonce[16]) {
                                 2u * CLEAN_RX_TRACE_WORDS + 24u, 0u);
         }
     }
+    if (snapshot && station_mode() && !badger_bytes_load_u32(detail + 596u))
+        snapshot = clean_block(&l, CLEAN_AUTH_FAILURE_ADDR, detail + CLEAN_AUTH_FAILURE_DETAIL,
+                               sizeof(clean_auth_failure_t), 0u);
     if (station_mode() || soak_mode()) clean_station_rx_report(&station_rx, detail);
     if (saved_error != CLEAN_OK) {
         l.error = saved_error;
