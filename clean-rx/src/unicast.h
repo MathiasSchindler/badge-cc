@@ -209,7 +209,13 @@ typedef struct {
     uint32_t ack_elapsed, ack_window;
     uint32_t response_delay;
     uint32_t ack_dropped;
+    uint32_t rx_filtered, rx_capture_max_us;
 } clean_mac_trace_status_t;
+
+_Static_assert(CLEAN_MAC_TRACE_ADDR + sizeof(clean_mac_trace_status_t) <= CLEAN_RX_TRACE_ADDR,
+               "MAC trace must not overlap RX/TX traces");
+_Static_assert(864u + sizeof(clean_mac_trace_status_t) <= CLEAN_DCF_TRACE_DETAIL,
+               "Clocked HT MAC trace must fit before DCF evidence");
 
 static inline int clean_test_ack_count(uint32_t command, uint32_t profile) {
     if (profile != 3u || (command & 255u) != 9u ||

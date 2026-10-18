@@ -361,13 +361,13 @@ Implemented paths:
 The original 40-byte ACK status at `0x201e0` remains unchanged. A separate
 64-byte `clean_mac_radio_status_t` at `0x20210` reports `MAC3` and its profile,
 CW, remaining slots, NAV deadline, TX deferrals, internally consumed ACKs,
-ACK timeouts, RX backpressure polls, a held-capture flag, scheduled CTS/short
+ACK timeouts, RX backpressure polls, a pending-RX flag, scheduled CTS/short
 response counts, queued policy status, prepared-ACK discards and live SHM
 address readback. It does not overlap the mailbox, ACK status or capture ring.
 New response counts accumulate sampled 16-bit PSM deltas into 32-bit totals;
 the original ACK-status counters retain their existing format.
 
-A separate 104-byte `MCR1` status at `0x20250`, copied to detail offset 1808,
+A separate 112-byte `MCR1` status at `0x20250`, copied to detail offset 1808,
 reports scheduled responses by auth/association/non-QoS-data/other receive
 classes, corresponding bound frames actually published to transport, and
 invalid-FCS published captures. These counters are reset at controller startup
@@ -377,9 +377,13 @@ they do not identify individual RF exchanges or measure SIFS. Its original
 40-byte prefix is preserved. Appended words report host/PSM IFS and clock
 samples, the last local-response stage/FC/RX flags, global bad-FCS count and
 last invalid frame identity/length, ACK notification elapsed/window and response
-setup delay. The final word, at detail offset 1908, reports deliberately
-suppressed eligible ACKs as `mac_ack_dropped`. Both station and soak JSON
-expose these as `mac_*` diagnostics.
+setup delay. Detail offset 1908 reports deliberately suppressed eligible
+ACKs as `mac_ack_dropped`. The final two words, at offsets 1912 and 1916,
+report `mac_rx_filtered` and `mac_rx_capture_max_us`: station-filtered
+captures and maximum sampled profile-3 capture age, respectively. The latter
+is a service observation, not an RF/SIFS measurement. Both station and soak
+JSON expose these as `mac_*` diagnostics. Soak fault evidence starts at 1920,
+after the trace.
 Bad-FCS counts include unrelated channel traffic; they are not bound-peer loss.
 
 Station evidence at detail offset 1680 contains `MAC1` plus unprotected
@@ -391,8 +395,15 @@ The collector reports these
 as `mac_*` fields; `mac_rx_waits` counts backpressure polls, **not lost packets**.
 `ack_responses_scheduled`, `cts_responses_scheduled` and
 `short_responses_scheduled` count submissions, not independently verified RF
-responses. `mac_pending_rx` explicitly exposes a capture still held at stop;
-bounded test completion is not proof that the entire RX queue was drained.
+responses. Station profiles 2 and 3 stage frames in the existing eight-slot
+SRAM capture ring and release PSM SHM before host consumption. FIFO order and
+the single logical F2 credit are preserved. Saturation retains the next
+capture in SHM instead of overwriting queued frames. After NAV processing,
+these profiles select own-address frames and group management/data from the
+pinned peer; this selection does not replace frame validation. Passive/raw
+capture is unchanged. `mac_pending_rx` includes held SHM and queued SRAM
+frames. Target-based completion drains staging, but an explicit stop can
+leave pending RX.
 
 ```sh
 make -C clean-rx/src CC=clang BUILD=../../build/clean-rx all test
@@ -916,8 +927,12 @@ build/clean-rx/badge/collector SECOND_SERIAL monitor.bin CHANNEL \
 ```
 
 Start this before the station trial. The 2.5-million-tick window records
-valid-FCS authentication/association requests and AP responses for the learned
-fresh station MAC. ACKs addressed to the AP are counted separately; other
+valid-FCS authentication/association requests and AP responses for the first
+observed authentication-request station TA; later requests from other
+stations do not replace that binding. The collector reports first/last
+request and response observation times as `monitor_*_us`, relative to monitor
+start, and `monitor_requests_before_first_response`. These are badge-host
+observation times, not RF/SIFS timestamps. ACKs addressed to the AP are counted separately; other
 clients can also generate those ACKs, so that count alone is not attribution
 or SIFS timing proof. Monitoring is lossy under load and absence is not proof
 that no RF transmission occurred.

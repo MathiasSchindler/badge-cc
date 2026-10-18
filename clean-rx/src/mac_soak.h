@@ -14,7 +14,7 @@
 #define CLEAN_SOAK_POLLS (CLEAN_SOAK_HOST_SECONDS * 4u)
 #define CLEAN_SOAK_PHYS 8u
 #define CLEAN_SOAK_PAYLOADS 5u
-#define CLEAN_SOAK_FAULT_DETAIL 1912u
+#define CLEAN_SOAK_FAULT_DETAIL 1920u
 
 _Static_assert(CLEAN_SOAK_FAULT_DETAIL + 2u * CLEAN_RX_FAULT_WORDS <= 1960u,
                "RX fault report must not overlap fixture inputs");

@@ -174,11 +174,17 @@ int clean_edca_txop_valid(const clean_edca_t *s, uint32_t exchange_us) {
 }
 
 uint32_t clean_mac_fcs(const volatile uint8_t *bytes, uint32_t length) {
+    static const uint32_t nibble[16] = {
+        0x00000000u, 0x1db71064u, 0x3b6e20c8u, 0x26d930acu,
+        0x76dc4190u, 0x6b6b51f4u, 0x4db26158u, 0x5005713cu,
+        0xedb88320u, 0xf00f9344u, 0xd6d6a3e8u, 0xcb61b38cu,
+        0x9b64c2b0u, 0x86d3d2d4u, 0xa00ae278u, 0xbdbdf21cu
+    };
     uint32_t crc = 0xffffffffu;
     for (uint32_t i = 0u; i < length; ++i) {
         crc ^= bytes[i];
-        for (uint32_t bit = 0u; bit < 8u; ++bit)
-            crc = (crc >> 1u) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+        crc = (crc >> 4u) ^ nibble[crc & 15u];
+        crc = (crc >> 4u) ^ nibble[crc & 15u];
     }
     return ~crc;
 }
@@ -212,6 +218,20 @@ int clean_mac_nav_duration(const volatile uint8_t *m, uint32_t n,
     for (uint32_t i = 0u; i < 6u; ++i) if (m[4u + i] != own[i]) equal = 0u;
     uint16_t duration = u16(m + 2u);
     return equal || (duration & 0x8000u) ? 0 : (int)duration;
+}
+
+int clean_mac_rx_relevant(const volatile uint8_t *m, uint32_t n,
+                           const uint8_t own[6], const uint8_t peer[6]) {
+    if (n < 14u || n > CLEAN_MPDU_BYTES) return 0;
+    uint32_t local = 1u;
+    for (uint32_t i = 0u; i < 6u; ++i)
+        if (m[4u + i] != own[i]) local = 0u;
+    if (local) return 1;
+    uint32_t type = (m[0] >> 2u) & 3u;
+    if (!(m[4] & 1u) || n < 28u || (type != 0u && type != 2u)) return 0;
+    for (uint32_t i = 0u; i < 6u; ++i)
+        if (m[10u + i] != peer[i]) return 0;
+    return 1;
 }
 
 void clean_mac_rx_init(clean_mac_rx_t *s) {

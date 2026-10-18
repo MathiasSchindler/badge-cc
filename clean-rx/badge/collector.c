@@ -184,7 +184,8 @@ static void print_mac_timing(const uint8_t detail[2048]) {
         "ifs_status", "ifs_backoff", "ifs_idle", "psm_ifs", "psm_tsf", "psm_polls",
         "ack_stage", "ack_frame_control", "ack_rx_status",
         "bad_fcs", "bad_frame_control", "bad_frame_length",
-        "ack_elapsed", "ack_window", "response_delay", "ack_dropped"
+        "ack_elapsed", "ack_window", "response_delay", "ack_dropped",
+        "rx_filtered", "rx_capture_max_us"
     };
     _Static_assert(sizeof(clean_mac_trace_status_t) == 40u + 4u * sizeof(names) / sizeof(names[0]),
                    "Trace JSON fields match the shared status layout");
@@ -587,9 +588,15 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (tx == 17u) {
         printf("{\"monitor_auth_requests\":%u,\"monitor_assoc_requests\":%u,"
                "\"monitor_ap_acks\":%u,\"monitor_ap_responses\":%u,"
+               "\"monitor_auth_first_us\":%u,\"monitor_auth_last_us\":%u,"
+               "\"monitor_response_first_us\":%u,\"monitor_response_last_us\":%u,"
+               "\"monitor_requests_before_first_response\":%u,"
                "\"monitor_acks_to_ap\":%u,\"error\":%u}\n",
                usb_report_u32(detail + 540u), usb_report_u32(detail + 544u),
                usb_report_u32(detail + 548u), usb_report_u32(detail + 552u),
+               usb_report_u32(detail + 520u), usb_report_u32(detail + 524u),
+               usb_report_u32(detail + 528u), usb_report_u32(detail + 532u),
+               usb_report_u32(detail + 536u),
                usb_report_u32(detail + 556u),
                usb_report_u32(detail + 8u));
         return usb_report_u32(detail + 8u) == 0u;
@@ -692,10 +699,11 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                "\"ht_legacy_fallback_reasons\":%u,\"ht_peer_rx_mcs_mask\":%u,"
                "\"ht_peer_basic_mcs_mask\":%u,\"ht_peer_primary_channel\":%u,"
                "\"ht_peer_width40\":%s,\"wmm_peer_parameters_present\":%s,"
-               "\"wmm_peer_parameter_set\":%u",
+               "\"wmm_peer_parameter_set\":%u,\"ht_peer_profile_source\":%u,"
+               "\"ht_peer_runtime_updates\":%u",
                usb_report_u32(ht) == CLEAN_HT_PEER_MAGIC ? "true" : "false",
                usb_report_u32(ht + 4u), ht[8], ht[9], ht[11], ht[10] ? "true" : "false",
-               ht[16] ? "true" : "false", ht[17]);
+               ht[16] ? "true" : "false", ht[17], ht[19], usb_report_u32(ht + 44u));
         puts("}");
         if (!associated) fputs("No validated successful association exchange\n", stderr);
         if (tx==18u && !authorized) fputs("WPA2 protected round trip not established\n",stderr);

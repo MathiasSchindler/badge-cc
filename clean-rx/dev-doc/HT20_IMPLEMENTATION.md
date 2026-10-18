@@ -482,10 +482,12 @@ Station reports include `ht_advertised:false` and the fallback reason bitmask:
 
 Bit 32 is currently unconditional. Parsing advertised EDCA parameters is
 **not** EDCA execution, admission control or negotiated QoS operation.
-The compact 44-byte version-2 peer report starts at badge detail offset 1040,
+The original compact 44-byte version-2 peer report starts at badge detail offset 1040,
 after unicast status and before the saved-packet length. It does not overlap
 the association response at offsets 800..991. An integrated native test
 requires association evidence to remain valid after publishing the report.
+The [association/runtime extension](#association-response-profiles-and-runtime-htwmm-updates)
+uses the remaining four bytes before offset 1088 for a change counter.
 
 ### Extended receive profile and minimum A-MSDU diagnostic
 
@@ -1194,6 +1196,99 @@ readbacks matched the respective pre-test full-flash backups exactly**.
 Both badges remain in BOOTSEL. No Mac network settings or unrelated
 experiment directories were changed.
 
+### Association-response profiles and runtime HT/WMM updates
+
+The 2026-10-18 implementation adds independent, atomic association-response
+HT/WMM parsing and fixes a real refresh-propagation bug:
+`clean_station_refresh` copied HT/WMM-only beacon changes into its argument
+but returned zero when ERP/basic-rate/slot fields were unchanged.
+`station_receive` refreshed a temporary AP record and copied it back only
+when that return value was nonzero, so those updates were discarded.
+Refresh now compares every represented HT/WMM field, not just the WMM
+parameter-set nibble or legacy fields. Same-counter AC changes and
+parameter-set wrap are detected.
+
+Accepted association-response optional IEs have their own snapshot. The
+parser retains the existing address, subtype, fragment, FCS, AID, status
+and complete IE-boundary gates. It commits the AID and snapshot only after
+the entire successful response validates. Missing response elements remain
+missing instead of inheriting the discovery beacon. Malformed/duplicate
+optional elements mark HT fallback without preventing the existing legacy
+association. Auth responses and rejected/malformed association responses do
+not modify the saved output.
+
+Subsequent matching beacon updates preserve the association snapshot and
+increment a saturating HT/WMM change counter. The compact report uses
+response capabilities/MCS constrained by the latest beacon and current
+operation/protection/EDCA observations. It never increases the response MCS
+set or adds 40-MHz capability. Source 0 means discovery, 1 means accepted
+response, and 2 means response plus subsequent beacon changes. Departure
+handling clears the retained association profile and counter.
+The report is now 48 bytes at detail 1040..1087; byte 19 carries source
+and bytes 44..47 carry the counter. Saved association evidence and the
+packet-length field remain separate.
+
+This does **not** activate HT/WMM advertisements or install AP-derived
+command-15 policy into the legacy station. That would restrict its existing
+legacy/WPA2 TX path to the clocked diagnostic fixture. Actual negotiated
+HT/QoS enablement remains behind the outstanding MAC/receive gates.
+Unexecutable WMM contention exponents also produce explicit WMM fallback.
+
+Native ASan/UBSan cases cover:
+
+- Successful response HT/WMM parsing and feeding its AC records into the
+  shared EDCA engine.
+- Every truncated IE boundary with reconstructed valid FCS, allowing only
+  complete optional-element boundaries; wrong subtype, protected flags,
+  RA/TA/BSSID, fragmentation and AID failures.
+- Atomic rejection/status handling, unchanged outputs for authentication,
+  absent response capabilities, duplicate HT/WMM and unsupported execution
+  exponents.
+- WMM-only changes, changed ACs with an unchanged counter, parameter-count
+  wrap, MCS intersection, protection/channel fallback, removed capabilities,
+  bad-FCS refresh atomicity, counter saturation and departure clearing.
+- Existing open/WPA2 association-request identity and preserved association
+  evidence after report publication.
+
+Default and HT/extended-RX/response/EDCA badge suites pass, as do both
+freestanding builds with no undefined symbols. Final badge builds are
+`438812da` (default, text 79,728/BSS 221,312 bytes) and `e3bb50ff`
+(gated, text 83,496/BSS 225,800 bytes). The compiled `run` stack frame is
+904 bytes in both profiles. Explicit project byte-copy helpers avoid
+compiler-generated `__aeabi_memcpy` dependencies from structure assignment.
+Controller source/binaries were not changed for this increment.
+
+Hardware attempts against two nodes matching the configured local SSID
+were retained, without displaying or provisioning its password:
+
+| Badge build / channel | Observation |
+| --- | --- |
+| Default / 1 | AP discovered; one request ACK observed, no validated authentication response; association not reached |
+| Default / 11 | No usable target AP discovery; host input error, no controller error |
+| Gated / 1 | AP discovered; four request ACKs observed, no validated authentication response; association not reached |
+
+All three report `ht_advertised:false`, profile source 0 and zero runtime
+association updates. These failures are not successful association,
+negotiated-HT qualification or RF validation of the new source-1/2 paths.
+They do not establish the cause of the missing authentication responses.
+Evidence: `build/clean-rx/badge/d2-association-{default-ch1,default-ch11,edca-ch1}.*`.
+
+Before writing badge A, its complete flash was freshly saved and verified
+as `build/clean-rx/badge/d2-association-start-A-full.bin`. After all trials,
+the full original flash was restored; the independent full 16-MiB readback
+`build/clean-rx/badge/d2-association-restored-A-full.bin` matches exactly.
+Badge B was not modified. Badge A remains in BOOTSEL.
+
+### Subsequent AP reply investigation and bounded RX staging
+
+The [AP authentication investigation](AP_AUTHENTICATION_INVESTIGATION.md)
+records independent monitor evidence, negative radio/rate controls, the
+eight-slot station RX FIFO and revised service diagnostics. Legacy fixtures
+pass, but local-AP reply delivery remains unresolved. The final gated matrix
+passed 10/16 cells; identical-payload old/new replays passed 2/4 each and
+retain independently invalid, repeat-identical SHM captures. Neither
+negotiated HT operation nor receive reliability is qualified.
+
 ### Remaining D2 work
 
 - Integrate the [bounded EDCA command](EDCA_IMPLEMENTATION.md) with actual
@@ -1203,8 +1298,9 @@ experiment directories were changed.
   integrate negotiated protected aggregates; preserve legacy fallback.
 - Meet HT receive-size and required MAC/Block ACK obligations jointly with
   D3 before constructing/advertising an HT association profile.
-- Complete capability/operation negotiation in association responses and
-  runtime beacon changes, not merely peer beacon profiling.
+- Use the implemented association-response/runtime profiles for actual
+  local capability/operation negotiation and AP-driven policy activation;
+  profile capture alone does not enable negotiated HT operation.
 - Verify negotiated association and actual HT OTA framing with an independent
   HT20 implementation, including explicit legacy fallback.
 - Diagnose remaining RX losses; no all-rate reliability threshold is passed.

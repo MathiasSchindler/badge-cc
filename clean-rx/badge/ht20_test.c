@@ -3,7 +3,7 @@
 #include <string.h>
 #include "ht_station.h"
 #include "../src/ht20.h"
-#include "frames.h"
+#include "station.h"
 
 static void packet_tests(void) {
     static const uint16_t sizes[] = {28u,29u,60u,88u,512u,1528u,2026u,2027u,2332u};
@@ -106,6 +106,170 @@ static void packet_tests(void) {
     puts("HT data v1: all MCS, size/fragment boundaries, version/flags/FCS and station/default gates pass; NOT RF");
 }
 
+static void association_tests(const uint8_t cap[26], const uint8_t op[22],
+                               const uint8_t wmm[24]) {
+    const uint8_t mac[6] = {2u,1u,2u,3u,4u,5u}, bssid[6] = {2u,6u,7u,8u,9u,10u};
+    uint8_t response[256] = {0}, detail[2048] = {0};
+    response[0] = 0x10u; response[24] = 1u;
+    response[28] = 38u; response[29] = 0xc0u;
+    memcpy(response + 4u, mac, 6u);
+    memcpy(response + 10u, bssid, 6u);
+    memcpy(response + 16u, bssid, 6u);
+    response[30] = 1u; response[31] = 1u; response[32] = 0x8cu;
+    response[33] = 45u; response[34] = 26u; memcpy(response + 35u, cap, 26u);
+    response[61] = 61u; response[62] = 22u; memcpy(response + 63u, op, 22u);
+    response[85] = 221u; response[86] = 24u; memcpy(response + 87u, wmm, 24u);
+    uint32_t length = 115u;
+    badger_bytes_store_u32(response + length - 4u, diag_crc32(response, length - 4u));
+    clean_station_association_t parsed = {0};
+    uint16_t aid = 0u;
+    assert(!clean_station_response_profile(response, length, mac, bssid, 1u, &aid, &parsed));
+    assert(aid == 38u && parsed.valid && parsed.aid == 38u && parsed.capability == 1u);
+    assert(parsed.ht.capabilities && parsed.ht.operation && parsed.ht.wmm.present);
+    assert(clean_ht_peer_fallback(&parsed.ht, 1u) == CLEAN_HT_FALLBACK_MAC);
+    clean_station_association_t saved = parsed;
+    clean_edca_t edca = {0};
+    assert(clean_edca_configure(&edca, parsed.ht.wmm.ac, 0u, 1u, 1u));
+    assert(clean_edca_select(&edca, 1u, 0u) == 1 && edca.ac[1].aifsn == 7u);
+
+    for (uint32_t end = 0u; end < length - 4u; ++end) {
+        uint8_t truncated[256];
+        memcpy(truncated, response, end);
+        badger_bytes_store_u32(truncated + end, diag_crc32(truncated, end));
+        aid = 999u; parsed = saved;
+        int result = clean_station_response_profile(truncated, end + 4u,
+                                                    mac, bssid, 1u, &aid, &parsed);
+        int complete = end == 33u || end == 61u || end == 85u;
+        assert(result == (complete ? 0 : -1));
+        if (!complete) assert(aid == 999u && !memcmp(&parsed, &saved, sizeof(parsed)));
+    }
+    const uint8_t offsets[] = {0u,1u,4u,10u,16u,22u,28u};
+    const uint8_t masks[] = {0x20u,0x40u,1u,1u,1u,1u,38u};
+    for (uint32_t i = 0u; i < sizeof(offsets); ++i) {
+        response[offsets[i]] ^= masks[i];
+        badger_bytes_store_u32(response + length - 4u, diag_crc32(response, length - 4u));
+        aid = 999u; parsed = saved;
+        assert(clean_station_response_profile(response, length, mac, bssid, 1u,
+                                               &aid, &parsed) == -1);
+        assert(aid == 999u && !memcmp(&parsed, &saved, sizeof(parsed)));
+        response[offsets[i]] ^= masks[i];
+    }
+    response[26] = 17u;
+    badger_bytes_store_u32(response + length - 4u, diag_crc32(response, length - 4u));
+    assert(clean_station_response_profile(response, length, mac, bssid, 1u,
+                                           &aid, &parsed) == 17);
+    assert(aid == 999u && !memcmp(&parsed, &saved, sizeof(parsed)));
+    response[26] = 0u;
+    badger_bytes_store_u32(response + length - 4u, diag_crc32(response, length - 4u));
+    uint8_t auth[34] = {0};
+    memcpy(auth, response, 24u);
+    auth[0] = 0xb0u; auth[26] = 2u;
+    badger_bytes_store_u32(auth + 30u, diag_crc32(auth, 30u));
+    assert(!clean_station_response_profile(auth, sizeof(auth), mac, bssid, 0u, &aid, &parsed));
+    assert(aid == 999u && !memcmp(&parsed, &saved, sizeof(parsed)));
+
+    uint8_t beacon[256] = {0};
+    beacon[0] = 0x80u; beacon[34] = 1u;
+    memset(beacon + 4u, 255, 6u);
+    memcpy(beacon + 10u, bssid, 6u); memcpy(beacon + 16u, bssid, 6u);
+    beacon[36] = 0u; beacon[37] = 1u; beacon[38] = 'x';
+    memcpy(beacon + 39u, response + 30u, length - 34u);
+    uint32_t beacon_length = length + 9u;
+    badger_bytes_store_u32(beacon + beacon_length - 4u, diag_crc32(beacon, beacon_length - 4u));
+    clean_station_ap_t ap = {0};
+    assert(clean_station_beacon(beacon, beacon_length, bssid, &ap) == CLEAN_AP_OPEN);
+    assert(!ap.association.valid && !ap.ht_updates);
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(detail[CLEAN_HT_PEER_DETAIL + 19u] == 0u);
+    ap.association = saved;
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(detail[CLEAN_HT_PEER_DETAIL + 19u] == 1u);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) == CLEAN_HT_FALLBACK_MAC);
+    assert(!clean_station_refresh(&ap, beacon, beacon_length));
+
+    /* WMM-only updates must reach the caller even with unchanged legacy IEs. */
+    beacon[102] = (uint8_t)((beacon[102] & 0xf0u) | 4u);
+    beacon[104] = 4u;
+    badger_bytes_store_u32(beacon + beacon_length - 4u, diag_crc32(beacon, beacon_length - 4u));
+    assert(clean_station_refresh(&ap, beacon, beacon_length) == 1);
+    assert(ap.ht_updates == 1u && ap.ht.wmm.parameter_set == 4u);
+    assert(ap.ht.wmm.ac[0].aifsn == 4u && ap.association.ht.wmm.ac[0].aifsn == 3u);
+    assert(ap.association.valid && ap.association.aid == 38u);
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(detail[CLEAN_HT_PEER_DETAIL + 19u] == 2u);
+    assert(detail[CLEAN_HT_PEER_DETAIL + 17u] == 4u);
+    assert(detail[CLEAN_HT_PEER_DETAIL + 20u] == 4u);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 44u) == 1u);
+    assert(!clean_station_refresh(&ap, beacon, beacon_length) && ap.ht_updates == 1u);
+    beacon[104] = 5u;
+    beacon[74] = 1u;
+    beacon[47] = 15u;
+    badger_bytes_store_u32(beacon + beacon_length - 4u, diag_crc32(beacon, beacon_length - 4u));
+    assert(clean_station_refresh(&ap, beacon, beacon_length) == 1 && ap.ht_updates == 2u);
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(detail[CLEAN_HT_PEER_DETAIL + 8u] == 15u);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) &
+           CLEAN_HT_FALLBACK_PROTECTION);
+    ap.association.ht.rx_mcs = 3u;
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(detail[CLEAN_HT_PEER_DETAIL + 8u] == 3u);
+    ap.association.ht.rx_mcs = saved.ht.rx_mcs;
+    clean_station_ht_report(&ap, 6u, detail);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) &
+           CLEAN_HT_FALLBACK_CHANNEL);
+    for (uint32_t i = 0u; i < 2u; ++i) {
+        beacon[102] = (uint8_t)((beacon[102] & 0xf0u) | (i ? 0u : 15u));
+        badger_bytes_store_u32(beacon + beacon_length - 4u, diag_crc32(beacon, beacon_length - 4u));
+        assert(clean_station_refresh(&ap, beacon, beacon_length) == 1);
+        assert(ap.ht.wmm.parameter_set == (i ? 0u : 15u) && ap.ht_updates == 3u + i);
+    }
+    clean_station_ap_t before = ap;
+    beacon[beacon_length - 1u] ^= 1u;
+    assert(!clean_station_refresh(&ap, beacon, beacon_length));
+    assert(!memcmp(&ap, &before, sizeof(ap)));
+    beacon[beacon_length - 1u] ^= 1u;
+    ap.ht_updates = UINT32_MAX; beacon[104] = 6u;
+    badger_bytes_store_u32(beacon + beacon_length - 4u, diag_crc32(beacon, beacon_length - 4u));
+    assert(clean_station_refresh(&ap, beacon, beacon_length) == 1 && ap.ht_updates == UINT32_MAX);
+    beacon[42] = 46u;
+    badger_bytes_store_u32(beacon + beacon_length - 4u, diag_crc32(beacon, beacon_length - 4u));
+    assert(clean_station_refresh(&ap, beacon, beacon_length) == 1);
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) & CLEAN_HT_FALLBACK_NO_HT);
+
+    uint8_t legacy[37];
+    memcpy(legacy, response, 33u);
+    badger_bytes_store_u32(legacy + 33u, diag_crc32(legacy, 33u));
+    assert(!clean_station_response_profile(legacy, sizeof(legacy), mac, bssid, 1u, &aid, &parsed));
+    assert(parsed.valid && !parsed.ht.capabilities && !parsed.ht.operation && !parsed.ht.wmm.present);
+    ap.association = parsed; ap.ht_updates = 1u;
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) & CLEAN_HT_FALLBACK_NO_HT);
+    assert(!detail[CLEAN_HT_PEER_DETAIL + 8u]);
+
+    response[111] = 45u; response[112] = 26u; memcpy(response + 113u, cap, 26u);
+    badger_bytes_store_u32(response + 139u, diag_crc32(response, 139u));
+    assert(!clean_station_response_profile(response, 143u, mac, bssid, 1u, &aid, &parsed));
+    assert(parsed.valid && parsed.ht.invalid);
+    assert(clean_ht_peer_fallback(&parsed.ht, 1u) & CLEAN_HT_FALLBACK_MALFORMED);
+    response[99] = 3u;
+    badger_bytes_store_u32(response + 111u, diag_crc32(response, 111u));
+    assert(!clean_station_response_profile(response, length, mac, bssid, 1u, &aid, &parsed));
+    assert(parsed.valid && parsed.ht.invalid && !parsed.ht.wmm.present);
+    response[99] = wmm[12];
+    response[96] = 0xb4u;
+    badger_bytes_store_u32(response + 111u, diag_crc32(response, 111u));
+    assert(!clean_station_response_profile(response, length, mac, bssid, 1u, &aid, &parsed));
+    assert(parsed.ht.wmm.present && !clean_edca_valid(parsed.ht.wmm.ac));
+    assert(clean_ht_peer_fallback(&parsed.ht, 1u) & CLEAN_HT_FALLBACK_WMM);
+    ap.association = saved;
+    clean_station_forget_association(&ap);
+    assert(!ap.association.valid && !ap.ht_updates);
+    clean_station_ht_report(&ap, 1u, detail);
+    assert(!detail[CLEAN_HT_PEER_DETAIL + 19u]);
+    puts("HT association: independent response profiles, atomic bounds/address/status gates, runtime WMM/HT updates and legacy fallback pass; NOT negotiated HT");
+}
+
 static void peer_tests(void) {
     uint8_t cap[26] = {0}, op[22] = {0};
     uint8_t wmm[24] = {
@@ -199,6 +363,7 @@ static void peer_tests(void) {
     memset(detail, 0xa5, sizeof(detail));
     clean_ht_peer_report(&peer, 1u, detail);
     assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL) == CLEAN_HT_PEER_MAGIC);
+    association_tests(cap, op, wmm);
     assert(badger_bytes_load_u32(detail + CLEAN_HT_PEER_DETAIL + 4u) == CLEAN_HT_FALLBACK_MAC);
     for (uint32_t i = 0u; i < sizeof(detail); ++i)
         if (i < CLEAN_HT_PEER_DETAIL || i >= CLEAN_HT_PEER_DETAIL + CLEAN_HT_PEER_BYTES)
@@ -411,11 +576,57 @@ static void ack_evidence_tests(void) {
     puts("Clocked HT: isolated v4 gates, all-MCS ACK timeout, saved ACK FCS/address/freshness checks pass; NOT RF");
 }
 
+static void monitor_tests(void) {
+    uint8_t detail[2048] = {0}, packet[172] = {0}, saved[2048];
+    clean_station_ap_t ap = {.bssid={2u,3u,4u,5u,6u,7u}};
+    const uint8_t mac[6] = {2u,8u,9u,10u,11u,12u};
+    uint32_t size = 12u + clean_station_auth(packet + 12u, 1u, mac, &ap);
+    for (uint32_t length = 0u; length < size; ++length) {
+        clean_station_monitor(detail, packet, length, ap.bssid, 17u);
+        assert(!badger_bytes_load_u32(detail + 540u));
+    }
+    clean_station_monitor(detail, packet, size, ap.bssid, 0u);
+    clean_station_monitor(detail, packet, size, ap.bssid, 200000u);
+    assert(badger_bytes_load_u32(detail + 540u) == 2u);
+    assert(!badger_bytes_load_u32(detail + 520u));
+    assert(badger_bytes_load_u32(detail + 524u) == 200000u);
+    assert(!memcmp(detail + 1972u, mac, sizeof(mac)));
+    assert(!memcmp(detail + 600u, packet + 18u, 34u));
+    memcpy(saved, detail, sizeof(saved));
+    packet[28] ^= 4u;
+    badger_bytes_store_u32(packet + size - 4u, diag_crc32(packet + 18u, size - 22u));
+    clean_station_monitor(detail, packet, size, ap.bssid, 200050u);
+    assert(!memcmp(saved, detail, sizeof(saved)));
+    memcpy(packet + 22u, mac, sizeof(mac));
+    memcpy(packet + 28u, ap.bssid, sizeof(mac));
+    packet[44] = 2u;
+    badger_bytes_store_u32(packet + size - 4u, diag_crc32(packet + 18u, size - 22u));
+    clean_station_monitor(detail, packet, size, ap.bssid, 200100u);
+    clean_station_monitor(detail, packet, size, ap.bssid, 201000u);
+    assert(badger_bytes_load_u32(detail + 552u) == 2u);
+    assert(badger_bytes_load_u32(detail + 528u) == 200100u);
+    assert(badger_bytes_load_u32(detail + 532u) == 201000u);
+    assert(badger_bytes_load_u32(detail + 536u) == 2u);
+    assert(badger_bytes_load_u32(detail + 1088u) == size);
+    assert(!memcmp(detail + 1104u, packet, size));
+    memcpy(saved, detail, sizeof(saved));
+    packet[size - 1u] ^= 1u;
+    clean_station_monitor(detail, packet, size, ap.bssid, 202000u);
+    assert(!memcmp(saved, detail, sizeof(saved)));
+    packet[size - 1u] ^= 1u;
+    packet[28] ^= 4u;
+    badger_bytes_store_u32(packet + size - 4u, diag_crc32(packet + 18u, size - 22u));
+    clean_station_monitor(detail, packet, size, ap.bssid, 202000u);
+    assert(!memcmp(saved, detail, sizeof(saved)));
+    puts("Passive AP monitor: bounded FCS/address evidence and first/last receive timestamps pass");
+}
+
 int main(void) {
     packet_tests();
     ack_packet_tests();
     ack_evidence_tests();
     peer_tests();
     amsdu_tests();
+    monitor_tests();
     return 0;
 }

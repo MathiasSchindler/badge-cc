@@ -7,10 +7,18 @@
 #include "ht_station.h"
 
 typedef struct {
+    clean_ht_peer_t ht;
+    uint16_t aid, capability;
+    uint8_t valid;
+} clean_station_association_t;
+
+typedef struct {
     uint8_t bssid[6], ssid[32], ssid_length, secured, erp;
     uint8_t rsn[128], rsn_length;
     uint16_t capability, rates, basic_rates;
     clean_ht_peer_t ht;
+    clean_station_association_t association;
+    uint32_t ht_updates;
 } clean_station_ap_t;
 
 enum {
@@ -169,10 +177,47 @@ static inline int clean_station_refresh(clean_station_ap_t *ap, const uint8_t *m
         next.rsn_length != ap->rsn_length ||
         !badger_bytes_equal(next.rsn, ap->rsn, ap->rsn_length))
         return CLEAN_AP_UNSUPPORTED;
-    int changed = next.erp != ap->erp || next.basic_rates != ap->basic_rates ||
+    int ht_changed = !clean_ht_peer_equal(&next.ht, &ap->ht);
+    int changed = ht_changed || next.erp != ap->erp || next.basic_rates != ap->basic_rates ||
                   next.capability != ap->capability;
+    badger_bytes_copy((uint8_t *)&next.association,
+                      (const uint8_t *)&ap->association, sizeof(next.association));
+    next.ht_updates = ap->ht_updates;
+    if (ht_changed && next.association.valid && next.ht_updates != 0xffffffffu)
+        ++next.ht_updates;
     badger_bytes_copy((uint8_t *)ap, (const uint8_t *)&next, sizeof(next));
     return changed;
+}
+
+static inline void clean_station_forget_association(clean_station_ap_t *ap) {
+    badger_bytes_zero((uint8_t *)&ap->association, sizeof(ap->association));
+    ap->ht_updates = 0u;
+}
+
+static inline void clean_station_ht_report(const clean_station_ap_t *ap, uint32_t channel,
+                                            uint8_t detail[2048]) {
+    clean_ht_peer_t profile;
+    const clean_ht_peer_t *source = ap->association.valid ? &ap->association.ht : &ap->ht;
+    badger_bytes_copy((uint8_t *)&profile, (const uint8_t *)source, sizeof(profile));
+    if (ap->association.valid && ap->ht_updates) {
+        profile.invalid |= ap->ht.invalid;
+        profile.capabilities &= ap->ht.capabilities;
+        profile.rx_mcs &= ap->ht.rx_mcs;
+        if (!(ap->ht.capability & 2u)) profile.capability &= (uint16_t)~2u;
+        profile.operation = ap->ht.operation;
+        profile.primary = ap->ht.primary;
+        profile.secondary = ap->ht.secondary;
+        profile.width40 = ap->ht.width40;
+        profile.protection = ap->ht.protection;
+        profile.basic_mcs = ap->ht.basic_mcs;
+        profile.unsupported_basic = ap->ht.unsupported_basic;
+        badger_bytes_copy((uint8_t *)&profile.wmm,
+                          (const uint8_t *)&ap->ht.wmm, sizeof(profile.wmm));
+    }
+    clean_ht_peer_report(&profile, channel, detail);
+    detail[CLEAN_HT_PEER_DETAIL + 19u] = !ap->association.valid ? 0u :
+        ap->ht_updates ? 2u : 1u;
+    badger_bytes_store_u32(detail + CLEAN_HT_PEER_DETAIL + 44u, ap->ht_updates);
 }
 
 static inline void clean_station_header(uint8_t *m, uint8_t fc, uint16_t sequence,
@@ -265,9 +310,10 @@ static inline void clean_station_request_sent(clean_station_request_t *s,
     if (acked) s->pending = 0u;
 }
 
-static inline int clean_station_response(const uint8_t *m, uint32_t n,
+static inline int clean_station_response_profile(const uint8_t *m, uint32_t n,
                                          const uint8_t mac[6], const uint8_t bssid[6],
-                                         uint8_t association, uint16_t *aid) {
+                                         uint8_t association, uint16_t *aid,
+                                         clean_station_association_t *profile) {
     if (n < 34u || !clean_frame_valid(m, n) || (m[1] & 0xc7u) ||
         (m[22] & 15u) || !badger_bytes_equal(m + 4u, mac, 6u) ||
         !badger_bytes_equal(m + 10u, bssid, 6u) ||
@@ -280,17 +326,31 @@ static inline int clean_station_response(const uint8_t *m, uint32_t n,
     uint16_t raw_aid = clean_station_u16(m + 28u);
     if (!(raw_aid & 0x3fffu) ||
         (raw_aid & 0x3fffu) > 2007u) return -1;
+    clean_station_association_t parsed;
+    badger_bytes_zero((uint8_t *)&parsed, sizeof(parsed));
+    parsed.aid = (uint16_t)(raw_aid & 0x3fffu);
+    parsed.capability = clean_station_u16(m + 24u);
     int supported_rates = 0;
     for (uint32_t at = 30u; at < n - 4u;) {
         if (n - 4u - at < 2u || m[at + 1u] > n - 4u - at - 2u) return -1;
+        clean_ht_peer_ie(&parsed.ht, m[at], m + at + 2u, m[at + 1u]);
         if (m[at] == 1u) {
             if (supported_rates++ || !m[at + 1u] || m[at + 1u] > 8u) return -1;
         }
         at += 2u + m[at + 1u];
     }
     if (!supported_rates || !(clean_station_u16(m + 24u) & 1u)) return -1;
-    *aid = (uint16_t)(raw_aid & 0x3fffu);
+    parsed.valid = 1u;
+    if (profile)
+        badger_bytes_copy((uint8_t *)profile, (const uint8_t *)&parsed, sizeof(parsed));
+    *aid = parsed.aid;
     return 0;
+}
+
+static inline int clean_station_response(const uint8_t *m, uint32_t n,
+                                         const uint8_t mac[6], const uint8_t bssid[6],
+                                         uint8_t association, uint16_t *aid) {
+    return clean_station_response_profile(m, n, mac, bssid, association, aid, 0);
 }
 
 static inline int clean_station_departure(const uint8_t *m, uint32_t n,
@@ -345,6 +405,49 @@ static inline int clean_station_eapol_evidence(const uint8_t detail[2048]) {
     return clean_station_evidence(detail) && badger_bytes_load_u32(detail + 572u) == CLEAN_AP_PSK_CCMP &&
            badger_bytes_load_u32(detail + 576u) != 0u && size >= 18u && size <= 528u &&
            clean_station_eapol_m1(detail + 1122u, size - 18u, detail + 1972u, detail + 1980u);
+}
+
+static inline void clean_station_monitor(uint8_t detail[2048], const uint8_t *packet,
+                                         uint32_t size, const uint8_t target[6],
+                                         uint32_t elapsed_us) {
+    if (size < 32u || !clean_frame_valid(packet + 18u, size - 18u)) return;
+    const uint8_t *m = packet + 18u;
+    uint32_t n = size - 18u;
+    if (n >= 34u && m[0] == 0xb0u && clean_station_u16(m + 26u) == 1u &&
+        badger_bytes_equal(m + 4u, target, 6u) &&
+        badger_bytes_equal(m + 16u, target, 6u)) {
+        if (badger_bytes_load_u32(detail + 540u) &&
+            !badger_bytes_equal(m + 10u, detail + 1972u, 6u)) return;
+        if (!badger_bytes_load_u32(detail + 540u))
+            badger_bytes_store_u32(detail + 520u, elapsed_us);
+        badger_bytes_store_u32(detail + 524u, elapsed_us);
+        badger_bytes_copy(detail + 1972u, m + 10u, 6u);
+        badger_bytes_store_u32(detail + 540u, badger_bytes_load_u32(detail + 540u) + 1u);
+        badger_bytes_store_u32(detail + 596u, n < 192u ? n : 192u);
+        badger_bytes_copy(detail + 600u, m, n < 192u ? n : 192u);
+    } else if (n >= 28u && m[0] == 0u &&
+        badger_bytes_equal(m + 4u, target, 6u) &&
+        badger_bytes_equal(m + 10u, detail + 1972u, 6u)) {
+        badger_bytes_store_u32(detail + 544u, badger_bytes_load_u32(detail + 544u) + 1u);
+        badger_bytes_store_u32(detail + 796u, n < 192u ? n : 192u);
+        badger_bytes_copy(detail + 800u, m, n < 192u ? n : 192u);
+    } else if (clean_ack_reply(m, n, detail + 1972u)) {
+        badger_bytes_store_u32(detail + 548u, badger_bytes_load_u32(detail + 548u) + 1u);
+    } else if (clean_ack_reply(m, n, target)) {
+        badger_bytes_store_u32(detail + 556u, badger_bytes_load_u32(detail + 556u) + 1u);
+    } else if (n >= 28u && m[0] != 0x80u &&
+        badger_bytes_equal(m + 10u, target, 6u) &&
+        badger_bytes_equal(m + 4u, detail + 1972u, 6u)) {
+        if (!badger_bytes_load_u32(detail + 552u)) {
+            badger_bytes_store_u32(detail + 528u, elapsed_us);
+            badger_bytes_store_u32(detail + 536u, badger_bytes_load_u32(detail + 540u));
+        }
+        badger_bytes_store_u32(detail + 532u, elapsed_us);
+        badger_bytes_store_u32(detail + 552u, badger_bytes_load_u32(detail + 552u) + 1u);
+        badger_bytes_store_u32(detail + 1088u, size);
+        badger_bytes_copy(detail + 1104u, packet,
+            size < CLEAN_DETAIL_PACKET_BYTES ? size : CLEAN_DETAIL_PACKET_BYTES);
+    }
 }
 
 #endif

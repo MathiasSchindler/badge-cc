@@ -623,7 +623,7 @@ static void ht_boundaries(void) {
         assert(!memcmp(frame, fallback, sizeof(frame)));
         beacon[at - sizeof(wmm) + 8u] ^= 1u;
         badger_bytes_store_u32(beacon + at, diag_crc32(beacon, at));
-        assert(clean_station_refresh(&parsed, beacon, at + 4u) == 0);
+        assert(clean_station_refresh(&parsed, beacon, at + 4u) == 1);
         assert(parsed.ht.wmm.parameter_set == 1u);
         assert(clean_station_associate(fallback, 0x123u, own, &parsed) == length);
         assert(!memcmp(frame, fallback, sizeof(frame)));

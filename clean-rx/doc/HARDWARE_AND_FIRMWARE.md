@@ -130,14 +130,28 @@ associated metadata.
 The SDIOD TX ring carries host-facing packets with 32-byte DMA bursts.
 Its final descriptor marks end-of-table.
 
-The controller permits one unconsumed logical frame. The host increments
+The F2 transport permits one unconsumed logical frame. The host increments
 the consumed counter only after validating the complete packet or fragment
 assembly. Publication increments the posted counter. Descriptor completion
 and host consumption are distinct events.
 
-An occupied credit or descriptor prevents publication. The HT data path
-retains its prepared capture until publication. Raw TX/rearm, retuning and
-key commands clear prepared transport state when discarding a capture.
+An occupied credit or descriptor prevents publication. Station profiles 2
+and 3 stage captures in an eight-slot SRAM FIFO, releasing the single PSM
+SHM capture after copying its bytes and metadata. Publication preserves FIFO
+order and retains the head across credit, descriptor and fragment
+backpressure. A full FIFO leaves the next capture in SHM rather than
+overwriting queued data. Target-based completion drains staged frames;
+an explicit stop can leave pending reception.
+
+After NAV observation, these station profiles select own-address captures
+and group-address management/data frames transmitted by the pinned peer.
+Unrelated traffic does not consume F2 credit. This selection is not frame
+validation: own-address captures still require host validation. Passive/raw
+capture is not filtered this way.
+
+Other receive paths retain their prepared capture until publication.
+Raw TX/rearm, retuning and key commands clear prepared transport state when
+discarding a capture.
 
 ## Function 2 packet format
 

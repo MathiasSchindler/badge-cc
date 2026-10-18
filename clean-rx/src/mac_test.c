@@ -4,6 +4,7 @@
 #include <string.h>
 #include "mac.h"
 #include "mac_soak.h"
+#include "sdio_ring.h"
 #include "../badge/station_rx.h"
 
 static void fcs(uint8_t *m, uint32_t n) {
@@ -558,7 +559,97 @@ static void qos_receive(void) {
     puts("QoS RX: independent TID sequences/fragments, duplicate/wrap, bounds, policy gates and expiry/wiping pass; NOT EDCA or Block ACK");
 }
 
+static void receive_relevance(void) {
+    uint8_t m[CLEAN_MPDU_BYTES + 1u] = {0};
+    const uint8_t own[6] = {2u,3u,4u,5u,6u,7u};
+    const uint8_t peer[6] = {2u,8u,9u,10u,11u,12u};
+    memcpy(m + 4u, own, sizeof(own));
+    memcpy(m + 10u, peer, sizeof(peer));
+    for (uint32_t n = 0u; n < 14u; ++n)
+        assert(!clean_mac_rx_relevant(m, n, own, peer));
+    for (uint32_t fc = 0u; fc < 256u; ++fc) {
+        m[0] = (uint8_t)fc;
+        assert(clean_mac_rx_relevant(m, 14u, own, peer));
+        assert(clean_mac_rx_relevant(m, CLEAN_MPDU_BYTES, own, peer));
+        assert(!clean_mac_rx_relevant(m, CLEAN_MPDU_BYTES + 1u, own, peer));
+    }
+    m[0] = 0x80u;
+    for (uint32_t bit = 0u; bit < 48u; ++bit) {
+        m[4u + bit / 8u] ^= (uint8_t)(1u << (bit & 7u));
+        assert(!clean_mac_rx_relevant(m, 14u, own, peer));
+        assert(clean_mac_rx_relevant(m, 28u, own, peer) == (bit == 0u));
+        m[4u + bit / 8u] ^= (uint8_t)(1u << (bit & 7u));
+    }
+    memset(m + 4u, 255, 6u);
+    for (uint32_t n = 14u; n < 28u; ++n)
+        assert(!clean_mac_rx_relevant(m, n, own, peer));
+    for (uint32_t fc = 0u; fc < 256u; ++fc) {
+        m[0] = (uint8_t)fc;
+        uint32_t type = (fc >> 2u) & 3u;
+        assert(clean_mac_rx_relevant(m, 28u, own, peer) == (type == 0u || type == 2u));
+    }
+    m[0] = 0x88u;
+    for (uint32_t bit = 0u; bit < 48u; ++bit) {
+        m[10u + bit / 8u] ^= (uint8_t)(1u << (bit & 7u));
+        assert(!clean_mac_rx_relevant(m, 28u, own, peer));
+        m[10u + bit / 8u] ^= (uint8_t)(1u << (bit & 7u));
+    }
+    puts("Station RX selection: own-address diagnostics and pinned-peer group traffic retained; unrelated traffic excluded");
+}
+
+static void capture_queue(void) {
+    uint8_t detail[2048] = {0};
+    clean_mac_trace_status_t trace = {.rx_filtered=123u,.rx_capture_max_us=456u};
+    assert(CLEAN_STATION_TRACE_DETAIL + sizeof(trace) <= CLEAN_SOAK_FAULT_DETAIL);
+    memcpy(detail + CLEAN_STATION_TRACE_DETAIL, &trace, sizeof(trace));
+    memset(detail + CLEAN_SOAK_FAULT_DETAIL, 0xa5, 2u * CLEAN_RX_FAULT_WORDS);
+    assert(!memcmp(detail + CLEAN_STATION_TRACE_DETAIL, &trace, sizeof(trace)));
+    for (uint32_t start = 0xfffffff0u; start != 16u; ++start) {
+        uint32_t slots[8], captured = start, published = start, posted = start, consumed = start;
+        for (uint32_t round = 0u; round < 8u; ++round) {
+            for (uint32_t n = 0u; n < 8u; ++n) {
+                assert(clean_sdio_credit_available(captured, published, 8u) == 1);
+                slots[captured & 7u] = captured;
+                ++captured;
+            }
+            assert(!clean_sdio_credit_available(captured, published, 8u));
+            assert(clean_sdio_credit_available(captured + 1u, published, 8u) == -1);
+            for (uint32_t n = 0u; n < 8u; ++n) {
+                assert(slots[published & 7u] == published);
+                assert(clean_sdio_credit_available(posted, consumed, CLEAN_SDIO_WINDOW) == 1);
+                ++posted;
+                ++published;
+                assert(!clean_sdio_credit_available(posted, consumed, CLEAN_SDIO_WINDOW));
+                assert(clean_sdio_credit_available(captured, published, 8u) == 1);
+                ++consumed;
+            }
+            assert(captured == published && posted == consumed);
+        }
+    }
+    puts("RX staging: eight-slot FIFO ownership, full-queue retention, one-credit F2 drain and 32-bit counter wrap pass");
+}
+
+static void fcs_reference(void) {
+    uint8_t data[CLEAN_MPDU_BYTES], value;
+    assert(clean_mac_fcs((const uint8_t *)"123456789", 9u) == 0xcbf43926u);
+    for (uint32_t i = 0u; i < 256u; ++i) {
+        value = (uint8_t)i;
+        assert(clean_mac_fcs(&value, 1u) == diag_crc32(&value, 1u));
+    }
+    uint32_t random = 0x12345678u;
+    for (uint32_t i = 0u; i < sizeof(data); ++i) {
+        random ^= random << 13u;
+        random ^= random >> 17u;
+        random ^= random << 5u;
+        data[i] = (uint8_t)random;
+    }
+    for (uint32_t length = 0u; length <= sizeof(data); ++length)
+        assert(clean_mac_fcs(data, length) == diag_crc32(data, length));
+    puts("MAC FCS: nibble implementation matches independent bitwise CRC for known vector, every byte and every supported length");
+}
+
 int main(void) {
+    fcs_reference();
     contention();
     edca();
     retries_and_nav();
@@ -568,6 +659,8 @@ int main(void) {
     station_transmit();
     soak_protocol();
     qos_receive();
+    receive_relevance();
+    capture_queue();
     puts("MAC: DCF/NAV/EIFS/wrap, retry identity, FCS, duplicates and bounded reassembly OK");
     puts("MAC: 100000 native deliveries per simulated direction across 3 sizes; NOT RF qualification");
     return 0;

@@ -5,7 +5,7 @@
 #include "../src/mac.h"
 
 #define CLEAN_HT_PEER_DETAIL 1040u
-#define CLEAN_HT_PEER_BYTES 44u
+#define CLEAN_HT_PEER_BYTES 48u
 #define CLEAN_HT_PEER_MAGIC 0x32505448u
 
 _Static_assert(CLEAN_HT_PEER_DETAIL >= 1000u + 40u &&
@@ -36,6 +36,25 @@ enum {
     CLEAN_HT_FALLBACK_MAC = 32u,
     CLEAN_HT_FALLBACK_PROTECTION = 64u
 };
+
+static inline int clean_ht_peer_equal(const clean_ht_peer_t *a, const clean_ht_peer_t *b) {
+    if (a->capability != b->capability || a->protection != b->protection ||
+        a->capabilities != b->capabilities || a->operation != b->operation ||
+        a->invalid != b->invalid || a->primary != b->primary ||
+        a->secondary != b->secondary || a->width40 != b->width40 ||
+        a->rx_mcs != b->rx_mcs || a->basic_mcs != b->basic_mcs ||
+        a->unsupported_basic != b->unsupported_basic ||
+        a->ampdu_exponent != b->ampdu_exponent || a->mpdu_spacing != b->mpdu_spacing ||
+        a->wmm.present != b->wmm.present || a->wmm.information != b->wmm.information ||
+        a->wmm.parameter_set != b->wmm.parameter_set || a->wmm.uapsd != b->wmm.uapsd)
+        return 0;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        const clean_wmm_ac_t *x = &a->wmm.ac[i], *y = &b->wmm.ac[i];
+        if (x->aifsn != y->aifsn || x->acm != y->acm || x->ecw_min != y->ecw_min ||
+            x->ecw_max != y->ecw_max || x->txop_32us != y->txop_32us) return 0;
+    }
+    return 1;
+}
 
 /* Parse optional peer IEs without changing the existing legacy association. */
 static inline void clean_ht_peer_ie(clean_ht_peer_t *s, uint32_t id,
@@ -85,7 +104,8 @@ static inline uint32_t clean_ht_peer_fallback(const clean_ht_peer_t *s, uint32_t
         reason |= CLEAN_HT_FALLBACK_CHANNEL;
     if (!s->rx_mcs || s->unsupported_basic || (s->basic_mcs & ~s->rx_mcs))
         reason |= CLEAN_HT_FALLBACK_MCS;
-    if (!s->wmm.present || s->wmm.ac[0].acm) reason |= CLEAN_HT_FALLBACK_WMM;
+    if (!s->wmm.present || s->wmm.ac[0].acm || !clean_edca_valid(s->wmm.ac))
+        reason |= CLEAN_HT_FALLBACK_WMM;
     /* No association advertisement until actual EDCA/BA/receive-size support. */
     reason |= CLEAN_HT_FALLBACK_MAC;
     if ((s->protection & 3u) || (s->protection & 0x10u))

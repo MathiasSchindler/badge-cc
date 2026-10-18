@@ -7,7 +7,8 @@ firmware.
 
 - [HT20 implementation and investigations](HT20_IMPLEMENTATION.md):
   D1/D2/D3 milestones, API development, receive failures, contention
-  diagnostics, watchdog work and remaining qualification.
+  diagnostics, watchdog work, association/runtime peer profiles and
+  remaining qualification.
 - [Hardware development notes](HARDWARE_DEVELOPMENT.md): the former mixed
   architecture/reference document, preserving hardware bring-up context,
   RX streaming investigations, CCK truncation and MAC experiments.
@@ -19,6 +20,9 @@ firmware.
   measurements and experiment records moved out of the root tracker.
 - [Bounded EDCA implementation](EDCA_IMPLEMENTATION.md): controller policy,
   per-category access, native tests, paired RF matrix and remaining D2 gates.
+- [AP authentication and RX staging investigation](AP_AUTHENTICATION_INVESTIGATION.md):
+  independently observed missing replies, timing/rate controls, bounded
+  station receive FIFO, legacy regressions and HT corruption replays.
 
 Keep experiment commands, build IDs, trial counts, logs, unresolved behavior
 and proposed changes here. Document current user-visible behavior and

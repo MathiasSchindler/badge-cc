@@ -95,6 +95,9 @@ int clean_mac_valid(const volatile uint8_t *mpdu, uint32_t length);
 int clean_mac_retry(volatile uint8_t *mpdu, uint32_t length);
 int clean_mac_nav_duration(const volatile uint8_t *mpdu, uint32_t length,
                            const uint8_t own[6]);
+/* Header-only selection after capture/NAV processing; not frame validation. */
+int clean_mac_rx_relevant(const volatile uint8_t *mpdu, uint32_t length,
+                           const uint8_t own[6], const uint8_t peer[6]);
 
 typedef struct {
     const volatile uint8_t *body;

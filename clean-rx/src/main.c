@@ -22,6 +22,9 @@ _Static_assert(CLEAN_MAC_RADIO_ADDR >= CLEAN_UNICAST_ADDR + sizeof(clean_unicast
                CLEAN_MAC_RADIO_ADDR + sizeof(clean_mac_radio_status_t) <= FW_MULTI_ADDR,
                "MAC radio status does not overlap transport or captures");
 _Static_assert(CLEAN_DCF_MAX_SLOTS == CLEAN_MAC_CW_MAX, "PSM/software contention bound");
+_Static_assert(FW_MAX_FRAMES > 0u && FW_MAX_FRAMES <= 16u &&
+               (FW_MAX_FRAMES & (FW_MAX_FRAMES - 1u)) == 0u,
+               "Capture FIFO must fit credit validation and power-of-two indexing");
 _Static_assert(CLEAN_MAC_TRACE_ADDR >= CLEAN_MAC_RADIO_ADDR + sizeof(clean_mac_radio_status_t) &&
                CLEAN_MAC_TRACE_ADDR + sizeof(clean_mac_trace_status_t) <= FW_MULTI_ADDR,
                "MAC trace does not overlap radio status or captures");
@@ -67,6 +70,7 @@ static clean_tx_tail_t cck_tx_tail;
 static uint32_t last_tx_identity;
 static uint8_t last_tx_valid;
 static uint8_t capture_prepared;
+static uint32_t rx_published_frames;
 static uint8_t policy_pending, policy_short_slot, policy_response;
 static uint16_t policy_basic;
 static uint16_t cts_sampled, short_sampled, ack_sampled;
@@ -641,7 +645,8 @@ static void station_publish_mac(void) {
     MAC_RADIO->cw = station_dcf.cw;
     MAC_RADIO->slots = station_hw ? shm_read16(CLEAN_DCF_SLOTS) : station_dcf.slots;
     MAC_RADIO->nav_until = station_dcf.nav_valid ? station_dcf.nav_until : 0u;
-    MAC_RADIO->pending_rx = shm_read16(0x601u) == PSM_STATE_CAPTURED;
+    MAC_RADIO->pending_rx = shm_read16(0x601u) == PSM_STATE_CAPTURED ||
+        MULTI->captured_frames != rx_published_frames;
     uint16_t cts = shm_read16(CLEAN_CTS_SENT), short_count = shm_read16(CLEAN_SHORT_SENT);
     uint16_t ack = shm_read16(CLEAN_ACK_CONSUMED);
     MAC_RADIO->control_acks += (uint16_t)(ack - ack_sampled);
@@ -765,6 +770,33 @@ static void station_observe_capture(void) {
             }
         }
     }
+}
+
+static int station_publish_capture(uint32_t channel) {
+    uint32_t total = MULTI->captured_frames;
+    if (clean_sdio_credit_available(total, rx_published_frames, FW_MAX_FRAMES) < 0)
+        return fail(0x8cu, FW_MULTI_ADDR, total - rx_published_frames);
+    if (total == rx_published_frames) return 1;
+    volatile fw_frame_slot_t *slot = &MULTI->frames[rx_published_frames & (FW_MAX_FRAMES - 1u)];
+    int posted = sdio_f2_send_frame(slot, channel);
+    if (MBOX->fw_state == FW_STATE_ERROR) return 0;
+    if (!posted) return 1;
+    if (slot->rxe_len >= 34u) {
+        const volatile uint8_t *m = slot->raw + 8u;
+        uint8_t bound = 1u;
+        for (uint32_t i = 0u; i < 6u; ++i)
+            if (m[4u + i] != station_address[i] ||
+                m[10u + i] != (uint8_t)(shm_read16(CLEAN_ACK_PEER + i/2u) >>
+                                                      (8u * (i & 1u))))
+                bound = 0u;
+        if (bound) {
+            ++MAC_TRACE->published[clean_mac_frame_kind(m[0])];
+            if (!clean_mac_valid(m, slot->rxe_len - CLEAN_PLCP_BYTES))
+                ++MAC_TRACE->invalid;
+        }
+    }
+    ++rx_published_frames;
+    return 1;
 }
 
 /* Template preparation is deliberately outside the contention interval. The
@@ -1469,6 +1501,7 @@ void cyw43_main(void) {
     uint32_t scanner_mode = (raw_target == 0xffffffffu);
     uint32_t target_frames = raw_target ? raw_target : 1u;
     if (!scanner_mode && target_frames > FW_MAX_FRAMES) target_frames = FW_MAX_FRAMES;
+    uint8_t capture_target_reached = 0u;
     MULTI->magic = FW_MULTI_MAGIC;
     MULTI->target_frames = target_frames;
     MULTI->captured_frames = 0u;
@@ -1489,6 +1522,9 @@ void cyw43_main(void) {
         }
         uint32_t cmd = MBOX->host_cmd;
         if (station_mac) {
+            if (!station_publish_capture(channel)) break;
+            if (capture_target_reached &&
+                MULTI->captured_frames == rx_published_frames) break;
             if (!station_counter_ok()) break;
             station_consume_ack();
             station_observe_capture();
@@ -1803,6 +1839,7 @@ void cyw43_main(void) {
             station_enabled = 1u;
             station_mac = (uint8_t)(p[15] >= 2u);
             station_hw = (uint8_t)(p[15] == 3u);
+            rx_published_frames = MULTI->captured_frames;
             rx_discard_fcs = shm_read16(0x7a8u);
             rx_discard_length = shm_read16(0x7a9u);
             for (uint32_t i = 0u; i < 6u; ++i) station_address[i] = p[i];
@@ -1926,20 +1963,51 @@ void cyw43_main(void) {
             continue;
         }
         if (st == PSM_STATE_CAPTURED) {
+            if (capture_target_reached) continue;
             if (station_mac) {
                 station_consume_ack();
                 if (shm_read16(0x601u) != PSM_STATE_CAPTURED) continue;
                 station_observe_capture();
+                if (station_hw) {
+                    uint32_t captured = (uint32_t)shm_read16(CLEAN_DCF_RX_LO) |
+                        ((uint32_t)shm_read16(CLEAN_DCF_RX_HI) << 16u);
+                    uint32_t held = mac_now() - captured;
+                    if (held > MAC_TRACE->rx_capture_max_us)
+                        MAC_TRACE->rx_capture_max_us = held;
+                }
+                uint8_t peer[6];
+                for (uint32_t i = 0u; i < 3u; ++i) {
+                    uint16_t word = shm_read16(CLEAN_ACK_PEER + i);
+                    peer[2u * i] = (uint8_t)word;
+                    peer[2u * i + 1u] = (uint8_t)(word >> 8u);
+                }
+                uint32_t length = shm_read16(0x606u);
+                if (length < CLEAN_PLCP_BYTES ||
+                    !clean_mac_rx_relevant(nav_frame, length - CLEAN_PLCP_BYTES,
+                                           station_address, peer)) {
+                    if (!capture_prepared) (void)rx_dma_poll_and_reclaim(0);
+                    capture_prepared = 0u;
+                    ++MAC_TRACE->rx_filtered;
+                    shm_write16(0x601u, 0u);
+                    nav_sampled = 0u;
+                    continue;
+                }
             }
             if (station_enabled || CLEAN_RX_HT_DATA) {
-                int credit = clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
-                                                          SDIO_TX_WINDOW);
+                int credit = station_mac ?
+                    clean_sdio_credit_available(MULTI->captured_frames, rx_published_frames,
+                                                FW_MAX_FRAMES) :
+                    clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
+                                                SDIO_TX_WINDOW);
                 if (credit < 0) {
-                    fail(0x8cu, FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET, MBOX->f2_consumed);
+                    fail(0x8cu, station_mac ? FW_MULTI_ADDR :
+                        FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET,
+                        station_mac ? MULTI->captured_frames - rx_published_frames :
+                        MBOX->f2_consumed);
                     break;
                 }
-                /* The PSM may already have ACKed this frame. Keep its capture
-                 * reserved instead of discarding it behind an occupied F2 slot. */
+                /* An ACKed frame is retained in SHM when all SRAM slots are
+                 * occupied, or in its SRAM slot until F2 accepts it. */
                 if (!credit) {
                     if (station_enabled) ++MAC_RADIO->rx_waits;
                     continue;
@@ -2003,25 +2071,20 @@ void cyw43_main(void) {
                 (void)rx_dma_poll_and_reclaim(slot);
                 capture_prepared = 1u;
             }
+            if (station_mac) {
+                capture_prepared = 0u;
+                MULTI->captured_frames = total + 1u;
+                if (!scanner_mode && total + 1u >= target_frames)
+                    capture_target_reached = 1u;
+                shm_write16(0x601u, 0u);
+                nav_sampled = 0u;
+                continue;
+            }
             int posted = sdio_f2_send_frame(slot, channel);
             if (MBOX->fw_state == FW_STATE_ERROR) break;
             if ((station_enabled || CLEAN_RX_HT_DATA) && !posted) {
                 if (station_enabled) ++MAC_RADIO->rx_waits;
                 continue;
-            }
-            if (station_mac && slot->rxe_len >= 34u) {
-                const volatile uint8_t *m = slot->raw + 8u;
-                uint8_t bound = 1u;
-                for (uint32_t i = 0u; i < 6u; ++i)
-                    if (m[4u + i] != station_address[i] ||
-                        m[10u + i] != (uint8_t)(shm_read16(CLEAN_ACK_PEER + i/2u) >>
-                                                          (8u * (i & 1u))))
-                        bound = 0u;
-                if (bound) {
-                    ++MAC_TRACE->published[clean_mac_frame_kind(m[0])];
-                    if (!clean_mac_valid(m, slot->rxe_len - CLEAN_PLCP_BYTES))
-                        ++MAC_TRACE->invalid;
-                }
             }
             capture_prepared = 0u;
             MULTI->captured_frames = total + 1u;

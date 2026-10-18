@@ -130,6 +130,16 @@ profile. Profile 1 is rejected with error `0x85`. Policy is applied at an
 idle RX/response boundary. Completion acknowledges queueing; the
 policy-pending status records application.
 
+Profiles 2 and 3 process NAV before selecting own-address captures and
+group-address management/data from the pinned peer for delivery. They use
+an eight-slot SRAM FIFO independently of the single logical F2 credit;
+when full, the next capture stays in SHM. Target-based completion drains
+staged frames, but an explicit stop can leave pending RX. The radio status
+includes either held SHM or queued SRAM frames in `pending_rx`. The MAC
+trace includes the filtered-capture count and, for profile 3, maximum
+sampled capture age in microseconds. These are service diagnostics, not
+RF timing or packet-loss measurements.
+
 Command 4 uses the channel field at bits 15..8. Values outside 1..14 are
 acknowledged without a retune. For in-range values, the controller updates
 its software channel only when the tuning routine succeeds, but returns
