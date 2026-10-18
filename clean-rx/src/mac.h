@@ -96,6 +96,9 @@ int clean_qos_rx(clean_qos_rx_t *s, const uint8_t *mpdu, uint32_t length, uint32
  * must enforce aggregate admission and subframe destination policy. */
 int clean_qos_rx_authenticated(clean_qos_rx_t *s, const uint8_t *mpdu,
                                uint32_t length, uint32_t now);
+/* Only for MPDUs released in order from an active Block ACK agreement. */
+int clean_qos_rx_ba_authenticated(clean_qos_rx_t *s, const uint8_t *mpdu,
+                                  uint32_t length, uint32_t now);
 uint32_t clean_mac_fcs(const volatile uint8_t *bytes, uint32_t length);
 int clean_mac_valid(const volatile uint8_t *mpdu, uint32_t length);
 int clean_mac_retry(volatile uint8_t *mpdu, uint32_t length);

@@ -46,6 +46,10 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+#if CLEAN_RX_AMPDU_INTERFACE == 2
+    restore(original,162u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_IF_BODY),
+            WORD(0x3f0u,0x1fffu,0x1800u,0x1780u));
+#endif
     restore(original, 138u, WORD(0x785u,0x1780u,0x1780u,139u),
             WORD(0x785u,0x1780u,0x1780u,257u));
     restore(original, 143u, WORD(0x77fu,0x1780u,0x1780u,RX_PREFIX_EOI),
@@ -223,6 +227,9 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
                             uint32_t pc, uint32_t *steps) {
     int body = pc == RX_COMPLETE;
     for (*steps = 0u; *steps < 1000000u; ++*steps) {
+#if CLEAN_RX_AMPDU_INTERFACE >= 3
+        if (pc == AMPDU_IF_GOOD) return 197u;
+#endif
         if (body && pc == 167u) pc = RX_COMPLETE;
         if (pc == 147u || pc == 167u || pc == 197u ||
             pc == 257u || pc == 259u || pc == 262u || pc == 263u) return pc;
@@ -233,6 +240,7 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
         uint32_t d = (uint32_t)w & 0x1fffu;
         uint16_t av = ack_operand(r, a), bv = ack_operand(r, b);
         if (op == 0x77fu) pc = d;
+        else if (op == 0xd0u) { if (av == bv) pc = d; }
         else if (op == 0xdau) { if (av < bv) pc = d; }
         else if (op == 0xdcu) { if (av > bv) pc = d; }
         else if (op == 0xd1u) { if (av != bv) pc = d; }
@@ -310,12 +318,13 @@ static void receive_completion(void) {
 
 static uint32_t slot_reads;
 static uint32_t phy_writes;
+static uint16_t psm_clock_step;
 
 static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
     phy_writes = 0u;
     for (uint32_t step = 0u; step < 10000u; ++step) {
         if (pc == 198u || pc == 266u || pc == 124u || pc == 130u ||
-            pc == 118u || pc == 129u ||
+            pc == 118u || pc == 129u || pc == 163u ||
             pc == 148u || pc == 263u) return pc;
         assert(pc >= ACK_ENTER && pc < ACK_PROGRAM_END);
         uint64_t w = instruction(pc++);
@@ -324,6 +333,7 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
         uint32_t b = (uint32_t)(w >> 13u) & 0x1fffu;
         uint32_t d = (uint32_t)w & 0x1fffu;
         if (a == CLEAN_DCF_SLOTS) ++slot_reads;
+        if (a == 0x1119u) regs[a] = (uint16_t)(regs[a] + psm_clock_step);
         uint16_t av = ack_operand(regs, a), bv = ack_operand(regs, b);
         if (op == 0x3f0u) regs[d] = av;
         else if (op == 0x378u) regs[d] = (uint16_t)((av << 8u) | (bv & 255u));
@@ -331,17 +341,21 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
         else if (op == 0xd0u) { if (av == bv) pc = d; }
         else if (op == 0xd1u) { if (av != bv) pc = d; }
         else if (op == 0xdau) { if (av < bv) pc = d; }
+        else if (op == 0xdbu) { if (av >= bv) pc = d; }
         else if (op == 0xdcu) { if (av > bv) pc = d; }
         else if (op == 0x1c0u) regs[d] = (uint16_t)(av + bv);
         else if (op == 0x1d0u) regs[d] = (uint16_t)(av - bv);
         else if (op == 0x278u) regs[d] = av >> 8u;
         else if (op == 0x140u) regs[d] = av & bv;
         else if (op == 0x78eu) { if (events & 2u) pc = d; }
+        else if ((op & 0x7e0u) == 0x700u) {
+            if ((uint32_t)events & (1u << (op & 31u))) pc = d;
+        }
         else if ((op & 0xf00u) == 0x400u || (op & 0xf00u) == 0x500u) {
             if (((av >> (op & 15u)) & 1u) == (op >> 8u == 5u)) pc = d;
         } else if (op == 0x230u || op == 0x270u) {
             regs[d] = (uint16_t)(av & (op == 0x230u ? 15u : 255u));
-        } else if (op == 0x304u || op == 0x308u) {
+        } else if ((op & 0xff0u) == 0x300u) {
             uint16_t mask = (uint16_t)(1u << (op & 15u));
             regs[d] = (uint16_t)((bv & ~mask) | ((av << (op & 15u)) & mask));
         } else {
@@ -761,7 +775,7 @@ static void ht_failure_capture(void) {
     }
     assert(instruction(RX_TRACE_BAD_CONTINUE) ==
            WORD(0x77fu,0x1780u,0x1780u,CLEAN_RX_HT_RESPONSE ? HT_FAIL_FCS : HT_TRACE_BAD));
-    assert(instruction(HT_TRACE_BAD_RETURN) == WORD(0x77fu,0x1780u,0x1780u,263u));
+    assert(instruction(HT_TRACE_BAD_RETURN) == WORD(0x77fu,0x1780u,0x1780u,AMPDU_BAD_HOOK));
     for (uint32_t phy = 0u; phy < 4u; ++phy) {
         memset(r, 0, sizeof(r));
         r[CLEAN_QOS_RESPONSE_POLICY] = 3u;
@@ -1240,7 +1254,139 @@ static void transmit_cleanup(void) {
     puts("PSM TX cleanup: RX priority, active RX/TX/drain deferral, owned completion and PHY register preservation; NOT RF");
 }
 
+static void aggregate_probe_trace(void) {
+#if CLEAN_RX_AMPDU_PROBE
+    uint16_t base[0x1800]={0}, r[0x1800];
+    base[0x1009u]=2u;
+    base[0x100cu]=86u;
+    base[0x100du]=0x1922u;
+    base[0x100eu]=0x1234u;
+    for (uint32_t i=0u;i<136u;++i) base[CLEAN_SHM_FRAME+i]=(uint16_t)(0x7010u+i);
+    base[CLEAN_SHM_FRAME+1u]=0xfc00u;
+    base[CLEAN_SHM_FRAME+2u]=0x0f00u;
+    for (uint32_t fault=0u;fault<5u;++fault) {
+        memcpy(r,base,sizeof(r));
+        if (fault==1u) r[0x1009u]=1u;
+        if (fault==2u) r[CLEAN_SHM_FRAME+2u]^=0x0800u;
+        if (fault==3u) r[CLEAN_SHM_FRAME+1u]^=0x0100u;
+        if (fault==4u) r[CLEAN_SHM_FRAME+2u]|=1u;
+        assert(psm_run(r,0,AMPDU_TRACE_BAD)==263u);
+        assert(r[CLEAN_AMPDU_PROBE_SHM]==(fault==0u));
+        if (!fault) {
+            assert(r[CLEAN_AMPDU_PROBE_SHM+1u]==2u &&
+                   r[CLEAN_AMPDU_PROBE_SHM+2u]==86u);
+            for (uint32_t i=0u;i<44u;++i)
+                assert(r[CLEAN_AMPDU_PROBE_SHM+8u+i]==base[CLEAN_SHM_FRAME+i]);
+        }
+        assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
+    }
+    memcpy(r,base,sizeof(r));
+    assert(psm_run(r,0,AMPDU_TRACE_GOOD)==
+           (CLEAN_RX_AMPDU_INTERFACE==3 ? 130u : 198u));
+    assert(r[CLEAN_AMPDU_PROBE_SHM]==1u && r[CLEAN_AMPDU_PROBE_SHM+1u]==1u);
+    assert(psm_run(r,0,AMPDU_TRACE_GOOD)==
+           (CLEAN_RX_AMPDU_INTERFACE==3 ? 130u : 198u) &&
+           r[CLEAN_AMPDU_PROBE_SHM]==2u);
+    assert(psm_run(r,0,AMPDU_TRACE_GOOD)==198u && r[CLEAN_AMPDU_PROBE_SHM]==3u);
+    assert(psm_run(r,0,AMPDU_TRACE_GOOD)==198u && r[CLEAN_AMPDU_PROBE_SHM]==3u);
+    for (uint32_t i=0u;i<132u;++i)
+        assert(r[CLEAN_AMPDU_PROBE_SHM+8u+i]==base[CLEAN_SHM_FRAME+i%44u]);
+    puts("PSM A-MPDU probe: terminal-only three-slot retention, bounded commits, no response; NOT RF");
+#endif
+}
+
+static void aggregate_interface_trace(void) {
+#if CLEAN_RX_AMPDU_INTERFACE
+    uint16_t r[0x1800]={0};
+    r[CLEAN_SHM_FRAME+1u]=0xfc00u;
+    r[CLEAN_SHM_FRAME+2u]=0x0f00u;
+    r[0x100cu]=6u;
+    r[0x1119u]=65530u;
+    assert(psm_run(r,0,AMPDU_IF_PREFIX)==148u);
+    assert(r[CLEAN_AMPDU_IF_SHM]==1u && r[CLEAN_AMPDU_IF_SHM+2u]==65530u &&
+           r[CLEAN_AMPDU_IF_SHM+3u]==6u);
+    r[CLEAN_AMPDU_PROBE_SHM]=1u;
+    r[0x100cu]=86u;
+    r[0x100du]=0x4122u;
+    r[0x100eu]=0x0a42u;
+    r[0x1024u]=0x102u;
+    r[0x102au]=86u;
+    r[0x1004u]=0x20c0u;
+    r[0x1782u]=1u;
+    psm_clock_step=1u;
+    uint32_t events=(1u<<3u)|(1u<<6u)|(1u<<14u);
+    assert(psm_run(r,(int)events,AMPDU_IF_ENTER)==198u);
+    psm_clock_step=0u;
+    assert(r[CLEAN_AMPDU_IF_SHM+1u]==CLEAN_AMPDU_IF_RECORDS);
+    for (uint32_t i=0u;i<CLEAN_AMPDU_IF_RECORDS;++i) {
+        const uint16_t *row=r+CLEAN_AMPDU_IF_SHM+4u+8u*i;
+        assert(row[1]==86u && row[2]==0x4122u && row[3]==0x0a42u &&
+               row[4]==0x102u && row[5]==86u && row[6]==0x20c0u && row[7]==events);
+        if (i) assert((uint16_t)(row[0]-row[-8])>=32u);
+    }
+    uint16_t stamp=r[CLEAN_AMPDU_IF_SHM+4u];
+    assert(psm_run(r,0,AMPDU_IF_ENTER)==198u &&
+           r[CLEAN_AMPDU_IF_SHM+4u]==stamp);
+    r[CLEAN_AMPDU_IF_SHM+1u]=0u;
+    assert(psm_run(r,0,AMPDU_IF_ENTER)==198u);
+    assert(r[CLEAN_AMPDU_IF_SHM]==0x8001u && r[CLEAN_AMPDU_IF_SHM+1u]==1u);
+    r[CLEAN_AMPDU_IF_SHM]=1u;
+    r[CLEAN_AMPDU_IF_SHM+1u]=0u;
+    psm_clock_step=1u;
+    assert(psm_run(r,(int)events,AMPDU_IF_BODY)==163u);
+    psm_clock_step=0u;
+    assert(r[CLEAN_AMPDU_IF_SHM]==2u &&
+           r[CLEAN_AMPDU_IF_SHM+1u]==CLEAN_AMPDU_IF_RECORDS && r[0x1780u]==65535u);
+    uint32_t end=ACK_PROGRAM_END;
+#if CLEAN_RX_AMPDU_INTERFACE >= 3
+    end=AMPDU_IF_EARLY;
+    uint32_t steps;
+    r[CLEAN_SHM_FRAME+2u]=0x0f00u;
+    r[CLEAN_AMPDU_IF_SHM]=1u;
+    r[0x100du]=0x1922u;
+    uint32_t pending=(1u<<6u)|(1u<<3u);
+    assert(receive_run(r,&pending,AMPDU_IF_EARLY,&steps)==197u);
+    assert(!(pending&(1u<<6u)) && (pending&(1u<<3u)));
+    r[0x100du]=0x1822u;
+    r[0x1780u]=1u;
+    pending=(1u<<6u)|(1u<<3u);
+    assert(receive_run(r,&pending,RX_COMPLETE,&steps)==262u);
+    assert(pending&(1u<<6u));
+    uint16_t early[0x1800]={0};
+    early[CLEAN_SHM_FRAME+1u]=0xfc00u;
+    early[CLEAN_SHM_FRAME+2u]=0x0f00u;
+    early[CLEAN_AMPDU_IF_SHM]=1u;
+    early[0x100cu]=86u;
+    early[0x100du]=0x1922u;
+    early[0x100eu]=0x0a41u;
+    assert(psm_run(early,0,AMPDU_IF_GOOD)==130u);
+    assert(early[CLEAN_AMPDU_PROBE_SHM]==1u &&
+           early[CLEAN_AMPDU_PROBE_SHM+5u]==0u &&
+           early[CLEAN_AMPDU_IF_SHM]==CLEAN_RX_AMPDU_INTERFACE);
+    early[CLEAN_AMPDU_PROBE_SHM]=2u;
+    early[0x1009u]=2u;
+    early[0x100cu]=82u;
+    early[0x100du]=0x4000u;
+    assert(psm_run(early,0,AMPDU_TRACE_BAD)==263u);
+    assert(early[CLEAN_AMPDU_PROBE_SHM]==2u &&
+           early[CLEAN_AMPDU_IF_SHM+132u]==82u &&
+           early[CLEAN_AMPDU_IF_SHM+137u]==2u);
+    for (uint32_t i=0u;i<44u;++i)
+        assert(early[CLEAN_AMPDU_IF_SHM+138u+i]==early[CLEAN_SHM_FRAME+i]);
+#endif
+    for (uint32_t pc=AMPDU_IF_PREFIX;pc<end;++pc) {
+        uint64_t w=instruction(pc);
+        uint32_t op=(uint32_t)(w>>39u), d=(uint32_t)w&0x1fffu;
+        assert(op>=0x400u || d<0x1000u || d>=0x1780u);
+        assert((op&0x7e0u)!=0x780u);
+    }
+    puts("PSM aggregate interface: passive records, nonclearing events, clock wrap, bounded timeout and one-shot commits pass; NOT RF");
+#endif
+}
+
 int main(void) {
+    aggregate_interface_trace();
+    aggregate_probe_trace();
     transmit_cleanup();
     ht_qos_acknowledgements();
     ack_capture_evidence();

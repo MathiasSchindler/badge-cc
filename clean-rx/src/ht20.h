@@ -5,6 +5,7 @@
 #include "mac.h"
 #include "tx_diag.h"
 #include "unicast.h"
+#include "block_ack.h"
 
 #ifndef CLEAN_RX_HT_PROBE
 #define CLEAN_RX_HT_PROBE 0
@@ -34,12 +35,23 @@ _Static_assert(CLEAN_RX_HT_CLEAR_SIG_CRC == 0 ||
 #define CLEAN_HT_AMSDU_VERSION 2u
 #define CLEAN_HT_ACK_VERSION 3u
 #define CLEAN_HT_CLOCKED_VERSION 4u
+#define CLEAN_HT_AMPDU_PROBE_VERSION 5u
+#define CLEAN_HT_AMPDU_PROBE_TX_MODE 30u
+#define CLEAN_HT_AMPDU_PROBE_RX_MODE 31u
+#define CLEAN_HT_AMPDU_PROBE_MPDU 80u
+#define CLEAN_HT_AMPDU_PROBE_SLOT_BYTES (8u + CLEAN_HT_AMPDU_PROBE_MPDU)
+#define CLEAN_HT_AMPDU_PROBE_COUNT 3u
+#define CLEAN_HT_AMPDU_PROBE_BYTES (CLEAN_HT_AMPDU_PROBE_COUNT * (4u + CLEAN_HT_AMPDU_PROBE_MPDU))
+#define CLEAN_HT_AMPDU_PROBE_TX_BYTES (6u + CLEAN_HT_AMPDU_PROBE_BYTES)
+#define CLEAN_HT_AMPDU_PROBE_STORAGE ((CLEAN_HT_DATA_HEADER + CLEAN_HT_AMPDU_PROBE_TX_BYTES + 3u) & ~3u)
 #define CLEAN_HT_DATA_HEADER 8u
 #define CLEAN_HT_DATA_STORAGE (CLEAN_HT_DATA_HEADER + CLEAN_TX_STORAGE_BYTES)
 #define CLEAN_HT_DATA_MAX_MPDU (CLEAN_RX_HT_RX ? CLEAN_AMSDU_MPDU_BYTES : CLEAN_MTU_MAX_BYTES)
 #define CLEAN_RX_HT20 0x80u
 
 _Static_assert(CLEAN_RX_HT_DATA == 0 || CLEAN_RX_HT_DATA == 1, "HT data build gate");
+_Static_assert(!CLEAN_RX_AMPDU_PROBE || CLEAN_RX_HT_DATA,
+               "Aggregate hardware probing requires the finite HT payload API");
 _Static_assert(CLEAN_TX_BUFFER_ADDR + CLEAN_HT_DATA_STORAGE <= 0x80000u,
                "Versioned HT staging must fit controller SRAM");
 
@@ -75,6 +87,25 @@ typedef struct {
     uint32_t template_crc_zeroed;
 } clean_ht_diag_t;
 
+typedef struct {
+    uint32_t magic;
+    uint16_t count, outcome, length, status1, status2, phy, time_lo, time_hi;
+    uint8_t raw[272];
+} clean_ampdu_probe_trace_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t mode, count, prefix_tsf, prefix_count;
+    uint16_t record[CLEAN_AMPDU_IF_RECORDS][8];
+    uint16_t tail[6];
+    uint8_t tail_raw[88];
+} clean_ampdu_interface_t;
+
+_Static_assert(sizeof(clean_ampdu_interface_t) == 4u + 2u*CLEAN_AMPDU_IF_WORDS,
+               "Aggregate interface trace layout");
+_Static_assert(sizeof(clean_ampdu_probe_trace_t) == 4u + 2u * CLEAN_AMPDU_PROBE_WORDS &&
+               CLEAN_HT_AMPDU_PROBE_COUNT * CLEAN_HT_AMPDU_PROBE_SLOT_BYTES + 8u <= 272u,
+               "Aggregate probe must retain three raw MPDUs and their status words");
 _Static_assert(sizeof(clean_ht_early_t) == 2u * CLEAN_HT_EARLY_WORDS,
                "Early HT PSM trace layout");
 _Static_assert(sizeof(clean_ht_tx_t) == 8u && sizeof(clean_ht_diag_t) == 36u,
@@ -167,6 +198,111 @@ static inline int clean_ht20_rx_sig_valid(const volatile uint8_t sig[6], uint32_
     return 1;
 }
 
+static inline int clean_ht_ampdu_probe_sig(uint8_t sig[6], uint32_t mcs) {
+    if (!clean_ht20_sig(sig, CLEAN_HT_AMPDU_PROBE_BYTES, mcs)) return 0;
+    sig[3] |= 8u;
+    sig[4] = sig[5] = 0u;
+    uint8_t crc = clean_ht20_crc(sig);
+    for (uint32_t i = 0u; i < 8u; ++i)
+        sig[(34u+i)/8u] |= (uint8_t)(((crc >> (7u-i)) & 1u) << ((34u+i)&7u));
+    return 1;
+}
+
+static inline int clean_ht_ampdu_probe_sig_valid(const volatile uint8_t sig[6],
+                                                 uint32_t length) {
+    uint8_t expected[6];
+    if (length != CLEAN_HT_AMPDU_PROBE_BYTES ||
+        !clean_ht_ampdu_probe_sig(expected,sig[0])) return 0;
+    for (uint32_t i = 0u; i < sizeof(expected); ++i)
+        if (sig[i] != expected[i]) return 0;
+    return 1;
+}
+
+static inline int clean_ht_ampdu_probe_mpdu(uint8_t m[80], const uint8_t nonce[14],
+                                            uint32_t sequence) {
+    if (nonce[13] >= 8u || sequence >= CLEAN_HT_AMPDU_PROBE_COUNT) return 0;
+    for (uint32_t i = 0u; i < CLEAN_HT_AMPDU_PROBE_MPDU; ++i) m[i] = 0u;
+    m[0] = 0x88u; m[1] = 2u;
+    m[4] = m[10] = m[16] = 2u;
+    for (uint32_t i = 0u; i < 5u; ++i) {
+        m[5u+i] = nonce[i];
+        m[11u+i] = m[17u+i] = nonce[i];
+    }
+    /* Keep receiver and transmitter distinct even for repeated challenge bytes. */
+    m[15] ^= 0x80u; m[21] ^= 0x80u;
+    m[22] = (uint8_t)(sequence << 4u);
+    m[24] = 0x60u;
+    for (uint32_t i = 0u; i < 14u; ++i) m[26u+i] = nonce[i];
+    static const uint8_t marker[8] = {'A','M','P','D','U','-','D','2'};
+    for (uint32_t i = 0u; i < sizeof(marker); ++i) m[40u+i] = marker[i];
+    for (uint32_t i = 48u; i < 76u; ++i) m[i] = (uint8_t)(nonce[i%14u] ^ i ^ sequence);
+    uint32_t fcs = clean_mac_fcs(m,76u);
+    for (uint32_t i = 0u; i < 4u; ++i) m[76u+i] = (uint8_t)(fcs >> (8u*i));
+    return 1;
+}
+
+static inline int clean_ht_ampdu_probe_sequence(const uint8_t *m, uint32_t length,
+                                                const uint8_t nonce[14]) {
+    if (length != CLEAN_HT_AMPDU_PROBE_MPDU || (m[22] & 15u)) return -1;
+    uint32_t sequence = ((uint32_t)m[22] | ((uint32_t)m[23] << 8u)) >> 4u;
+    uint8_t expected[80];
+    if (!clean_ht_ampdu_probe_mpdu(expected,nonce,sequence)) return -1;
+    for (uint32_t i = 0u; i < sizeof(expected); ++i)
+        if (m[i] != expected[i]) return -1;
+    return (int)sequence;
+}
+
+static inline uint32_t clean_ht_ampdu_probe_trace_mask(const clean_ampdu_probe_trace_t *trace,
+                                                       const uint8_t nonce[14]) {
+    if (trace->magic != CLEAN_AMPDU_PROBE_MAGIC || !trace->count ||
+        trace->count > CLEAN_HT_AMPDU_PROBE_COUNT ||
+        ((trace->phy & 3u) != 2u &&
+         !(CLEAN_RX_AMPDU_INTERFACE >= 3 && (trace->status1 & 0x100u) &&
+           (trace->status2 & 0x200u))) ||
+        trace->length != CLEAN_PLCP_BYTES + CLEAN_HT_AMPDU_PROBE_MPDU) return 0u;
+    uint32_t mask = 0u;
+    for (uint32_t i = 0u; i < trace->count; ++i) {
+        const uint8_t *raw = trace->raw + i * CLEAN_HT_AMPDU_PROBE_SLOT_BYTES;
+        if (raw[2u] != nonce[13] ||
+            !clean_ht_ampdu_probe_sig_valid(raw+2u,CLEAN_HT_AMPDU_PROBE_BYTES)) continue;
+        int sequence = clean_ht_ampdu_probe_sequence(raw+8u,CLEAN_HT_AMPDU_PROBE_MPDU,nonce);
+        if (sequence >= 0) mask |= 1u << (uint32_t)sequence;
+    }
+    return mask;
+}
+
+static inline int clean_ht_ampdu_probe_frame(uint8_t packet[CLEAN_HT_AMPDU_PROBE_STORAGE],
+                                             const uint8_t nonce[14]) {
+    if (nonce[13] >= 8u) return 0;
+    for (uint32_t i = 0u; i < CLEAN_HT_AMPDU_PROBE_STORAGE; ++i) packet[i] = 0u;
+    if (!clean_ht_ampdu_probe_sig(packet+CLEAN_HT_DATA_HEADER,nonce[13])) return 0;
+    packet[0] = CLEAN_HT_AMPDU_PROBE_VERSION;
+    packet[2] = nonce[13];
+    packet[4] = (uint8_t)CLEAN_HT_AMPDU_PROBE_BYTES;
+    packet[5] = (uint8_t)(CLEAN_HT_AMPDU_PROBE_BYTES >> 8u);
+    for (uint32_t i = 0u; i < CLEAN_HT_AMPDU_PROBE_COUNT; ++i) {
+        uint8_t *delimiter = packet + CLEAN_HT_DATA_HEADER + 6u + i*84u;
+        delimiter[0] = 0u; delimiter[1] = 5u;
+        delimiter[2] = clean_ampdu_delimiter_crc(delimiter);
+        delimiter[3] = 0x4eu;
+        if (!clean_ht_ampdu_probe_mpdu(delimiter+4u,nonce,i)) return 0;
+    }
+    return 1;
+}
+
+static inline int clean_ht_ampdu_probe_command(uint32_t cmd,
+                                               const volatile uint8_t *packet) {
+    if (!CLEAN_RX_AMPDU_PROBE ||
+        cmd != (CLEAN_HT_DATA_CMD | clean_tx_length_bits(CLEAN_HT_AMPDU_PROBE_TX_BYTES) |
+                (1u << 19u))) return 0;
+    uint8_t expected[CLEAN_HT_AMPDU_PROBE_STORAGE], nonce[14];
+    for (uint32_t i = 0u; i < 14u; ++i) nonce[i] = packet[44u+i];
+    if (!clean_ht_ampdu_probe_frame(expected,nonce)) return 0;
+    for (uint32_t i = 0u; i < sizeof(expected); ++i)
+        if (packet[i] != expected[i]) return 0;
+    return 1;
+}
+
 static inline uint8_t clean_ht_data_byte(uint32_t at, const uint8_t nonce[14]);
 static inline uint8_t clean_ht_amsdu_byte(uint32_t at, const uint8_t nonce[14]);
 static inline uint8_t clean_ht_ack_byte(uint32_t at, const uint8_t nonce[14]);
@@ -217,7 +353,8 @@ static inline int clean_ht_payload_command_valid(uint32_t cmd, uint32_t enabled,
 
 static inline int clean_ht_data_command_valid(uint32_t cmd, uint32_t enabled,
         uint32_t station, const volatile uint8_t *packet) {
-    return !station && clean_ht_payload_command_valid(cmd, enabled, 0u, packet);
+    return !station && enabled && (clean_ht_ampdu_probe_command(cmd,packet) ||
+        clean_ht_payload_command_valid(cmd, enabled, 0u, packet));
 }
 
 static inline int clean_ht_clocked_command_valid(uint32_t cmd, uint32_t enabled,

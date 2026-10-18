@@ -7,7 +7,7 @@ CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
 	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u -DLIVE_USB_CLEAN
 CFLAGS += $(EXTRA_CFLAGS)
-SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c \
+SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb_hw.c \
 	$(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
@@ -21,7 +21,7 @@ HEADERS := $(wildcard *.h ../src/*.h $(ROOT)/src/tools/diagnostics_logic.h \
 	../peer/frame.h ../peer/protocol.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test)
-LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c \
+LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/tools/diagnostics_logic.c
 
@@ -70,9 +70,9 @@ $(ROOT)/build/host-tools/bin2uf2:
 $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
 
-$(BUILD)/collector: collector.c frames.h station.h ../src/wpa2_crypto.c ../src/mac.c ../src/tx_diag.h $(BUILD)/build_id.h
+$(BUILD)/collector: collector.c frames.h station.h ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
 	cc -std=c11 -Wall -Wextra -Werror -O2 $(EXTRA_CFLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
-		$< ../src/wpa2_crypto.c ../src/mac.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
+		$< ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
 test: $(NATIVE_TESTS)
@@ -89,8 +89,8 @@ test: $(NATIVE_TESTS)
 
 $(NATIVE_TESTS): $(HEADERS) $(ROOT)/src/tools/diagnostics_logic.c $(BUILD)/build_id.h | $(BUILD)
 
-$(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../src/wpa2_crypto.c ../src/wpa2_crypto.h ../src/mac.c
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined wpa2_test.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c \
+$(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../src/wpa2_crypto.c ../src/wpa2_crypto.h ../src/mac.c ../src/block_ack.c
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined wpa2_test.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 		$(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/secret_test: secret_test.c $(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb.h \
@@ -105,6 +105,6 @@ $(BUILD)/loader_strict_test: $(LOADER_TEST_SOURCES) | $(BUILD)
 $(BUILD)/loader_test: $(LOADER_TEST_SOURCES) | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O2 $(EXTRA_CFLAGS) $(LOADER_TEST_SOURCES) -o $@
 
-$(BUILD)/ht20_test: ht20_test.c ../src/mac.c $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
+$(BUILD)/ht20_test: ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
-		ht20_test.c ../src/mac.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
+		ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c -o $@

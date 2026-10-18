@@ -281,7 +281,8 @@ static int receive(clean_mac_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now
     uint8_t frag = m[22] & 15u, more = m[1] & 4u;
     uint32_t payload = n - header - 4u;
     int aggregate = qos && (m[24] & 128u);
-    if (qos && (m[24] & 0x60u) >= 0x40u)
+    if (qos && (m[24] & 0x60u) >= 0x40u &&
+        !(qos == 2 && (m[24] & 0x60u) == 0x60u))
         return rx_error(s, CLEAN_MAC_UNSUPPORTED);
     if ((m[0] == 0x48u || m[0] == 0xc8u) && (payload || frag || more || aggregate))
         return rx_error(s, CLEAN_MAC_INVALID);
@@ -384,6 +385,15 @@ int clean_qos_rx(clean_qos_rx_t *s, const uint8_t *m, uint32_t n, uint32_t now) 
 int clean_qos_rx_authenticated(clean_qos_rx_t *s, const uint8_t *m,
                                uint32_t n, uint32_t now) {
     return qos_receive(s, m, n, now, 1);
+}
+
+int clean_qos_rx_ba_authenticated(clean_qos_rx_t *s, const uint8_t *m,
+                                  uint32_t n, uint32_t now) {
+    clean_qos_rx_expire(s, now);
+    if (n < 30u || !clean_mac_valid(m, n)) return CLEAN_MAC_INVALID;
+    if (m[0] != 0x88u || (m[22] & 15u) || (m[1] & 4u) || (m[24] & 128u))
+        return CLEAN_MAC_UNSUPPORTED;
+    return receive(&s->tid[m[24] & 15u], m, n, now, 1, 2);
 }
 
 int clean_amsdu_open(clean_amsdu_t *s, const volatile uint8_t *body, uint32_t length) {

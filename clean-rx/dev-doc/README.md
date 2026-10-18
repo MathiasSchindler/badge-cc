@@ -20,6 +20,15 @@ firmware.
   measurements and experiment records moved out of the root tracker.
 - [Bounded EDCA implementation](EDCA_IMPLEMENTATION.md): controller policy,
   per-category access, native tests, paired RF matrix and remaining D2 gates.
+- [Bounded Block ACK software](BLOCK_ACK_IMPLEMENTATION.md): agreement,
+  delimiter-stream, ciphertext reordering and WPA2 native integration;
+  outstanding PSM aggregate capture and SIFS-timed BA requirements.
+- [Finite A-MPDU radio investigation](AMPDU_RADIO_INVESTIGATION.md):
+  delimiter-stripped first-MPDU capture, bounded diagnostic evidence,
+  unsuccessful continuation trials and remaining aggregate/EOF requirements.
+- [Next-MPDU/aggregate-terminal interface](AMPDU_INTERFACE_INVESTIGATION.md):
+  separate early/terminal events, reproducible two-MPDU capture, preserved
+  short final frame, passive timelines and remaining boundary/EOF limits.
 - [AP authentication and RX staging investigation](AP_AUTHENTICATION_INVESTIGATION.md):
   independently observed missing replies, timing/rate controls, bounded
   station receive FIFO, legacy regressions, matched-amplitude HT replays

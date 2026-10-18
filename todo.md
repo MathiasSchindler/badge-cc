@@ -120,8 +120,11 @@ Raw HT20, extended reception, per-TID receive/CCMP state, gated responses
 and bounded per-category access exist. Association-response/runtime peer
 profiling and bounded station RX staging are implemented. Opt-in non-HT
 WMM negotiation, AP-derived EDCA policy, protected QoS exchanges and bounded
-protected A-MSDU receive software are implemented. Aggregate OTA qualification
-and Block ACK/A-MPDU/reordering integration remain open. Receive completion/
+protected A-MSDU receive software are implemented. Bounded Block ACK agreement,
+A-MPDU stream parsing and ciphertext reordering are native-tested with WPA2
+delivery. Partial multi-MPDU radio capture is demonstrated in the finite
+diagnostic; complete live aggregate reception, Immediate BA and station/controller integration
+remain open. Receive completion/
 discard handling, radio override ownership and atomic backoff publication
 have been corrected and regression-tested. Local-AP reply delivery and
 intermittent HT receive corruption remain qualification limits.
@@ -136,6 +139,12 @@ tracks isolated PHY/gain controls and TX-cleanup verification.
 The [controlled independent HT receive investigation](clean-rx/dev-doc/CONTROLLED_HT_RECEIVE.md)
 verifies small-frame vendor-to-clean MCS0/MCS7 reception on both badges;
 receive reliability and mandatory HT MAC integration remain open.
+See the [aggregate radio investigation](clean-rx/dev-doc/AMPDU_RADIO_INVESTIGATION.md)
+for current capture evidence and remaining hardware gates.
+The [next-MPDU interface investigation](clean-rx/dev-doc/AMPDU_INTERFACE_INVESTIGATION.md)
+records the latest diagnostic progress and unresolved terminal-frame boundary.
+The [Block ACK implementation record](clean-rx/dev-doc/BLOCK_ACK_IMPLEMENTATION.md)
+separates tested software from the remaining live receive/response work.
 
 - [ ] Complete HT capability/operation negotiation, mixed-mode TX/RX, airtime
   and MCS configuration while preserving explicit legacy fallback.

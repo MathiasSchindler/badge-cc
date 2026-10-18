@@ -895,12 +895,16 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     uint16_t ack_sent = shm_read16(CLEAN_ACK_SENT);
     uint16_t cts_sent = shm_read16(CLEAN_CTS_SENT);
     if (ht_probe) {
+        uint32_t aggregate_probe = ht_probe == 2u && CLEAN_RX_AMPDU_PROBE &&
+            ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_AMPDU_PROBE_VERSION;
+        uint32_t ht_length = total_len - CLEAN_PLCP_BYTES;
         if (!(ht_probe == 2u ? CLEAN_RX_HT_DATA : CLEAN_RX_HT_PROBE) ||
-            !clean_ht20_sig_valid(tx_buf, total_len - CLEAN_PLCP_BYTES) ||
-            !clean_ht20_tx_controls(&ht_tx, total_len - CLEAN_PLCP_BYTES, tx_buf[0]))
+            !(aggregate_probe ? clean_ht_ampdu_probe_sig_valid(tx_buf, ht_length) :
+                                clean_ht20_sig_valid(tx_buf, ht_length)) ||
+            !clean_ht20_tx_controls(&ht_tx, ht_length, tx_buf[0]))
             return fail(0x83u, FW_TX_BUF_ADDR, total_len);
         phyctl1 = clean_ht20_rates[tx_buf[0]].phyctl1;
-        ofdm_airtime = clean_ht20_airtime_us(total_len - CLEAN_PLCP_BYTES, tx_buf[0]);
+        ofdm_airtime = clean_ht20_airtime_us(ht_length, tx_buf[0]);
     } else if (is_ofdm) {
         int rate = clean_ofdm_rate_index(tx_buf[0]);
         if (rate < 0 || !clean_ofdm_plcp_valid(tx_buf, total_len - CLEAN_PLCP_BYTES))
@@ -1258,6 +1262,16 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
 
     for (uint32_t i = 0u; i < 32u; ++i)  shm_write16(0x600u + i, 0u);
     for (uint32_t i = 0u; i < 480u; ++i) shm_write16(0x620u + i, 0u);
+#if CLEAN_RX_AMPDU_PROBE
+    for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i)
+        shm_write16(CLEAN_AMPDU_PROBE_SHM + i, 0u);
+    ((volatile clean_ampdu_probe_trace_t *)CLEAN_AMPDU_PROBE_ADDR)->magic = 0u;
+#endif
+#if CLEAN_RX_AMPDU_INTERFACE
+    for (uint32_t i = 0u; i < CLEAN_AMPDU_IF_WORDS; ++i)
+        shm_write16(CLEAN_AMPDU_IF_SHM + i, 0u);
+    ((volatile clean_ampdu_interface_t *)CLEAN_AMPDU_IF_ADDR)->magic = 0u;
+#endif
     volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
     for (uint32_t i = 0u; i < 4u; ++i) tail[i] = 0u;
     volatile uint8_t *ht_bytes = (volatile uint8_t *)HT_RX;
@@ -2146,6 +2160,20 @@ void cyw43_main(void) {
     rx_dma_stop();
 
     if (station_hw) snapshot_dcf_trace();
+#if CLEAN_RX_AMPDU_PROBE
+    volatile clean_ampdu_probe_trace_t *aggregate =
+        (volatile clean_ampdu_probe_trace_t *)CLEAN_AMPDU_PROBE_ADDR;
+    volatile uint16_t *aggregate_words = (volatile uint16_t *)(CLEAN_AMPDU_PROBE_ADDR + 4u);
+    for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i)
+        aggregate_words[i] = shm_read16(CLEAN_AMPDU_PROBE_SHM + i);
+    aggregate->magic = CLEAN_AMPDU_PROBE_MAGIC;
+#endif
+#if CLEAN_RX_AMPDU_INTERFACE
+    volatile uint16_t *interface_words = (volatile uint16_t *)(CLEAN_AMPDU_IF_ADDR + 4u);
+    for (uint32_t i = 0u; i < CLEAN_AMPDU_IF_WORDS; ++i)
+        interface_words[i] = shm_read16(CLEAN_AMPDU_IF_SHM + i);
+    ((volatile clean_ampdu_interface_t *)CLEAN_AMPDU_IF_ADDR)->magic = CLEAN_AMPDU_IF_MAGIC;
+#endif
     if (station_mac) {
         volatile clean_auth_failure_t *failure =
             (volatile clean_auth_failure_t *)CLEAN_AUTH_FAILURE_ADDR;

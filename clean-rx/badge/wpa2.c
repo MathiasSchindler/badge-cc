@@ -178,14 +178,16 @@ static int protected_reply(const clean_wpa_t *s, const volatile uint8_t *plain,
     return !different;
 }
 
-int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t now) {
+static int protected_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
+                              uint32_t now, int block_ack) {
     clean_wpa_rx_expire(s,now);
     if (!s->installed || s->error || n<44u || !clean_frame_valid(m,n) ||
         (m[0]!=8u && m[0]!=0x88u) || (m[1]&0xc3u)!=0x42u ||
         !wpa_equal(m+4u,s->mac,6u) || !wpa_equal(m+10u,s->bssid,6u)) return 0;
     uint32_t h=m[0]==0x88u?26u:24u;
     int aggregate=h==26u && (m[24]&128u);
-    if (n<h+20u || (h==26u && (m[24]&0x60u)>=0x40u) ||
+    if (n<h+20u || (h==26u && (m[24]&0x60u)>=0x40u &&
+                   !(block_ack && (m[24]&0x60u)==0x60u)) ||
         (aggregate && (!s->rx_amsdu || (m[1]&4u) || (m[22]&15u))))
         return failure(s,WPA_FORMAT);
     const uint8_t *c=m+h;
@@ -224,7 +226,9 @@ int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t n
             return failure(s,WPA_FRAGMENT);
     }
     badger_bytes_store_u32(s->rx_mpdu+h+payload,diag_crc32(s->rx_mpdu,h+payload));
-    int result=tid==16u?
+    int result=block_ack?
+        clean_qos_rx_ba_authenticated(&s->rx_qos,s->rx_mpdu,h+payload+4u,now):
+        tid==16u?
         clean_mac_rx_authenticated(&s->rx_mac,s->rx_mpdu,h+payload+4u,now):
         clean_qos_rx_authenticated(&s->rx_qos,s->rx_mpdu,h+payload+4u,now);
     if (result<0) return failure(s,WPA_FRAGMENT);
@@ -248,4 +252,63 @@ int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t n
     }
     if (matched) { ++s->protected_rx; s->stage=WPA_PROTECTED; }
     return matched;
+}
+
+int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t now) {
+    return protected_receive(s,m,n,now,0);
+}
+
+static int ba_protected_sink(void *context, const uint8_t *mpdu, uint32_t length,
+                              uint32_t now) {
+    clean_wpa_t *s = context;
+    if (!s->installed || s->error) return -1;
+    int result = protected_receive(s,mpdu,length,now,1);
+    return result < 0 ? -1 : 1;
+}
+
+static int ba_identity(const clean_wpa_t *s, const clean_ba_rx_t *ba) {
+    return s->installed && !s->error && wpa_equal(s->mac,ba->own,6u) &&
+           wpa_equal(s->bssid,ba->peer,6u);
+}
+
+int clean_wpa_ba_receive(clean_wpa_t *s, clean_ba_rx_t *ba, const uint8_t *mpdu,
+                         uint32_t length, uint32_t now) {
+    if (!ba_identity(s,ba) || !mpdu || length < 46u || !(mpdu[1]&64u))
+        return CLEAN_BA_INVALID;
+    return clean_ba_receive(ba,mpdu,length,now,ba_protected_sink,s);
+}
+
+int clean_wpa_ba_poll(clean_wpa_t *s, clean_ba_rx_t *ba, uint32_t now) {
+    if (!ba_identity(s,ba)) return CLEAN_BA_INVALID;
+    return clean_ba_poll(ba,now,ba_protected_sink,s);
+}
+
+int clean_wpa_ba_bar(clean_wpa_t *s, clean_ba_rx_t *ba, const uint8_t *mpdu,
+                     uint32_t length, uint32_t now) {
+    if (!ba_identity(s,ba)) return CLEAN_BA_INVALID;
+    return clean_ba_bar(ba,mpdu,length,now,ba_protected_sink,s);
+}
+
+typedef struct {
+    clean_wpa_t *wpa;
+    clean_ba_rx_t *ba;
+} wpa_ampdu_context_t;
+
+static int ampdu_protected_sink(void *context, const uint8_t *mpdu,
+                                uint32_t length, uint32_t now) {
+    wpa_ampdu_context_t *c = context;
+    int result = clean_wpa_ba_receive(c->wpa,c->ba,mpdu,length,now);
+    if (result == CLEAN_BA_BUSY) return 0;
+    return result == CLEAN_BA_ACCEPTED || result == CLEAN_BA_DUPLICATE ||
+           result == CLEAN_BA_OLD ? 1 : -1;
+}
+
+int clean_wpa_ampdu_feed(clean_wpa_t *s, clean_ba_rx_t *ba, clean_ampdu_stream_t *stream,
+                         const uint8_t *bytes, uint32_t length, uint32_t *used,
+                         uint32_t now) {
+    if (!used) return CLEAN_BA_INVALID;
+    *used = 0u;
+    if (!ba_identity(s,ba)) return CLEAN_BA_INVALID;
+    wpa_ampdu_context_t context = {.wpa=s,.ba=ba};
+    return clean_ampdu_feed(stream,bytes,length,used,ampdu_protected_sink,&context,now);
 }

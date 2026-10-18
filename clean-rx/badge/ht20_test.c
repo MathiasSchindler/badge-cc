@@ -5,6 +5,84 @@
 #include "../src/ht20.h"
 #include "station.h"
 
+static void aggregate_probe_tests(void) {
+    uint8_t packet[CLEAN_HT_AMPDU_PROBE_STORAGE], nonce[14]={1u,2u,3u,4u,5u};
+    uint32_t command=CLEAN_HT_DATA_CMD |
+        clean_tx_length_bits(CLEAN_HT_AMPDU_PROBE_TX_BYTES) | (1u << 19u);
+    for (uint32_t mcs=0u;mcs<8u;++mcs) {
+        nonce[13]=(uint8_t)mcs;
+        assert(clean_ht_ampdu_probe_frame(packet,nonce));
+        assert(clean_ht_ampdu_probe_sig_valid(packet+8u,252u));
+        assert(!clean_ht20_sig_valid(packet+8u,252u));
+        assert(!clean_ht20_rx_sig_valid(packet+8u,252u));
+        assert(clean_ht_data_command_valid(command,1u,0u,packet)==CLEAN_RX_AMPDU_PROBE);
+        assert(!clean_ht_data_command_valid(command,0u,0u,packet));
+        assert(!clean_ht_data_command_valid(command,1u,1u,packet));
+        for (uint32_t i=0u;i<3u;++i) {
+            const uint8_t *delimiter=packet+14u+i*84u;
+            assert(delimiter[0]==0u && delimiter[1]==5u && delimiter[3]==0x4eu);
+            assert(delimiter[2]==clean_ampdu_delimiter_crc(delimiter));
+            assert(clean_mac_valid(delimiter+4u,80u));
+            assert(clean_ht_ampdu_probe_sequence(delimiter+4u,80u,nonce)==(int)i);
+            assert(memcmp(delimiter+8u,delimiter+14u,6u));
+        }
+        clean_ampdu_probe_trace_t trace = {.magic=CLEAN_AMPDU_PROBE_MAGIC,
+            .length=86u,.phy=2u};
+        for (uint32_t i=0u;i<3u;++i) {
+            uint8_t *raw=trace.raw+i*CLEAN_HT_AMPDU_PROBE_SLOT_BYTES;
+            memcpy(raw+2u,packet+8u,6u);
+            memcpy(raw+8u,packet+18u+i*84u,80u);
+            trace.count=(uint16_t)(i+1u);
+            assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==(1u << (i+1u))-1u);
+        }
+        trace.count=4u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        trace.count=0u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        trace.count=3u;
+        trace.magic=0x31504441u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        trace.magic=CLEAN_AMPDU_PROBE_MAGIC;
+        trace.length=258u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        trace.length=86u;
+        trace.phy=1u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        trace.phy=1u;
+        trace.status1=0x1922u;
+        trace.status2=0x0a41u;
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==
+               (CLEAN_RX_AMPDU_INTERFACE>=3 ? 7u : 0u));
+        trace.status1=0u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        trace.phy=2u;
+        trace.raw[8u]^=1u;
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==6u);
+        trace.raw[8u]^=1u;
+        trace.raw[CLEAN_HT_AMPDU_PROBE_SLOT_BYTES+2u]^=1u;
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==5u);
+        memcpy(trace.raw+CLEAN_HT_AMPDU_PROBE_SLOT_BYTES,trace.raw,
+               CLEAN_HT_AMPDU_PROBE_SLOT_BYTES);
+        memcpy(trace.raw+2u*CLEAN_HT_AMPDU_PROBE_SLOT_BYTES,trace.raw,
+               CLEAN_HT_AMPDU_PROBE_SLOT_BYTES);
+        assert(clean_ht_ampdu_probe_trace_mask(&trace,nonce)==1u);
+        trace.raw[8u+26u]^=1u;
+        trace.count=1u;
+        assert(!clean_ht_ampdu_probe_trace_mask(&trace,nonce));
+        for (uint32_t i=0u;i<sizeof(packet);++i) {
+            packet[i]^=1u;
+            assert(!clean_ht_ampdu_probe_command(command,packet));
+            packet[i]^=1u;
+        }
+        for (uint32_t i=0u;i<32u;++i)
+            assert(!clean_ht_ampdu_probe_command(command^(1u << i),packet));
+        assert(!packet[sizeof(packet)-1u] && !packet[sizeof(packet)-2u]);
+    }
+    nonce[13]=8u;
+    assert(!clean_ht_ampdu_probe_frame(packet,nonce));
+    puts("Finite A-MPDU probe: three full-FCS MPDUs, delimiters, HT-SIG, strict build/count/profile gates; NOT RF");
+}
+
 static void packet_tests(void) {
     static const uint16_t sizes[] = {28u,29u,60u,88u,512u,1528u,2026u,2027u,2332u};
     uint8_t packet[CLEAN_HT_DATA_STORAGE], nonce[14] = {1u,2u,3u,4u,5u,6u,7u,8u,9u,10u,11u};
@@ -693,6 +771,7 @@ static void monitor_tests(void) {
 }
 
 int main(void) {
+    aggregate_probe_tests();
     packet_tests();
     ack_packet_tests();
     ack_evidence_tests();

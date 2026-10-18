@@ -301,6 +301,78 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+    if (tx == CLEAN_HT_AMPDU_PROBE_TX_MODE || tx == CLEAN_HT_AMPDU_PROBE_RX_MODE) {
+        clean_ampdu_probe_trace_t trace;
+        memcpy(&trace,detail+CLEAN_AMPDU_PROBE_DETAIL,sizeof(trace));
+        int sig = trace.magic == CLEAN_AMPDU_PROBE_MAGIC && trace.count &&
+            (trace.phy & 3u) == 2u && trace.raw[2u] == nonce[13] &&
+            clean_ht_ampdu_probe_sig_valid(trace.raw+2u,CLEAN_HT_AMPDU_PROBE_BYTES);
+        uint32_t mask = clean_ht_ampdu_probe_trace_mask(&trace,nonce);
+        int single = mask && trace.count == 1u ?
+            clean_ht_ampdu_probe_sequence(trace.raw+8u,80u,nonce) : -1;
+        int completed = !usb_report_u32(detail+8u) && usb_report_u32(detail+36u)==10u;
+        int submitted = completed && usb_report_u32(detail+1092u)==1u &&
+            usb_report_u32(detail+1096u)==1u;
+        int received = completed && mask;
+        printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"mode\":\"ampdu-probe-%s\","
+               "\"channel\":%u,\"mcs\":%u,\"error\":%u,\"local_tx_submission\":%s,"
+               "\"fresh_radio_capture\":%s,\"terminal_aggregate_sig\":%s,"
+               "\"aggregate_observations\":%u,\"rxe_length\":%u,\"outcome\":%u,"
+               "\"status1\":%u,\"status2\":%u,\"phy\":%u,"
+               "\"subframe_status2\":[%u,%u,%u],"
+               "\"retained_subframe_bitmap\":%u,\"standalone_subframe\":%d,"
+               "\"chipcommon_id\":%u,\"actual_multi_mpdu_delivery\":false,"
+               "\"multi_mpdu_radio_capture\":%s,"
+               "\"immediate_ba\":false,\"ht_qualified\":false",
+               serial,USB_REPORT_BUILD_ID,
+               tx==CLEAN_HT_AMPDU_PROBE_TX_MODE?"tx":"rx",channel,nonce[13],
+               usb_report_u32(detail+8u),submitted?"true":"false",received?"true":"false",
+               sig?"true":"false",trace.count,trace.length,trace.outcome,
+               trace.status1,trace.status2,trace.phy,
+               trace.raw[264u]|((uint32_t)trace.raw[265u]<<8u),
+               trace.raw[266u]|((uint32_t)trace.raw[267u]<<8u),
+               trace.raw[268u]|((uint32_t)trace.raw[269u]<<8u),
+               mask,single,usb_report_u32(detail+680u),
+               received && (mask & (mask-1u)) ? "true" : "false");
+#if CLEAN_RX_AMPDU_INTERFACE
+        clean_ampdu_interface_t interface;
+        memcpy(&interface,detail+CLEAN_AMPDU_IF_DETAIL,sizeof(interface));
+        int valid=interface.magic==CLEAN_AMPDU_IF_MAGIC &&
+            (((interface.mode==1u || interface.mode==2u) &&
+              interface.count==CLEAN_AMPDU_IF_RECORDS) ||
+             (interface.mode==3u && interface.count && interface.count<=3u));
+        printf(",\"interface\":{\"valid\":%s,\"mode\":%u,\"count\":%u,"
+               "\"prefix_tsf\":%u,\"prefix_count\":%u,\"samples\":[",
+               valid?"true":"false",interface.mode,interface.count,
+               interface.prefix_tsf,interface.prefix_count);
+        uint32_t count=interface.magic==CLEAN_AMPDU_IF_MAGIC &&
+            interface.count<=CLEAN_AMPDU_IF_RECORDS ? interface.count : 0u;
+        for (uint32_t i=0u;i<count;++i) {
+            const uint16_t *r=interface.record[i];
+            printf("%s[%u,%u,%u,%u,%u,%u,%u,%u]",i?",":"",
+                (uint16_t)(r[0]-interface.prefix_tsf),r[1],r[2],r[3],r[4],r[5],r[6],r[7]);
+        }
+        uint8_t expected[CLEAN_HT_AMPDU_PROBE_MPDU];
+        uint32_t available=interface.tail[0]>=6u && interface.tail[0]<=86u ?
+            interface.tail[0]-6u : 0u, matched=0u, shifted=0u;
+        if (interface.magic==CLEAN_AMPDU_IF_MAGIC && interface.tail[5]==2u &&
+            clean_ht_ampdu_probe_mpdu(expected,nonce,2u)) {
+            while (matched<available && interface.tail_raw[8u+matched]==expected[matched])
+                ++matched;
+            while (shifted<available && shifted<76u &&
+                   interface.tail_raw[8u+shifted]==expected[4u+shifted]) ++shifted;
+        }
+        printf("],\"tail\":{\"rxe_length\":%u,\"status1\":%u,\"status2\":%u,"
+               "\"phy\":%u,\"elapsed_us\":%u,\"outcome\":%u,"
+               "\"matching_sequence2_bytes\":%u,\"matching_sequence2_shift4_bytes\":%u}}",
+               interface.tail[0],interface.tail[1],interface.tail[2],interface.tail[3],
+               interface.tail[5]==2u ?
+                   (uint16_t)(interface.tail[4]-interface.prefix_tsf) : 0u,
+               interface.tail[5],matched,shifted);
+#endif
+        puts("}");
+        return tx==CLEAN_HT_AMPDU_PROBE_TX_MODE ? submitted : received;
+    }
     if (tx == CLEAN_PEER_RX_MODE) {
         clean_ht_rx_t rx;
         clean_ht_diag_t diagnostic;
@@ -881,13 +953,15 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint8_t peer_mode = 0u;
+    int ampdu_probe = argc == 7 && (strcmp(argv[4],"--ht-ampdu-probe-tx")==0 ||
+                                   strcmp(argv[4],"--ht-ampdu-probe-rx")==0);
     int vendor_ht = argc == 7 && strcmp(argv[4], "--vendor-ht-rx") == 0;
     int ht_ack = argc == 7 && (strcmp(argv[4], "--ht-ack-tx") == 0 ||
                                strcmp(argv[4], "--ht-ack-clocked-tx") == 0 ||
                                strcmp(argv[4], "--ht-ack-rx") == 0);
     int ht_data = argc == 8 && (strcmp(argv[4], "--ht-data-tx") == 0 ||
                                 strcmp(argv[4], "--ht-data-rx") == 0);
-    int ht_probe = vendor_ht || ht_ack || ht_data || (argc == 7 && (strcmp(argv[4], "--ht-probe-tx") == 0 ||
+    int ht_probe = ampdu_probe || vendor_ht || ht_ack || ht_data || (argc == 7 && (strcmp(argv[4], "--ht-probe-tx") == 0 ||
                                            strcmp(argv[4], "--ht-probe-rx") == 0));
     if (ht_probe) {
         char *end_mcs;
@@ -898,6 +972,14 @@ int main(int argc, char **argv) {
         }
         challenge[13] = (uint8_t)mcs;
         peer_mode = strcmp(argv[4], "--ht-probe-tx") == 0 ? 21u : 22u;
+        if (ampdu_probe) {
+            if (!CLEAN_RX_AMPDU_PROBE) {
+                fputs("A-MPDU hardware probing requires CLEAN_RX_AMPDU_PROBE=1\n",stderr);
+                return 2;
+            }
+            peer_mode = strcmp(argv[4],"--ht-ampdu-probe-tx")==0 ?
+                CLEAN_HT_AMPDU_PROBE_TX_MODE : CLEAN_HT_AMPDU_PROBE_RX_MODE;
+        }
         if (vendor_ht) peer_mode = CLEAN_PEER_RX_MODE;
         if (ht_ack) {
             if (!CLEAN_RX_HT_RESPONSE) {
@@ -996,6 +1078,8 @@ int main(int argc, char **argv) {
               "--ht-data-tx|--ht-data-rx CHALLENGE_HEX_28 MCS:0-7 MPDU_BYTES:28-2332\n", stderr);
         fputs("HT ACK diagnostic: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ht-ack-tx|--ht-ack-clocked-tx|--ht-ack-rx CHALLENGE_HEX_28 MCS:0-7\n", stderr);
+        fputs("A-MPDU hardware diagnostic: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--ht-ampdu-probe-tx|--ht-ampdu-probe-rx CHALLENGE_HEX_28 MCS:0-7\n",stderr);
         fputs("AP authentication only: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-auth|--ap-assoc|--ap-monitor XX:XX:XX:XX:XX:XX\n", stderr);
         fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "

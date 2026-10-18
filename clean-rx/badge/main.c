@@ -46,7 +46,7 @@ static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uin
 
 static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u; }
 static int soak_mode(void) { return detail[2000u]==19u || detail[2000u]==20u; }
-static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=29u; }
+static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=31u; }
 
 static void screen(const char *status, uint32_t packets, uint32_t error) {
     char number[12];
@@ -665,7 +665,8 @@ static void run(const uint8_t nonce[16]) {
     wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
-    if (nonce[14] > CLEAN_PEER_RX_MODE || !secret_valid ||
+    if ((nonce[14] > CLEAN_PEER_RX_MODE && !(CLEAN_RX_AMPDU_PROBE &&
+            nonce[14] <= CLEAN_HT_AMPDU_PROBE_RX_MODE)) || !secret_valid ||
         ((nonce[14] == 21u || nonce[14] == 22u || nonce[14] >= 24u) && nonce[13] >= 8u) ||
         (nonce[14] >= 26u && nonce[14] <= 28u && (!CLEAN_RX_HT_RESPONSE ||
                              clean_ht_data_length(nonce) != CLEAN_HT_ACK_MPDU)) ||
@@ -685,7 +686,8 @@ static void run(const uint8_t nonce[16]) {
                    nonce[14] != 0u && nonce[14] != 2u && nonce[14] != 13u &&
                    nonce[14] != 17u &&
                    nonce[14] != 22u && nonce[14] != 23u &&
-                   nonce[14] != 25u && nonce[14] != CLEAN_PEER_RX_MODE) &&
+                   nonce[14] != 25u && nonce[14] != CLEAN_PEER_RX_MODE &&
+                   nonce[14] != CLEAN_HT_AMPDU_PROBE_RX_MODE) &&
         clean_write(&l, 0x18002024u, 0xf0u) &&
         clean_write(&l, CLEAN_MBOX + 24u, 2u) && clean_wait_state(&l, 9u, 100000u)) {
         l.stage = 7u;
@@ -713,15 +715,20 @@ static void run(const uint8_t nonce[16]) {
             }
         }
         if (soak_mode()) mac_soak_run(&l, nonce);
-        else (void)receive_for(&l, nonce[14] == CLEAN_PEER_RX_MODE ? 4200000u :
+        else (void)receive_for(&l, nonce[14] == CLEAN_PEER_RX_MODE ||
+                              nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE ? 4200000u :
                               nonce[14] == 13u || nonce[14] == 17u ||
                               nonce[14] == 22u || nonce[14] == 23u ||
                               nonce[14] == 25u || nonce[14] == 27u ? 2500000u : 700000u, 0u);
-        if (l.error == CLEAN_OK && (nonce[14] == 24u || nonce[14] == 26u || nonce[14] == 28u)) {
-            uint32_t total = 6u + clean_ht_data_length(nonce);
+        if (l.error == CLEAN_OK && (nonce[14] == 24u || nonce[14] == 26u || nonce[14] == 28u ||
+                                   nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE)) {
+            uint32_t total = nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE ?
+                CLEAN_HT_AMPDU_PROBE_TX_BYTES : 6u + clean_ht_data_length(nonce);
             uint32_t started = l.wire->now_us(l.wire->context);
             do {
-                if (!(nonce[14] == 28u ? clean_ht_clocked_frame(rx_packet, nonce) :
+                if (!(nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE ?
+                      clean_ht_ampdu_probe_frame(rx_packet, nonce) :
+                      nonce[14] == 28u ? clean_ht_clocked_frame(rx_packet, nonce) :
                       nonce[14] == 26u ? clean_ht_ack_frame(rx_packet, nonce) :
                                         clean_ht_data_frame(rx_packet, nonce))) {
                     l.error = CLEAN_INPUT;
@@ -876,6 +883,18 @@ static void run(const uint8_t nonce[16]) {
                                sizeof(clean_ht_rx_t), 0u) &&
                    clean_block(&l, CLEAN_HT_DIAG_ADDR, detail + CLEAN_HT_DIAG_DETAIL,
                                sizeof(clean_ht_diag_t), 0u);
+    if (snapshot && (nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE ||
+                     nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE)) {
+        uint32_t chip_id;
+        snapshot = clean_block(&l, CLEAN_AMPDU_PROBE_ADDR, detail + CLEAN_AMPDU_PROBE_DETAIL,
+                               sizeof(clean_ampdu_probe_trace_t), 0u) &&
+                   clean_read(&l, 0x18000000u, &chip_id);
+        if (snapshot) badger_bytes_store_u32(detail + 680u, chip_id);
+#if CLEAN_RX_AMPDU_INTERFACE
+        if (snapshot) snapshot = clean_block(&l, CLEAN_AMPDU_IF_ADDR,
+            detail + CLEAN_AMPDU_IF_DETAIL, sizeof(clean_ampdu_interface_t), 0u);
+#endif
+    }
     if (snapshot && (nonce[14] == 27u || nonce[14] == 28u))
         snapshot = clean_block(&l, CLEAN_HT_FAILURE_ADDR, detail + CLEAN_HT_FAILURE_DETAIL,
                                sizeof(clean_ht_failure_t), 0u);

@@ -4,6 +4,7 @@
 #include "station.h"
 #include "../src/wpa2_crypto.h"
 #include "../src/mac.h"
+#include "../src/block_ack.h"
 
 enum { WPA_WAIT_M1, WPA_WAIT_M3, WPA_KEYS, WPA_M4_SENT, WPA_PROTECTED };
 enum { WPA_OK, WPA_FORMAT, WPA_REPLAY, WPA_NONCE, WPA_MIC, WPA_UNWRAP,
@@ -32,5 +33,15 @@ int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
 uint32_t clean_wpa_probe(clean_wpa_t *s, uint8_t frame[512]);
 int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t now);
 void clean_wpa_rx_expire(clean_wpa_t *s, uint32_t now);
+/* Agreement/controller ownership remains with the caller. Ciphertext is
+ * buffered first; per-TID MIC/PN processing runs only on ordered release. */
+int clean_wpa_ba_receive(clean_wpa_t *s, clean_ba_rx_t *ba, const uint8_t *mpdu,
+                         uint32_t length, uint32_t now);
+int clean_wpa_ba_poll(clean_wpa_t *s, clean_ba_rx_t *ba, uint32_t now);
+int clean_wpa_ba_bar(clean_wpa_t *s, clean_ba_rx_t *ba, const uint8_t *mpdu,
+                     uint32_t length, uint32_t now);
+int clean_wpa_ampdu_feed(clean_wpa_t *s, clean_ba_rx_t *ba, clean_ampdu_stream_t *stream,
+                         const uint8_t *bytes, uint32_t length, uint32_t *used,
+                         uint32_t now);
 
 #endif

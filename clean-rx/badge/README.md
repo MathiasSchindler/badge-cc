@@ -65,6 +65,21 @@ the mandatory-minimum 3,839-byte aggregate, delivered through three F2
 fragments and validated/deaggregated on the badge. It is not negotiated HT,
 Block ACK or A-MPDU reception. Negotiated non-HT QoS station dispatch is
 separately enabled by the WMM gate.
+Bounded BA agreements, A-MPDU delimiter-stream parsing and ciphertext
+reordering now have native integration with WPA2 delivery. They are not
+called by the live station dispatcher: actual aggregate capture and
+SIFS-timed Immediate BA are still missing, and negotiated HT stays disabled.
+See [the implementation boundary and tests](../dev-doc/BLOCK_ACK_IMPLEMENTATION.md).
+The separate `CLEAN_RX_AMPDU_PROBE=1` gate requires HT data and extended RX
+and adds a finite, nonstation aggregate diagnostic. Use matching images
+and collector with `ht_probe.sh TX RX PREFIX MCS --ampdu-probe`.
+It submits one three-MPDU PPDU; reports distinguish a fresh individual
+capture from all subframes retained and keep BA/HT qualification false.
+An additional `CLEAN_RX_AMPDU_INTERFACE=3` diagnostic now retains two
+complete MPDUs at MCS0; the third loses four leading bytes. Values 1/2
+provide passive post-completion/body timelines. All default to disabled.
+See [interface profiles and measured limitations](../dev-doc/AMPDU_INTERFACE_INVESTIGATION.md).
+See [build commands, evidence layout and failed continuations](../dev-doc/AMPDU_RADIO_INVESTIGATION.md).
 The additional, default-disabled `CLEAN_RX_HT_RESPONSE=1` gate requires
 extended RX and adds pinned-radio QoS/HT normal-ACK response logic.
 `ht_probe.sh TX RX PREFIX MCS --ack` uses its matching `ht-ack` build for a

@@ -140,7 +140,7 @@ fresh peer captures below provide that evidence.
 | Host metadata | Packet byte 15 and byte 16 currently encode legacy rate/channel/flags; [phy_rates.h](../src/phy_rates.h) marks formats 2/3 unsupported (`0x40`) | Design explicit/versioned MCS, bandwidth, GI, mixed-mode and aggregation evidence in D2. Do not alias HT onto OFDM flag `0x10` or treat CCK short-preamble flag `0x20` as SGI. Preserve fragment metadata. |
 | ACK/CTS/IFS | [psm_ack.h](../src/psm_ack.h) rejects HT/QoS by default; a separately gated normal-ACK prototype adds QoS policy and HT-to-legacy response-rate tables | Qualify returned ACKs/SIFS, HT protection/NAV, EOF anchoring and retries. Local response starts are not RF timing qualification. |
 | Association/QoS | [station.h](../badge/station.h) emits SSID, legacy rates and optional RSN; HT/WMM peer IEs do not enable local capabilities. Shared per-TID duplicate/reassembly state is integrated with existing protected QoS RX; plaintext station negotiation/delivery remains gated | D2 still needs AP-driven EDCA, HT responses/protection, Block ACK/reordering and negotiated QoS/HT operation. A receive state machine or WMM IE alone is insufficient. |
-| Buffers/aggregation | [frame_limits.h](../src/frame_limits.h) retains the default 2,400-byte MPDU bound; the opt-in extended RX profile supports 3,896 bytes and three F2 fragments | Minimum A-MSDU validation/deaggregation and bounded protected station reception are implemented below. D3 still needs bounded A-MPDU parsing, per-MPDU CRC, BA negotiation/BAR/window/reordering and negotiated delivery/replay integration. F2 fragmentation is neither 802.11 fragmentation nor aggregation. |
+| Buffers/aggregation | [frame_limits.h](../src/frame_limits.h) retains the default 2,400-byte MPDU bound; the opt-in extended RX profile supports 3,896 bytes and three F2 fragments | Minimum A-MSDU validation/deaggregation and bounded protected station reception are implemented below. Bounded A-MPDU parsing, per-MPDU CRC, BA agreement/BAR/window/reordering and ordered WPA2 delivery are now native-tested; [live aggregate capture and Immediate BA remain unimplemented](BLOCK_ACK_IMPLEMENTATION.md). F2 fragmentation is neither 802.11 fragmentation nor aggregation. |
 
 Important association constraint: an HT Capability element with the maximum
 A-MSDU bit clear still declares a 3,839-byte A-MSDU limit, not "disabled".
@@ -1301,6 +1301,10 @@ complete negotiated HT operation.
 
 ### Remaining D2 work
 
+- Integrate the [native-tested Block ACK/reordering software](BLOCK_ACK_IMPLEMENTATION.md)
+  with actual PSM aggregate boundaries, retained multi-MPDU capture and
+  hardware-timed Immediate BA; wire station agreement/key lifecycle before
+  enabling negotiation.
 - Qualify [AP-driven non-HT WMM/EDCA integration](EDCA_IMPLEMENTATION.md#ap-driven-non-ht-wmm-integration)
   beyond its bounded open/WPA2 exchanges, including runtime policy
   changes and recovery; implement HT protection and qualify the gated ACK

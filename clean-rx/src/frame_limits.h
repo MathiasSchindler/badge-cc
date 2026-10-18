@@ -7,6 +7,23 @@
 #ifndef CLEAN_RX_HT_RX
 #define CLEAN_RX_HT_RX 0
 #endif
+#ifndef CLEAN_RX_AMPDU_PROBE
+#define CLEAN_RX_AMPDU_PROBE 0
+#endif
+#ifndef CLEAN_RX_AMPDU_INTERFACE
+#define CLEAN_RX_AMPDU_INTERFACE 0
+#endif
+#define CLEAN_AMPDU_IF_SHM 0x200u
+#define CLEAN_AMPDU_IF_RECORDS 16u
+#define CLEAN_AMPDU_IF_WORDS (4u + 8u * CLEAN_AMPDU_IF_RECORDS + 6u + 44u)
+#define CLEAN_AMPDU_IF_ADDR 0x20800u
+#define CLEAN_AMPDU_IF_DETAIL 1104u
+#define CLEAN_AMPDU_IF_MAGIC 0x32464941u
+#define CLEAN_AMPDU_PROBE_SHM 0x100u
+#define CLEAN_AMPDU_PROBE_WORDS 144u
+#define CLEAN_AMPDU_PROBE_ADDR 0x20600u
+#define CLEAN_AMPDU_PROBE_DETAIL 768u
+#define CLEAN_AMPDU_PROBE_MAGIC 0x32504441u
 #if CLEAN_RX_HT_RX
 #define CLEAN_MPDU_BYTES 3896u
 #define CLEAN_SHM_FRAME 0x800u
@@ -78,6 +95,23 @@
 #define CLEAN_DETAIL_PACKET_BYTES 528u
 
 _Static_assert(CLEAN_RX_HT_RX == 0 || CLEAN_RX_HT_RX == 1, "HT RX build gate");
+_Static_assert(CLEAN_RX_AMPDU_PROBE == 0 ||
+               (CLEAN_RX_AMPDU_PROBE == 1 && CLEAN_RX_HT_RX),
+               "Aggregate hardware probing requires extended RX");
+_Static_assert(CLEAN_RX_AMPDU_INTERFACE == 0 ||
+               (CLEAN_RX_AMPDU_INTERFACE >= 1 && CLEAN_RX_AMPDU_INTERFACE <= 3 &&
+                CLEAN_RX_AMPDU_PROBE),
+               "Aggregate interface tracing requires the finite hardware probe");
+_Static_assert(CLEAN_AMPDU_IF_SHM >= CLEAN_AMPDU_PROBE_SHM + CLEAN_AMPDU_PROBE_WORDS &&
+               CLEAN_AMPDU_IF_SHM + CLEAN_AMPDU_IF_WORDS <= 0x600u &&
+               CLEAN_AMPDU_IF_ADDR >= CLEAN_AMPDU_PROBE_ADDR + 4u + 2u*CLEAN_AMPDU_PROBE_WORDS &&
+               CLEAN_AMPDU_IF_ADDR + 4u + 2u*CLEAN_AMPDU_IF_WORDS <= 0x20d80u &&
+               4u + 2u*CLEAN_AMPDU_IF_WORDS <= CLEAN_DETAIL_PACKET_BYTES,
+               "Aggregate interface trace must not overlap live state");
+_Static_assert(CLEAN_AMPDU_PROBE_SHM + CLEAN_AMPDU_PROBE_WORDS <= 0x600u &&
+               CLEAN_AMPDU_PROBE_ADDR + 4u + 2u * CLEAN_AMPDU_PROBE_WORDS <= 0x20d80u &&
+               CLEAN_AMPDU_PROBE_DETAIL + 4u + 2u * CLEAN_AMPDU_PROBE_WORDS <= 1088u,
+               "Aggregate probe evidence must not overlap live state or packet evidence");
 _Static_assert(CLEAN_SHM_FRAME + CLEAN_RAW_BYTES / 2u <= CLEAN_SHM_FRAME_END &&
                (!CLEAN_RX_HT_RX || CLEAN_SHM_FRAME >= 0x800u),
                "Capture must not overlap PSM controls");

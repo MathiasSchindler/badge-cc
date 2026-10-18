@@ -514,6 +514,113 @@ static void protected_qos(clean_wpa_t before) {
     puts("WPA2 QoS: 16 interleaved TIDs x 16 fragments, size/sequence/PN boundaries, duplicate suppression, MIC/policy rejection and idle expiry/wiping pass; NOT HT negotiation");
 }
 
+static void ba_open(clean_ba_rx_t *ba, const clean_wpa_t *s, uint8_t tid,
+                     uint16_t sequence) {
+    uint8_t request[37]={0};
+    request[0]=0xd0u;
+    memcpy(request+4u,s->mac,6u);
+    memcpy(request+10u,s->bssid,6u);
+    memcpy(request+16u,s->bssid,6u);
+    request[24]=3u;
+    request[26]=1u;
+    uint16_t parameters=(uint16_t)(2u | ((uint16_t)tid << 2u) | (8u << 6u));
+    request[27]=(uint8_t)parameters;
+    request[28]=(uint8_t)(parameters >> 8u);
+    request[31]=(uint8_t)(sequence << 4u);
+    request[32]=(uint8_t)(sequence >> 4u);
+    badger_bytes_store_u32(request+33u,diag_crc32(request,33u));
+    assert(clean_ba_action(ba,request,sizeof(request))==CLEAN_BA_PREPARED);
+    assert(clean_ba_activate(ba,tid,0u)==CLEAN_BA_ACCEPTED);
+}
+
+static uint32_t ba_protected_frame(clean_wpa_t *s, uint8_t *m, uint8_t tid,
+                                   uint16_t sequence, uint8_t pn) {
+    uint32_t n=protected_frame(s,m,tid,pn);
+    m[22]=(uint8_t)(sequence << 4u);
+    m[23]=(uint8_t)(sequence >> 4u);
+    m[24]|=0x60u;
+    /* CCMP masks sequence and ACK policy out of its AAD. */
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    return n;
+}
+
+static void protected_block_ack(clean_wpa_t before) {
+    static clean_ba_rx_t ba;
+    static clean_ampdu_stream_t stream;
+    clean_wpa_t s=before;
+    uint8_t m[512], first[512];
+    clean_ba_init(&ba,s.mac,s.bssid);
+    ba_open(&ba,&s,3u,4095u);
+    uint32_t n=ba_protected_frame(&s,m,3u,0u,2u);
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,1u)==CLEAN_BA_ACCEPTED);
+    assert(s.protected_rx==0u && s.rx_pn[3][0]==0u);
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,2u)==CLEAN_BA_DUPLICATE);
+    n=ba_protected_frame(&s,first,3u,4095u,1u);
+    assert(clean_wpa_ba_receive(&s,&ba,first,n,3u)==CLEAN_BA_ACCEPTED);
+    assert(s.protected_rx==2u && s.rx_pn[3][0]==2u && ba.delivered==2u && !s.error);
+    assert(clean_wpa_ba_receive(&s,&ba,first,n,4u)==CLEAN_BA_DUPLICATE);
+    assert(s.protected_rx==2u && s.rx_pn[3][0]==2u);
+    n=ba_protected_frame(&s,m,3u,1u,1u);
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,5u)==CLEAN_BA_ACCEPTED);
+    assert(s.protected_rx==2u && s.rx_pn[3][0]==2u && !s.error);
+    ba_open(&ba,&s,4u,0u);
+    n=ba_protected_frame(&s,m,4u,0u,1u);
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,6u)==CLEAN_BA_ACCEPTED);
+    assert(s.protected_rx==3u && s.rx_pn[4][0]==1u);
+    n=ba_protected_frame(&s,m,3u,3u,4u);
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,7u)==CLEAN_BA_ACCEPTED);
+    assert(s.protected_rx==3u && s.rx_pn[3][0]==2u);
+    assert(clean_wpa_ba_poll(&s,&ba,7u+CLEAN_BA_GAP_US)==CLEAN_BA_ACCEPTED);
+    assert(s.protected_rx==4u && s.rx_pn[3][0]==4u);
+    n=ba_protected_frame(&s,m,3u,5u,6u);
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,8u+CLEAN_BA_GAP_US)==CLEAN_BA_ACCEPTED);
+    uint8_t bar[24]={0};
+    bar[0]=0x84u;
+    memcpy(bar+4u,s.mac,6u); memcpy(bar+10u,s.bssid,6u);
+    bar[16]=4u; bar[17]=0x30u; bar[18]=0x50u;
+    badger_bytes_store_u32(bar+20u,diag_crc32(bar,20u));
+    assert(clean_wpa_ba_bar(&s,&ba,bar,sizeof(bar),9u+CLEAN_BA_GAP_US)==CLEAN_BA_ACCEPTED);
+    assert(s.protected_rx==5u && s.rx_pn[3][0]==6u);
+    n=ba_protected_frame(&s,m,3u,6u,7u);
+    m[n-12u]^=1u;
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,10u+CLEAN_BA_GAP_US)==CLEAN_BA_SINK_ERROR);
+    assert(s.error==WPA_MIC && !s.installed && s.rx_pn[3][0]==6u);
+    assert(clean_wpa_ba_poll(&s,&ba,11u+CLEAN_BA_GAP_US)==CLEAN_BA_INVALID);
+    qos_plaintext_wiped(&s);
+
+    /* Full delimiter stream -> bounded ciphertext reorder -> CCMP -> delivery. */
+    s=before;
+    clean_ba_init(&ba,s.mac,s.bssid);
+    ba_open(&ba,&s,7u,10u);
+    uint8_t wire[256]={0};
+    uint32_t size=0u;
+    for (uint32_t i=0u;i<2u;++i) {
+        uint8_t pn=(uint8_t)(2u-i);
+        n=ba_protected_frame(&s,m,7u,(uint16_t)(9u+pn),pn);
+        wire[size]=(uint8_t)(n << 4u);
+        wire[size+1u]=(uint8_t)(n >> 4u);
+        wire[size+2u]=clean_ampdu_delimiter_crc(wire+size);
+        wire[size+3u]=0x4eu;
+        memcpy(wire+size+4u,m,n);
+        size+=4u+n;
+        if (!i) size=(size+3u)&~3u;
+    }
+    assert(clean_ampdu_begin(&stream,size)==CLEAN_BA_ACCEPTED);
+    for (uint32_t offset=0u;offset<size;) {
+        uint32_t chunk=size-offset<7u?size-offset:7u, used;
+        assert(clean_wpa_ampdu_feed(&s,&ba,&stream,wire+offset,chunk,&used,offset)==
+               CLEAN_BA_ACCEPTED && used==chunk);
+        offset+=used;
+    }
+    assert(clean_ampdu_end(&stream)==CLEAN_BA_ACCEPTED && stream.frames==2u);
+    assert(s.protected_rx==2u && s.rx_pn[7][0]==2u && ba.delivered==2u && !s.error);
+    assert(clean_wpa_ampdu_feed(&s,&ba,&stream,0,0u,0,1u)==CLEAN_BA_INVALID);
+    clean_ba_close(&ba,7u);
+    assert(clean_wpa_ba_receive(&s,&ba,m,n,9u)==CLEAN_BA_NO_AGREEMENT);
+    puts("Protected BA: ciphertext reordering before per-TID PN checks, sequence wrap, replay, MIC rejection and delimiter-stream delivery pass; NOT PSM/on-air BA");
+}
+
 static void handshake(void) {
     uint8_t secret[64], mac[6]={2u,6u,7u,8u,9u,10u}, ap[6]={2u,1u,2u,3u,4u,5u};
     memset(secret,1,32u); memset(secret+32u,3,32u);
@@ -531,6 +638,7 @@ static void handshake(void) {
     badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
     assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && size==141u && s.installed && s.stage==WPA_KEYS);
     protected_traffic(s);
+    protected_block_ack(s);
     protected_fragments(s);
     protected_qos(s);
     protected_aggregates(s);

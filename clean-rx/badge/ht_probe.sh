@@ -8,6 +8,7 @@ if [[ ( $# -ne 4 && $# -ne 5 && $# -ne 6 ) ||
     echo "Usage: bash clean-rx/badge/ht_probe.sh TX_SERIAL RX_SERIAL NEW_PREFIX MCS:0-7 [MPDU_BYTES:28-2332 [--extended-rx]]" >&2
     echo "The extended RX build also accepts the fixed 3869-byte A-MSDU fixture" >&2
     echo "Use --ack for the clocked 60-byte normal-ACK fixture; --ack-raw retains the raw-TX control" >&2
+    echo "Use --ampdu-probe for one diagnostic aggregate of three 80-byte MPDUs (no BA)" >&2
     echo "HT_PROBE_CHANNEL selects channel 1..11 for controlled comparisons (default 1)" >&2
     echo "HT_PROBE_TID pins the normal-ACK fixture TID to 0..7" >&2
     echo "HT_PROBE_CHALLENGE replays a matching 28-hex-digit challenge unchanged" >&2
@@ -23,7 +24,10 @@ fi
 collector=build/clean-rx/badge/ht-probe/collector
 mpdu=88 mode=probe
 clocked=0
-if [[ $# -eq 5 && ( $5 == --ack || $5 == --ack-raw ) ]]; then
+if [[ $# -eq 5 && $5 == --ampdu-probe ]]; then
+    mpdu=80 mode=ampdu-probe
+    collector=build/clean-rx/badge/d2-live/collector
+elif [[ $# -eq 5 && ( $5 == --ack || $5 == --ack-raw ) ]]; then
     mpdu=60 mode=ack
     collector=build/clean-rx/badge/ht-ack/collector
     if [[ $5 == --ack ]]; then clocked=1; fi
@@ -97,8 +101,10 @@ if [[ $mode == ack ]]; then
         challenge=${challenge:0:12}$(printf '%02x' "$((byte & 247))")${challenge:14}
     fi
 fi
-printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"vendor_peer":false,"ht_qualified":false}\n' \
-    "$challenge" "$mcs" "$channel" "$mpdu" > "$prefix-config.json" || exit 1
+subframes=1
+if [[ $mode == ampdu-probe ]]; then subframes=3; fi
+printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"aggregate_subframes":%s,"vendor_peer":false,"ht_qualified":false}\n' \
+    "$challenge" "$mcs" "$channel" "$mpdu" "$subframes" > "$prefix-config.json" || exit 1
 rx_pid=
 cleanup() {
     if [[ -n $rx_pid ]]; then
@@ -155,6 +161,18 @@ if [[ $tx_result -ne 0 || $rx_result -ne 0 ]]; then
     exit 1
 fi
 pair_mode=ht-pair
+if [[ $mode == ampdu-probe ]]; then
+    jq -n --slurpfile tx "$prefix-tx.json" --slurpfile rx "$prefix-rx.json" \
+        '{mode:"ampdu-probe-pair",channel:$tx[0].channel,mcs:$tx[0].mcs,
+          local_tx_submission:$tx[0].local_tx_submission,
+          fresh_radio_capture:$rx[0].fresh_radio_capture,
+          retained_subframe_bitmap:$rx[0].retained_subframe_bitmap,
+          multi_mpdu_radio_capture:$rx[0].multi_mpdu_radio_capture,
+          all_subframes_retained:($rx[0].retained_subframe_bitmap==7),
+          actual_multi_mpdu_delivery:false,immediate_ba:false,ht_qualified:false}' \
+        | tee "$prefix-pair.json"
+    exit "$?"
+fi
 if [[ $mode == data ]]; then pair_mode=ht-data-pair; fi
 if [[ $mode == ack ]]; then
     python3 - "$prefix" <<'PY' | tee "$prefix-pair.json"
