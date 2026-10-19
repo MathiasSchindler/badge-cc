@@ -130,12 +130,15 @@ first two complete diagnostic MPDUs to the RP2350 at MCS0/3/7 in both
 directions. The final byte-evidence campaign has 6/7 normal two-MPDU
 deliveries, one retained RF miss and two successful bad-middle rejections;
 the last DMA MPDU remains missing. An alternative retained-SHM/SRAM/F2
-path now delivers all three fixture MPDUs: 16/16 fresh MCS0..7 trials in
-both directions, exactly three deliveries and zero duplicates. It is
+path now delivers all three fixture MPDUs: its initial MCS0..7 matrix passes
+16/16 fresh trials in both directions, exactly three deliveries and zero duplicates. It is
 also tested with bad first/middle/last FCS and all-bad aggregates; failed
 initial receptions are retained, with successful fresh repeats. It is
-still a fixed-size, one-PPDU diagnostic with deferred held-boundary
-delivery. This is not production live
+still a fixed-size, one-PPDU diagnostic. A subsequent explicit PSM state-16
+terminal lease removes dependence on later ordinary traffic, including
+bad-last and all-bad aggregates. Its current matrix covers all MCS/direction
+cells, with RF misses/partials retained and successful fresh repeats;
+it does not establish loss-free reception. This is not production live
 reception, BA or mandatory receive/protection qualification. Receive completion/
 discard handling, radio override ownership and atomic backoff publication
 have been corrected and regression-tested. Local-AP reply delivery and
@@ -186,10 +189,19 @@ separates tested software from the remaining live receive/response work.
       - [x] Deliver all three complete fixture MPDUs through retained
         SHM/SRAM/F2, with independently checked saved bytes and no duplicates
         at MCS0..7 in both directions; keep the incomplete DMA path separate.
+      - [x] Replace ordinary held-frame dependence with an explicit PSM
+        terminal commit/claim/release; verify bad-last/all-bad handoff and
+        avoid duplicate ordinary publication, without enabling production BA or HT.
       - [ ] Generalize receive lengths, admission, repeated aggregates and
         agreement/key/reorder lifecycle beyond the finite diagnostic.
-      - [ ] Implement actual PSM Immediate BA and measure EOF-to-air SIFS;
-        retain mandatory receive-size/protection qualification as a gate.
+      - [x] Transmit a default-disabled, explicitly armed PSM compressed BA
+        for the fixed aggregate and receive matching complete BA bytes over
+        the air; independently verify addresses, bitmap and FCS. All normal
+        MCS/direction cells have full delivery/return controls after repeats.
+      - [ ] Complete production PSM Immediate BA/admission and independently
+        measure EOF-to-air SIFS. The fixed diagnostic does not qualify
+        either; bad-final reverse MCS7 still lacks a successful capture.
+        Retain mandatory receive-size/protection qualification as a gate.
   - [ ] Qualify interleaved legacy/HT traffic, rate/mode transitions and
     recovery against an independent peer; raw mixed-format captures alone
     do not qualify negotiated mixed traffic.

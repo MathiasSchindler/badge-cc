@@ -241,6 +241,23 @@ static inline int clean_ht20_rx_sig_valid(const volatile uint8_t sig[6], uint32_
     return 1;
 }
 
+static inline int clean_ht_ampdu_ba_match(const uint8_t *m, uint32_t length,
+                                          const uint8_t nonce[14]) {
+    if (!m || !nonce || length != 32u || m[0] != 0x94u || m[1] ||
+        m[2] || m[3] || m[16] != 4u || m[17] || m[18] || m[19] ||
+        !m[20] || (m[20] & ~7u)) return 0;
+    for (uint32_t i = 21u; i < 28u; ++i) if (m[i]) return 0;
+    for (uint32_t i = 0u; i < 6u; ++i) {
+        uint8_t own = i ? nonce[i-1u] : 2u;
+        uint8_t peer = (uint8_t)(own ^ (i == 5u ? 0x80u : 0u));
+        if (m[4u+i] != peer || m[10u+i] != own) return 0;
+    }
+    uint32_t fcs = clean_mac_fcs(m, 28u);
+    for (uint32_t i = 0u; i < 4u; ++i)
+        if (m[28u+i] != (uint8_t)(fcs >> (8u*i))) return 0;
+    return 1;
+}
+
 static inline int clean_ht_ampdu_probe_sig(uint8_t sig[6], uint32_t mcs) {
     if (!clean_ht20_sig(sig, CLEAN_HT_AMPDU_PROBE_BYTES, mcs)) return 0;
     sig[3] |= 8u;

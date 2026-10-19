@@ -32,14 +32,31 @@ no trial delivers the complete aggregate.
 The newer alternative
 [retained-SHM delivery](AMPDU_INTERFACE_INVESTIGATION.md#retained-shm-to-f2-delivery-2026-10-19)
 now delivers all three complete fixture MPDUs through SRAM/F2 to the badge
-at MCS0..7 in both directions: 16/16 fresh trials, exactly three deliveries
+at MCS0..7 in both directions: initially 16/16 fresh trials, exactly three deliveries
 and no duplicates. It preserves actual radio bytes instead of trying to
 repair the undocumented per-MPDU DMA/EOF transition. This remains a finite,
 fixed-size, one-PPDU path, not the production agreement/reorder recipient,
 and does not transmit BA or qualify SIFS.
 
-There is no controller BA-install command, station ADDBA activation, PSM
-aggregate response path or independent on-air aggregate qualification.
+An [explicit terminal lease](AMPDU_INTERFACE_INVESTIGATION.md#explicit-terminal-ownership-2026-10-19)
+now replaces the ordinary held-frame dependency. Producer state 16,
+controller claim and PSM release are verified for good-last, bad-last and
+all-bad controls, including zero delivery of the all-bad bodies. This
+removes the need for later ordinary traffic to obtain the finite snapshot;
+it does not establish a general RF EOF/BAR response event or SIFS timing.
+
+The newer default-disabled
+[compressed BA experiment](AMPDU_INTERFACE_INVESTIGATION.md#diagnostic-compressed-ba-return-2026-10-19)
+does transmit a real PSM compressed BA for the pinned three-by-80-byte
+fixture, and the transmitting badge receives the matching complete
+response over the air. Command 17 arms that diagnostic, not an agreement.
+The final 48-trial campaign independently validates 28 returned BA frames,
+including one partial normal response. All normal MCS/direction cells
+have a complete delivery/return control after repeats; bad-final reverse
+MCS7 still has no qualifying capture. Physical SIFS remains unqualified.
+
+There is no production controller BA-install command, station ADDBA
+activation, general PSM aggregate response path or independent-peer qualification.
 The new software is not called by the live station receive dispatcher.
 Merely linking its source into the builds does not activate it; unreferenced
 functions and storage are removed by section garbage collection.

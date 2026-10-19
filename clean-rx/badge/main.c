@@ -118,6 +118,17 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 }
             }
             uint32_t packets = badger_bytes_load_u32(detail + 1636u);
+#if CLEAN_RX_AMPDU_BA
+            if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_TX_MODE && size >= 18u &&
+                clean_ht_ampdu_ba_match(packet + 18u, size - 18u, peer_challenge)) {
+                uint32_t receipts =
+                    badger_bytes_load_u32(detail + CLEAN_AMPDU_BA_RX_DETAIL) == CLEAN_AMPDU_BA_RX_MAGIC ?
+                    badger_bytes_load_u32(detail + CLEAN_AMPDU_BA_RX_DETAIL + 4u) : 0u;
+                badger_bytes_store_u32(detail + CLEAN_AMPDU_BA_RX_DETAIL, CLEAN_AMPDU_BA_RX_MAGIC);
+                badger_bytes_store_u32(detail + CLEAN_AMPDU_BA_RX_DETAIL + 4u, receipts + 1u);
+                badger_bytes_copy(detail + CLEAN_AMPDU_BA_RX_DETAIL + 8u, packet + 18u, 32u);
+            }
+#endif
 #if CLEAN_RX_AMPDU_DELIVERY
             if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE && size >= 18u &&
                 packet[15] == peer_challenge[13] &&
@@ -700,10 +711,26 @@ static void run(const uint8_t nonce[16]) {
                    nonce[14] != 17u &&
                    nonce[14] != 22u && nonce[14] != 23u &&
                    nonce[14] != 25u && nonce[14] != CLEAN_PEER_RX_MODE &&
-                   nonce[14] != CLEAN_HT_AMPDU_PROBE_RX_MODE) &&
+                   (nonce[14] != CLEAN_HT_AMPDU_PROBE_RX_MODE || CLEAN_RX_AMPDU_BA)) &&
         clean_write(&l, 0x18002024u, 0xf0u) &&
         clean_write(&l, CLEAN_MBOX + 24u, 2u) && clean_wait_state(&l, 9u, 100000u)) {
         l.stage = 7u;
+#if CLEAN_RX_AMPDU_BA
+        if (nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE) {
+            uint8_t mpdu[80], config[16];
+            if (!clean_ht_ampdu_probe_mpdu(mpdu, nonce, 0u)) l.error = CLEAN_INPUT;
+            else {
+                for (uint32_t i = 0u; i < 6u; ++i) {
+                    config[i] = mpdu[4u+i]; config[6u+i] = mpdu[10u+i];
+                }
+                config[12] = 0x50u; config[13] = 1u;
+                config[14] = 1u; config[15] = 3u;
+                if (station_command(&l, config, sizeof(config), 7u))
+                    (void)station_command(&l, config, sizeof(config),
+                        CLEAN_AMPDU_BA_CMD | ((uint32_t)nonce[13] << 8u));
+            }
+        }
+#endif
         if (nonce[14] == 26u || nonce[14] == 28u) {
             for (uint32_t i = 0u; i < 6u; ++i)
                 detail[1972u+i] = clean_ht_ack_byte(10u+i, nonce);

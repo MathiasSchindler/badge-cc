@@ -91,15 +91,32 @@ delivered payloads, not just capture counters. `actual_multi_mpdu_delivery`
 can therefore be true while `all_subframes_delivered`, `immediate_ba`,
 `sifs_timing_qualified` and `ht_qualified` remain false. This is still a
 bounded experiment, not production station/BA integration.
-Alternatively, `CLEAN_RX_AMPDU_SHM=1` uses the unchanged three-slot PSM
-capture and a pause/readback-verified controller snapshot, then validates
+Alternatively, `CLEAN_RX_AMPDU_SHM=1` uses the three-slot PSM
+capture with an explicit state-16 terminal lease and a
+pause/readback-verified controller snapshot, then validates
 and queues each complete MPDU through SRAM/F2. It requires the same
 probe/interface-3/handoff-2 gates and cannot be combined with DMA delivery.
 The finite matrix delivers all three MPDUs at MCS0..7 in both directions,
-with exactly three deliveries and zero duplicates. The collector exposes
-`shm_delivery_enabled` and independently verifies the saved delivered bytes.
+with exactly three deliveries and zero duplicates in completed controls;
+failed/partial receptions and fresh repeats are retained separately.
+Bad-last/all-bad completion no longer waits for a later ordinary frame.
+The collector exposes `shm_delivery_enabled` and `shm_terminal` ownership
+counters/timestamps, and independently verifies the saved delivered bytes.
+The measured snapshot/lease intervals are not EOF-to-air SIFS measurements.
 This remains a fixed-size, one-aggregate experiment: general station
 reception, Immediate BA, measured SIFS and HT advertisement are not enabled.
+An additional default-disabled `CLEAN_RX_AMPDU_BA=1` SHM-only profile now
+arms a pinned diagnostic PSM compressed BA through command 17. Mode 31
+enables TX only for this profile; mode 30 uses automatic turnaround to
+receive the actual response. The final campaign independently verifies
+28 complete returned BA frames, including one partial normal response,
+and normal complete-delivery/return controls at every MCS/direction after
+repeats. Bad-final reverse MCS7 remains unqualified.
+The collector exposes `ba_experiment`; armed positive pairs require an
+actual matching returned BA and delivery bitmap. These are fixed
+three-by-80-byte tests, not production agreement/reorder installation,
+measured RF SIFS or negotiated HT. The existing qualification flags stay
+false. See [BA build gate, command/evidence ABI and full results](../dev-doc/AMPDU_INTERFACE_INVESTIGATION.md#diagnostic-compressed-ba-return-2026-10-19).
 See [interface profiles and measured limitations](../dev-doc/AMPDU_INTERFACE_INVESTIGATION.md).
 See [build commands, evidence layout and failed continuations](../dev-doc/AMPDU_RADIO_INVESTIGATION.md).
 The first D2 PHY/association item is now split into completed software

@@ -373,6 +373,39 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             printf("\"");
         } else printf("null");
 #endif
+#if CLEAN_RX_AMPDU_SHM
+        const uint8_t *terminal=detail+CLEAN_AMPDU_IF_DETAIL+4u+
+            2u*CLEAN_AMPDU_SHM_STATUS_WORD;
+        uint16_t terminal_words[CLEAN_AMPDU_SHM_STATUS_WORDS];
+        memcpy(terminal_words,terminal,sizeof(terminal_words));
+        int terminal_valid=completed &&
+            usb_report_u32(detail+CLEAN_AMPDU_IF_DETAIL)==CLEAN_AMPDU_IF_MAGIC &&
+            terminal_words[2]==1u && terminal_words[3]==1u &&
+            terminal_words[4]==CLEAN_AMPDU_SHM_HELD_STATE &&
+            terminal_words[5]==1u;
+        printf(",\"shm_terminal\":{\"valid\":%s,\"published_count\":%u,"
+               "\"released_count\":%u,\"claim_state\":%u,\"claimed_count\":%u,"
+               "\"published_tsf\":%u,\"released_tsf\":%u,\"hold_us\":%u}",
+               terminal_valid?"true":"false",terminal_words[2],
+               terminal_words[3],terminal_words[4],
+               terminal_words[5],usb_report_u32(terminal),
+               usb_report_u32(terminal+16u),usb_report_u32(terminal+12u));
+#endif
+#if CLEAN_RX_AMPDU_BA
+        const uint8_t *ba=detail+CLEAN_AMPDU_IF_DETAIL+4u+160u;
+        uint16_t ba_words[CLEAN_AMPDU_BA_WORDS];
+        memcpy(ba_words,ba,sizeof(ba_words));
+        int returned_ba=usb_report_u32(detail+CLEAN_AMPDU_BA_RX_DETAIL)==CLEAN_AMPDU_BA_RX_MAGIC &&
+            clean_ht_ampdu_ba_match(detail+CLEAN_AMPDU_BA_RX_DETAIL+8u,32u,nonce);
+        printf(",\"ba_experiment\":{\"enabled\":%s,\"bitmap\":%u,\"attempts\":%u,"
+               "\"started\":%u,\"errors\":%u,\"observed_eof_tsf\":%u,"
+               "\"tx_active_tsf\":%u,\"tx_end_tsf\":%u,\"eof_status\":%u,"
+               "\"tx_status\":%u,\"returned_ba\":%s,\"returned_bitmap\":%u}",
+               ba_words[0]?"true":"false",ba_words[1],ba_words[2],ba_words[3],ba_words[4],
+               usb_report_u32(ba+10u),usb_report_u32(ba+14u),usb_report_u32(ba+18u),
+               ba_words[11],ba_words[12],returned_ba?"true":"false",
+               returned_ba?detail[CLEAN_AMPDU_BA_RX_DETAIL+28u]:0u);
+#endif
 #if CLEAN_RX_AMPDU_INTERFACE
         clean_ampdu_interface_t interface;
         memcpy(&interface,detail+CLEAN_AMPDU_IF_DETAIL,sizeof(interface));

@@ -13,10 +13,315 @@ every MCS/direction cell, not loss-free reception. Controlled first,
 middle and last bad-FCS tests reject invalid MPDUs and retain later valid
 ones. Additional RF corruption is also rejected.
 
-No Immediate BA was transmitted or timed. There is
-no production multi-MPDU credit/DMA/station integration, and negotiated HT
+The newer gated experiment below transmits a compressed BA and receives
+the matching response over the air. **Physical EOF-to-air SIFS is not
+qualified.** There is no production multi-MPDU credit/DMA/station integration, and negotiated HT
 remains disabled. Both endpoints use clean firmware; this is not an
 independent-vendor or RF-analyzer qualification.
+
+## Diagnostic compressed BA return (2026-10-19)
+
+`CLEAN_RX_AMPDU_BA=1` adds an explicitly armed PSM response to the retained
+SHM fixture. It defaults to zero, requires SHM delivery, and does not
+install a BA agreement or enable HT association. This is one pinned
+three-by-80-byte aggregate per boot, TID 0, sequences 0..2, not a general
+Immediate BA recipient.
+
+The PSM checks retained good-FCS outcomes and the fixture's FC, RA, TA,
+sequence and QoS fields before setting receipt bits. Partial captures
+do not respond; an all-bad aggregate produces no BA. A nonzero bitmap
+requires observed RX status1 bit 14 before programming the TX modify
+engine with six PLCP bytes and the 28-byte compressed BA body. Hardware
+generates FCS. TX control `0x4021` selects the hardware SIFS response path;
+bounded EOF/TX-start/TX-end waits expose errors and cancel failed TX.
+The terminal commit/claim/release follows the response attempt.
+
+Command **17**, encoded as `17 | (mcs << 8)`, prepares the legacy OFDM
+response PLCP/PHY control for MCS0..7 with basic mask `0x150`. It requires
+pinned station hardware profile 3 and an unused capture/lease. The
+controller pauses/readback-verifies the PSM, writes/readback-verifies the
+response parameters and arms the permit last. Disabled/invalid requests
+fail explicitly. The badge's mode-31 receiver enables TX only in this
+opt-in build and configures/arms the pinned fixture before listening.
+
+The mode-30 sender now uses automatic RF turnaround with the PSM running
+while its raw aggregate drains. It preserves a held returned response
+instead of the ordinary diagnostic's post-TX inhibit/extra-airtime
+cleanup. Both changes are confined to this compile-time-gated fixture.
+SHM acquisition also runs with the station hardware profile; otherwise
+state 16 could be published but never claimed.
+
+### Actual radio evidence, including failures
+
+Initial build `880d030f`, prefix `d2-ba-ab-m0-r0`, retained three MPDUs
+and started local BA TX, but neither claimed the lease nor received the
+return. Build `d8140444`, `d2-ba-ab-m0-r1`, fixed station-profile snapshot
+acquisition and sender turnaround: all three bodies reached F2 and the
+sender saved the actual matching bitmap-7 BA, including valid FCS.
+These development trials are separate from the final matrix.
+
+The final matrix contains **48 fresh challenges**, including failed and
+partial trials. Normal build `0956610c` passes **11/16 initial** MCS0..7
+direction trials; six fresh repeats establish complete delivery plus an
+actual matching returned BA in all 16 cells. Forward MCS4 needs `r2`;
+its `r1` returns a correct partial bitmap 2, not a full normal pass.
+Forward MCS6 initially delivers three bodies but misses the returned BA.
+Other normal repeats are forward MCS7 and reverse MCS0/3.
+
+| Build | Bad mask | Complete cells | Returned bitmap |
+| --- | --- | --- | --- |
+| `0956610c` | 0 | All 16 MCS/direction cells, after repeats | 7 |
+| `3518ea8b` | 1 | All four MCS0/7 direction cells, initially | 6 |
+| `db11a597` | 2 | All four; forward MCS7 needs `r1` | 5 |
+| `83efecbd` | 4 | Both MCS0 directions and forward MCS7 (`r2`) | 3 |
+| `56b85be8` | 7 | All four; both MCS7 directions need `r2` | No BA |
+
+**Bad-final reverse MCS7 remains unqualified:** `r0` through `r3` capture
+no candidate, publish no terminal lease and start no BA, without a
+reported firmware/BA error. Forward MCS7's failed bad-final `r1` retains
+only one body. These observations do not establish the cause of reception
+loss or qualify the missing cell. All failed evidence is retained.
+
+Prefixes are `build/clean-rx/badge/d2-ba-final-{ab,ba}-m{0..7}-rN`
+and `d2-ba-bad{1,2,4,7}-{ab,ba}-m{0,7}-rN`.
+`d2-ba-evidence-assertions.log` independently reconstructs MPDU bytes and
+CRC32 from each nonce, rather than calling the firmware matchers:
+
+- **31 complete controls**, comprising 27 positive responses and four
+  all-bad/no-response controls.
+- **93 exact retained MPDUs**, including 23 deliberately invalid FCS values.
+- **70 exact saved SDIO deliveries** in complete controls; **77** across
+  all 48 trials, with no reported duplicate deliveries.
+- **28 actual returned BA frames** across all trials: 27 complete positive
+  controls plus the valid partial normal response. Full 32-byte contents,
+  addresses, control/SSN, bitmap and FCS are independently checked.
+- Completed terminal snapshot holds **129..137 us**, PSM lease intervals
+  **131..138 us**. These remain local ownership measurements.
+
+### Evidence ABI and timing limits
+
+Twenty little-endian 16-bit words at interface SHM word 80 (`0x250`),
+USB detail byte **1268**, contain permit, bitmap, attempt/start/error
+counts, observed EOF TSF, IFS TX-active TSF, IFS TX-end TSF, EOF status,
+TX status, saved final outcome, three PLCP words, PHYCTL1 and two reserved
+words. The collector exposes these as `ba_experiment`.
+
+The sender saves receipt magic `0x31524241` at detail **1480**, a count
+at **1484**, and the complete 32-byte BA at **1488**. Its matcher requires
+the pinned addresses derived from the nonce's first five bytes, exact BA
+format, nonzero bitmap within bits 0..2, and valid FCS. This gives fresh
+40-bit address binding, not an echoed full nonce. The pair runner requires
+an actual returned BA whose bitmap matches the actual delivered bodies;
+local TX-start counters alone cannot pass a positive armed experiment.
+The first-match receipt counter initialization was corrected after the RF
+campaign: previous metadata in that detail slot must not seed the count.
+The independently checked raw BA bytes are unaffected; that count is
+excluded from the historical campaign proof. All five badge BA profiles
+were rebuilt/native-tested after the correction; the corrected counter
+has not been radio-retested.
+
+**Observed status/IFS timestamps are not independently measured RF
+EOF/start/end edges.** For example the first returned BA has a 1-us
+observed EOF-to-IFS-active delta and a 56-us IFS interval; neither proves
+physical SIFS or the BA's calculated airtime. `immediate_ba`,
+`sifs_timing_qualified` and `ht_qualified` remain false. The existing AP
+has no administrative access and no additional capture/timing equipment
+is available; same-firmware counters/returns do not replace that
+qualification.
+
+### Reproduction, native checks and remaining gates
+
+Add `-DCLEAN_RX_AMPDU_BA=1` to the existing SHM build flags below for both
+controller and badge, rebuild both, and select the matching collector:
+
+```sh
+CLEAN_RX_COLLECTOR=build/clean-rx/badge/d2-ba-final/collector \
+  bash clean-rx/badge/ht_probe.sh TX_SERIAL RX_SERIAL NEW_PREFIX MCS --ampdu-probe
+```
+
+Bad-FCS profiles add `-DCLEAN_RX_AMPDU_BAD_FCS=1`, `2`, `4` or `7` to both
+builds. All-bad controls intentionally fail the accepted-data runner and
+must be checked for three retained invalid bodies, zero delivery,
+completed lease and zero BA attempts/starts; they do not create a
+success-shaped pair.
+
+Native PSM tests cover all eight bad masks, all 27 pinned header-field
+mutations, disabled permit, partial counts, template/control programming,
+outcome restoration and each bounded timeout/cancellation. Badge tests
+cover valid bitmaps 1..7, all 256 wire-bit mutations, all 224 header/body
+bit mutations with recomputed FCS, nulls and wrong lengths. Default,
+handoff, DMA, SHM, BA and four BA fault builds pass their sanitizer tests;
+all 18 controller/badge ELFs have no undefined symbols. Non-BA PSM
+instruction bytes match the preceding builds; whole controller binaries
+change because disabled command 17 now has an explicit rejection branch.
+
+Production admission/credits, variable lengths and sequences, repeated
+aggregates, ADDBA/BAR/DELBA, agreement/key/reorder lifecycle, mandatory
+receive-size/protection and independent timing/interoperability remain
+unfinished. The diagnostic bitmap is not the production recipient's
+admission bitmap. **D2 stays open; HT advertisement stays disabled.**
+
+### Full-flash preservation
+
+Fresh `d2-ba-start-{A,B}-full.bin` backups independently match the preceding
+restored originals. After the last radio trial, both complete 16,777,216-byte
+originals were loaded with picotool verification, independently reread as
+`d2-ba-restored-{A,B}-full.bin` and compared byte for byte. SHA256:
+
+- A: `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`
+- B: `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`
+
+The first restore attempt ran before USB BOOTSEL re-enumeration completed;
+its failure is retained as `d2-ba-restore-A.log`. Both subsequent
+`d2-ba-restore-{A,B}-retry.log` operations completed successfully after
+explicit device readiness checks. Both badges are left in BOOTSEL;
+the restored original applications were not booted.
+
+## Explicit terminal ownership (2026-10-19)
+
+The SHM delivery build now has a dedicated PSM/controller handoff instead
+of waiting for ordinary state-14 reception. It remains default-disabled
+and limited to the same three-by-80-byte, once-per-boot fixture.
+
+1. After the third retained body, an observed early EOF, or the guarded
+   short/bad-third tail, the PSM commits its timestamp and publication
+   counter, then publishes **state 16** at SHM `0x601`.
+2. The PSM waits without changing the retained bodies or sampled outcomes.
+   A good final frame is not required to enter this state.
+3. The controller recognizes only this dedicated state, pauses the PSM,
+   checks control readback and verifies the frozen state, count and
+   interface metadata. It copies committed bodies/outcomes into private
+   SRAM before recording its actual claimed state and claim count.
+4. The controller clears the lease while paused, then resumes the PSM.
+   The PSM records its release timestamp/counter and takes good/bad cleanup.
+   It bypasses the ordinary last-frame header/capture path, rather than
+   identifying and suppressing a presumed duplicate by HT-SIG comparison.
+5. Existing per-body/FCS validation and shared SRAM/F2 credit handling
+   deliver only accepted records. SDIO backpressure does not return
+   ownership of the private snapshot prematurely.
+
+The collector and pair JSON expose `shm_terminal`, with actual publication,
+claim and release counters, claimed state, two PSM timestamps and
+controller-measured `hold_us`. Validity requires a completed capture,
+valid interface magic, exactly one publication/claim/release and actual
+claimed state 16; absent/unclaimed records are not promoted to success.
+This is a retention-completion interface, **not a qualified RF EOF event**.
+In particular, the fixed third-body limit can publish before a separately
+measured aggregate EOF. Partial EOF and short-tail handling are native-tested,
+not general variable-length/abort radio qualification.
+
+### Terminal evidence ABI and clocks
+
+The ten little-endian 16-bit words start at interface SHM word 68
+(`0x244` absolute), USB detail byte **1244**. They occupy unused handoff-2
+evidence space; handoff-1 remains incompatible with the SHM gate.
+
+| Relative word | Writer | Meaning |
+| --- | --- | --- |
+| 0..1 | PSM | Publication TSF, low/high |
+| 2 | PSM | Publication count |
+| 3 | PSM | Release count |
+| 4 | Controller | Actual frozen state at claim, expected 16 |
+| 5 | Controller | Claim count |
+| 6..7 | Controller | Publication-to-copied-snapshot interval, low/high |
+| 8..9 | PSM | Release TSF, low/high |
+
+Both intervals must use the TSF domain: PSM IHR `0x1119/0x111a` and
+controller `D11+0x180`. The first `d87b024b` MCS0 trial delivered all three
+frames and completed the lease, but used `mac_now()` in the diagnostic
+profile, where it selects the unrelated `D11+0x1c` clock. Its reported
+4,181-us hold disagreed with the 132-us PSM interval. That evidence is
+retained as `d2-terminal-ab-m0-r0`; the controller now reads the TSF
+explicitly. These local intervals do not measure EOF-to-air SIFS.
+
+### Native protocol checks
+
+The SHM PSM simulator covers counts 1..3, good/bad final outcomes and
+EOF/non-EOF decisions; held-state immutability; explicit release to
+good/bad cleanup without ordinary receive publication; timestamp wrap and
+publication/release counter wrap; and no ACK/CTS transmission.
+Default, capture-only handoff and DMA instruction bytes remain exactly
+identical to the preceding builds.
+
+No agreement installation, repeated-aggregate lifecycle, Immediate BA,
+mandatory protection or HT association advertisement is added here.
+
+### Terminal radio campaign and independent byte proof
+
+The final normal build is `8a1f3425`, prefixes
+`build/clean-rx/badge/d2-terminal-final-{ab,ba}-m{0..7}-r0`.
+**12/16 initial trials deliver all three MPDUs.** Fresh `r1` repeats pass
+for forward MCS5/7 and reverse MCS5/7, so every MCS/direction cell has a
+complete three-delivery, zero-duplicate control. These repeats do not
+erase the failed initial receptions or establish loss-free operation.
+
+Fault prefixes are `d2-terminal-bad{1,2,4,7}-{ab,ba}-m{0,7}-r0`, with
+`d2-terminal-bad1-ab-m7-r1` completing the single failed initial fault
+cell. All successful controls use actual claimed state 16 and exactly
+one publication, claim and release:
+
+| Build | Bad mask | Complete controls | Delivered sequences |
+| --- | --- | --- | --- |
+| `8a1f3425` | 0 | All 16 MCS/direction cells; four fresh repeats needed | 0, 1, 2 |
+| `c4656cf3` | 1 | 3/4 initial; forward MCS7 repeat passes | 1, 2 |
+| `3493fa5e` | 2 | 4/4 initial | 0, 2 |
+| `0418d948` | 4 | 4/4 initial | 0, 1 |
+| `f761375c` | 7 | 4/4 initial | None |
+
+In particular, all four bad-last and all four all-bad MCS0/7 direction
+controls complete the dedicated handoff without ordinary state-14
+acquisition. All-bad trials retain three deliberately invalid bodies,
+deliver none and return the expected accepted-data runner failure,
+without a success-shaped pair file.
+
+Across the **32 complete controls**, publication-to-copied-snapshot
+intervals are **129..133 us**; PSM publication-to-release intervals are
+**131..134 us**. The independent test requires both below 1,000 us and
+release no earlier than the copied snapshot, using actual saved TSF words.
+These are finite local ownership measurements, not a production latency
+bound, RF EOF anchoring or SIFS qualification.
+
+The five failed/partial initial receptions are retained separately:
+
+| Trial | Retained count | Sampled outcomes | Delivered bitmap | Terminal lease |
+| --- | --- | --- | --- | --- |
+| Normal forward MCS5 | 3 | Bad, bad, good | 4 | Completed |
+| Normal forward MCS7 | 0 | None | 0 | Not claimed |
+| Normal reverse MCS5 | 2 | Bad, bad | 0 | Completed |
+| Normal reverse MCS7 | 0 | None | 0 | Not claimed |
+| Bad-first forward MCS7 | 1 | Bad | 0 | Completed |
+
+The forward MCS5 failure has independently invalid FCS in both rejected
+bodies and one correct complete saved third MPDU. The partial leases
+demonstrate finite recovery evidence but are not promoted into full
+aggregate or general abort qualification.
+
+An independent Node pass reconstructs the exact MPDU bytes and reflected
+CRC32 without firmware/collector helpers. Across **37 fresh challenges**
+it verifies **96 complete retained radio MPDUs**, including the exact
+**24 intentionally invalid FCS values**, in the 32 complete controls;
+**72 complete saved SDIO MPDUs** in those controls; and the additional
+correct saved MPDU in the failed forward-MCS5 trial. It independently
+checks actual terminal words, counters, sampled outcomes, saved delivery
+bitmaps/counts, zero duplicates, build identity, pair output and the
+unchanged false BA/SIFS/HT flags.
+Results: `build/clean-rx/badge/d2-terminal-evidence-assertions.log`.
+
+Default, handoff, DMA, normal SHM and SHM masks 1/2/4/7 controller/badge
+builds and native suites pass with ASan/UBSan; all sixteen freestanding
+ELFs have no undefined symbols. Both the exact PSM instruction sections
+and the complete non-SHM Wi-Fi firmware binaries are byte-identical to the
+earlier `d2-eof-{default,handoff,dma}` builds.
+
+### Flash preservation
+
+Fresh complete `d2-terminal-start-{A,B}-full.bin` reads were compared
+against the previously verified originals before installation. After the
+campaign, both full 16-MiB images were restored with verification, then
+independently saved as `d2-terminal-restored-{A,B}-full.bin` and compared
+byte for byte with the fresh originals. Both original SHA-256 values
+match, and both badges are left in BOOTSEL without booting those images.
+Results: `build/clean-rx/badge/d2-terminal-restoration.log`.
 
 ## Retained SHM-to-F2 delivery (2026-10-19)
 
@@ -30,7 +335,9 @@ recipient or negotiated HT.
 
 ### Ownership and validation
 
-The unchanged PSM first retains the three actual radio bodies through its
+The initial delivery implementation described in this section used the
+unchanged PSM; its held-receive ownership is superseded by the explicit
+terminal protocol above. It first retains the three actual radio bodies through its
 already-proven direct-body handoff. When the controller observes a held
 receive, it pauses the PSM and verifies the paused control readback before
 copying all committed snapshot words and the three sampled good/bad
@@ -113,10 +420,11 @@ all delivery flags and pair output. The failed trial's partial raw record
 is kept separate from those 90 verified bodies.
 Results: `build/clean-rx/badge/d2-shm-evidence-assertions.log`.
 
-Acquisition still requires a held receive boundary. A bad final MPDU
-or all-bad aggregate can therefore wait for a later ordinary held frame
-before the controller copies its committed record. This is an explicit
-latency limitation, not bounded EOF-to-delivery qualification. Immediate
+Initial acquisition required a held receive boundary. A bad final MPDU
+or all-bad aggregate could therefore wait for a later ordinary held frame
+before the controller copied its committed record. The explicit terminal
+protocol above removes that dependency for the finite fixture, not the
+remaining general receive/EOF qualification obligations. Immediate
 BA must use PSM-side receipt/retention state and an EOF/SIFS response path;
 it cannot wait for this deferred Cortex/SDIO delivery.
 
@@ -719,7 +1027,9 @@ applications or host networking were changed.
    bad FCS, delimiter errors, truncation and abort, ideally with an
    independent aggregate source/capture.
 3. Replace the fixed diagnostic slots with bounded production retained
-   credits and DMA delivery before admitting frames to a hardware BA bitmap.
+   credits and proven delivery before admitting frames to a hardware BA
+   bitmap; repairing the separate DMA experiment is not itself a requirement
+   if an alternative path meets all receive/retention obligations.
 4. Install atomic agreement state and implement/measure real SIFS-timed
    compressed BA at qualified EOF/BAR events. Then integrate station
    lifecycle, reordering/CCMP and negotiate HT last.

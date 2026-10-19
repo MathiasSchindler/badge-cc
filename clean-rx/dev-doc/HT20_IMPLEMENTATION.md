@@ -1398,6 +1398,24 @@ MPDUs reach the badge. See the
 [full delivery evidence and limitations](AMPDU_INTERFACE_INVESTIGATION.md#retained-shm-to-f2-delivery-2026-10-19).
 This does not resolve the separate DMA/EOF experiment, generalize the
 three fixed slots, or implement Immediate BA or mandatory protection.
+The subsequent
+[explicit terminal-ownership campaign](AMPDU_INTERFACE_INVESTIGATION.md#explicit-terminal-ownership-2026-10-19)
+replaces ordinary held-receive polling with a PSM state-16 commit/claim/
+release, including bad-last/all-bad controls. Copying no longer depends on
+a later good ordinary frame. Failed/partial RF receptions remain visible;
+the measured local TSF lease intervals are not qualified EOF-to-air SIFS.
+
+The subsequent default-disabled
+[compressed BA return campaign](AMPDU_INTERFACE_INVESTIGATION.md#diagnostic-compressed-ba-return-2026-10-19)
+adds a real PSM BA response and sender turnaround for the fixed fixture.
+All normal MCS/direction cells now have a complete delivery plus actual
+matching on-air return after repeats; 28 returned BA frames are
+independently validated across 48 trials, including one partial normal
+response. Single-bad controls exclude the invalid body's receipt bit.
+Bad-final reverse MCS7 remains unqualified after four no-capture trials.
+Command 17 arms this diagnostic, not a production agreement. The hardware
+SIFS control selection and observed IFS timestamps do not independently
+qualify RF EOF-to-air SIFS. HT advertisement remains disabled.
 
 - Integrate the [native-tested Block ACK/reordering software](BLOCK_ACK_IMPLEMENTATION.md)
   with actual PSM aggregate boundaries, retained multi-MPDU capture and

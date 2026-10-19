@@ -340,6 +340,14 @@ static uint16_t psm_clock_step;
 static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
     phy_writes = 0u;
     for (uint32_t step = 0u; step < 10000u; ++step) {
+#if CLEAN_RX_AMPDU_BA
+        if ((pc == AMPDU_BA_EOF_WAIT && !(regs[0x100du] & 0x4000u)) ||
+            (pc == AMPDU_BA_START_WAIT && !(regs[0x1148u] & 0x100u)) ||
+            (pc == AMPDU_BA_END_WAIT && (regs[0x1148u] & 0x100u))) return pc;
+#endif
+#if CLEAN_RX_AMPDU_SHM
+        if (pc == AMPDU_SHM_WAIT && regs[0x601u]) return pc;
+#endif
         if (pc == 198u || pc == 266u || pc == 124u || pc == 130u ||
             (CLEAN_RX_AMPDU_DMA && (pc == 253u || pc == 220u)) ||
             pc == 118u || pc == 129u || pc == 163u ||
@@ -1352,7 +1360,13 @@ static void aggregate_probe_trace(void) {
            (CLEAN_RX_AMPDU_INTERFACE==3 && !CLEAN_RX_AMPDU_DMA ?
                 (CLEAN_RX_AMPDU_HANDOFF==2 ? 163u : 130u) : 198u) &&
            r[CLEAN_AMPDU_PROBE_SHM]==2u);
-    assert(psm_run(r,0,AMPDU_TRACE_GOOD)==198u && r[CLEAN_AMPDU_PROBE_SHM]==3u);
+    assert(psm_run(r,0,AMPDU_TRACE_GOOD)==
+#if CLEAN_RX_AMPDU_SHM
+           AMPDU_SHM_WAIT &&
+#else
+           198u &&
+#endif
+           r[CLEAN_AMPDU_PROBE_SHM]==3u);
     assert(psm_run(r,0,AMPDU_TRACE_GOOD)==198u && r[CLEAN_AMPDU_PROBE_SHM]==3u);
     for (uint32_t i=0u;i<132u;++i)
         assert(r[CLEAN_AMPDU_PROBE_SHM+8u+i]==base[CLEAN_SHM_FRAME+i%44u]);
@@ -1467,7 +1481,12 @@ static void aggregate_interface_trace(void) {
     early[0x1009u]=2u;
     early[0x100cu]=82u;
     early[0x100du]=0x4000u;
-    assert(psm_run(early,0,AMPDU_TRACE_BAD)==263u);
+    assert(psm_run(early,0,AMPDU_TRACE_BAD)==
+#if CLEAN_RX_AMPDU_SHM
+           AMPDU_SHM_WAIT);
+#else
+           263u);
+#endif
     assert(early[CLEAN_AMPDU_PROBE_SHM]==2u &&
            early[CLEAN_AMPDU_IF_SHM+132u]==82u &&
            early[CLEAN_AMPDU_IF_SHM+137u]==2u);
@@ -1481,6 +1500,130 @@ static void aggregate_interface_trace(void) {
         assert((op&0x7e0u)!=0x780u);
     }
     puts("PSM aggregate interface: passive records, nonclearing events, clock wrap, bounded timeout and one-shot commits pass; NOT RF");
+#endif
+}
+
+static void aggregate_ba_transmit(void) {
+#if CLEAN_RX_AMPDU_BA
+    for (uint32_t bad=0u;bad<8u;++bad) {
+        uint16_t r[0x1800]={0};
+        r[CLEAN_AMPDU_BA_WORD]=1u;
+        r[CLEAN_AMPDU_PROBE_SHM]=3u;
+        r[0x1782u]=(uint16_t)(bad & 4u ? 2u : 1u);
+        r[CLEAN_AMPDU_BA_WORD+14u]=0x040bu;
+        r[CLEAN_AMPDU_BA_WORD+17u]=0x000bu;
+        for (uint32_t i=0u;i<3u;++i) {
+            r[0x612u+i]=(uint16_t)(0x1202u+i);
+            r[CLEAN_ACK_PEER+i]=(uint16_t)(0x3402u+i);
+        }
+        for (uint32_t n=0u;n<3u;++n) {
+            uint32_t slot=CLEAN_AMPDU_PROBE_SHM+8u+44u*n;
+            r[CLEAN_AMPDU_IF_SHM+11u+8u*n]=(uint16_t)(bad & (1u<<n) ? 2u : 1u);
+            r[slot+4u]=0x0288u; r[slot+15u]=(uint16_t)(n<<4u); r[slot+16u]=0x60u;
+            for (uint32_t i=0u;i<3u;++i) {
+                r[slot+6u+i]=r[0x612u+i];
+                r[slot+9u+i]=r[CLEAN_ACK_PEER+i];
+            }
+        }
+        if (!bad) {
+            uint16_t invalid[0x1800];
+            const uint32_t fields[]={4u,6u,7u,8u,9u,10u,11u,15u,16u};
+            for (uint32_t n=0u;n<3u;++n)
+                for (uint32_t i=0u;i<sizeof(fields)/sizeof(fields[0]);++i) {
+                    memcpy(invalid,r,sizeof(r));
+                    invalid[CLEAN_AMPDU_PROBE_SHM+8u+44u*n+fields[i]]^=1u;
+                    assert(psm_run(invalid,0,AMPDU_BA_ENTER)==AMPDU_SHM_WAIT);
+                    assert(!invalid[CLEAN_AMPDU_BA_WORD+2u] &&
+                           invalid[CLEAN_AMPDU_BA_WORD+4u]==1u);
+                }
+            for (uint32_t count=0u;count<3u;++count) {
+                memcpy(invalid,r,sizeof(r)); invalid[CLEAN_AMPDU_PROBE_SHM]=(uint16_t)count;
+                assert(psm_run(invalid,0,AMPDU_BA_ENTER)==AMPDU_SHM_WAIT);
+                assert(!invalid[CLEAN_AMPDU_BA_WORD+2u]);
+            }
+            memcpy(invalid,r,sizeof(r)); invalid[CLEAN_AMPDU_BA_WORD]=0u;
+            assert(psm_run(invalid,0,AMPDU_BA_ENTER)==AMPDU_SHM_WAIT);
+            assert(!invalid[CLEAN_AMPDU_BA_WORD+2u]);
+        }
+        assert(psm_run(r,0,AMPDU_BA_ENTER)==
+               (bad==7u ? AMPDU_SHM_WAIT : AMPDU_BA_EOF_WAIT));
+        assert(r[CLEAN_AMPDU_BA_WORD+1u]==(7u^bad));
+        if (bad==7u) { assert(!r[CLEAN_AMPDU_BA_WORD+2u]); continue; }
+        assert(!r[0x1081u]);
+        r[0x100du]=0x4000u; r[0x1119u]=100u;
+        assert(psm_run(r,0,AMPDU_BA_EOF_WAIT)==AMPDU_BA_START_WAIT);
+        assert(r[0x10e3u]==0x94u && r[0x10ebu]==4u && !r[0x10ecu]);
+        assert(r[0x10edu]==(7u^bad) && !r[0x10eeu] && !r[0x10efu] && !r[0x10f0u]);
+        assert(r[0x1084u]==65535u && r[0x1085u]==1u && r[0x10b5u]==34u);
+        assert(r[0x1080u]==0x4021u && r[0x1081u]==0xd0u);
+        assert(r[CLEAN_AMPDU_BA_WORD+2u]==1u && !r[CLEAN_AMPDU_BA_WORD+3u]);
+        r[0x1148u]=0x100u; r[0x1119u]=110u;
+        assert(psm_run(r,0,AMPDU_BA_START_WAIT)==AMPDU_BA_END_WAIT);
+        assert(r[CLEAN_AMPDU_BA_WORD+3u]==1u && r[CLEAN_AMPDU_BA_WORD+7u]==110u);
+        r[0x1148u]=0u; r[0x1119u]=160u;
+        assert(psm_run(r,0,AMPDU_BA_END_WAIT)==AMPDU_SHM_WAIT);
+        assert(r[CLEAN_AMPDU_BA_WORD+9u]==160u && !r[CLEAN_AMPDU_BA_WORD+4u]);
+        assert(r[0x1782u]==(bad & 4u ? 2u : 1u));
+        assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
+        const uint32_t timeout[]={AMPDU_BA_EOF_DEC,AMPDU_BA_START_DEC,AMPDU_BA_END_DEC};
+        for (uint32_t i=0u;i<3u;++i) {
+            r[0x601u]=0u; r[0x1780u]=1u;
+            r[0x1080u]=i ? 0x4021u : 0u; r[0x1081u]=i ? 0xd0u : 0u;
+            uint16_t errors=r[CLEAN_AMPDU_BA_WORD+4u];
+            assert(psm_run(r,0,timeout[i])==AMPDU_SHM_WAIT);
+            assert(r[CLEAN_AMPDU_BA_WORD+4u]==errors+1u);
+            assert(!r[0x1080u] && !r[0x1081u]);
+        }
+    }
+    puts("PSM diagnostic BA: retained-only bitmap, pinned header, EOF gate, 32-byte template, PHY start/end, bounded cancellation and outcome preservation; NOT RF/SIFS qualification");
+#endif
+}
+
+static void aggregate_terminal_handoff(void) {
+#if CLEAN_RX_AMPDU_SHM
+    const uint32_t status=CLEAN_AMPDU_IF_SHM+CLEAN_AMPDU_SHM_STATUS_WORD;
+    assert(instruction(AMPDU_SHM_WAIT)==
+           WORD(0xd1u,0x601u,0x1800u,AMPDU_SHM_WAIT));
+    for (uint32_t count=1u;count<=3u;++count)
+        for (uint32_t outcome=1u;outcome<=2u;++outcome)
+            for (uint32_t eof=0u;eof<2u;++eof) {
+                uint16_t r[0x1800]={0}, frozen[0x1800];
+                r[CLEAN_AMPDU_PROBE_SHM]=(uint16_t)count;
+                r[0x100du]=(uint16_t)(eof<<14u);
+                r[0x1782u]=(uint16_t)outcome;
+                r[0x1119u]=65530u; r[0x111au]=7u;
+                int commit=count==3u || eof;
+                assert(psm_run(r,0,AMPDU_IF_ADVANCE)==
+                       (commit ? AMPDU_SHM_WAIT : 163u));
+                assert(r[CLEAN_AMPDU_IF_SHM+1u]==count);
+                if (!commit) {
+                    assert(!r[status+2u] && !r[0x601u]);
+                    continue;
+                }
+                assert(r[0x601u]==CLEAN_AMPDU_SHM_HELD_STATE);
+                assert(r[status]==65530u && r[status+1u]==7u &&
+                       r[status+2u]==1u && !r[status+3u]);
+                memcpy(frozen,r,sizeof(r));
+                assert(psm_run(r,0,AMPDU_SHM_WAIT)==AMPDU_SHM_WAIT);
+                assert(!memcmp(r,frozen,sizeof(r)));
+                r[0x601u]=0u; r[0x1119u]=10u; r[0x111au]=8u;
+                assert(psm_run(r,0,AMPDU_SHM_WAIT)==(outcome==2u ? 263u : 266u));
+                assert(r[status+2u]==1u && r[status+3u]==1u &&
+                       r[status+8u]==10u && r[status+9u]==8u);
+                assert(((uint32_t)r[status+8u] |
+                        ((uint32_t)r[status+9u]<<16u)) -
+                       ((uint32_t)r[status] | ((uint32_t)r[status+1u]<<16u))==16u);
+                assert(r[CLEAN_AMPDU_PROBE_SHM]==count);
+                assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
+            }
+    uint16_t r[0x1800]={0};
+    r[status+2u]=65535u; r[status+3u]=65535u;
+    r[0x1782u]=1u;
+    assert(psm_run(r,0,AMPDU_SHM_COMMIT)==AMPDU_SHM_WAIT);
+    assert(!r[status+2u] && r[status+3u]==65535u);
+    r[0x601u]=0u;
+    assert(psm_run(r,0,AMPDU_SHM_WAIT)==266u && !r[status+3u]);
+    puts("PSM SHM terminal: explicit immutable lease, good/bad final, partial EOF, held wait, timestamp wrap and release without ordinary RX; NOT BA/SIFS qualification");
 #endif
 }
 
@@ -1505,6 +1648,8 @@ int main(void) {
                 assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
             }
 #endif
+    aggregate_terminal_handoff();
+    aggregate_ba_transmit();
     aggregate_handoff_trace();
     aggregate_interface_trace();
     aggregate_probe_trace();

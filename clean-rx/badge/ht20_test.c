@@ -1028,7 +1028,42 @@ static void monitor_tests(void) {
     puts("Passive AP monitor: bounded FCS/address evidence and first/last receive timestamps pass");
 }
 
+static void aggregate_ba_tests(void) {
+    uint8_t nonce[14]={1u,2u,3u,4u,5u,6u}, m[32]={0}, original[32];
+    m[0]=0x94u; m[16]=4u;
+    for (uint32_t i=0u;i<6u;++i) {
+        m[10u+i]=i ? nonce[i-1u] : 2u;
+        m[4u+i]=(uint8_t)(m[10u+i] ^ (i==5u ? 0x80u : 0u));
+    }
+    for (uint32_t mask=1u;mask<8u;++mask) {
+        m[20]=(uint8_t)mask;
+        uint32_t crc=clean_mac_fcs(m,28u);
+        for (uint32_t i=0u;i<4u;++i) m[28u+i]=(uint8_t)(crc>>(8u*i));
+        assert(clean_ht_ampdu_ba_match(m,32u,nonce));
+        memcpy(original,m,sizeof(m));
+        for (uint32_t bit=0u;bit<256u;++bit) {
+            m[bit/8u]^=(uint8_t)(1u<<(bit&7u));
+            assert(!clean_ht_ampdu_ba_match(m,32u,nonce));
+            memcpy(m,original,sizeof(m));
+        }
+        for (uint32_t bit=0u;bit<224u;++bit) {
+            m[bit/8u]^=(uint8_t)(1u<<(bit&7u));
+            uint32_t altered=clean_mac_fcs(m,28u);
+            for (uint32_t i=0u;i<4u;++i) m[28u+i]=(uint8_t)(altered>>(8u*i));
+            int valid=bit>=160u && bit<163u && m[20]!=0u;
+            assert(clean_ht_ampdu_ba_match(m,32u,nonce)==valid);
+            memcpy(m,original,sizeof(m));
+        }
+    }
+    assert(!clean_ht_ampdu_ba_match(NULL,32u,nonce));
+    assert(!clean_ht_ampdu_ba_match(m,32u,NULL));
+    assert(!clean_ht_ampdu_ba_match(m,31u,nonce));
+    assert(!clean_ht_ampdu_ba_match(m,33u,nonce));
+    puts("Diagnostic BA receipt: complete pinned addresses/control/bitmap/FCS and every-bit corruption rejection pass");
+}
+
 int main(void) {
+    aggregate_ba_tests();
     aggregate_dma_tests();
     aggregate_shm_tests();
     configuration_tests();

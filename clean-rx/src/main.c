@@ -909,18 +909,17 @@ static uint8_t ampdu_shm_next;
 
 static int ampdu_shm_receive(uint32_t mac_en, uint32_t rx_start) {
     if (!ampdu_shm_copied) {
-        if (shm_read16(0x601u) != PSM_STATE_CAPTURED) return 1;
+        if (shm_read16(0x601u) != CLEAN_AMPDU_SHM_HELD_STATE) return 1;
         mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
         uint32_t control = mmio_read32(D11_MACCONTROL);
         if ((control & 3u) != (clean_mac_pause_psm(mac_en) & 3u))
             return fail(0x8du, D11_MACCONTROL, control);
-        if (shm_read16(0x601u) != PSM_STATE_CAPTURED ||
-            shm_read16(CLEAN_AMPDU_PROBE_SHM) != 3u ||
+        uint16_t state = shm_read16(0x601u);
+        uint16_t count = shm_read16(CLEAN_AMPDU_PROBE_SHM);
+        if (state != CLEAN_AMPDU_SHM_HELD_STATE || !count || count > 3u ||
             shm_read16(CLEAN_AMPDU_IF_SHM) != 3u ||
-            shm_read16(CLEAN_AMPDU_IF_SHM + 1u) != 3u) {
-            mmio_write32(D11_MACCONTROL, mac_en);
-            return 1;
-        }
+            shm_read16(CLEAN_AMPDU_IF_SHM + 1u) != count)
+            return fail(0x8du, CLEAN_AMPDU_PROBE_SHM, count);
         uint8_t *bytes = (uint8_t *)&ampdu_shm_snapshot + 4u;
         for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i) {
             uint16_t word = shm_read16(CLEAN_AMPDU_PROBE_SHM + i);
@@ -928,24 +927,18 @@ static int ampdu_shm_receive(uint32_t mac_en, uint32_t rx_start) {
             bytes[2u * i + 1u] = (uint8_t)(word >> 8u);
         }
         ampdu_shm_snapshot.magic = CLEAN_AMPDU_PROBE_MAGIC;
-        for (uint32_t i = 0u; i < 3u; ++i)
+        for (uint32_t i = 0u; i < count; ++i)
             ampdu_shm_outcomes[i] = shm_read16(CLEAN_AMPDU_IF_SHM + 11u + 8u * i);
-        /* The ordinary last-frame capture must not also publish sequence 2.
-         * A later, unrelated held frame still belongs to the ordinary path. */
-        if (shm_read16(0x606u) == 86u &&
-            shm_read16(CLEAN_SHM_FRAME + 1u) ==
-                (uint16_t)(ampdu_shm_snapshot.raw[2u] |
-                           ((uint16_t)ampdu_shm_snapshot.raw[3u] << 8u)) &&
-            shm_read16(CLEAN_SHM_FRAME + 2u) ==
-                (uint16_t)(ampdu_shm_snapshot.raw[4u] |
-                           ((uint16_t)ampdu_shm_snapshot.raw[5u] << 8u)) &&
-            shm_read16(CLEAN_SHM_FRAME + 3u) ==
-                (uint16_t)(ampdu_shm_snapshot.raw[6u] |
-                           ((uint16_t)ampdu_shm_snapshot.raw[7u] << 8u))) {
-            (void)rx_dma_poll_and_reclaim(0);
-            shm_write16(0x601u, 0u);
-        }
+        uint32_t status = CLEAN_AMPDU_IF_SHM + CLEAN_AMPDU_SHM_STATUS_WORD;
+        uint32_t published = (uint32_t)shm_read16(status) |
+            ((uint32_t)shm_read16(status + 1u) << 16u);
+        shm_write16(status + 4u, state);
+        shm_write16(status + 5u, (uint16_t)(shm_read16(status + 5u) + 1u));
+        uint32_t held = mmio_read32(D11_BASE + 0x180u) - published;
+        shm_write16(status + 6u, (uint16_t)held);
+        shm_write16(status + 7u, (uint16_t)(held >> 16u));
         ampdu_shm_copied = 1u;
+        shm_write16(0x601u, 0u);
         mmio_write32(D11_MACCONTROL, mac_en);
     }
     if (ampdu_shm_next == ampdu_shm_snapshot.count) return 1;
@@ -1061,6 +1054,9 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     uint32_t ofdm_airtime = 0u;
     clean_ht_tx_t ht_tx;
     uint32_t station = shm_read16(CLEAN_ACK_ENABLE);
+    uint32_t ba_listen = CLEAN_RX_AMPDU_BA && ht_probe == 2u &&
+        ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_AMPDU_PROBE_VERSION;
+    if (ba_listen) station = 1u;
     uint16_t ack_sent = shm_read16(CLEAN_ACK_SENT);
     uint16_t cts_sent = shm_read16(CLEAN_CTS_SENT);
     if (ht_probe) {
@@ -1118,7 +1114,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     if (station_hw) shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
     MBOX->rc_dacbuf = 0x55550001u;
     phy_tx_hw_configure(channel);
-    if (station_mac) phy_tx_set_automatic();
+    if (station_mac || ba_listen) phy_tx_set_automatic();
     else phy_tx_set_inhibit(0);
 
     MBOX->rc_dacbuf = 0x55550002u;
@@ -1253,7 +1249,7 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     (void)mmio_read16(0x18001502u);
     tx_diag.phy_debug_first = mmio_read32(D11_BASE + 0x158u);
     tx_diag.status_first = tx_status();
-    if (station_mac) {
+    if (station_mac || ba_listen) {
         mmio_write32(D11_MACCONTROL, mac_tx_ctl | 2u);
         (void)mmio_read32(D11_MACCONTROL);
     }
@@ -1731,7 +1727,7 @@ void cyw43_main(void) {
         if (!station_mac && !ampdu_dma_receive(rx_start)) break;
 #endif
 #if CLEAN_RX_AMPDU_SHM
-        if (!station_mac && !ampdu_shm_receive(mac_en, rx_start)) break;
+        if (!ampdu_shm_receive(mac_en, rx_start)) break;
 #endif
 #if CLEAN_RX_AMPDU_DELIVERY
         if (!station_mac && !station_publish_capture(channel)) break;
@@ -2012,7 +2008,10 @@ void cyw43_main(void) {
             if (MBOX->fw_state == FW_STATE_ERROR) break;
             if (cmd & CLEAN_TX_REARM_RX) {
                 if (!d11_restart_rx_psm(channel)) break;
-            } else if (!reliable && (shm_read16(0x601u) == PSM_STATE_CAPTURED ||
+            } else if (!reliable &&
+                       !(CLEAN_RX_AMPDU_BA && ht_probe == 2u &&
+                         packet[0] == CLEAN_HT_AMPDU_PROBE_VERSION) &&
+                       (shm_read16(0x601u) == PSM_STATE_CAPTURED ||
                        shm_read16(0x601u) == PSM_STATE_FAULT))
                 shm_write16(0x601u, 0u);
             if (!reliable) capture_prepared = 0u;
@@ -2137,6 +2136,50 @@ void cyw43_main(void) {
             policy_command = cmd;
             continue;
         }
+        if ((cmd & 0xffu) == CLEAN_AMPDU_BA_CMD) {
+#if CLEAN_RX_AMPDU_BA
+            uint8_t plcp[6];
+            uint32_t mcs = cmd >> 8u;
+            int rate = clean_ht_ack_rate(policy_basic, mcs);
+            if (!station_hw || mcs >= 8u || policy_basic != 0x150u ||
+                rate < 4 || shm_read16(CLEAN_AMPDU_BA_WORD) ||
+                ampdu_shm_copied || shm_read16(CLEAN_AMPDU_PROBE_SHM) ||
+                !clean_ofdm_plcp_rate(plcp, 32u, (uint32_t)rate - 4u)) {
+                fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+                break;
+            }
+            mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
+            uint32_t control = mmio_read32(D11_MACCONTROL);
+            if ((control & 3u) != (clean_mac_pause_psm(mac_en) & 3u)) {
+                fail(0x8du, D11_MACCONTROL, control);
+                break;
+            }
+            for (uint32_t i = 1u; i < CLEAN_AMPDU_BA_WORDS; ++i) {
+                uint16_t value = i >= 14u && i <= 16u ?
+                    (uint16_t)(plcp[2u*(i-14u)] |
+                        ((uint16_t)plcp[2u*(i-14u)+1u] << 8u)) :
+                    i == 17u ? clean_ofdm_rates[rate-4].phyctl1 : 0u;
+                shm_write16(CLEAN_AMPDU_BA_WORD + i, value);
+                if (shm_read16(CLEAN_AMPDU_BA_WORD + i) != value) {
+                    fail(0x8du, CLEAN_AMPDU_BA_WORD + i, value);
+                    break;
+                }
+            }
+            if (MBOX->fw_state == FW_STATE_ERROR) break;
+            shm_write16(CLEAN_AMPDU_BA_WORD, 1u);
+            if (shm_read16(CLEAN_AMPDU_BA_WORD) != 1u) {
+                fail(0x8du, CLEAN_AMPDU_BA_WORD, shm_read16(CLEAN_AMPDU_BA_WORD));
+                break;
+            }
+            mmio_write32(D11_MACCONTROL, mac_en);
+            MBOX->host_cmd = 2u;
+            __asm__ volatile("dsb" ::: "memory");
+            continue;
+#else
+            fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+            break;
+#endif
+        }
         if ((cmd & 0xffu) == CLEAN_HT_RESPONSE_CMD) {
             int policy = clean_ht_response_policy(cmd, CLEAN_RX_HT_RESPONSE,
                                                    MAC_RADIO->profile);
@@ -2214,12 +2257,6 @@ void cyw43_main(void) {
         }
         if (st == PSM_STATE_CAPTURED) {
             if (capture_target_reached) continue;
-#if CLEAN_RX_AMPDU_SHM
-            if (!station_mac) {
-                if (!ampdu_shm_receive(mac_en, rx_start)) break;
-                if (shm_read16(0x601u) != PSM_STATE_CAPTURED) continue;
-            }
-#endif
             if (station_mac) {
                 station_consume_ack();
                 if (shm_read16(0x601u) != PSM_STATE_CAPTURED) continue;

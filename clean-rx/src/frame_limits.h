@@ -25,7 +25,21 @@
 #ifndef CLEAN_RX_AMPDU_SHM
 #define CLEAN_RX_AMPDU_SHM 0
 #endif
+#ifndef CLEAN_RX_AMPDU_BA
+#define CLEAN_RX_AMPDU_BA 0
+#endif
+#define CLEAN_AMPDU_BA_CMD 17u
+#define CLEAN_AMPDU_BA_WORD (CLEAN_AMPDU_IF_SHM + 80u)
+#define CLEAN_AMPDU_BA_WORDS 20u
+#define CLEAN_AMPDU_BA_RX_DETAIL 1480u
+#define CLEAN_AMPDU_BA_RX_MAGIC 0x31524241u
+_Static_assert(CLEAN_RX_AMPDU_BA == 0 ||
+               (CLEAN_RX_AMPDU_BA == 1 && CLEAN_RX_AMPDU_SHM),
+               "Diagnostic Block ACK requires retained SHM delivery");
 #define CLEAN_RX_AMPDU_DELIVERY (CLEAN_RX_AMPDU_DMA || CLEAN_RX_AMPDU_SHM)
+#define CLEAN_AMPDU_SHM_HELD_STATE 16u
+#define CLEAN_AMPDU_SHM_STATUS_WORD 68u
+#define CLEAN_AMPDU_SHM_STATUS_WORDS 10u
 /* Shared receipt-evidence ABI for both bounded aggregate delivery paths. */
 #define CLEAN_AMPDU_DMA_PENDING 0x300u
 #define CLEAN_AMPDU_DMA_SUBMITTED 0x301u
@@ -41,6 +55,9 @@
 #define CLEAN_AMPDU_IF_ADDR 0x20800u
 #define CLEAN_AMPDU_IF_DETAIL 1104u
 #define CLEAN_AMPDU_IF_MAGIC 0x32464941u
+_Static_assert(80u + CLEAN_AMPDU_BA_WORDS <= CLEAN_AMPDU_HANDOFF_COMMIT &&
+               CLEAN_AMPDU_BA_RX_DETAIL + 40u <= CLEAN_AMPDU_DMA_PAYLOAD_DETAIL,
+               "Diagnostic BA evidence must not overlap handoff or payload records");
 #define CLEAN_AMPDU_PROBE_SHM 0x100u
 #define CLEAN_AMPDU_PROBE_WORDS 144u
 #define CLEAN_AMPDU_PROBE_ADDR 0x20600u
@@ -122,6 +139,10 @@ _Static_assert(CLEAN_RX_AMPDU_SHM == 0 ||
                 CLEAN_RX_AMPDU_PROBE && CLEAN_RX_AMPDU_INTERFACE == 3 &&
                 CLEAN_RX_AMPDU_HANDOFF == 2),
                "SHM aggregate delivery requires the finite handoff without DMA publication");
+_Static_assert(CLEAN_AMPDU_SHM_STATUS_WORD >= 4u + 3u * 8u &&
+               CLEAN_AMPDU_SHM_STATUS_WORD + CLEAN_AMPDU_SHM_STATUS_WORDS <=
+                   CLEAN_AMPDU_HANDOFF_COMMIT,
+               "SHM terminal ownership evidence must fit unused handoff-2 rows");
 _Static_assert(CLEAN_RX_AMPDU_DMA == 0 ||
                (CLEAN_RX_AMPDU_DMA == 1 && CLEAN_RX_AMPDU_PROBE &&
                 CLEAN_RX_AMPDU_INTERFACE == 3 && CLEAN_RX_AMPDU_HANDOFF == 2),
