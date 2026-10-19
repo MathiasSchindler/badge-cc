@@ -116,138 +116,53 @@ See [target mapping and evidence](clean-rx/dev-doc/HT20_IMPLEMENTATION.md).
 ### D2. HT PHY and association
 
 **Status: in progress; HT station advertisement remains disabled.**
-Raw HT20, extended reception, per-TID receive/CCMP state, gated responses
-and bounded per-category access exist. Association-response/runtime peer
-profiling and bounded station RX staging are implemented. Opt-in non-HT
-WMM negotiation, AP-derived EDCA policy, protected QoS exchanges and bounded
-protected A-MSDU receive software are implemented. Bounded Block ACK agreement,
-A-MPDU stream parsing and ciphertext reordering are native-tested with WPA2
-delivery. Complete three-MPDU radio capture and bad-FCS continuation are
-demonstrated in the finite diagnostic at all MCS in both directions;
-general live aggregate reception, Immediate BA and station/controller integration
-remain open. A separate gated per-MPDU DMA/F2 experiment now delivers the
-first two complete diagnostic MPDUs to the RP2350 at MCS0/3/7 in both
-directions. The final byte-evidence campaign has 6/7 normal two-MPDU
-deliveries, one retained RF miss and two successful bad-middle rejections;
-the last DMA MPDU remains missing. An alternative retained-SHM/SRAM/F2
-path now delivers all three fixture MPDUs: its initial MCS0..7 matrix passes
-16/16 fresh trials in both directions, exactly three deliveries and zero duplicates. It is
-also tested with bad first/middle/last FCS and all-bad aggregates; failed
-initial receptions are retained, with successful fresh repeats. It is
-still a fixed-size, one-PPDU diagnostic. A subsequent explicit PSM state-16
-terminal lease removes dependence on later ordinary traffic, including
-bad-last and all-bad aggregates. Its current matrix covers all MCS/direction
-cells, with RF misses/partials retained and successful fresh repeats;
-it does not establish loss-free reception. This is not production live
-reception, BA or mandatory receive/protection qualification. Receive completion/
-discard handling, radio override ownership and atomic backoff publication
-have been corrected and regression-tested. Local-AP reply delivery and
-intermittent HT receive corruption remain qualification limits.
-Owned station TX cleanup is implemented and regression-tested.
-Negotiated station operation and its mandatory MAC prerequisites are not
-yet qualified.
-See [implementation and remaining gates](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#remaining-d2-work).
-Follow-up receive investigations are recorded in
-[the development record](clean-rx/dev-doc/AP_AUTHENTICATION_INVESTIGATION.md).
-The [remaining RF-hint evaluation](clean-rx/dev-doc/RF_HINT_FOLLOWUP.md)
-tracks isolated PHY/gain controls and TX-cleanup verification.
-The [controlled independent HT receive investigation](clean-rx/dev-doc/CONTROLLED_HT_RECEIVE.md)
-verifies small-frame vendor-to-clean MCS0/MCS7 reception on both badges;
-receive reliability and mandatory HT MAC integration remain open.
-See the [aggregate radio investigation](clean-rx/dev-doc/AMPDU_RADIO_INVESTIGATION.md)
-for current capture evidence and remaining hardware gates.
-The [next-MPDU interface investigation](clean-rx/dev-doc/AMPDU_INTERFACE_INVESTIGATION.md)
-records the fixed next/last-frame diagnostic handoff and remaining live/BA gates.
-The [Block ACK implementation record](clean-rx/dev-doc/BLOCK_ACK_IMPLEMENTATION.md)
-separates tested software from the remaining live receive/response work.
+Live aggregate reception, mandatory MAC integration and negotiated operation
+are not yet qualified. Implementation details and qualification limits are in
+the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualification-checkpoint-2026-10-19).
 
-- [ ] Complete HT capability/operation negotiation and PHY configuration:
-  - [x] Prepare a conservative, unadvertised HT20/800-ns/BCC/one-stream
-    capability element, with optional PHY modes disabled.
-  - [x] Parse AP HT capabilities/operation and WMM independently of legacy
-    association; reject malformed optional elements for HT without
-    invalidating an otherwise usable legacy response.
-  - [x] Constrain the candidate PHY profile by the accepted response and
-    subsequent beacon changes, including channel, basic MCS and protection.
-  - [x] Select a common MCS under an explicit ceiling; validate exact
-    per-frame MCS requests without silently changing the requested rate.
-  - [x] Implement bounded/raw HT mixed-format TX/RX at MCS0..7 while keeping
-    legacy PHY formats and receive metadata distinct.
-  - [x] Use one validated configuration for HT PHY controls, symbol count,
-    mixed-format airtime and L-SIG length; apply airtime to TX deadlines.
-  - [x] Preserve legacy-only association and explicit fallback reasons,
-    including disabled local HT/extended-RX builds and missing mandatory MAC.
-  - [ ] Activate the candidate through atomic station/controller policy and
-    actual HT association advertisement only after mandatory MAC/BA,
-    receive-size and protection obligations are implemented and qualified.
-    - [x] Make existing station/controller policy completion acknowledge an
-      applied, readback-verified policy rather than deferred queueing; keep
-      pending requests single-flight and report failures explicitly.
-    - [ ] Integrate and qualify live aggregate delivery/Immediate BA and
-      mandatory receive/protection before adding real HT policy activation
-      or association advertisement; the commit barrier alone is insufficient.
-      - [x] Deliver all three complete fixture MPDUs through retained
-        SHM/SRAM/F2, with independently checked saved bytes and no duplicates
-        at MCS0..7 in both directions; keep the incomplete DMA path separate.
-      - [x] Replace ordinary held-frame dependence with an explicit PSM
-        terminal commit/claim/release; verify bad-last/all-bad handoff and
-        avoid duplicate ordinary publication, without enabling production BA or HT.
-      - [ ] Generalize receive lengths, admission, repeated aggregates and
-        agreement/key/reorder lifecycle beyond the finite diagnostic.
-        - [x] Establish a focused unchanged-vendor/AP unicast reference
-          with a passive clean observer in both badge role assignments:
-          actual received-BA counter deltas and CRC-valid A-MPDU-format
-          HT prefixes, not merely enabled flags or submitted bursts.
-          See [reference results and limitations](clean-rx/vendor-burst/README.md).
-          Complete multi-MPDU body delivery remained unproven in that
-          initial reference; this does not close the parent item.
-        - [x] Correlate fresh RX epochs/HT prefixes with later MAC headers
-          and exact F2 publication IDs; independently validate complete
-          variable-length ciphertext MPDUs/FCS from the nonce-derived
-          vendor MAC, including A-MPDU-format receptions in both roles.
-          Retain one-size controls as failed qualifications. Larger live
-          PSDUs still lack terminal commits; multiple MPDUs from one live
-          aggregate, sustained reliability and production lifecycle remain open.
-        - [x] Add default-off bounded exit/progress records before pending
-          ownership is cleared: length/short rejection, abort/fault, watchdog
-          and RX/prefix replacement. Observe event 6, good-only bit 8,
-          terminal bit 14, raw registers and first-hint RX counts without
-          changing the receive handoff or enabling TX.
-          Larger live 1598/1342-byte prefixes reach early good-only hints
-          then abort at RX counts 560/304; they remain unattributed.
-          Five later variable-length controls pass across both roles,
-          but do not reproduce those larger exits. Short-exit coverage
-          is native-only; see the reference's build/evidence distinctions.
-        - [x] Implement default-off complete early-MPDU retention with
-          bounded SHM, commit-last fresh-prefix identity and independent
-          host FCS validation. Build `e9008554` retains one complete
-          170-byte MPDU at nonterminal hint status `0x1922` from a live
-          478-byte A-MPDU-format PPDU, vendor B/passive A. Native bounds
-          cover every length 44..1000; oversize candidates are counted.
-          No early EOI, advance, TX or production HT gate is enabled.
-        - [ ] Qualify repeated early retention, other body sizes and both
-          roles: five other final-build controls lack a qualified early
-          sample. Preserve those failures; one positive is not reliability.
-        - [ ] Qualify a justified next-frame/EOF handoff: two independently
-          FCS-valid, correctly bounded, nonduplicate MPDUs from one fresh
-          vendor PPDU, then repeated aggregates and both roles. The
-          observed 478-byte/170-byte early case is a bounded starting point,
-          not proof of the second body or a general advance interface.
-      - [x] Transmit a default-disabled, explicitly armed PSM compressed BA
-        for the fixed aggregate and receive matching complete BA bytes over
-        the air; independently verify addresses, bitmap and FCS. All normal
-        MCS/direction cells have full delivery/return controls after repeats.
-      - [ ] Complete production PSM Immediate BA/admission and independently
-        measure EOF-to-air SIFS. The fixed diagnostic does not qualify
-        either; bad-final reverse MCS7 still lacks a successful capture.
-        Retain mandatory receive-size/protection qualification as a gate.
-  - [ ] Qualify interleaved legacy/HT traffic, rate/mode transitions and
-    recovery against an independent peer; raw mixed-format captures alone
-    do not qualify negotiated mixed traffic.
-- [ ] Integrate actual WMM/EDCA, protection, QoS and required receive-size,
-  Block ACK/A-MPDU/reordering obligations jointly with D3.
-- [ ] Verify negotiated association and actual HT OTA framing against an
-  independent HT20 peer, including positive, negative and recovery cases.
+#### Completed foundations
+
+- [x] Prepare an unadvertised HT20, one-stream, BCC, 800-ns-GI capability profile.
+- [x] Parse AP HT/WMM capabilities and constrain the profile on association and beacon updates.
+- [x] Implement common-MCS selection, exact rate requests, PHY configuration and airtime deadlines.
+- [x] Implement bounded mixed-format HT TX/RX at MCS0..7 and explicit legacy fallback.
+- [x] Implement non-HT WMM/EDCA, protected QoS, per-TID CCMP and bounded A-MSDU receive software.
+- [x] Implement native-tested Block ACK agreements, A-MPDU parsing and ciphertext reordering.
+- [x] Implement readback-verified atomic station/controller policy commits.
+- [x] Deliver fixed three-MPDU aggregates with explicit terminal ownership and bad-FCS continuation.
+- [x] Transmit and independently receive compressed Block ACKs in the fixed diagnostic.
+- [x] Implement passive vendor/AP reference captures, fresh-frame correlation and receive-exit tracing.
+- [x] Implement bounded early-MPDU retention with independent FCS validation.
+- [x] Implement a default-disabled, one-shot next-body advance diagnostic.
+- [x] Retain two complete, FCS-valid MPDUs from one live vendor aggregate in both size orders.
+- [x] Capture and enforce reconciled controller/host receive and delivery diagnostics.
+- [x] Trace receive/copy/FIFO state across live aggregate handoffs.
+- [x] Correct receive/TX ownership, discard handling and backoff publication.
+
+#### Remaining work packages
+
+- [ ] **1. Repeat early capture:** qualify complete early MPDUs at multiple
+  sizes in both badge roles; retain failed trials and identify capture losses.
+- [ ] **2. Qualify aggregate handoff:** repeat two-body capture in both badge
+  roles and size orders; verify terminal, bad-frame and abort recovery.
+- [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot
+  assumptions and qualify bounded buffering, transport backpressure,
+  malformed/truncated input and recovery across successive PPDUs.
+- [ ] **4. Integrate secure Block ACK lifecycle:** wire agreements/windows,
+  admission, reordering, duplicate/replay checks and key changes into actual
+  station RX; handle teardown, timeout and reassociation without stale state.
+- [ ] **5. Complete Immediate BA and ACK responses:** drive PSM responses from
+  admitted frames, validate returned bytes/bitmaps across supported MCS and
+  bad-frame cases, and independently measure EOF-to-air SIFS.
+- [ ] **6. Qualify mandatory receive and protection:** integrate required frame
+  sizes, A-MSDU/QoS, WMM/EDCA and HT/legacy protection; verify protected traffic,
+  AP policy changes and recovery jointly with D3.
+- [ ] **7. Activate HT association:** after the mandatory MAC, receive-size and
+  protection gates pass, advertise the supported HT profile and atomically
+  apply negotiated station/controller policy with explicit legacy fallback.
+- [ ] **8. Qualify negotiated interoperability:** verify association, actual HT
+  OTA framing, interleaved legacy/HT traffic, rate/mode changes and recovery
+  against an independent HT20 peer, including negative and fallback cases.
 
 ### D3. HT MAC and performance
 

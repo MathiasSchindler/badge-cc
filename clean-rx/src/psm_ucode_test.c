@@ -245,10 +245,21 @@ static uint16_t ack_operand(const uint16_t regs[0x1800], uint32_t operand) {
 static uint32_t early_copy_fault;
 static uint32_t early_status_after_hint;
 #endif
+#if CLEAN_RX_HT_ADVANCE
+static uint32_t handoff_state_after_arm;
+#endif
 static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
                             uint32_t pc, uint32_t *steps) {
     int body = pc == RX_COMPLETE;
     for (*steps = 0u; *steps < 1000000u; ++*steps) {
+#if CLEAN_RX_HT_ADVANCE
+        if (pc == 163u && r[CLEAN_OBSERVER_ADVANCE]) return pc;
+        if (pc == OBSERVER_HANDOFF_2_0 && handoff_state_after_arm) {
+            r[0x100cu] = 0u;
+            r[0x100du] &= ~0x100u;
+            handoff_state_after_arm = 0u;
+        }
+#endif
 #if CLEAN_RX_HT_EARLY_SAVE
         if (pc == OBSERVER_EARLY && early_status_after_hint) {
             r[0x100du] |= 0x4000u;
@@ -287,6 +298,8 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
         else if (op == 0x1c0u) r[d] = (uint16_t)(av + bv);
         else if (op == 0x1d0u) r[d] = (uint16_t)(av - bv);
         else if (op == 0x378u) r[d] = (uint16_t)((av << 8u) | (bv & 255u));
+        else if (op == 0x376u) r[d] = (uint16_t)((bv & ~0x3fc0u) | ((av << 6u)&0x3fc0u));
+        else if (op == 0x307u) r[d] = (uint16_t)((bv & ~0x80u) | ((av << 7u)&0x80u));
         else if (op == 0x278u) r[d] = av >> 8u;
         else if (op == 0x270u) r[d] = av & 255u;
         else if (op == 0x140u) r[d] = av & bv;
@@ -1798,6 +1811,7 @@ static void early_snapshot_seed(uint16_t r[0x1800], uint32_t length) {
     r[0x100cu] = (uint16_t)(length+6u); r[0x100du] = 0x1100u;
     r[0x1001u] = CLEAN_SHM_FRAME; r[0x1004u] = 0x8802u;
     r[0x102au] = 0x222u; r[0x10afu] = 0x1000u;
+    r[0x1024u] = 0xa3ffu;
     r[0x1780u] = 1u; r[0x1782u] = 0x1234u; r[0x1783u] = 0x5678u;
     r[CLEAN_SHM_FRAME+1u] = (uint16_t)(((length+4u)&255u)<<8u);
     r[CLEAN_SHM_FRAME+2u] = (uint16_t)(0x0f00u|((length+4u)>>8u));
@@ -1827,9 +1841,17 @@ static void passive_early_snapshot(void) {
                !r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
         assert(r[0x1001u] == CLEAN_SHM_FRAME && r[0x1004u] == 0x8802u &&
                r[0x102au] == 0x222u && r[0x10afu] == 0x1000u);
+#if CLEAN_RX_HT_ADVANCE
+        assert(!r[CLEAN_OBSERVER_HANDOFF_SHM]);
+        if (length == 170u || length == 298u) {
+            printf("PSM fast snapshot %u bytes: %u modeled instructions including timeout; NOT RF timing\n",
+                   length,steps);
+            assert(steps <= (length == 170u ? 200u : 300u));
+        }
+#endif
     }
     for (uint32_t fault = 1u; fault <= 16u; ++fault) {
-        early_snapshot_seed(r,554u);
+        early_snapshot_seed(r,298u);
         uint32_t events = 1u<<6u, steps;
         if (fault <= 5u) early_copy_fault = fault;
         if (fault == 6u) r[0x100cu] = CLEAN_OBSERVER_EARLY_MAX+7u;
@@ -1875,7 +1897,140 @@ static void passive_early_snapshot(void) {
                    r[CLEAN_OBSERVER_EARLY_SHM+CLEAN_OBSERVER_EARLY_HEADER] == 0x7001u);
         else assert(!memcmp(before,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(before)));
     }
-    puts("PSM early snapshot: every length 44..1000, odd tails, control SHM/register preservation, stale-copy rejection and single-to-multi priority pass; no advance, EOI or TX");
+    puts("PSM early snapshot: every supported length, odd tails, control SHM/register preservation, stale-copy rejection and single-to-multi priority pass");
+#if CLEAN_RX_HT_ADVANCE
+    for (uint32_t order = 0u; order < 2u; ++order)
+    for (uint32_t fault = 0u; fault < 8u; ++fault) {
+        uint32_t first = order ? 298u : 170u, second = order ? 170u : 298u;
+        early_snapshot_seed(r,first);
+        r[CLEAN_SHM_FRAME+1u] = 0xde00u;
+        r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+        r[CLEAN_SHM_FRAME+3u] = 0x03b0u;
+        r[0x102bu] = (uint16_t)second; r[0x1078u] = 0xffffu;
+        events = (1u<<6u)|(1u<<3u);
+        if (fault == 1u) r[0x102bu] = 554u;
+        if (fault == 2u) events &= ~(1u<<3u);
+        if (fault == 3u) r[CLEAN_SHM_FRAME+1u] = 0x5e00u;
+        if (fault == 4u) r[0x100du] |= 0x4000u;
+        if (fault == 5u) r[0x100du] |= 0x8000u;
+        if (fault == 6u) r[CLEAN_OBSERVER_ADVANCE] = 1u;
+        if (fault == 7u) r[0x102bu] = (uint16_t)first;
+        uint32_t next = receive_run(r,&events,RX_COMPLETE,&steps);
+        if (!fault) {
+            assert(next == 163u && r[CLEAN_OBSERVER_ADVANCE] == 1u);
+            assert(r[CLEAN_OBSERVER_ADVANCE+1u] == second && r[0x102au] == second);
+            assert(r[0x1001u] == CLEAN_SHM_FRAME && r[0x1078u] == 0xff7fu);
+            assert(r[0x1780u] == 65535u && !(events&(1u<<6u)));
+            assert(r[CLEAN_OBSERVER_PENDING] == 1u && r[CLEAN_OBSERVER_EPOCH] == 9u);
+            assert(r[CLEAN_SHM_FRAME+1u] == 0xde00u &&
+                   r[CLEAN_SHM_FRAME+2u] == 0x0f01u &&
+                   r[CLEAN_SHM_FRAME+3u] == 0x03b0u);
+            assert(steps <= 400u);
+            assert(r[CLEAN_OBSERVER_HANDOFF_SHM] == 1u &&
+                   r[CLEAN_OBSERVER_HANDOFF_SHM+1u] == 9u &&
+                   r[CLEAN_OBSERVER_HANDOFF_SHM+2u] == 7u &&
+                   !r[CLEAN_OBSERVER_HANDOFF_SHM+3u]);
+            for (uint32_t phase = 0u; phase < CLEAN_OBSERVER_HANDOFF_RECORDS; ++phase) {
+                const uint16_t *h = r+CLEAN_OBSERVER_HANDOFF_SHM+
+                    CLEAN_OBSERVER_HANDOFF_HEADER+phase*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS;
+                assert(h[2] == first+6u && h[3] == 0x1100u &&
+                       h[6] == CLEAN_SHM_FRAME && h[8] == second);
+                assert(h[5] == (phase == 2u ? ((0x8802u&~0x3fc0u)|0x20c0u) : 0x8802u));
+                assert(h[7] == (phase == 2u ? second : 0x222u));
+                assert(h[11] == (phase == 2u ? 0xff7fu : 0xffffu));
+                assert(h[10] == 0xa3ffu);
+            }
+        } else {
+            assert(next == (fault == 4u ? 197u : 262u) &&
+                   r[CLEAN_OBSERVER_ADVANCE] == (fault == 6u));
+            assert(r[0x1001u] == CLEAN_SHM_FRAME && r[0x102au] == 0x222u);
+        }
+        assert(r[0x1782u] == 0x1234u && r[0x1783u] == 0x5678u);
+        assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+    }
+    puts("PSM bounded advance: exact 478-byte 170/298 pair in both orders, GoodFCS, EOF/abort exclusion, one-shot arm, prefix/epoch preservation and no TX; NOT RF");
+    early_snapshot_seed(r,170u);
+    r[CLEAN_SHM_FRAME+1u] = 0xde00u;
+    r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+    r[0x102bu] = 298u;
+    events = (1u<<6u)|(1u<<3u);
+    handoff_state_after_arm = 1u;
+    assert(receive_run(r,&events,RX_COMPLETE,&steps) == 163u);
+    for (uint32_t phase = 0u; phase < CLEAN_OBSERVER_HANDOFF_RECORDS; ++phase) {
+        const uint16_t *h = r+CLEAN_OBSERVER_HANDOFF_SHM+
+            CLEAN_OBSERVER_HANDOFF_HEADER+phase*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS;
+        assert(h[2] == (phase == 2u ? 0u : 176u));
+        assert(h[3] == (phase == 2u ? 0x1000u : 0x1100u));
+    }
+    assert(r[CLEAN_OBSERVER_EARLY_SHM+2u] == 176u &&
+           r[CLEAN_OBSERVER_EARLY_SHM+3u] == 0x1100u &&
+           r[CLEAN_OBSERVER_HANDOFF_SHM+2u] == 7u);
+    puts("PSM handoff trace: three phases, modeled post-arm state change and immutable terminal/new-RX retention; NOT RF timing");
+    for (uint32_t outcome = 0u; outcome < 4u; ++outcome) {
+        early_snapshot_seed(r,170u);
+        const uint32_t record = CLEAN_OBSERVER_SHM+CLEAN_OBSERVER_HEADER_WORDS;
+        r[CLEAN_OBSERVER_SHM+1u] = 1u; r[record+10u] = 9u;
+        r[record+6u] = r[CLEAN_SHM_FRAME+1u] = 0xde00u;
+        r[record+7u] = r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+        r[record+8u] = r[CLEAN_SHM_FRAME+3u] = 0x03b0u;
+        r[0x102bu] = 298u; events = (1u<<6u)|(1u<<3u);
+        assert(receive_run(r,&events,RX_COMPLETE,&steps) == 163u);
+        uint16_t retained[CLEAN_OBSERVER_EARLY_RETAIN_WORDS];
+        memcpy(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained));
+        uint16_t handoff[CLEAN_OBSERVER_HANDOFF_HEADER+
+            CLEAN_OBSERVER_HANDOFF_RECORDS*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS];
+        memcpy(handoff,r+CLEAN_OBSERVER_HANDOFF_SHM,sizeof(handoff));
+        /* Inject a modeled hardware body; this does not validate the RF handoff. */
+        r[0x100cu] = 304u; r[0x100du] = 0x5100u;
+        for (uint32_t i = 0u; i < 20u; ++i) r[CLEAN_SHM_FRAME+4u+i] = (uint16_t)(0x4000u+i);
+        uint32_t target = outcome == 0u ? HT_TRACE_GOOD : outcome == 1u ? HT_TRACE_BAD :
+            outcome == 2u ? OBSERVER_EXIT_ABORT : OBSERVER_EXIT_TIMEOUT;
+        uint32_t end = psm_run(r,0,target);
+        assert(end == (outcome == 0u ? 198u : outcome == 1u ? 263u : outcome == 2u ? 266u : 262u));
+        assert(r[record+11u] == (outcome == 0u ? 1u : outcome == 1u ? 2u : outcome == 2u ? 5u : 6u));
+        assert(!r[CLEAN_OBSERVER_PENDING] && r[CLEAN_OBSERVER_HELD] == (outcome == 0u));
+        assert(r[record+14u] == 304u && r[record+38u] == 9u && r[record+39u] == 1u);
+        if (outcome < 2u) assert(r[record+18u] == 0x4000u);
+        if (outcome < 2u) {
+            assert(r[CLEAN_OBSERVER_SECOND_SHM] == 1u &&
+                   r[CLEAN_OBSERVER_SECOND_SHM+1u] == 9u &&
+                   r[CLEAN_OBSERVER_SECOND_SHM+2u] == 304u &&
+                   r[CLEAN_OBSERVER_SECOND_SHM+10u] == outcome+1u);
+            assert(r[CLEAN_OBSERVER_SECOND_SHM+CLEAN_OBSERVER_SECOND_HEADER] == 0x4000u);
+            for (uint32_t i = 0u; i < CLEAN_OBSERVER_SECOND_MAX/2u; ++i)
+                assert(r[CLEAN_OBSERVER_SECOND_SHM+CLEAN_OBSERVER_SECOND_HEADER+i] ==
+                       r[CLEAN_SHM_FRAME+4u+i]);
+            assert(r[0x600u] == 0xa55au);
+        } else assert(!r[CLEAN_OBSERVER_SECOND_SHM]);
+        assert(psm_run(r,0,OBSERVER_START) == 130u);
+        assert(!r[CLEAN_OBSERVER_PENDING] && !r[CLEAN_OBSERVER_HELD] && r[CLEAN_OBSERVER_EPOCH] == 10u);
+        assert(!memcmp(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained)));
+        assert(!memcmp(handoff,r+CLEAN_OBSERVER_HANDOFF_SHM,sizeof(handoff)));
+        assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+    }
+    puts("PSM bounded advance: modeled second-body terminal/bad/abort/watchdog ownership and new-RX retention pass; NOT RF/DMA recovery qualification");
+    for (uint32_t fault = 0u; fault < 6u; ++fault) {
+        early_snapshot_seed(r,170u);
+        r[CLEAN_OBSERVER_EARLY_SHM] = 1u;
+        r[CLEAN_OBSERVER_EARLY_SHM+1u] = 9u;
+        r[CLEAN_OBSERVER_ADVANCE] = 1u;
+        r[CLEAN_OBSERVER_OUTCOME] = 1u;
+        if (fault == 0u) r[CLEAN_OBSERVER_ADVANCE] = 0u;
+        if (fault == 1u) r[CLEAN_OBSERVER_PENDING] = 2u;
+        if (fault == 2u) r[CLEAN_OBSERVER_EPOCH] = 10u;
+        if (fault == 3u) r[0x100cu] = 49u;
+        if (fault == 4u) r[0x100cu] = 307u;
+        if (fault == 5u) r[CLEAN_OBSERVER_SECOND_SHM] = 7u;
+        uint16_t retained[CLEAN_OBSERVER_EARLY_RETAIN_WORDS];
+        memcpy(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained));
+        assert(psm_run(r,0,OBSERVER_SECOND) == 198u);
+        assert(r[CLEAN_OBSERVER_SECOND_SHM] == (fault == 5u ? 7u : 0u));
+        assert(!memcmp(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained)));
+        assert(r[0x600u] == 0xa55au);
+        assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+    }
+    puts("PSM continuation snapshot: exact copy bounds, missing/wrong owner, epoch, short/oversize and immutable commit guards pass");
+#endif
 }
 #endif
 

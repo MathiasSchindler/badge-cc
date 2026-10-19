@@ -4,7 +4,7 @@ include Makefile
 REF_DIR := clean-rx/vendor-burst
 REF_BUILD := build/clean-rx/vendor-burst
 REF_CONTROLLER := $(REF_BUILD)/controller/cyw43_rx_fw.bin
-REF_FLAGS := -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1
+REF_FLAGS := -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1
 REF_CFLAGS := $(RP2350_CFLAGS) -DLIVE_USB_FIRMWARE -DLIVE_USB_CLEAN \
 	-DWIFI_TRACE_SIZE=5888u -I$(REF_BUILD) -I$(WIFI_ASSET_DIR) $(REF_FLAGS)
 REF_COMMON := $(REF_DIR)/main.c $(ARCH_DIR)/start.c $(ARCH_DIR)/bootrom_reboot.c \
@@ -76,5 +76,5 @@ reference-test: $(REF_BUILD)/protocol_test
 	$(REF_BUILD)/protocol_test
 $(REF_BUILD)/protocol_test: $(REF_DIR)/protocol_test.c $(REF_HEADERS)
 	@mkdir -p $(dir $@)
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) -fsanitize=address,undefined \
 		$< $(TOOLS_DIR)/diagnostics_logic.c -o $@

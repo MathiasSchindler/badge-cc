@@ -81,7 +81,7 @@ static int configure(const uint8_t nonce[16]) {
     if (!command(263u, 1u, size + 6u, sizeof(reply)) ||
         !var_set("nmode", 1u, 0u) ||
         !var_set("ampdu", 1u, 0u) ||
-        !var_set("ampdu_mpdu", 4u, 0u) ||
+        !var_set("ampdu_mpdu", REF_AMPDU_LIMIT, 0u) ||
         !scalar(2u, 0u) || !scalar(86u, 0u) ||
         !scalar(134u, 4u) ||
         !var_set("bsscfg:sup_wpa", 1u, 1u) ||
@@ -162,11 +162,25 @@ void ref_run(const uint8_t nonce[16]) {
                badger_bytes_equal(nonce, saved_nonce, 13u)) {
         ok = snapshot(0u);
         uint32_t sent = 0u, start = ref_now(), digest = REF_DIGEST_INITIAL;
+        uint32_t minimum = 0xffffffffu, maximum = 0u, buckets[4] = {0u};
         while (ok && sent < REF_FRAME_COUNT && ref_now() - start < 6000000u) {
             uint32_t size = ref_frame(tx, nonce, ref_detail + 38u, sent);
+            uint32_t before = ref_now();
             ok = wifi_firmware_send_frame(0u, tx, size);
-            if (ok) { digest = ref_digest(digest, tx, size); ++sent; }
+            uint32_t elapsed = ref_now()-before;
+            if (ok) {
+                if (elapsed < minimum) minimum = elapsed;
+                if (elapsed > maximum) maximum = elapsed;
+                ++buckets[elapsed <= 200u ? 0u : elapsed <= 400u ? 1u : elapsed <= 800u ? 2u : 3u];
+                digest = ref_digest(digest, tx, size); ++sent;
+            }
         }
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS,sent);
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+4u,ref_now()-start);
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+8u,sent ? minimum : 0u);
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+12u,maximum);
+        for (uint32_t i = 0u; i < 4u; ++i)
+            badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+16u+4u*i,buckets[i]);
         badger_bytes_store_u32(ref_detail + 28u, sent);
         badger_bytes_store_u32(ref_detail + 52u, digest);
         if (ok && sent != REF_FRAME_COUNT) { firmware.error = WIFI_FW_TIMEOUT; ok = 0; }

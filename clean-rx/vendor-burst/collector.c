@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include "protocol.h"
+#include "../src/sdio_ring.h"
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
 
@@ -144,6 +145,24 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         usb_report_u32(observer+64u) != REF_OBSERVER_ABI) {
         fputs("Reference identity or receive-only configuration mismatch\n",stderr); return 0;
     }
+    const uint8_t *timing = vendor+REF_SUBMIT_STATS;
+    uint32_t timed = usb_report_u32(timing), elapsed = usb_report_u32(timing+4u);
+    uint32_t minimum = usb_report_u32(timing+8u), maximum = usb_report_u32(timing+12u), total = 0u;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        uint32_t bucket = usb_report_u32(timing+16u+4u*i);
+        if (bucket > REF_FRAME_COUNT) { fputs("Invalid submission timing bucket\n",stderr); return 0; }
+        total += bucket;
+    }
+    if (timed != REF_FRAME_COUNT || timed != total || !elapsed ||
+        minimum > maximum || maximum > elapsed) {
+        fputs("Invalid bounded submission timing report\n",stderr); return 0;
+    }
+    printf("{\"test\":\"vendor-submission-timing\",\"pattern\":\"large-prime-small-pairs\","
+           "\"ampdu_mpdu_requested\":%u,\"frames\":%u,\"elapsed_us\":%u,"
+           "\"min_write_us\":%u,\"max_write_us\":%u,"
+           "\"write_us_buckets\":[%u,%u,%u,%u],\"bucket_upper_us\":[200,400,800,null]}\n",
+           REF_AMPDU_LIMIT,timed,elapsed,minimum,maximum,usb_report_u32(timing+16u),
+           usb_report_u32(timing+20u),usb_report_u32(timing+24u),usb_report_u32(timing+28u));
     printf("{\"test\":\"vendor-queries\",\"queries\":[");
     for (uint32_t i = 0u; i < REF_QUERY_COUNT; ++i) {
         const uint8_t *q = vendor+REF_QUERY_BASE+i*REF_QUERY_BYTES;
@@ -165,6 +184,43 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
            (unsigned)log[22]|((unsigned)log[23]<<8u),
            (unsigned)observer[260]|((unsigned)observer[261]<<8u),
            usb_report_u32(observer+60u),usb_report_u32(observer+76u),usb_report_u32(observer+72u));
+    const uint8_t *f2 = observer+REF_MBOX_TAIL+444u-REF_MBOX_HEAD_BYTES;
+    const uint8_t *multi = observer+REF_MULTI_DETAIL, *loader = observer+REF_LOADER_DETAIL;
+    uint32_t posted = usb_report_u32(f2+8u), consumed = usb_report_u32(f2+4u);
+    uint32_t f2_counts = usb_report_u32(f2), summaries = usb_report_u32(loader+28u);
+    if (!ref_delivery_accounted(observer)) {
+        fputs("Invalid frozen observer delivery accounting\n",stderr); return 0;
+    }
+    printf("{\"test\":\"observer-delivery-state\",\"controller_state\":%u,"
+           "\"controller_error\":%u,\"rx_polls\":%u,\"rx_cycles\":%u,"
+           "\"capture_target\":%u,\"captured\":%u,\"bad_fcs\":%u,\"oversize\":%u,"
+           "\"rx_event_discard\":%u,\"plcp_discard\":%u,\"dma_frames\":%u,"
+           "\"dma_status0\":%u,\"dma_status1\":%u,\"f2_posted\":%u,\"f2_consumed\":%u,"
+           "\"f2_pending\":%u,\"f2_posted_saturated\":%u,\"f2_dropped_saturated\":%u,"
+           "\"host_rx_status\":%u,\"host_resyncs\":%u,\"host_stalled\":%u,"
+           "\"host_retries\":%u,\"host_credit\":%u,\"host_idle_polls\":%u}\n",
+           usb_report_u32(observer+132u),usb_report_u32(observer+140u),
+           usb_report_u32(observer+188u),usb_report_u32(observer+192u),
+           usb_report_u32(multi+4u),usb_report_u32(multi+8u),
+           usb_report_u32(multi+12u),usb_report_u32(multi+16u),
+           usb_report_u32(multi+20u),usb_report_u32(multi+24u),usb_report_u32(multi+28u),
+           usb_report_u32(multi+32u),usb_report_u32(multi+36u),
+           posted,consumed,posted-consumed,f2_counts&0xffffu,f2_counts>>16u,
+           usb_report_u32(loader+4u),usb_report_u32(loader+8u),usb_report_u32(loader+12u),
+           usb_report_u32(loader+16u),usb_report_u32(loader+20u),usb_report_u32(loader+24u));
+    for (uint32_t i = 0u; i < summaries; ++i) {
+        const uint8_t *r = observer+REF_RX_SUMMARIES+i*REF_RX_SUMMARY_BYTES;
+        uint32_t length = usb_report_u32(r);
+        if (length < 4u || length > CLEAN_MPDU_BYTES ||
+            usb_report_u32(r+56u) != i+1u) {
+            fputs("Invalid ordinary receive summary\n",stderr); return 0;
+        }
+        printf("{\"test\":\"ordinary-rx-summary\",\"ordinal\":%u,\"mpdu_bytes\":%u,"
+               "\"bdc_version\":%u,\"raw_rate\":%u,\"phy_metadata\":%u,\"ht_version\":%u,"
+               "\"frame_control\":%u,\"fcs_valid\":%s}\n",
+               i+1u,length,r[4],r[5],r[6],r[7],ref_u16(r+16u),
+               usb_report_u32(r+8u) == usb_report_u32(r+12u)?"true":"false");
+    }
     if (count > CLEAN_OBSERVER_RECORDS || memcmp(log+6u,mac,6u)) {
         fputs("Invalid observer session log\n",stderr); return 0;
     }
@@ -197,17 +253,63 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
     const uint8_t *early = observer+REF_EARLY_BASE;
     uint32_t early_rxe = ref_u16(early+4u), early_length = early_rxe >= 6u ? early_rxe-6u : 0u;
     int early_linked = ref_early_correlated(log,early,mac);
+#if CLEAN_RX_HT_ADVANCE
+    const uint8_t *handoff = observer+REF_HANDOFF_BASE;
+    uint32_t handoff_id = ref_u16(handoff), phases = ref_u16(handoff+4u);
+    if (handoff_id > CLEAN_OBSERVER_RECORDS ||
+        (handoff_id && phases != 1u && phases != 3u && phases != 7u) ||
+        (!handoff_id && phases) || ref_u16(handoff+6u)) {
+        fputs("Invalid handoff trace header\n",stderr); return 0;
+    }
+    static const char *const phase_names[] = {
+        "before-retain","before-eoi","after-arm"};
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_HANDOFF_RECORDS; ++i) {
+        if (!(phases & (1u<<i))) continue;
+        const uint8_t *r = handoff+2u*CLEAN_OBSERVER_HANDOFF_HEADER+
+            2u*i*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS;
+        printf("{\"test\":\"handoff-state\",\"phase\":\"%s\",\"prefix_id\":%u,"
+               "\"epoch\":%u,\"matches_early_owner\":%s,\"tsf\":%u,\"rxe_length\":%u,"
+               "\"status1\":%u,\"status2\":%u,\"copy_control\":%u,\"rx_base\":%u,"
+               "\"copy_end\":%u,\"next_length\":%u,\"raw_1002\":%u,"
+               "\"raw_1024\":%u,\"raw_1078\":%u}\n",
+               phase_names[i],handoff_id,ref_u16(handoff+2u),
+               handoff_id == ref_u16(early) && ref_u16(handoff+2u) == ref_u16(early+2u) ?
+                   "true":"false",
+               usb_report_u32(r),ref_u16(r+4u),ref_u16(r+6u),ref_u16(r+8u),
+               ref_u16(r+10u),ref_u16(r+12u),ref_u16(r+14u),ref_u16(r+16u),
+               ref_u16(r+18u),ref_u16(r+20u),ref_u16(r+22u));
+    }
+    const uint8_t *second = observer+REF_SECOND_BASE;
+    uint32_t second_rxe = ref_u16(second+4u);
+    uint32_t second_length = second_rxe >= 6u ? second_rxe-6u : 0u;
+    int second_fcs = CLEAN_RX_HT_ADVANCE && ref_u16(second) &&
+        second_length >= 44u && second_length <= CLEAN_OBSERVER_SECOND_MAX &&
+        diag_crc32(second+CLEAN_OBSERVER_SECOND_HEADER*2u,second_length-4u) ==
+            usb_report_u32(second+CLEAN_OBSERVER_SECOND_HEADER*2u+second_length-4u);
+    printf("{\"test\":\"continuation-snapshot\",\"prefix_id\":%u,\"epoch\":%u,"
+           "\"rxe_length\":%u,\"status1\":%u,\"status2\":%u,\"outcome\":%u,"
+           "\"rx_base\":%u,\"fcs_valid\":%s}\n",
+           ref_u16(second),ref_u16(second+2u),second_rxe,ref_u16(second+6u),
+           ref_u16(second+8u),ref_u16(second+20u),ref_u16(second+22u),second_fcs?"true":"false");
+#endif
+    int pair_linked = 0;
+    for (uint32_t i = 0u; i < samples; ++i)
+        if (ref_pair_correlated(log,early,observer+REF_SAMPLE_BASE+i*REF_SAMPLE_BYTES,mac))
+            pair_linked = 1;
     int early_fcs = early_length >= 44u && early_length <= CLEAN_OBSERVER_EARLY_MAX &&
         diag_crc32(early+CLEAN_OBSERVER_EARLY_HEADER*2u,early_length-4u) ==
         usb_report_u32(early+CLEAN_OBSERVER_EARLY_HEADER*2u+early_length-4u);
     printf("{\"test\":\"early-snapshot\",\"prefix_id\":%u,\"rx_epoch\":%u,"
            "\"rxe_length\":%u,\"mpdu_bytes\":%u,\"status1\":%u,\"status2\":%u,"
            "\"tsf\":%u,\"candidate_kind\":%u,\"oversize_candidates\":%u,"
-           "\"fcs_valid\":%s,\"fresh_prefix_fcs_match\":%s}\n",
+           "\"fcs_valid\":%s,\"fresh_prefix_fcs_match\":%s,"
+           "\"advance_state\":%u,\"advance_next_length\":%u,\"pair_correlated\":%s}\n",
            ref_u16(early),ref_u16(early+2u),early_rxe,early_length,
            ref_u16(early+6u),ref_u16(early+8u),usb_report_u32(early+10u),
            ref_u16(early+20u),ref_u16(early+22u),
-           early_fcs?"true":"false",early_linked?"true":"false");
+           early_fcs?"true":"false",early_linked?"true":"false",
+           CLEAN_RX_HT_ADVANCE ? ref_u16(early+24u) : 0u,
+           CLEAN_RX_HT_ADVANCE ? ref_u16(early+26u) : 0u,pair_linked?"true":"false");
     uint32_t valid = 0u, aggregate = 0u, unaccounted = 0u;
     for (uint32_t i = 0u; i < count; ++i) {
         const uint8_t *r = log+2u*CLEAN_OBSERVER_HEADER_WORDS+i*2u*CLEAN_OBSERVER_RECORD_WORDS;
@@ -281,20 +383,23 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
            "\"unaccounted_prefix_exits\":%u,\"active_prefix_at_stop\":%u,"
            "\"early_nonterminal_mpdu_proven\":%s,\"early_multi_candidate_correlated\":%s,"
            "\"phy_header_transmitter_attributed\":%s,"
-           "\"vendor_block_ack_activity\":%s,\"complete_multi_mpdu_delivery_proven\":false,"
+           "\"vendor_block_ack_activity\":%s,\"complete_multi_mpdu_delivery_proven\":%s,"
            "\"plaintext_over_air_verified\":false,\"sifs_timing_qualified\":false}\n",
            sent,usb_report_u32(vendor+24u),usb_report_u32(vendor+44u)&0x2000u?"true":"false",
            (usb_report_u32(vendor+44u)&0x30u)==0x30u?"true":"false",
            count,overflow,valid,aggregate,aggregate?"true":"false",correlated,correlated_aggregate,
            unaccounted,ref_u16(log+14u),
            early_linked?"true":"false",early_linked && ref_u16(early+20u)==2u?"true":"false",
-           correlated || early_linked?"true":"false",ba_activity?"true":"false");
+           correlated || early_linked?"true":"false",ba_activity?"true":"false",
+           pair_linked?"true":"false");
     if (!aggregate || !ba_activity || correlated < 2u || !correlated_aggregate || unaccounted)
         fputs("Reference requires vendor BA activity, two fresh-prefix-linked FCS-valid MPDU lengths, a linked A-MPDU-format reception and accounted prefix exits; evidence is incomplete\n",stderr);
     if (!early_linked)
         fputs("Early snapshot requires complete FCS-valid bytes bound to a fresh nonterminal aggregate prefix; not proven\n",stderr);
+    if (CLEAN_RX_HT_ADVANCE && !pair_linked)
+        fputs("Bounded advance requires two distinct complete FCS-valid bodies under one fresh PPDU; not proven\n",stderr);
     return aggregate != 0u && ba_activity && correlated >= 2u && correlated_aggregate != 0u &&
-        !unaccounted && early_linked;
+        !unaccounted && early_linked && (!CLEAN_RX_HT_ADVANCE || pair_linked);
 }
 
 int main(int argc, char **argv) {

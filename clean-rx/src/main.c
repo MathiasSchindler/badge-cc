@@ -402,6 +402,11 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
 #if CLEAN_RX_HT_OBSERVER
         /* Passive diagnostic ID; ordinary profiles keep reserved bytes zero. */
         uint16_t correlation = shm_read16(CLEAN_OBSERVER_HELD);
+#if CLEAN_RX_HT_ADVANCE
+        if (correlation && correlation == shm_read16(CLEAN_OBSERVER_EARLY_SHM) &&
+            shm_read16(CLEAN_OBSERVER_ADVANCE) == 1u)
+            correlation |= CLEAN_OBSERVER_ADVANCE_TAG;
+#endif
         pkt[10] = (uint8_t)correlation;
         pkt[11] = (uint8_t)(correlation >> 8u);
 #endif

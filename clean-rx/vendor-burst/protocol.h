@@ -4,6 +4,7 @@
 #include "../../src/tools/diagnostics_logic.h"
 #include "../src/frame_limits.h"
 #include "../src/ht_observer.h"
+#include "../src/sdio_ring.h"
 
 #define REF_MAGIC 0x31524648u
 #define REF_TRACE_BYTES 5888u
@@ -12,6 +13,8 @@
 #define REF_QUERY_BASE 128u
 #define REF_QUERY_BYTES 32u
 #define REF_QUERY_COUNT 19u
+#define REF_SUBMIT_STATS (REF_QUERY_BASE + REF_QUERY_COUNT*REF_QUERY_BYTES)
+#define REF_AMPDU_LIMIT 2u
 #define REF_COUNTER_BYTES 1536u
 #define REF_COUNTER_BEFORE 1024u
 #define REF_COUNTER_AFTER 2560u
@@ -22,12 +25,78 @@
 #define REF_DUMP_BYTES 384u
 #define REF_OBSERVER_DETAIL 1024u
 #define REF_DIGEST_INITIAL 0x811c9dc5u
-#define REF_OBSERVER_ABI 5u
+#define REF_OBSERVER_ABI 12u
+#define REF_MBOX_TAIL 320u
+#define REF_MBOX_HEAD_BYTES 128u
+#define REF_MBOX_BYTES 480u
+#define REF_MULTI_DETAIL 672u
+#define REF_LOADER_DETAIL 712u
+#define REF_RX_SUMMARIES 744u
+#define REF_RX_SUMMARY_BYTES 64u
+#define REF_RX_SUMMARY_COUNT 2u
+_Static_assert(292u <= REF_MBOX_TAIL &&
+    REF_MBOX_TAIL + REF_MBOX_BYTES - REF_MBOX_HEAD_BYTES <= REF_MULTI_DETAIL &&
+    REF_MULTI_DETAIL + 40u <= REF_LOADER_DETAIL &&
+    REF_LOADER_DETAIL + 32u <= REF_RX_SUMMARIES &&
+    REF_RX_SUMMARIES + REF_RX_SUMMARY_COUNT*REF_RX_SUMMARY_BYTES <= REF_OBSERVER_DETAIL,
+    "Frozen receive diagnostics must not overlap existing trace regions");
+static inline int ref_delivery_accounted(const uint8_t trace[REF_TRACE_BYTES]) {
+    const uint8_t *f2 = trace+REF_MBOX_TAIL+444u-REF_MBOX_HEAD_BYTES;
+    const uint8_t *loader = trace+REF_LOADER_DETAIL;
+    uint32_t captured = badger_bytes_load_u32(trace+REF_MULTI_DETAIL+8u);
+    uint32_t posted = badger_bytes_load_u32(f2+8u), consumed = badger_bytes_load_u32(f2+4u);
+    uint32_t counts = badger_bytes_load_u32(f2);
+    /* Reference counters start at zero; wraparound is not a bounded report. */
+    if (badger_bytes_load_u32(trace+128u) != 0x4f505258u ||
+        badger_bytes_load_u32(trace+REF_MULTI_DETAIL) != 0x4d554c54u ||
+        posted > captured || consumed > posted ||
+        clean_sdio_credit_available(posted,consumed,CLEAN_SDIO_WINDOW) < 0 ||
+        consumed != badger_bytes_load_u32(loader) ||
+        consumed != badger_bytes_load_u32(trace+60u) ||
+        badger_bytes_load_u32(loader+28u) > REF_RX_SUMMARY_COUNT) return 0;
+    uint32_t dropped = captured-posted;
+    return (counts&0xffffu) == (posted < 0xffffu ? posted : 0xffffu) &&
+        (counts>>16u) == (dropped < 0xffffu ? dropped : 0xffffu);
+}
+static inline int ref_rx_summary(uint8_t summary[REF_RX_SUMMARY_BYTES],
+                                  const uint8_t *packet, uint32_t size, uint32_t ordinal) {
+    if (size < 22u || size > 18u + CLEAN_MPDU_BYTES) return 0;
+    uint32_t length = size - 18u, copied = length < 40u ? length : 40u;
+    badger_bytes_zero(summary,REF_RX_SUMMARY_BYTES);
+    badger_bytes_store_u32(summary,length);
+    badger_bytes_copy(summary+4u,packet+14u,4u);
+    badger_bytes_store_u32(summary+8u,diag_crc32(packet+18u,length-4u));
+    badger_bytes_copy(summary+12u,packet+size-4u,4u);
+    badger_bytes_copy(summary+16u,packet+18u,copied);
+    badger_bytes_store_u32(summary+56u,ordinal);
+    badger_bytes_copy(summary+60u,packet+4u,4u);
+    return 1;
+}
 #define REF_SAMPLE_BASE 2560u
 #define REF_SAMPLE_BYTES 1104u
 #define REF_SAMPLES 2u
 #define REF_SAMPLE_MPDU_BYTES (REF_SAMPLE_BYTES - 16u)
 #define REF_EARLY_BASE (REF_SAMPLE_BASE + REF_SAMPLES*REF_SAMPLE_BYTES)
+#define REF_SECOND_BASE (REF_EARLY_BASE + 2u*(CLEAN_OBSERVER_SECOND_SHM-CLEAN_OBSERVER_EARLY_SHM))
+#define REF_HANDOFF_BASE (REF_EARLY_BASE + 2u*(CLEAN_OBSERVER_HANDOFF_SHM-CLEAN_OBSERVER_EARLY_SHM))
+#define REF_ADVANCED_SAMPLE 0x100u
+static inline uint32_t ref_sample_slot(const uint8_t *samples, uint32_t count,
+                                       uint32_t length, uint32_t identity, uint32_t advanced) {
+    for (uint32_t i = 0u; i < count; ++i) {
+        const uint8_t *saved = samples+i*REF_SAMPLE_BYTES;
+        if (badger_bytes_load_u32(saved) != length) continue;
+        if ((badger_bytes_load_u32(saved+8u)&REF_ADVANCED_SAMPLE) || !identity)
+            return REF_SAMPLES;
+        return i;
+    }
+    if (count < REF_SAMPLES) return count;
+    if (advanced) {
+        for (uint32_t i = 0u; i < count; ++i)
+            if (!(badger_bytes_load_u32(samples+i*REF_SAMPLE_BYTES+8u)&REF_ADVANCED_SAMPLE))
+                return i;
+    }
+    return REF_SAMPLES;
+}
 
 _Static_assert(REF_OBSERVER_DETAIL+CLEAN_OBSERVER_WORDS*2u <= REF_SAMPLE_BASE,
                "Observer records must not overlap complete MPDU samples");
@@ -62,7 +131,8 @@ static inline uint32_t ref_frame(uint8_t frame[REF_FRAME_MAX], const uint8_t non
                                  const uint8_t peer[6], uint32_t sequence) {
     static const uint16_t lengths[4] = {128u,256u,512u,1024u};
     if (sequence >= REF_FRAME_COUNT) return 0u;
-    uint32_t size = lengths[(sequence + sequence / 4u) & 3u];
+    uint32_t phase = sequence & 15u;
+    uint32_t size = lengths[phase < 4u ? 3u : phase < 12u ? phase&1u : 2u];
     badger_bytes_zero(frame, size);
     badger_bytes_copy(frame, peer, 6u);
     ref_mac(frame + 6u, nonce);
@@ -151,7 +221,40 @@ static inline int ref_early_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u
         diag_crc32(mpdu,length-4u) == badger_bytes_load_u32(mpdu+length-4u);
 }
 
-_Static_assert(REF_QUERY_BASE + REF_QUERY_COUNT * REF_QUERY_BYTES <= REF_COUNTER_BEFORE,
+static inline int ref_pair_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u],
+                                      const uint8_t early[CLEAN_OBSERVER_EARLY_WORDS*2u],
+                                      const uint8_t sample[REF_SAMPLE_BYTES],
+                                      const uint8_t mac[6]) {
+#if CLEAN_RX_HT_ADVANCE
+    if (!ref_early_correlated(log,early,mac) || !ref_sample_correlated(log,sample,mac) ||
+        ref_u16(early+24u) != 1u ||
+        !(badger_bytes_load_u32(sample+8u)&REF_ADVANCED_SAMPLE) ||
+        badger_bytes_load_u32(sample+4u) != ref_u16(early)) return 0;
+    const uint8_t *first = early+CLEAN_OBSERVER_EARLY_HEADER*2u, *second = sample+16u;
+    uint32_t first_length = ref_u16(early+4u)-6u;
+    uint32_t second_length = badger_bytes_load_u32(sample);
+    const uint8_t *record = log+2u*CLEAN_OBSERVER_HEADER_WORDS+
+        (ref_u16(early)-1u)*2u*CLEAN_OBSERVER_RECORD_WORDS;
+    for (uint32_t i = 4u; i < 22u; ++i)
+        if (first[i] != second[i]) return 0;
+    uint16_t first_sequence = ref_u16(first+22u), second_sequence = ref_u16(second+22u);
+    return ((first_length == 170u && second_length == 298u) ||
+            (first_length == 298u && second_length == 170u)) &&
+        ref_u16(early+26u) == second_length &&
+        ref_u16(early+15u) == 4u+((first_length+3u)&~3u)+4u+second_length &&
+        !(first_sequence&15u) && !(second_sequence&15u) &&
+        (first_sequence>>4u) != (second_sequence>>4u) &&
+        (first[0]&0xfcu) == 0x88u && (second[0]&0xfcu) == 0x88u &&
+        (first[1]&7u) == (second[1]&7u) && (first[1]&3u) != 3u && !(first[1]&4u) &&
+        (first[24]&15u) == (second[24]&15u) &&
+        (ref_u16(record+32u)&0xc000u) == 0x4000u;
+#else
+    (void)log; (void)early; (void)sample; (void)mac;
+    return 0;
+#endif
+}
+
+_Static_assert(REF_SUBMIT_STATS + 32u <= REF_COUNTER_BEFORE,
                "Query metadata must not overlap raw counter replies");
 _Static_assert(REF_DUMP_AFTER + REF_DUMP_BYTES <= REF_TRACE_BYTES &&
     REF_OBSERVER_DETAIL + CLEAN_OBSERVER_WORDS * 2u <= REF_SAMPLE_BASE &&

@@ -19,7 +19,10 @@ fi
 for serial in "$1" "$2"; do
     ready=0
     for ((i=0;i<100;i++)); do
-        if "$picotool" info --ser "$serial" > "$prefix-ready-$serial.log" 2>&1; then
+        if {
+            printf 'BOOTSEL readiness attempt %u\n' "$((i+1))"
+            "$picotool" info --ser "$serial"
+        } >> "$prefix-ready-$serial.log" 2>&1; then
             ready=1
             break
         fi

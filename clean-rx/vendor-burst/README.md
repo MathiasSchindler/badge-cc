@@ -53,11 +53,12 @@ cross-core selector races before shared-memory reads.
 ## Fixture and evidence
 
 The burst contains 32 frames of each Ethernet length: 128, 256, 512 and
-1024 bytes. The length index is `(sequence + sequence / 4) & 3`: each
-four-frame group contains every size, and its first size rotates. Each size
-starts eight groups. This avoids always placing the smallest frame at the
-same submission phase or first position of a possible four-MPDU aggregate.
-It does not assume the vendor actually groups frames that way.
+1024 bytes. Each 16-frame group contains four 1024-byte frames, four
+128/256-byte pairs, then four 512-byte frames. Eight groups keep the total
+at 128 frames. Large frames aim to build a queue before the small pairs;
+the requested vendor `ampdu_mpdu` limit is two. Neither submission order
+nor that limit proves actual aggregation. The earlier campaigns below used
+the rotating four-size pattern and a limit of four.
 It uses experimental EtherType `0x88b5`, unicast to the AP,
 with a nonce-derived local MAC, `HTREF001`, sequence number, challenge,
 deterministic payload and trailing CRC32. Submission is bounded to six
@@ -68,6 +69,8 @@ This is not a broadcast/IP flood or continuous RF transmission.
 Each raw phase file contains a 64-byte build/nonce-bound, CRC-checked report
 and 5888-byte trace. Trace pages are independently bound to that report.
 The collector writes JSONL, stderr and loading/readiness logs alongside them.
+Readiness logs append every numbered attempt, including failures, rather
+than replacing earlier attempts when a later probe succeeds.
 Device-reported submission is not treated as OTA payload verification.
 
 ### Vendor queries
@@ -106,7 +109,7 @@ No public vendor implementation was copied into the clean firmware.
 `CLEAN_RX_HT_OBSERVER=1` requires extended HT RX, excludes the aggregate
 fixture/interface/delivery profiles and defaults off. It retains at most 16 prefixes
 in SHM `0x100`; overflow is counted and retained entries never overwritten.
-The observer trace has ABI 5 at byte 64. The 16-word SHM header holds session
+The observer trace has ABI 12 at byte 64. The 16-word SHM header holds session
 identity, permit/count/overflow, pending/held IDs, RX epoch, progress and the
 first good-only hint's RX count. Each 47-word record has an append-only
 prefix and a one-shot terminal/exit snapshot:
@@ -123,6 +126,45 @@ prefix and a one-shot terminal/exit snapshot:
 | 41..45 | Raw SPR `0x1004`, `0x1002`, `0x102a`, `0x102b`, `0x10af` |
 | 46 | RX count at the first event-6/good-only-bit-8 observation; zero if absent |
 
+ABI 8 adds frozen receive/delivery diagnostics in previously unused trace
+space, without changing PSM logging, radio configuration or the trace size:
+
+| Trace bytes | Contents |
+| --- | --- |
+| 128..255 | Existing first 128 bytes of the controller mailbox |
+| 256..291 | Existing early-HT controller diagnostics |
+| 320..671 | Remaining 352 bytes of the complete 480-byte mailbox |
+| 672..711 | Capture target/count, discard counters and final DMA status |
+| 712..743 | Host consumed count, RX status, resync/stall/retry/credit state, idle polls and summary count |
+| 744..871 | First two ordinary F2 summaries: length, PHY metadata, computed/received FCS, at most 40 MAC bytes and ordinal |
+
+All controller memory is read only after `RX_DONE`. The two ordinary
+summaries are independent of vendor attribution, preserve short ACK/control
+frames, and add no per-frame CRC work after the first two deliveries.
+The collector validates the one-frame credit bound and reconciles controller
+consumption, host consumption and ordinary F2 count. Its delivery-state
+JSON distinguishes controller discard, transport drop/pending and host
+resync/stall counters; the 16-bit posted/dropped counters saturate.
+Ordinary summaries are diagnostics, not new admission or aggregate proofs.
+Only selected header/metadata fields, not SSID or payload bytes, are printed.
+
+ABI 12 additionally uses bytes 5604..5683, after the continuation's raw
+window, for a three-point handoff trace. Its four-word header holds committed
+prefix ID, epoch, phase mask and reserved zero. The mask advances through
+1/3/7 as these 12-word records become valid:
+
+1. Before retaining the first multi-MPDU candidate.
+2. Immediately before acknowledging event 6 for an admitted advance.
+3. Immediately after writing the next-body copy control.
+
+Each record contains TSF low/high, RX count, status1/status2, copy control,
+RX base, copy end, raw next length and raw SPRs `0x1002`, `0x1024`, `0x1078`.
+The collector prints committed phases only and reports whether the owner
+matches the retained early body. These are sequential register observations,
+not an atomic PHY snapshot or an EOF-to-air measurement. Instrumentation adds
+instructions in the diagnostic handoff path; it is a state-transition
+control, not a claimed latency or reception improvement.
+
 Every RX start logs any pending exit before clearing ownership and advancing
 the epoch. Every new prefix, including legacy, similarly records the boundary
 before invalidating old ownership and classifying the new prefix.
@@ -135,8 +177,10 @@ are not rewritten by duplicate terminal events.
 Length rejection, short completion, the existing abort/fault branch and
 watchdog expiry snapshot the pending record before returning to their
 unchanged original continuation. They never grant a delivery ID. The
-completion logger observes event 6 and status bits but does not acknowledge
-early events, advance the receiver or transmit. Bit 8 is a good-only hint,
+completion logger alone observes event 6 and status bits without acknowledging
+early events, advancing the receiver or transmitting. The separately gated
+[bounded advance](#bounded-next-body-advance) may acknowledge and advance once,
+but never transmits. Bit 8 is a good-only hint,
 not a general subframe-ready indication. Progress describes observations,
 not proof of physical EOF or its absence: a normal good completion can
 follow a recorded phase 3 without an intervening logged phase 4.
@@ -160,8 +204,9 @@ vendor-TA MPDU lengths, replacing a same-size candidate with the latest
 tagged candidate. Each 1104-byte slot holds a 16-byte descriptor and up to
 1088 MPDU bytes. The sample pool starts at trace byte 2560; the SHM log ends
 at byte 2560, exactly before the sample pool; the two ordinary samples end
-at byte 4768. A separate 1024-byte frozen early snapshot occupies bytes
-4768..5791. Compile-time checks enforce these boundaries. Oversize candidates
+at byte 4768. A separate 1024-byte frozen diagnostic block occupies bytes
+4768..5791; the advance profile splits it into first/continuation snapshots.
+Compile-time checks enforce these boundaries. Oversize candidates
 are counted explicitly. Full-F2 counts are retained even when a sample is
 not saved.
 
@@ -438,10 +483,245 @@ The justified next control is bounded preservation plus a single
 next-body advance, starting with the observed 478-byte case whose sizes
 are consistent with 170/298-byte MPDUs. The second body's actual bytes,
 FCS, boundaries and nonduplicate identity must be demonstrated under the
-same fresh prefix before claiming two-MPDU delivery. Existing fixed-fixture
-advance code is prior art, not yet a live variable-length implementation.
+same fresh prefix before claiming two-MPDU delivery. The bounded diagnostic
+below implements that attempted handoff; the physical continuation remains
+unqualified.
 Production admission, bad-subframe handling, BA/reorder/key lifecycle and
 physical SIFS qualification remain later gates.
+
+## Bounded next-body advance
+
+This section records the initial ABI-6 implementation. The current
+[paired-stimulus/ABI-7 update](#paired-stimulus-and-live-two-body-capture)
+below supersedes its one-order gate, buffer partition and base hypothesis.
+
+The reference now enables `CLEAN_RX_HT_ADVANCE=1`; the flag defaults off in
+the clean firmware and requires `CLEAN_RX_HT_EARLY_SAVE=1`. It is deliberately
+limited to the observed 478-byte PSDU / 170-byte first body / raw next length
+298 case, one advance per experiment. It requires a committed first body,
+matching current owner and RX length, GoodFCS, and clear terminal/abort bits
+immediately before arming. Observer TX remains disabled.
+
+After recording the attempt it acknowledges event 6 once, clears context
+bit 7, sets `SPR1001=FRAME+3`, writes copy end 298, arms the existing
+direct-body controls, replenishes the watchdog and resumes at PC163 without
+classifying another prefix. `FRAME+3` is an explicit hardware-layout
+hypothesis: the direct MAC body should begin at `FRAME+4`, retaining HT-SIG.
+No RF trial below reaches this action, so the layout is not yet proven.
+
+ABI 6 retains all previous trace offsets. With advance enabled the early
+snapshot has a 16-word header and a **992-byte** body, still exactly within
+SHM `0x400..0x5ff`. Without advance it retains the original 12-word header
+and 1000-byte body. Additional words are:
+
+| Early snapshot words | Contents |
+| --- | --- |
+| 12 | One-shot advance marker: 0 not armed, 1 attempted |
+| 13 | Raw next length saved before destructive action |
+| 14..15 | Advance TSF |
+| 16..511 | Complete early body, up to 992 bytes, including FCS |
+
+F2 diagnostic ID bit `0x8000` marks a terminal sample whose held prefix
+matches the attempted advance. The RP2350 removes that bit from the ID,
+stores descriptor metadata bit `0x100`, prioritizes that sample over an
+ordinary full pool and prevents subsequent replacement. Ordinary same-size
+replacement is unchanged. There is no new USB polling or larger trace.
+
+`complete_multi_mpdu_delivery_proven` is now computed, not fixed false.
+It requires independent complete FCS-valid early/F2 correlations under the
+same fresh prefix/epoch, the attempt and saved next length, distinct
+unfragmented sequence numbers, matching addresses/DS/TID, good terminal EOF,
+and `4 + align4(170) + 4 + 298 == 478`. Marker-only, duplicate-body,
+fragment-only sequence changes and individually valid but incompatible
+frames cannot qualify. With advance enabled the collector exits nonzero
+unless this pair predicate passes, in addition to its existing checks.
+
+### Retained bounded controls
+
+Build `fe06ab77`, evidence under `build/clean-rx/vendor-advance/`:
+
+| Trial | Vendor / observer | Valid HT headers | Aggregation-format headers | Correlated ordinary MPDUs | Early / advance / pair |
+| --- | --- | ---: | ---: | ---: | --- |
+| `bounded-r0` | B / A | 10 | 10 | 2 | None; fail |
+| `bounded-r1` | A / B | 9 | 8 | 2 | None; fail |
+| `bounded-r2` | B / A | 3 | 1 | 2 | None; fail |
+| `bounded-r3` | A / B | 7 | 6 | 2 | None; fail |
+| `bounded-r4` | B / A | 6 | 6 | 2 | None; fail |
+| `bounded-r5` | A / B | 9 | 8 | 2 | None; fail |
+
+Each trial submits all 128 fixtures, observes vendor received-BA activity,
+retains two complete valid variable-length ordinary samples and has zero
+unaccounted prefix exits. None retains an eligible early body or arms the
+advance. These are retained negative controls, not evidence of two-body
+delivery or working physical terminal/abort recovery after advance.
+
+Final build `d4873fdc` adds host-only address/fragment/PSDU/abort negative tests and
+extracts the unchanged sample-selection policy into a native-tested helper.
+Its controller binary byte-compares equal to the RF-tested controller.
+The tested images, controller and collector are preserved with `fe06ab77-`
+filenames. The final host-only changes have native validation, not another
+radio campaign.
+
+Both original 16-MiB flashes were backed up before this campaign to
+`build/clean-rx/vendor-advance/original-{A,B}.bin` and matched to the previous
+verified originals. After the six trials both were fully restored, then
+independently reread as `restored-{A,B}-full.bin` and byte/hash-compared with
+those backups. Both original hashes match the preservation record below;
+both badges remain in BOOTSEL.
+
+## Paired stimulus and live two-body capture
+
+The current grouped stimulus requests `ampdu_mpdu=2` and the bounded gate
+accepts both 170/298-byte orders within a 478-byte PSDU. The continuation
+base is aligned `FRAME`, superseding the unqualified `FRAME+3` hypothesis.
+No byte shifting, prefix reconstruction or forced-good FCS is used.
+Submission-call timing metrics at trace offset 736 retain count,
+elapsed/minimum/maximum microseconds and four buckets (`<=200`, `<=400`,
+`<=800`, larger). Counts and bounds are checked; they are not RF airtime.
+
+### Current ABI-7 snapshot layout
+
+The existing 1024-byte dump is unchanged in size:
+
+| SHM words / trace bytes | Contents |
+| --- | --- |
+| `0x400..0x4ff` / `4768..5279` | First snapshot: 16-word header plus up to 480 body bytes |
+| `0x500..0x5ff` / `5280..5791` | Continuation: 12-word header plus a fixed 300-byte raw body window |
+
+The non-advance, early-save-only profile retains its original 12-word header
+and 1000-byte capacity. For the advance profile, first-snapshot words
+12..15 still hold attempt/next length/TSF. Continuation words 0..11 hold
+commit-last ID, epoch, RX count, status1/status2, TSF, three live prefix
+words, hardware good/bad outcome, and actual `SPR1001`. A fixed window is
+copied so failed/truncated candidates retain their bytes; only the bounded
+RX-count-derived length is eligible for an FCS check. Stale suffix bytes
+never prove a frame. Both buffers are disjoint and end before live controls
+at `0x600`. No extra USB pages or Cortex/PSM object-selector races are added.
+
+Only an owned attempted advance can freeze one continuation. Its good/bad
+outcome is retained without turning bad frames into good F2 deliveries.
+Wrong owner/epoch, short/oversize input and a previously committed snapshot
+cannot replace the evidence. The first snapshot remains immutable.
+
+### Positive live result and retained final controls
+
+Build **`d97844a9`**, `build/clean-rx/vendor-pairs/final-r0`, vendor B /
+passive A, retains complete **170/298-byte** FCS-valid bodies under one
+fresh **478-byte** PPDU. The second body also reaches normal tagged F2.
+Matching addresses/TID, distinct unfragmented sequences and exact aggregate
+boundaries pass the strict collector; an independent bitwise CRC32 check
+verifies both full bodies and equality of frozen/F2 continuation bytes.
+
+| Final-build trial | Vendor / observer | Early / advance / pair |
+| --- | --- | --- |
+| `final-r0` | B / A | 170 / yes / **pass** |
+| `final-r1` | A / B | None / no / fail |
+| `final-r2` | B / A | None / no / fail |
+| `final-r3` | A / B | None / no / fail |
+
+This is **one bounded live two-body success**, not repeatable/both-role
+handoff, loss-free reception, generalized aggregate delivery or production
+HT operation. Bad-continuation controls resume later good receptions,
+but physical abort recovery after advance remains unqualified. SIFS,
+Immediate BA by the clean observer, secure reorder/key lifecycle and actual
+HT association remain gated. All failed controls are retained.
+
+Tested intermediate and final images/collectors are retained by build ID
+beside the raw evidence. Native tests cover both size orders, every early
+length 44..480, exact continuation copy bounds, commit/owner/epoch/length
+guards, immutable first-body retention, modeled terminal/bad/abort ownership,
+and no TX. Default-image and 1000-byte save-only regressions pass.
+
+The paired campaign's full originals in `build/clean-rx/vendor-pairs/`
+were restored and independently reread/byte/hash-verified after the trials.
+Both original hashes match the preservation record below; both badges
+remain in BOOTSEL.
+
+Full intermediate controls, corrupted-byte diagnosis, timing measurements,
+exact positive-frame identity and USB readiness failure are recorded in the
+[D2 development record](../dev-doc/HT20_IMPLEMENTATION.md#first-complete-live-two-body-capture-2026-10-19).
+
+### Exact-size retention follow-up
+
+Build **`2e8ac062`** adds direct 170/298-byte early-copy paths while
+retaining guarded copies for other lengths. The existing snapshot bounds,
+stale-copy rejection and strict two-body proof predicates are unchanged.
+Unreachable large-copy blocks are omitted from the advance profile only.
+
+`build/clean-rx/vendor-fifo/copy-r0` captures the reversed **298/170-byte**
+pair with both FCS values independently verified and the actual continuation
+F2 bytes equal to the frozen snapshot. This extends the earlier forward-
+order demonstration. Only one of six follow-up trials passes; neither
+both-role repeatability nor physical abort recovery is qualified.
+
+A vendor-only assembly FIFO control showed no useful submission-pacing
+gain and was removed. The preserved old baseline also reproduces the
+missing-capture direction. Detailed controls, limits and live bad-frame
+recovery are in the
+[retention follow-up record](../dev-doc/HT20_IMPLEMENTATION.md#shorter-live-retention-and-transport-pacing-control-2026-10-19).
+
+Both complete originals were restored after this follow-up, with independent
+16-MiB readbacks and byte/hash comparisons against the verified
+`build/clean-rx/vendor-fifo/` backups. Both badges remain in BOOTSEL.
+
+### Frozen delivery-state follow-up
+
+Build **`d6c2e83c`** adds the ABI-8 readout and two ordinary-frame summaries.
+Its clean controller is byte-identical to `2e8ac062`. Six bounded trials in
+`build/clean-rx/vendor-receive-state/` all receive HT traffic and reconcile
+captured frames with posted/dropped transport counts, with no pending credit
+or host resync/stall at stop.
+
+`state-r1`, vendor A / observer B, captures a complete **298/170-byte** pair,
+independently bitwise-FCS checked, with frozen continuation equal to tagged
+F2 bytes. This is the first complete live pair in that role assignment.
+Only one of six trials passes; other runs lack an eligible early body or
+retain a corrupt continuation. Earlier zero-HT loss did not recur and
+remains unexplained. Neither this result nor transport accounting qualifies
+repeatability, physical abort recovery or production aggregate reception.
+See the [frozen delivery-state record](../dev-doc/HT20_IMPLEMENTATION.md#frozen-delivery-state-and-reverse-role-pair-2026-10-19).
+Both complete originals were restored and independently reread/byte/hash-
+verified against fresh full-flash backups after all six trials. Both badges
+are in BOOTSEL.
+
+### Handoff-state controls
+
+Final trace-only build **`42424296`** retains the three-point handoff logger.
+Sixteen new bounded trials exercise nine advances, all with good early
+bodies but bad continuations. Fresh-prefix, FIFO-init and earlier-streaming
+controls were tested and removed because none qualified a complete pair.
+Zero-HT loss recurs twice with no transport drop, pending credit or host
+resync, locating that failure upstream of F2/USB delivery. No RF fix or D2
+completion is claimed. Detailed controls and limits are in the
+[handoff-state record](../dev-doc/HT20_IMPLEMENTATION.md#handoff-state-controls-and-zero-ht-delivery-exclusion-2026-10-19).
+
+Both complete original flashes were restored and independently reread as
+`build/clean-rx/vendor-handoff-state/restored-{A,B}-full.bin`.
+Each 16777216-byte readback byte/hash-matches its fresh pre-test original.
+Both badges remain in BOOTSEL.
+
+### Alternate receive-buffer control
+
+Eight `b48c71dc` trials use a separate `0x900` second-body destination
+with EOF-only copyback. Two advances, one per badge role, retain valid
+early bodies but corrupt continuations despite the measured separate
+destination. No complete pair qualifies. Same-destination reuse alone
+does not explain these failures; the unqualified control was removed.
+Exact tested images/source and all failed evidence are preserved in
+`build/clean-rx/vendor-alt-buffer/`.
+See the [alternate-buffer record](../dev-doc/HT20_IMPLEMENTATION.md#alternate-receive-buffer-control-2026-10-19).
+
+The retained collector now enforces complete capture/post/drop/consume
+accounting, including magic values, packed counter saturation and the
+one-frame pending bound. Explicit drops and pending frames remain visible.
+Native corruption/boundary tests pass, and the guard accepts all 30
+preserved full captures from the latest three campaigns.
+Final build `8bbed93e` retains ABI 12 and the original trace-only controller
+byte-for-byte. This host-guard/identity rebuild is not another RF trial.
+Both complete originals were restored and independently reread as
+`build/clean-rx/vendor-alt-buffer/restored-{A,B}-full.bin`.
+Both 16777216-byte readbacks byte/hash-match their fresh backups, and
+both badges remain in BOOTSEL.
 
 ## Footprint and validation
 
@@ -449,9 +729,9 @@ Current native-validated build sizes (`llvm-size`):
 
 | Image | Text | Data | BSS |
 | --- | ---: | ---: | ---: |
-| Vendor RP2350 | 244272 | 28 | 40004 |
-| Observer RP2350 | 75520 | 28 | 23216 |
-| Included clean controller | 61364 | 0 | 6408 |
+| Vendor RP2350 | 244504 | 28 | 40004 |
+| Observer RP2350 | 75140 | 28 | 23232 |
+| Included clean controller | 60528 | 0 | 6408 |
 
 The observer already includes the clean controller blob; do not add its
 size a second time. The vendor image includes the unchanged vendor assets.
@@ -461,13 +741,19 @@ clean station, clean WPA2 or previous BA application symbols.
 Validation includes ASan/UBSan fixture/digest/counter/HT-SIG tests, captured
 RF HT-SIG vectors, PSM observer tests, default-controller regression and
 original-image reconstruction identity, plus runner syntax and whitespace.
+ABI-8 summary tests cover every MPDU length 4..3896, short-frame zero padding,
+corrupt FCS, invalid lengths and untouched output boundaries.
 The previous uncorrelated reference ended with host-only rebuild `f8916d0c`.
 Correlation build `4e209642`, exit/first-hint build `7f1e3e90` and early
 snapshot build `e9008554` were radio-tested in both roles, with their
 different success criteria and qualification limits recorded above.
 Final tests also cover the default profile and the exit-only observer
-with early preservation disabled. The final radio build ID remains
-`e9008554` after the native race test.
+with early preservation disabled. That early-retention radio build remains `e9008554` after its native race
+test. The later bounded-advance controls and host-only follow-up are
+separately identified above. Advance-profile tests cover all lengths
+44..480, modeled continuation ownership for good/bad/abort/watchdog exits,
+no TX, one-shot and EOF/GoodFCS gates, proof-sample retention and strict
+same-PPDU pair positives/negatives.
 
 ## Preservation and next investigation
 
