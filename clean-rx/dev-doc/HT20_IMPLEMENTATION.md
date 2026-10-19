@@ -2818,6 +2818,227 @@ Independent 16777216-byte readbacks at
 byte-compare with the fresh originals and match their verified SHA256 hashes.
 Final serial-targeted checks confirm both badges remain in BOOTSEL.
 
+### Parked one-shot PHY receive reset (2026-10-19)
+
+The failed natural event-drain/reflush motivates a stronger, separately
+gated control, not a change to normal RX. The public CYW43439 datasheet
+does not specify the internal RXE command bits sufficiently to justify a
+new guessed reset mask. The original PSM abort at PC266..269 resets
+crypto controls (`0x7c0/0x7d0`), not the PHY. Reusing it is therefore not
+an independent stronger PHY-reset experiment.
+
+The selected recipe already appears in `radio_phy.c` during RX-path
+configuration and AGC finalization, and in the separate source-backed
+`r3_rx_path_configure`/AGC implementation:
+
+1. Write PHY `0xa00 = 0`.
+2. Clear PHY `0x440` bit 0 (deaf).
+3. Set PHY `0x44a` bits `0x44`.
+4. Write PHY `0x44a = 0x80`.
+5. Write PHY `0xa00 = 0xff`.
+6. Set PHY `0x440` bit 0 (undeaf).
+
+This is repository-grounded startup prior art, **not prior qualification
+as a live RXE timeout remedy**. The earlier authentication investigation
+also tried a PHY reset without per-execution instrumentation and did not
+establish a reliable fix. The current test instruments actual execution.
+
+`CLEAN_RX_HT_REARM_RESET` defaults off and requires one-shot strict passive
+recovery. The first busy decision remains immutable at SHM `0x7c0..0x7cf`.
+After the existing selective event drain, the PSM writes a request at
+`0x7d0` and enters a bounded 65,535-iteration reply loop. C3 services the
+request on every RX poll, pauses the PSM without restarting it, rechecks
+the request, and verifies TX is disabled and the four existing PHY TX
+override controls remain inhibited. It permits at most one reset execution.
+It applies the six operations and validates final PHY `0x440` bit 0,
+`0x44a = 0x80`, `0xa00 = 0xff`, and unchanged inhibition before acknowledging.
+All register operations are fixed-length, without unbounded I/O polling.
+
+The PSM then retries its original bounded RXE flush. A busy retry still
+faults with reason 3; C3 rejection/readback failure faults with reason 8;
+a missing reply faults with reason 7. The reply check precedes the final
+zero-count check, so a reply at the last modeled opportunity is accepted.
+There is no core or PSM restart, counter clearing, TX or normal RX change.
+The normal diagnostic restart-attempt counter must remain zero.
+
+ABI19/WND8 retains 35 160-byte samples with a 128-byte header. Modes 5/7
+identify natural/injected PHY reset; 0/1/3 retain previous meanings.
+SHM `0x7d0..0x7df` is copied to header bytes 96..127, below the RX-header
+and C3 capture-storage boundaries:
+
+| Word | Reset record |
+| --- | --- |
+| 0 | State: 0 unused, 1 request, 2 complete, 3 rejection/readback failure, 4 reply timeout, `0xffff` invalid cached copy |
+| 1 | Actual C3 execution count, at most one |
+| 2..3 | Original MACCONTROL low/high |
+| 4..6 | PHY `0x440/0x44a/0xa00` before |
+| 7..9 | The same registers after |
+| 10..11 | Before/after four-control TX-inhibit masks (15 means all four inhibited) |
+| 12..13 | Elapsed C3 service TSF low/high |
+| 14..15 | RXCTL before/after PHY reset, before retried flush |
+
+The final sample word now holds the 16-bit first-fault commit and 16-bit
+reset state separately. A completed PHY reset is not itself proof that
+RXE flush recovers or that later frames are received; both are checked
+independently. Injected mode still modifies only a latched decision, not
+physical hardware RXCTL.
+
+Native execution tests cover the emitted handshake instructions, successful
+and persistently busy retry, rejected/missing replies and the exact final
+reply opportunity/timeout boundary. The six-operation recipe is checked
+against the startup sequence and modeled over varied initial values,
+preserving unrelated PHY bits and TX overrides. Protocol tests cover mode
+and reset-state encodings, disabled payloads, cached invalidation markers
+and capacity. Both experimental targets retain the framebuffer-free screen.
+
+#### Instrumented injected execution
+
+Fresh whole-flash originals in
+`build/clean-rx/phy-reset-investigation/original-{A,B}.bin` are exactly
+16777216 bytes each and byte/hash-match the preceding independently
+verified readbacks before any experimental load.
+
+Four fixed injected trials (`aad318de`, mode 7), at 256/512 bytes in both
+roles, execute exactly one C3 reset each. All four report state 2, execution
+count 1, before/after TX-inhibit masks 15, and valid final PHY readbacks.
+The before and after values are `0x440 = 0x3e01`, `0x44a = 0x80` and
+`0xa00 = 0xff`; intermediate reset writes are covered by the native recipe
+test, while the execution count distinguishes running it from merely
+observing unchanged final values. Service takes 16 TSF units in each trial.
+The later PSM decision succeeds at RXCTL `0x800`.
+
+| Trial | First to last sampled captures | Final HT starts |
+| --- | --- | --- |
+| `injected256-role0-r0` | 0 to 274 | 5 |
+| `injected256-role1-r0` | 2 to 214 | 2 |
+| `injected512-role0-r0` | 1 to 597 | 3 |
+| `injected512-role1-r0` | 0 to 345 | 1 |
+
+All four preserve the first forced fault, have no controller error or PSM
+restart, and reconcile frozen delivery accounting. None qualifies an early
+body. This verifies actual live reset execution and subsequent receive
+progress from an injected decision, not recovery from physical busy RXE.
+
+#### Fixed natural controls and a real recovered timeout
+
+The fixed matrix adds four 512-byte event-drain/reflush controls
+(`9fd0f901`, mode 1) followed by ten natural PHY-reset trials
+(`0157638f`, mode 5): one 256-byte trial per role, then four 512-byte
+trials per role. No RF trial is retried until success.
+
+Both role-0 reflush controls finish without controller fault but retain
+zero HT starts (346 and 590 captures). Both role-1 controls activate on a
+real timeout, exhaust the retry and stop after one capture, preserving
+RXCTL `0x804`, zero wait remaining and SHM reason 3. Their first RXE
+counts are 980/924, status1 `0x4000` and status2 `0x4140`.
+
+Three of the ten natural PHY-reset trials activate on a real exhausted
+wait. Each executes exactly one reset with valid readbacks and inhibited
+TX, preserving both original and subsequent PSM decisions:
+
+| Trial | First fault RXE count / status1 / status2 | RXCTL before/after PHY reset | Result |
+| --- | --- | --- | --- |
+| `reset512-role1-r0` | 980 / `0x4000` / `0x4140` | `0x804` / `0x804` | Retry exhausts; explicit reason-3 fault after one capture |
+| `reset512-role1-r1` | 1301 / `0x5800` / `0x0040` | `0x804` / `0x800` | Strict retry succeeds; reception continues |
+| `reset512-role1-r2` | 980 / `0x4000` / `0x4140` | `0x804` / `0x804` | Retry exhausts; explicit reason-3 fault after one capture |
+
+The middle trial is a **real, instrumented recovered busy timeout**, not
+an injected decision or an automatic restart. Its first-fault record has
+zero wait remaining, outcome 2, RX epoch 330 and bad-FCS count 4.
+C3 executes the reset in 17 TSF units and directly observes RXCTL change
+from `0x804` to `0x800`, before reissuing the original flush. The final
+main record is committed sequence 962, outcome 1, RXCTL `0x800`, RX epoch
+355 and unchanged bad-FCS count 4.
+
+The receive timeline independently brackets the activation:
+
+| Sample | Calibrated elapsed us | Captured | First-fault commit | PHY reset state |
+| --- | ---: | ---: | ---: | ---: |
+| 24 | 2401564 | 323 | 0 | 0 |
+| 25 | 2501582 | 327 | 2 | 2 |
+| 26 | 2601589 | 330 | 2 | 2 |
+| 30 | 2987803 | 350 | 2 | 2 |
+
+These four samples have coherent cached publication, direct controller
+state 9/error 0, and zero recorded PSM restarts. Frozen accounting retains
+350 captures = 343 posted/consumed + 7 explicit drops, with no pending
+frame. The increasing post-activation counts prove receive progress;
+they do not prove HT reception: this trial has zero HT starts throughout.
+This single episode tests the combined pause/reset/reflush sequence.
+It does not isolate an individual reset write from PSM pause or the
+additional delay; no time-matched parked/no-reset control is claimed.
+
+The two failures have the earlier startup-like `0x4000/0x4140` status
+pair and are already faulted at the first timeline sample. Their PHY
+reset operations actually run and pass readback checks, but RXCTL remains
+busy and the second wait really exhausts. The reset is therefore **not a
+general or reliable remedy**. The differing status/count/timing groups
+are evidence for separate failure states, not sufficient documentation
+to assign undocumented RXE bit meanings or a unique root cause.
+The next hardware investigation should distinguish this persistent
+startup-like RXE state from the recoverable midstream state, retaining
+pre/post reset evidence instead of increasing identical retry counts.
+
+#### Why 554-byte repeatability remains open
+
+No new early body qualifies in this fixed matrix. Fourteen completed
+frozen exports retain 28 valid HT headers, including seven A-MPDU-format
+headers. Their exclusions are explicit:
+
+- 21 are not A-MPDU format.
+- Six end as terminal single bodies.
+- One has an early single-body good hint.
+
+The seven A-MPDU-format PSDUs are 302 or 558 bytes: they describe only one
+body, not the earlier qualifying 1118-byte multi-body PSDU. All fourteen
+completed vendor trials retain Block ACK activity, but that alone is not
+proof of multiple bodies in any captured PPDU. Thus this campaign has no
+observed qualifying multi-body opportunity to turn into a repeated
+554-byte early proof. It neither retracts the preceding two independently
+verified 554-byte bodies nor counts these single-body frames as repeats.
+A reliably confirmed multi-body stimulus remains necessary.
+
+Three otherwise completed trials see no HT starts despite continuing
+ordinary capture and successful rearm decisions (the two mode-1 role-0
+controls and the recovered mode-5 role-1 trial). HT-only loss remains
+separate from persistent RXE timeout.
+
+#### Validation and preservation
+
+All nine reference profiles and the ordinary controller pass builds and
+native/ASan/UBSan tests. All seven pre-existing controller profiles and
+the ordinary controller remain byte-identical to the preceding verified
+images; only the newly gated reset profiles change C3/PSM firmware.
+Final wrapper identities and footprints are in the reference README.
+
+All 108 raw phase reports from 18 fixed RF trials independently pass
+length and bitwise CRC checks. All 554 WND8 samples are retained with
+zero capacity loss (309 coherent cached publications, 245 explicitly
+incoherent). Four genuine faulted captures remain errors; the fourteen
+successful frozen exports reconcile 5822 captured frames, including
+163 explicit drops. No qualification failure is hidden or replaced by
+a successful-looking empty export.
+
+Final restoration initially fails its bounded readiness check before
+any flash write because Google Chrome again exclusively owns badge A's
+BOOTSEL USB interface. IORegistry identifies the owner; this is not a
+radio failure. The user closes the browser windows, then restoration
+resumes using the unchanged fresh original images.
+
+Both entire original flashes are now restored. Independent readbacks
+`build/clean-rx/phy-reset-investigation/restored-{A,B}-full.bin` each contain
+exactly 16777216 bytes and byte-compare with the fresh campaign originals.
+Their SHA256 values match the verified originals:
+
+- A: `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`.
+- B: `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`.
+
+Both complete load/verify operations and independent full readbacks
+succeed. Serial-targeted final checks confirm both badges in BOOTSEL.
+The reset remains default-disabled; one recovered episode does not
+qualify general RXE recovery, HT reliability, repeated 554-byte capture,
+normal HT advertisement or D2 completion.
+
 ### Remaining D2 work
 
 Use the [consolidated D2 work packages](../../todo.md#remaining-work-packages)

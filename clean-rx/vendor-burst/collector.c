@@ -189,6 +189,11 @@ static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]) {
     sequence = ref_u16(window+64u);
     printf("],\"psm_snapshot_committed\":%s}\n",
            sequence && !(sequence&1u)?"true":"false");
+    printf("{\"test\":\"rearm-phy-reset\",\"enabled\":%s,\"words\":[",
+           usb_report_u32(window+28u)&4u?"true":"false");
+    for (uint32_t i = 0u; i < 16u; ++i)
+        printf("%s%u",i?",":"",(unsigned)ref_u16(window+96u+2u*i));
+    puts("]}");
     for (uint32_t i = 0u; i < count; ++i) {
         const uint8_t *r = window+REF_WINDOW_HEADER_BYTES+i*REF_WINDOW_RECORD_BYTES;
         printf("{\"test\":\"receive-window-sample\",\"index\":%u,\"time_ticks\":%u,"
@@ -210,14 +215,15 @@ static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]) {
                "\"early_id\":%u,\"psm_restart_attempts\":%u,\"cached_rxctl\":%u,"
                "\"controller_state\":%u,\"controller_error\":%u,"
                "\"controller_error_address\":%u,\"controller_error_value\":%u,"
-               "\"first_fault_sequence\":%u}\n",
+               "\"first_fault_sequence\":%u,\"phy_reset_state\":%u}\n",
                (unsigned)ref_u16(r+76u),(unsigned)ref_u16(r+78u),
                (unsigned)ref_u16(r+80u),(unsigned)ref_u16(r+82u),
                (unsigned)ref_u16(r+112u),(unsigned)ref_u16(r+132u),
                (unsigned)ref_u16(r+134u),(unsigned)ref_u16(r+136u),
                (unsigned)ref_u16(r+138u),(unsigned)ref_u16(r+92u),
                usb_report_u32(r+100u),usb_report_u32(r+104u),
-               usb_report_u32(r+148u),usb_report_u32(r+152u),usb_report_u32(r+156u));
+               usb_report_u32(r+148u),usb_report_u32(r+152u),
+               (unsigned)ref_u16(r+156u),(unsigned)ref_u16(r+158u));
     }
     return 1;
 }

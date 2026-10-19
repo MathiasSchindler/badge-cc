@@ -26,7 +26,10 @@
 #define REF_DUMP_BYTES 384u
 #define REF_OBSERVER_DETAIL 1024u
 #define REF_DIGEST_INITIAL 0x811c9dc5u
-#define REF_OBSERVER_ABI 18u
+#define REF_OBSERVER_ABI 19u
+static inline uint16_t ref_u16(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8u));
+}
 static inline int ref_timer_calibration_valid(uint32_t ticks, uint32_t frames) {
     return ticks && ticks <= 100000u && frames >= 32u && frames <= 1024u &&
         ticks*100u >= frames;
@@ -35,11 +38,11 @@ static inline uint64_t ref_timer_us(uint32_t value, uint32_t ticks, uint32_t fra
     return (uint64_t)value*frames*1000u/ticks;
 }
 #define REF_WINDOW_BASE 128u
-#define REF_WINDOW_MAGIC 0x37444e57u
+#define REF_WINDOW_MAGIC 0x38444e57u
 #define REF_WINDOW_INTERVAL 100000u
 #define REF_WINDOW_RECORDS 35u
 #define REF_WINDOW_RECORD_BYTES 160u
-#define REF_WINDOW_HEADER_BYTES 96u
+#define REF_WINDOW_HEADER_BYTES 128u
 #define REF_WINDOW_BYTES (REF_WINDOW_HEADER_BYTES+REF_WINDOW_RECORDS*REF_WINDOW_RECORD_BYTES)
 _Static_assert(REF_WINDOW_BASE+REF_WINDOW_BYTES <= REF_TRACE_BYTES,
     "Separate receive-window export must fit the existing trace transport");
@@ -56,7 +59,7 @@ static inline int ref_window_valid(const uint8_t *window) {
         !count || count > REF_WINDOW_RECORDS ||
         badger_bytes_load_u32(window+12u) != REF_WINDOW_INTERVAL ||
         badger_bytes_load_u32(window+24u) > 1u ||
-        badger_bytes_load_u32(window+28u) > 3u ||
+        badger_bytes_load_u32(window+28u) > 7u ||
         (badger_bytes_load_u32(window+28u) &&
          (!badger_bytes_load_u32(window+24u) ||
           !(badger_bytes_load_u32(window+28u)&1u))) ||
@@ -67,11 +70,20 @@ static inline int ref_window_valid(const uint8_t *window) {
     if (!badger_bytes_load_u32(window+28u))
         for (uint32_t i = 64u; i < REF_WINDOW_HEADER_BYTES; ++i)
             if (window[i]) return 0;
+    if (!(badger_bytes_load_u32(window+28u)&4u))
+        for (uint32_t i = 96u; i < REF_WINDOW_HEADER_BYTES; ++i)
+            if (window[i]) return 0;
+    if ((badger_bytes_load_u32(window+28u)&4u) &&
+        ref_u16(window+96u) > 4u && ref_u16(window+96u) != 0xffffu) return 0;
     for (uint32_t i = 0u; i < count; ++i) {
         const uint8_t *r = window+REF_WINDOW_HEADER_BYTES+i*REF_WINDOW_RECORD_BYTES;
         uint32_t time = badger_bytes_load_u32(r), duration = badger_bytes_load_u32(r+4u);
         if (time < end || time >= 45000000u || !duration ||
             duration >= 45000000u-time) return 0;
+        uint16_t reset = ref_u16(r+158u);
+        if (badger_bytes_load_u32(window+28u)&4u) {
+            if (reset > 4u && reset != 0xffffu) return 0;
+        } else if (reset) return 0;
         end = time+duration;
     }
     for (uint32_t i = REF_WINDOW_HEADER_BYTES+count*REF_WINDOW_RECORD_BYTES; i < REF_WINDOW_BYTES; ++i)
@@ -185,10 +197,6 @@ static inline const char *ref_observer_outcome_name(uint32_t outcome) {
         "abort_or_fault","watchdog","new_rx","new_prefix"
     };
     return outcome < sizeof(names)/sizeof(names[0]) ? names[outcome] : 0;
-}
-
-static inline uint16_t ref_u16(const uint8_t *p) {
-    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8u));
 }
 
 static const char *const ref_queries[REF_QUERY_COUNT] = {

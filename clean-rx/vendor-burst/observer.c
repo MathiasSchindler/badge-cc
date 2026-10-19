@@ -44,7 +44,8 @@ static int window_sample(void) {
     badger_bytes_store_u32(r+144u,after);
     badger_bytes_store_u32(r+148u,error_address);
     badger_bytes_store_u32(r+152u,error_value);
-    badger_bytes_store_u32(r+156u,ref_u16(window+64u));
+    badger_bytes_store_u32(r+156u,ref_u16(window+64u) |
+        ((uint32_t)ref_u16(window+96u)<<16u));
     badger_bytes_store_u32(window+4u,count+1u);
     return 1;
 }
@@ -140,7 +141,8 @@ void ref_run(const uint8_t nonce[16]) {
         badger_bytes_store_u32(window+20u,ref_clock_frames);
         badger_bytes_store_u32(window+24u,CLEAN_RX_HT_REARM_WAIT);
         badger_bytes_store_u32(window+28u,
-            CLEAN_RX_HT_REARM_RECOVER | (CLEAN_RX_HT_REARM_INJECT<<1u));
+            CLEAN_RX_HT_REARM_RECOVER | (CLEAN_RX_HT_REARM_INJECT<<1u) |
+            (CLEAN_RX_HT_REARM_RESET<<2u));
         if (!ref_timer_calibration_valid(ref_clock_ticks,ref_clock_frames)) {
             loader.error = CLEAN_INPUT;
             badger_bytes_store_u32(ref_detail+8u,loader.error);

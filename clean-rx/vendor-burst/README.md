@@ -68,6 +68,17 @@ Injected mode is labelled in both telemetry and the screen; it is not evidence
 of a natural hardware timeout or successful physical recovery.
 Both recovery gates default off and require the strict passive profile.
 
+`reference-reset` adds the default-disabled `CLEAN_RX_HT_REARM_RESET`
+variant; `reference-reset-test` also injects the first latched busy decision.
+After preserving the first fault and draining events, the PSM requests
+one C3 PHY reset and waits at most 65,535 bounded reply iterations.
+C3 pauses PSM execution, rechecks the request and four TX-inhibit controls,
+and applies the existing six-operation startup receive-reset sequence.
+The PSM resumes only after successful PHY/control readbacks; rejected
+requests and reply timeouts fail explicitly (SHM reasons 8 and 7).
+The subsequent original RXE flush still has its own strict bound.
+No core/PSM restart, diagnostic reset or normal-profile change is included.
+
 The screen shows badge role, operation and experimental mode before radio
 start, then stopped/error status, capture count and first-fault RXCTL after
 observer stop. There are no display writes during active observer capture,
@@ -174,7 +185,7 @@ No public vendor implementation was copied into the clean firmware.
 `CLEAN_RX_HT_OBSERVER=1` requires extended HT RX, excludes the aggregate
 fixture/interface/delivery profiles and defaults off. It retains at most 16 prefixes
 in SHM `0x100`; overflow is counted and retained entries never overwritten.
-The observer trace has ABI 18 at byte 64. The 16-word SHM header holds session
+The observer trace has ABI 19 at byte 64. The 16-word SHM header holds session
 identity, permit/count/overflow, pending/held IDs, RX epoch, progress and the
 first good-only hint's RX count. Each 47-word record has an append-only
 prefix and a one-shot terminal/exit snapshot:
@@ -894,18 +905,19 @@ The current separate window trace starts at byte 128:
 
 | Window offset | Contents |
 | --- | --- |
-| 0..23 | Magic `WND7` (`0x37444e57`), retained count, capacity misses, nominal 100000-us interval, calibration ticks/SOF frames |
-| 24..31 | Strict decision-trace enable (0/1), recovery mode (0 strict/no recovery, 1 natural, 3 injected) |
+| 0..23 | Magic `WND8` (`0x38444e57`), retained count, capacity misses, nominal 100000-us interval, calibration ticks/SOF frames |
+| 24..31 | Strict decision-trace enable (0/1), recovery mode (0 strict/no recovery, 1 reflush, 3 injected reflush, 5 PHY reset, 7 injected PHY reset) |
 | 32..63 | Last cached 16-word PSM decision trace; all zero when disabled |
 | 64..95 | Immutable first-fault 16-word record; zero without recovery |
-| 96 onward | At most 35 records of 160 bytes |
+| 96..127 | Sixteen-word PHY reset/handoff record; zero without reset |
+| 128 onward | At most 35 records of 160 bytes |
 | Record 0..15 | Raw elapsed/read ticks, captured count, raw PSMDEBUG |
 | Record 16..99 | Cached mailbox bytes 60..143 |
 | Record 100..107 | Direct controller state/error |
 | Record 108..139 | Seqlocked cached HT/log/early metadata, ending with restart-attempt count |
 | Record 140..147 | Publication sequence before/after reads |
 | Record 148..155 | Direct controller error address/value |
-| Record 156..159 | First-fault commit sequence (0 unused, 2 committed, odd invalid cache) |
+| Record 156..159 | First-fault commit (16 bits), PHY reset state (16 bits) |
 
 Three equal nonzero even sequences qualify only the cached publication,
 not a simultaneous hardware snapshot. Final/error cleanup invalidates it.
@@ -916,11 +928,18 @@ WND3 replaces the last eight mailbox bytes with controller state/error.
 WND4 changes the final live-metadata word from early length to restart
 attempts. WND5 appends the explicit error address/value. Keep each archived
 collector with its matching format. WND6 has a 64-byte header and 36 rows
-of 156 bytes; WND7 adds the first-fault block and per-sample commit.
+of 156 bytes; WND7 has a 96-byte header and adds the first-fault block and
+per-sample 32-bit commit. WND8 has a 128-byte header and splits that final
+sample word into commit/reset state. Always use the matching collector.
 The `rearm-decision` JSON record exports raw words and separately reports
 PSM commit validity and C3 cache coherence. Its exact word layout is in the
 development record; the trace ends in success (1) or genuine busy-bit fault
 (2), with both branches testing the retained RXCTL operand.
+The `rearm-phy-reset` JSON record reports raw reset words. State is 0 unused,
+1 requested, 2 completed/readback-checked, 3 rejected/readback failure,
+4 PSM reply timeout, or `0xffff` for an invalidated cached copy.
+Execution count, original MACCONTROL, three PHY registers before/after,
+TX-inhibit masks, elapsed TSF and RXCTL before/after follow that state.
 
 ### Corrected rearm decision experiment
 
@@ -945,7 +964,7 @@ an explicit failure. No production recovery fix is claimed.
 
 ### One-shot recovery and both-role 554-byte captures
 
-The current gated experiment is recorded in the
+The preceding gated experiment is recorded in the
 [one-shot recovery development record](../dev-doc/HT20_IMPLEMENTATION.md#one-shot-rxe-event-drainreflush-experiment-2026-10-19).
 Four injected RF controls (`6d4ba8e4`) execute recovery and resume reception
 without restart; they do not simulate a physical busy RXE.
@@ -977,41 +996,73 @@ originals, and final serial-targeted checks confirm both in BOOTSEL.
 This includes a complete successful rewrite of B after its interrupted
 earlier restoration attempt.
 
+### Parked PHY reset: one real recovery, two persistent failures
+
+The [instrumented PHY-reset record](../dev-doc/HT20_IMPLEMENTATION.md#parked-one-shot-phy-receive-reset-2026-10-19)
+adds four injected execution controls, four reflush controls and ten
+natural reset trials. Three natural busy timeouts invoke the new reset:
+one clears RXCTL `0x804` to `0x800` and resumes reception, while two remain
+busy and stop explicitly after the bounded retry. The successful trial
+retains coherent samples showing capture growth from 327 after activation
+to 350, with no PSM restart or counter reset. It still sees no HT starts.
+This is a first physical recovery proof, **not a general reliability fix**.
+
+All four injected controls execute exactly one checked reset and resume
+capture. The fixed matrix adds no 554-byte early proof: the retained
+HT headers show only nonaggregates or single-body A-MPDU format, not a
+confirmed multi-body capture opportunity. Block ACK activity alone is
+not sufficient stimulus qualification.
+
+All 108 raw reports and 554 WND8 rows independently validate; fourteen
+successful frozen exports reconcile delivery and four genuine faults
+remain failures. Evidence and matching RF images/collectors are in
+`build/clean-rx/phy-reset-investigation/`. Normal firmware stays unchanged,
+all reset gates remain off by default, and D2 stays open.
+After the campaign, both entire original flashes are restored. Independent
+16777216-byte `restored-{A,B}-full.bin` readbacks in that directory
+byte/hash-match the fresh originals, and both badges remain in BOOTSEL.
+
 ## Footprint and validation
 
-Final native-validated ABI-18 sizes (`llvm-size`); these identity rebuilds
+Final native-validated ABI-19 sizes (`llvm-size`); these identity rebuilds
 are not additional RF trials:
 
 | Profile / image | Text | Data | BSS |
 | --- | ---: | ---: | ---: |
-| Default advance `b8ce682a`: vendor RP2350 | 246560 | 28 | 40012 |
+| Default advance `12ce0843`: vendor RP2350 | 246560 | 28 | 40012 |
 | Default advance: observer RP2350 | 77236 | 28 | 23240 |
 | Default advance: included clean controller | 60528 | 0 | 6408 |
-| Early-only `579f1033`: vendor RP2350 | 246756 | 28 | 48236 |
+| Early-only `140fc51d`: vendor RP2350 | 246756 | 28 | 48236 |
 | Early-only: observer RP2350 | 78072 | 28 | 23240 |
 | Early-only: included clean controller | 61364 | 0 | 6408 |
-| PHY probe `accf1429`: vendor RP2350 | 246756 | 28 | 48236 |
+| PHY probe `0d78175f`: vendor RP2350 | 246756 | 28 | 48236 |
 | PHY probe: observer RP2350 | 78032 | 28 | 23240 |
 | PHY probe: included clean controller | 61300 | 0 | 6408 |
-| Window `f27e087d`: vendor RP2350 | 247284 | 28 | 48236 |
-| Window: observer RP2350 | 79800 | 28 | 28940 |
+| Window `3ced6a9e`: vendor RP2350 | 247420 | 28 | 48236 |
+| Window: observer RP2350 | 79944 | 28 | 28972 |
 | Window: included clean controller | 61484 | 0 | 6408 |
-| Strict rearm `67c16a4c`: vendor RP2350 | 247292 | 28 | 48236 |
-| Strict rearm: observer RP2350 | 80088 | 28 | 28940 |
+| Strict rearm `aee44b59`: vendor RP2350 | 247428 | 28 | 48236 |
+| Strict rearm: observer RP2350 | 80232 | 28 | 28972 |
 | Strict rearm: included clean controller | 61736 | 0 | 6408 |
-| Natural recovery `5bd8cbc7`: vendor RP2350 | 247292 | 28 | 48236 |
-| Natural recovery: observer RP2350 | 80316 | 28 | 28940 |
-| Natural recovery: included clean controller | 61964 | 0 | 6408 |
-| Injected recovery `d3996efa`: vendor RP2350 | 247296 | 28 | 48236 |
-| Injected recovery: observer RP2350 | 80344 | 28 | 28940 |
-| Injected recovery: included clean controller | 61988 | 0 | 6408 |
+| Natural reflush `613e410c`: vendor RP2350 | 247428 | 28 | 48236 |
+| Natural reflush: observer RP2350 | 80460 | 28 | 28972 |
+| Natural reflush: included clean controller | 61964 | 0 | 6408 |
+| Injected reflush `ed4f0d14`: vendor RP2350 | 247432 | 28 | 48236 |
+| Injected reflush: observer RP2350 | 80488 | 28 | 28972 |
+| Injected reflush: included clean controller | 61988 | 0 | 6408 |
+| Natural PHY reset `2ab745a2`: vendor RP2350 | 247428 | 28 | 48236 |
+| Natural PHY reset: observer RP2350 | 81644 | 28 | 28972 |
+| Natural PHY reset: included clean controller | 63148 | 0 | 6408 |
+| Injected PHY reset `1dcc7ae0`: vendor RP2350 | 247428 | 28 | 48236 |
+| Injected PHY reset: observer RP2350 | 81668 | 28 | 28972 |
+| Injected PHY reset: included clean controller | 63172 | 0 | 6408 |
 
 The observer already includes the clean controller blob; do not add its
 size a second time. The vendor image includes the unchanged vendor assets.
-All fourteen RP2350 ELFs have no undefined symbols. Neither RP2350 application
+All eighteen RP2350 ELFs have no undefined symbols. Neither RP2350 application
 contains clean station, clean WPA2 or previous BA application symbols.
 The TFT uses streamed glyph rows, not the 153600-byte canvas; BSS changes
-only by 16 bytes in window profiles for the revised trace.
+only by 32 bytes versus WND7 in window profiles for the revised trace.
 The ordinary controller remains 41388 text / 0 data / 4912 BSS.
 Build identities include input paths, so private-output validation wrappers
 have different IDs from shared-output RF wrappers even with identical

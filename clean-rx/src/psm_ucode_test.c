@@ -196,12 +196,19 @@ static int flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t limit) {
 }
 
 #if CLEAN_RX_HT_REARM_WAIT
+#if CLEAN_RX_HT_REARM_RESET
+static uint16_t rearm_reset_reply = 2u;
+static uint32_t rearm_reset_delay;
+#endif
 static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
                        int clear_after_latch, int retry_clears) {
     uint32_t pc = 275u, polls = 0u, retries = 0u;
     uint16_t r[0x1800] = {0};
     uint32_t initial_events = events;
-    for (uint32_t step = 0u; step < 800300u; ++step) {
+#if CLEAN_RX_HT_REARM_RESET
+    uint32_t reset_polls = 0u;
+#endif
+    for (uint32_t step = 0u; step < 1200600u; ++step) {
         if (pc == 281u || pc == 290u) {
             int success = pc == 281u;
             assert(r[CLEAN_OBSERVER_REARM_SHM] == 2u*(1u+retries));
@@ -210,12 +217,13 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
                 (retries ? 0u : !!(initial_events&8u)));
             assert(success == !(r[CLEAN_OBSERVER_REARM_SHM+1u]&0x14u));
             if (clear_after_latch) assert(r[CLEAN_OBSERVER_REARM_SHM+11u] == 0x800u);
-            assert(events == (retries ? initial_events&~0x6868u :
+            uint32_t recovered = CLEAN_RX_HT_REARM_RECOVER &&
+                r[CLEAN_OBSERVER_REARM_SHM+16u];
+            assert(events == (recovered ? initial_events&~0x6868u :
                 success ? initial_events&~8u : initial_events));
 #if CLEAN_RX_HT_REARM_RECOVER
             assert(retries <= 1u);
-            assert(!!r[CLEAN_OBSERVER_REARM_SHM+16u] == !!retries);
-            if (retries) {
+            if (recovered) {
                 assert(r[CLEAN_OBSERVER_REARM_SHM+16u] == 2u);
                 assert(r[CLEAN_OBSERVER_REARM_SHM+17u]&0x14u);
                 assert(r[CLEAN_OBSERVER_REARM_SHM+26u] == 2u);
@@ -224,7 +232,15 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
 #else
             assert(!retries);
 #endif
-            if (!success) assert(r[0x602u] == 3u && r[0x1780u] == 0u);
+            if (!success) {
+#if CLEAN_RX_HT_REARM_RESET
+                uint16_t reset = r[CLEAN_OBSERVER_RESET_SHM];
+                if (reset == 3u || reset == 4u)
+                    assert(r[0x602u] == (reset == 3u ? 8u : 7u) && !retries);
+                else
+#endif
+                    assert(r[0x602u] == 3u && r[0x1780u] == 0u);
+            }
             return success;
         }
         uint64_t word = instruction(pc);
@@ -234,6 +250,11 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
             r[0x1004u] = (uint16_t)(0x800u |
                 (retries && retry_clears ? 0u : polls++ < busy_polls ? busy_bits : 0u));
         if (pc == OBSERVER_REARM_REMAINING && clear_after_latch) r[0x1004u] = 0x800u;
+#if CLEAN_RX_HT_REARM_RESET
+        if (pc == OBSERVER_REARM_RESET_WAIT &&
+            reset_polls++ >= rearm_reset_delay && rearm_reset_reply)
+            r[CLEAN_OBSERVER_RESET_SHM] = rearm_reset_reply;
+#endif
         uint16_t av = a >= 0x1800u ? immediate(a) : r[a];
         uint16_t bv = b >= 0x1800u ? immediate(b) : r[b];
         uint32_t next = pc+1u;
@@ -250,8 +271,8 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
             if (((av >> (op&15u))&1u) == (op >> 8u == 5u)) next = d;
         } else if (op == 0x1d0u || op == 0x1c0u) {
             r[d] = op == 0x1d0u ? (uint16_t)(av-bv) : (uint16_t)(av+bv);
-        } else if (op == 0xd1u) {
-            if (av != bv) next = d;
+        } else if (op == 0xd1u || op == 0xd0u) {
+            if (op == 0xd1u ? av != bv : av == bv) next = d;
         } else if (op == 0x703u || (op&0x7e0u) == 0x780u) {
             assert(a == 0x1780u && b == 0x1780u);
             uint32_t event = 1u << (op&31u);
@@ -2196,6 +2217,35 @@ int main(void) {
             if (events&(1u<<i)) pending |= 1u<<bits[i];
         assert(rearm_flush(65536u,0x14u,pending,0,1));
         assert(!rearm_flush(65536u,0x14u,pending,0,0));
+    }
+#endif
+#if CLEAN_RX_HT_REARM_RESET
+    for (uint32_t reply = 0u; reply < 2u; ++reply) {
+        rearm_reset_reply = reply ? 3u : 0u;
+        assert(!rearm_flush(65536u,0x14u,0x6a68u,0,1));
+    }
+    rearm_reset_reply = 2u;
+    rearm_reset_delay = 65535u;
+    assert(rearm_flush(65536u,0x14u,0x6a68u,0,1));
+    rearm_reset_delay = 65536u;
+    assert(!rearm_flush(65536u,0x14u,0x6a68u,0,1));
+    rearm_reset_delay = 0u;
+#define RESET_ROW(index,mask,value) {index,mask,value},
+    const uint16_t recipe[][3] = {CLEAN_OBSERVER_RX_RESET_OPS(RESET_ROW)};
+#undef RESET_ROW
+    const uint16_t expected[][3] = {
+        {0xa00u,0xffffu,0u},{0x440u,1u,0u},{0x44au,0x44u,0x44u},
+        {0x44au,0xffffu,0x80u},{0xa00u,0xffffu,0xffu},{0x440u,1u,1u}
+    };
+    assert(sizeof(recipe) == sizeof(expected) && !memcmp(recipe,expected,sizeof(recipe)));
+    for (uint32_t value = 0u; value <= 65535u; value += 257u) {
+        uint16_t phy[0x1000] = {0};
+        phy[0x440u] = phy[0x44au] = phy[0xa00u] = (uint16_t)value;
+        phy[0x44cu] = 0x4000u; phy[0x938u] = 0x800u;
+        for (uint32_t i = 0u; i < 6u; ++i)
+            phy[recipe[i][0]] = (uint16_t)((phy[recipe[i][0]]&~recipe[i][1])|recipe[i][2]);
+        assert(phy[0x440u] == (value|1u) && phy[0x44au] == 0x80u &&
+               phy[0xa00u] == 0xffu && phy[0x44cu] == 0x4000u && phy[0x938u] == 0x800u);
     }
 #endif
     puts("PSM: image identity, capture bounds, RX streaming and startup flush OK");

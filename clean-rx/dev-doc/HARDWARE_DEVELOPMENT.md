@@ -244,6 +244,12 @@ encrypted reception or WPA2 support.
      no PSM restart or diagnostic reset is allowed. Its additional
      `CLEAN_RX_HT_REARM_INJECT` control changes only a latched decision,
      never hardware RXCTL. Neither gate changes ordinary RX.
+   - `CLEAN_RX_HT_REARM_RESET` separately adds a bounded PSM/C3 handoff
+     for the existing six-operation PHY receive-reset recipe. C3 pauses
+     the parked PSM, verifies TX inhibition before/after and validates
+     final PHY readbacks before allowing the single flush retry. Rejected
+     or unanswered requests fault explicitly; no core/PSM restart occurs.
+     See the [instrumented reset experiment](HT20_IMPLEMENTATION.md#parked-one-shot-phy-receive-reset-2026-10-19).
 2. **PLCP Detection & Prefix Copy (`event_start` -> `prefix_seen`):**
    - The original one-shot idle wait expires after 64 * 65,535 polls with
      reason 6. For live hardware DCF only, an expiry hook restarts the idle

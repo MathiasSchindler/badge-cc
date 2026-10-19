@@ -129,7 +129,9 @@ void bare_main(void) {
                     screen_line(12u,ref_role,0xffffu);
                     screen_line(40u,ref_role[0] == 'C' ?
                         "PASSIVE RX - NO TX" : "JOIN THEN SEND 128",0x07ffu);
-                    screen_line(68u,CLEAN_RX_HT_REARM_INJECT ? "INJECTED RECOVERY TEST" :
+                    screen_line(68u,CLEAN_RX_HT_REARM_RESET ?
+                        (CLEAN_RX_HT_REARM_INJECT ? "INJECTED PHY RESET" : "PHY RESET RECOVERY") :
+                        CLEAN_RX_HT_REARM_INJECT ? "INJECTED RECOVERY TEST" :
                         CLEAN_RX_HT_REARM_RECOVER ? "ONE SHOT RECOVERY" :
                         CLEAN_RX_HT_REARM_WAIT ? "STRICT NO RECOVERY" : "REFERENCE",0xffe0u);
                 }

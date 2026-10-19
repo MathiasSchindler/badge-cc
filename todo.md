@@ -142,13 +142,13 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Capture complete FCS-valid 554-byte nonterminal early MPDUs in both badge roles.
 - [x] Reproduce zero-HT reception with actual PSM-state and PHY-control diagnostics.
 - [x] Implement SOF-calibrated receive timelines, decision-latched rearm diagnostics and conditional-event regression tests.
-- [x] Implement gated one-shot RXE recovery, preserved first-fault diagnostics and framebuffer-free badge status.
+- [x] Implement gated one-shot RXE/PHY recovery controls, preserved first-fault diagnostics and framebuffer-free badge status.
 - [x] Correct receive/TX ownership, discard handling and backoff publication.
 
 #### Remaining work packages
 
 - [ ] **1. Qualify early-capture reliability:** repeat complete 554-byte bodies
-  in both roles; qualify bounded RXE flush/rearm recovery and isolate HT-only misses,
+  in both roles; qualify bounded RXE/PHY recovery and isolate HT-only misses,
   with independently confirmed multi-body stimulus.
 - [ ] **2. Qualify aggregate handoff:** repeat two-body capture in both badge
   roles and size orders; verify terminal, bad-frame and abort recovery.
