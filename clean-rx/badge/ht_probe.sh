@@ -171,6 +171,7 @@ if [[ $mode == ampdu-probe ]]; then
           multi_mpdu_radio_capture:$rx[0].multi_mpdu_radio_capture,
           all_subframes_retained:($rx[0].retained_subframe_bitmap==7),
           dma_experiment_enabled:$rx[0].dma_experiment_enabled,
+          shm_delivery_enabled:$rx[0].shm_delivery_enabled,
           delivered_subframe_bitmap:$rx[0].delivered_subframe_bitmap,
           delivered_subframes:$rx[0].delivered_subframes,
           actual_multi_mpdu_delivery:($tx[0].local_tx_submission and

@@ -1391,6 +1391,14 @@ remain required; the unconditional mandatory-MAC fallback is unchanged.
 
 ### Remaining D2 work
 
+The isolated retained-SHM/SRAM/F2 diagnostic now delivers all three actual
+MPDUs at every MCS0..7 in both directions, without duplicates in its finite
+matrix. Controlled bad first/middle/last frames are rejected while other
+MPDUs reach the badge. See the
+[full delivery evidence and limitations](AMPDU_INTERFACE_INVESTIGATION.md#retained-shm-to-f2-delivery-2026-10-19).
+This does not resolve the separate DMA/EOF experiment, generalize the
+three fixed slots, or implement Immediate BA or mandatory protection.
+
 - Integrate the [native-tested Block ACK/reordering software](BLOCK_ACK_IMPLEMENTATION.md)
   with actual PSM aggregate boundaries, retained multi-MPDU capture and
   hardware-timed Immediate BA; wire station agreement/key lifecycle before

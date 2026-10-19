@@ -368,6 +368,25 @@ static inline uint32_t clean_ht_ampdu_probe_trace_mask(const clean_ampdu_probe_t
     return mask;
 }
 
+static inline int clean_ht_ampdu_shm_decode(const clean_ampdu_probe_trace_t *trace,
+        uint32_t index, uint16_t outcome, volatile uint8_t raw[88]) {
+    if (!trace || !raw || trace->magic != CLEAN_AMPDU_PROBE_MAGIC ||
+        !trace->count || trace->count > CLEAN_HT_AMPDU_PROBE_COUNT ||
+        index >= trace->count || trace->length != 86u ||
+        ((trace->phy & 3u) != 1u && (trace->phy & 3u) != 2u) ||
+        !outcome || outcome > 2u)
+        return CLEAN_AMPDU_DMA_HEADER_ERROR;
+    const uint8_t *saved = trace->raw + index * CLEAN_HT_AMPDU_PROBE_SLOT_BYTES;
+    if (!clean_ht_ampdu_probe_sig_valid(saved + 2u, CLEAN_HT_AMPDU_PROBE_BYTES))
+        return CLEAN_AMPDU_DMA_HEADER_ERROR;
+    if (outcome == 2u) return CLEAN_AMPDU_DMA_BAD;
+    if (!clean_mac_valid(saved + 8u, CLEAN_HT_AMPDU_PROBE_MPDU))
+        return CLEAN_AMPDU_DMA_FCS_ERROR;
+    for (uint32_t i = 0u; i < CLEAN_HT_AMPDU_PROBE_SLOT_BYTES; ++i)
+        raw[i] = saved[i];
+    return CLEAN_AMPDU_DMA_GOOD;
+}
+
 static inline int clean_ht_ampdu_probe_frame(uint8_t packet[CLEAN_HT_AMPDU_PROBE_STORAGE],
                                              const uint8_t nonce[14]) {
     if (nonce[13] >= 8u) return 0;
@@ -481,7 +500,7 @@ static inline int clean_ht_rx_metadata(uint8_t rate, uint8_t flags, uint8_t vers
 /* Keep UNSUPPORTED set so legacy metadata consumers cannot mistake MCS for CCK. */
 static inline uint8_t clean_ht_rx_version(uint32_t enabled, uint16_t phy,
         const volatile uint8_t sig[6], uint32_t length) {
-#if CLEAN_RX_AMPDU_DMA
+#if CLEAN_RX_AMPDU_DELIVERY
     if (enabled && ((phy & 3u) == 1u || (phy & 3u) == 2u) &&
         length == CLEAN_HT_AMPDU_PROBE_MPDU &&
         clean_ht_ampdu_probe_sig_valid(sig, CLEAN_HT_AMPDU_PROBE_BYTES))

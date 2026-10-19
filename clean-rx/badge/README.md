@@ -91,6 +91,15 @@ delivered payloads, not just capture counters. `actual_multi_mpdu_delivery`
 can therefore be true while `all_subframes_delivered`, `immediate_ba`,
 `sifs_timing_qualified` and `ht_qualified` remain false. This is still a
 bounded experiment, not production station/BA integration.
+Alternatively, `CLEAN_RX_AMPDU_SHM=1` uses the unchanged three-slot PSM
+capture and a pause/readback-verified controller snapshot, then validates
+and queues each complete MPDU through SRAM/F2. It requires the same
+probe/interface-3/handoff-2 gates and cannot be combined with DMA delivery.
+The finite matrix delivers all three MPDUs at MCS0..7 in both directions,
+with exactly three deliveries and zero duplicates. The collector exposes
+`shm_delivery_enabled` and independently verifies the saved delivered bytes.
+This remains a fixed-size, one-aggregate experiment: general station
+reception, Immediate BA, measured SIFS and HT advertisement are not enabled.
 See [interface profiles and measured limitations](../dev-doc/AMPDU_INTERFACE_INVESTIGATION.md).
 See [build commands, evidence layout and failed continuations](../dev-doc/AMPDU_RADIO_INVESTIGATION.md).
 The first D2 PHY/association item is now split into completed software

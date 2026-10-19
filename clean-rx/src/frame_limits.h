@@ -22,6 +22,11 @@
 #ifndef CLEAN_RX_AMPDU_DMA
 #define CLEAN_RX_AMPDU_DMA 0
 #endif
+#ifndef CLEAN_RX_AMPDU_SHM
+#define CLEAN_RX_AMPDU_SHM 0
+#endif
+#define CLEAN_RX_AMPDU_DELIVERY (CLEAN_RX_AMPDU_DMA || CLEAN_RX_AMPDU_SHM)
+/* Shared receipt-evidence ABI for both bounded aggregate delivery paths. */
 #define CLEAN_AMPDU_DMA_PENDING 0x300u
 #define CLEAN_AMPDU_DMA_SUBMITTED 0x301u
 #define CLEAN_AMPDU_DMA_DETAIL 704u
@@ -112,6 +117,11 @@
 #define CLEAN_DETAIL_PACKET_BYTES 528u
 
 _Static_assert(CLEAN_RX_HT_RX == 0 || CLEAN_RX_HT_RX == 1, "HT RX build gate");
+_Static_assert(CLEAN_RX_AMPDU_SHM == 0 ||
+               (CLEAN_RX_AMPDU_SHM == 1 && !CLEAN_RX_AMPDU_DMA &&
+                CLEAN_RX_AMPDU_PROBE && CLEAN_RX_AMPDU_INTERFACE == 3 &&
+                CLEAN_RX_AMPDU_HANDOFF == 2),
+               "SHM aggregate delivery requires the finite handoff without DMA publication");
 _Static_assert(CLEAN_RX_AMPDU_DMA == 0 ||
                (CLEAN_RX_AMPDU_DMA == 1 && CLEAN_RX_AMPDU_PROBE &&
                 CLEAN_RX_AMPDU_INTERFACE == 3 && CLEAN_RX_AMPDU_HANDOFF == 2),
@@ -119,7 +129,7 @@ _Static_assert(CLEAN_RX_AMPDU_DMA == 0 ||
 _Static_assert(CLEAN_AMPDU_DMA_PENDING >= CLEAN_AMPDU_IF_SHM + CLEAN_AMPDU_IF_WORDS &&
                CLEAN_AMPDU_DMA_SUBMITTED < 0x600u,
                "Aggregate DMA controls must not overlap evidence or station SHM");
-_Static_assert(!CLEAN_RX_AMPDU_DMA ||
+_Static_assert(!CLEAN_RX_AMPDU_DELIVERY ||
                CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * 80u <= 2048u,
                "Aggregate delivered-payload evidence must fit the USB report");
 _Static_assert(CLEAN_RX_AMPDU_PROBE == 0 ||

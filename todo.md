@@ -129,7 +129,13 @@ remain open. A separate gated per-MPDU DMA/F2 experiment now delivers the
 first two complete diagnostic MPDUs to the RP2350 at MCS0/3/7 in both
 directions. The final byte-evidence campaign has 6/7 normal two-MPDU
 deliveries, one retained RF miss and two successful bad-middle rejections;
-the last MPDU remains missing. This is not production live
+the last DMA MPDU remains missing. An alternative retained-SHM/SRAM/F2
+path now delivers all three fixture MPDUs: 16/16 fresh MCS0..7 trials in
+both directions, exactly three deliveries and zero duplicates. It is
+also tested with bad first/middle/last FCS and all-bad aggregates; failed
+initial receptions are retained, with successful fresh repeats. It is
+still a fixed-size, one-PPDU diagnostic with deferred held-boundary
+delivery. This is not production live
 reception, BA or mandatory receive/protection qualification. Receive completion/
 discard handling, radio override ownership and atomic backoff publication
 have been corrected and regression-tested. Local-AP reply delivery and
@@ -177,6 +183,13 @@ separates tested software from the remaining live receive/response work.
     - [ ] Integrate and qualify live aggregate delivery/Immediate BA and
       mandatory receive/protection before adding real HT policy activation
       or association advertisement; the commit barrier alone is insufficient.
+      - [x] Deliver all three complete fixture MPDUs through retained
+        SHM/SRAM/F2, with independently checked saved bytes and no duplicates
+        at MCS0..7 in both directions; keep the incomplete DMA path separate.
+      - [ ] Generalize receive lengths, admission, repeated aggregates and
+        agreement/key/reorder lifecycle beyond the finite diagnostic.
+      - [ ] Implement actual PSM Immediate BA and measure EOF-to-air SIFS;
+        retain mandatory receive-size/protection qualification as a gate.
   - [ ] Qualify interleaved legacy/HT traffic, rate/mode transitions and
     recovery against an independent peer; raw mixed-format captures alone
     do not qualify negotiated mixed traffic.

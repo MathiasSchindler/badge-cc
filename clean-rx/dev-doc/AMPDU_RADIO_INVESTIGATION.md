@@ -3,8 +3,11 @@
 The follow-up [interface investigation](AMPDU_INTERFACE_INVESTIGATION.md)
 now demonstrates all three complete diagnostic MPDUs with the fixed
 direct-body handoff. Its additional gated DMA/F2 experiment actually
-delivers the first two to the RP2350 but still misses the last; production
-reception and Immediate BA remain incomplete. The record below describes the
+delivers the first two to the RP2350 but still misses the last. A newer,
+alternative retained-SHM/SRAM/F2 path delivers all three actual fixture
+MPDUs at MCS0..7 in both directions, without duplicates in its finite
+matrix; it does not fix that DMA transition. General station reception
+and Immediate BA remain incomplete. The record below describes the
 earlier, first-MPDU-only campaign and its evidence layouts.
 
 ## Initial campaign result and limits

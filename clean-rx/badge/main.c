@@ -26,7 +26,7 @@ static live_usb_control_t control;
 static int32_t usb_error;
 static uint32_t generation;
 static uint8_t detail[WIFI_TRACE_SIZE];
-_Static_assert(!CLEAN_RX_AMPDU_DMA ||
+_Static_assert(!CLEAN_RX_AMPDU_DELIVERY ||
                CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * CLEAN_HT_AMPDU_PROBE_MPDU <= sizeof(detail),
                "Aggregate payload evidence must fit the actual USB trace");
 static badger_canvas_t canvas;
@@ -72,7 +72,7 @@ static void screen(const char *status, uint32_t packets, uint32_t error) {
 }
 
 static void beacon(const uint8_t *packet, uint32_t size) {
-    if (CLEAN_RX_AMPDU_DMA && detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE) return;
+    if (CLEAN_RX_AMPDU_DELIVERY && detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE) return;
     if (station_mode())
         clean_station_discover(packet, size, station_target, &station_ap, &station_ap_status);
     uint8_t entry[40];
@@ -118,7 +118,7 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 }
             }
             uint32_t packets = badger_bytes_load_u32(detail + 1636u);
-#if CLEAN_RX_AMPDU_DMA
+#if CLEAN_RX_AMPDU_DELIVERY
             if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE && size >= 18u &&
                 packet[15] == peer_challenge[13] &&
                 packet[16] == (CLEAN_RX_HT20 | CLEAN_RX_UNSUPPORTED_PHY | detail[2001u]) &&

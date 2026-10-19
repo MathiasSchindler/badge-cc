@@ -83,6 +83,56 @@ static void aggregate_dma_tests(void) {
     puts("Aggregate DMA: first/continuation layout, complete FCS, truncation, corrupted metadata, atomic rejection and independent delivered-payload validation pass; NOT live qualification");
 }
 
+static void aggregate_shm_tests(void) {
+    uint8_t nonce[14]={1u,2u,3u,4u,5u,6u,7u,8u,9u,10u,11u,80u,0u,0u};
+    for (uint32_t mcs=0u;mcs<8u;++mcs) {
+        clean_ampdu_probe_trace_t trace={0};
+        trace.magic=CLEAN_AMPDU_PROBE_MAGIC;
+        trace.count=3u; trace.length=86u; trace.phy=2u;
+        nonce[13]=(uint8_t)mcs;
+        for (uint32_t index=0u;index<3u;++index) {
+            uint8_t *saved=trace.raw+88u*index;
+            uint8_t raw[88], expected[88];
+            assert(clean_ht_ampdu_probe_sig(saved+2u,mcs));
+            assert(clean_ht_ampdu_probe_mpdu(saved+8u,nonce,index));
+            memcpy(expected,saved,sizeof(expected));
+            assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_GOOD);
+            assert(!memcmp(raw,expected,sizeof(raw)));
+            memset(raw,0xa5,sizeof(raw));
+            for (uint32_t bit=0u;bit<640u;++bit) {
+                saved[8u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+                assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_FCS_ERROR);
+                assert(clean_ht_ampdu_shm_decode(&trace,index,2u,raw)==CLEAN_AMPDU_DMA_BAD);
+                saved[8u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+            }
+            for (uint32_t bit=0u;bit<48u;++bit) {
+                saved[2u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+                assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+                saved[2u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
+            }
+            assert(clean_ht_ampdu_shm_decode(&trace,index,0u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            assert(clean_ht_ampdu_shm_decode(&trace,index,3u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            assert(clean_ht_ampdu_shm_decode(&trace,3u,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            assert(clean_ht_ampdu_shm_decode(&trace,UINT32_MAX,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            assert(clean_ht_ampdu_shm_decode(0,index,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            assert(clean_ht_ampdu_shm_decode(&trace,index,1u,0)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            trace.count=0u;
+            assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            trace.count=4u;
+            assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            trace.count=3u; trace.length=85u;
+            assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            trace.length=86u; trace.phy=0u;
+            assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            trace.phy=2u; trace.magic^=1u;
+            assert(clean_ht_ampdu_shm_decode(&trace,index,1u,raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            trace.magic^=1u;
+            for (uint32_t i=0u;i<sizeof(raw);++i) assert(raw[i]==0xa5u);
+        }
+    }
+    puts("Aggregate SHM delivery: complete saved MAC/FCS, all three indices, corrupt data/signature, sampled bad outcome, bounds and atomic rejection pass; NOT production BA qualification");
+}
+
 static void configuration_tests(void) {
     static const uint32_t kbps[8]={6500u,13000u,19500u,26000u,39000u,52000u,58500u,65000u};
     static const uint32_t airtime[8]={154u,98u,82u,70u,62u,58u,58u,54u};
@@ -147,10 +197,10 @@ static void aggregate_probe_tests(void) {
         assert(clean_ht_ampdu_probe_frame(packet,nonce));
         assert(clean_ht_ampdu_probe_sig_valid(packet+8u,252u));
         assert(clean_ht_rx_version(1u,2u,packet+8u,80u)==
-               (CLEAN_RX_AMPDU_DMA ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
+               (CLEAN_RX_AMPDU_DELIVERY ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
         assert(!clean_ht_rx_version(0u,2u,packet+8u,80u));
         assert(clean_ht_rx_version(1u,1u,packet+8u,80u)==
-               (CLEAN_RX_AMPDU_DMA ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
+               (CLEAN_RX_AMPDU_DELIVERY ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
         assert(!clean_ht_rx_version(1u,0u,packet+8u,80u));
         assert(!clean_ht_rx_version(1u,3u,packet+8u,80u));
         assert(!clean_ht_rx_version(1u,2u,packet+8u,79u));
@@ -980,6 +1030,7 @@ static void monitor_tests(void) {
 
 int main(void) {
     aggregate_dma_tests();
+    aggregate_shm_tests();
     configuration_tests();
     aggregate_probe_tests();
     packet_tests();

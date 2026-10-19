@@ -901,6 +901,82 @@ static int ampdu_dma_receive(uint32_t rx_start) {
 }
 #endif
 
+#if CLEAN_RX_AMPDU_SHM
+static clean_ampdu_probe_trace_t ampdu_shm_snapshot;
+static uint16_t ampdu_shm_outcomes[3];
+static uint8_t ampdu_shm_copied;
+static uint8_t ampdu_shm_next;
+
+static int ampdu_shm_receive(uint32_t mac_en, uint32_t rx_start) {
+    if (!ampdu_shm_copied) {
+        if (shm_read16(0x601u) != PSM_STATE_CAPTURED) return 1;
+        mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
+        uint32_t control = mmio_read32(D11_MACCONTROL);
+        if ((control & 3u) != (clean_mac_pause_psm(mac_en) & 3u))
+            return fail(0x8du, D11_MACCONTROL, control);
+        if (shm_read16(0x601u) != PSM_STATE_CAPTURED ||
+            shm_read16(CLEAN_AMPDU_PROBE_SHM) != 3u ||
+            shm_read16(CLEAN_AMPDU_IF_SHM) != 3u ||
+            shm_read16(CLEAN_AMPDU_IF_SHM + 1u) != 3u) {
+            mmio_write32(D11_MACCONTROL, mac_en);
+            return 1;
+        }
+        uint8_t *bytes = (uint8_t *)&ampdu_shm_snapshot + 4u;
+        for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i) {
+            uint16_t word = shm_read16(CLEAN_AMPDU_PROBE_SHM + i);
+            bytes[2u * i] = (uint8_t)word;
+            bytes[2u * i + 1u] = (uint8_t)(word >> 8u);
+        }
+        ampdu_shm_snapshot.magic = CLEAN_AMPDU_PROBE_MAGIC;
+        for (uint32_t i = 0u; i < 3u; ++i)
+            ampdu_shm_outcomes[i] = shm_read16(CLEAN_AMPDU_IF_SHM + 11u + 8u * i);
+        /* The ordinary last-frame capture must not also publish sequence 2.
+         * A later, unrelated held frame still belongs to the ordinary path. */
+        if (shm_read16(0x606u) == 86u &&
+            shm_read16(CLEAN_SHM_FRAME + 1u) ==
+                (uint16_t)(ampdu_shm_snapshot.raw[2u] |
+                           ((uint16_t)ampdu_shm_snapshot.raw[3u] << 8u)) &&
+            shm_read16(CLEAN_SHM_FRAME + 2u) ==
+                (uint16_t)(ampdu_shm_snapshot.raw[4u] |
+                           ((uint16_t)ampdu_shm_snapshot.raw[5u] << 8u)) &&
+            shm_read16(CLEAN_SHM_FRAME + 3u) ==
+                (uint16_t)(ampdu_shm_snapshot.raw[6u] |
+                           ((uint16_t)ampdu_shm_snapshot.raw[7u] << 8u))) {
+            (void)rx_dma_poll_and_reclaim(0);
+            shm_write16(0x601u, 0u);
+        }
+        ampdu_shm_copied = 1u;
+        mmio_write32(D11_MACCONTROL, mac_en);
+    }
+    if (ampdu_shm_next == ampdu_shm_snapshot.count) return 1;
+    uint32_t total = MULTI->captured_frames;
+    int credit = clean_sdio_credit_available(total, rx_published_frames, FW_MAX_FRAMES);
+    if (credit < 0) return fail(0x8cu, FW_MULTI_ADDR, total - rx_published_frames);
+    if (!credit) return 1;
+    volatile fw_frame_slot_t *slot = &MULTI->frames[total & (FW_MAX_FRAMES - 1u)];
+    int decoded = clean_ht_ampdu_shm_decode(&ampdu_shm_snapshot, ampdu_shm_next,
+                                           ampdu_shm_outcomes[ampdu_shm_next], slot->raw);
+    if (decoded < 0)
+        return fail(decoded == CLEAN_AMPDU_DMA_FCS_ERROR ? 0x8eu : 0x8du,
+                    CLEAN_AMPDU_PROBE_SHM, (uint32_t)ampdu_shm_next);
+    ++ampdu_shm_next;
+    if (decoded == CLEAN_AMPDU_DMA_BAD) return 1;
+    slot->frame_index = (uint16_t)(total + 1u);
+    slot->rxe_len = 86u;
+    slot->rxe_status1 = 0u;
+    uint32_t status = 264u + 2u * (ampdu_shm_next - 1u);
+    slot->rxe_status2 = (uint16_t)(ampdu_shm_snapshot.raw[status] |
+        ((uint16_t)ampdu_shm_snapshot.raw[status + 1u] << 8u));
+    slot->phy_status0 = ampdu_shm_snapshot.phy;
+    slot->rx_tick_hi = (uint16_t)((ARM_CYCLE_COUNTER - rx_start) >> 16u);
+    slot->dma_rx_len = slot->dma_completed = 0u;
+    slot->f2_received = slot->f2_sdpcm_len = 0u;
+    __asm__ volatile("dsb" ::: "memory");
+    MULTI->captured_frames = total + 1u;
+    return 1;
+}
+#endif
+
 /* Template preparation is deliberately outside the contention interval. The
  * PSM may answer RX while waiting; in that case its TXE setup takes precedence. */
 static int station_edca_select(uint32_t mac_en, uint32_t tid, uint32_t exchange_us) {
@@ -1652,8 +1728,17 @@ void cyw43_main(void) {
         }
         uint32_t cmd = MBOX->host_cmd;
 #if CLEAN_RX_AMPDU_DMA
-        if (!station_mac &&
-            (!ampdu_dma_receive(rx_start) || !station_publish_capture(channel))) break;
+        if (!station_mac && !ampdu_dma_receive(rx_start)) break;
+#endif
+#if CLEAN_RX_AMPDU_SHM
+        if (!station_mac && !ampdu_shm_receive(mac_en, rx_start)) break;
+#endif
+#if CLEAN_RX_AMPDU_DELIVERY
+        if (!station_mac && !station_publish_capture(channel)) break;
+#endif
+#if CLEAN_RX_AMPDU_SHM
+        if (!station_mac && capture_target_reached &&
+            MULTI->captured_frames == rx_published_frames) break;
 #endif
         if (station_mac) {
             if (policy_pending && cmd != policy_command) {
@@ -2129,6 +2214,12 @@ void cyw43_main(void) {
         }
         if (st == PSM_STATE_CAPTURED) {
             if (capture_target_reached) continue;
+#if CLEAN_RX_AMPDU_SHM
+            if (!station_mac) {
+                if (!ampdu_shm_receive(mac_en, rx_start)) break;
+                if (shm_read16(0x601u) != PSM_STATE_CAPTURED) continue;
+            }
+#endif
             if (station_mac) {
                 station_consume_ack();
                 if (shm_read16(0x601u) != PSM_STATE_CAPTURED) continue;
@@ -2153,15 +2244,16 @@ void cyw43_main(void) {
                 }
             }
             if (station_enabled || CLEAN_RX_HT_DATA) {
-                int credit = station_mac ?
+                int credit = (station_mac || CLEAN_RX_AMPDU_SHM) ?
                     clean_sdio_credit_available(MULTI->captured_frames, rx_published_frames,
                                                 FW_MAX_FRAMES) :
                     clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
                                                 SDIO_TX_WINDOW);
                 if (credit < 0) {
-                    fail(0x8cu, station_mac ? FW_MULTI_ADDR :
+                    fail(0x8cu, (station_mac || CLEAN_RX_AMPDU_SHM) ? FW_MULTI_ADDR :
                         FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET,
-                        station_mac ? MULTI->captured_frames - rx_published_frames :
+                        (station_mac || CLEAN_RX_AMPDU_SHM) ?
+                            MULTI->captured_frames - rx_published_frames :
                         MBOX->f2_consumed);
                     break;
                 }
@@ -2230,7 +2322,7 @@ void cyw43_main(void) {
                 (void)rx_dma_poll_and_reclaim(slot);
                 capture_prepared = 1u;
             }
-            if (station_mac) {
+            if (station_mac || CLEAN_RX_AMPDU_SHM) {
                 capture_prepared = 0u;
                 MULTI->captured_frames = total + 1u;
                 if (!scanner_mode && total + 1u >= target_frames)

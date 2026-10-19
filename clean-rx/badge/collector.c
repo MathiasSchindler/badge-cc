@@ -17,7 +17,7 @@
 #include "../src/tx_diag.h"
 #include "../src/mac_soak.h"
 
-_Static_assert(!CLEAN_RX_AMPDU_DMA ||
+_Static_assert(!CLEAN_RX_AMPDU_DELIVERY ||
                CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * CLEAN_HT_AMPDU_PROBE_MPDU <= WIFI_TRACE_SIZE,
                "Aggregate payload evidence must fit the actual USB trace");
 
@@ -320,7 +320,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         int received = completed && mask;
         uint32_t reported_delivered = usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+4u);
         uint32_t delivered = 0u;
-        int delivered_valid = CLEAN_RX_AMPDU_DMA && completed &&
+        int delivered_valid = CLEAN_RX_AMPDU_DELIVERY && completed &&
             usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL)==CLEAN_AMPDU_DMA_MAGIC;
         if (delivered_valid)
             delivered=clean_ht_ampdu_delivery_mask(detail+CLEAN_AMPDU_DMA_PAYLOAD_DETAIL,
@@ -336,7 +336,8 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                "\"retained_subframe_bitmap\":%u,\"standalone_subframe\":%d,"
                "\"chipcommon_id\":%u,\"actual_multi_mpdu_delivery\":%s,"
                "\"all_subframes_delivered\":%s,"
-               "\"dma_experiment_enabled\":%s,\"delivered_subframe_bitmap\":%u,"
+               "\"dma_experiment_enabled\":%s,\"shm_delivery_enabled\":%s,"
+               "\"delivered_subframe_bitmap\":%u,"
                "\"reported_delivered_subframe_bitmap\":%u,\"delivery_payloads_valid\":%s,"
                "\"delivered_subframes\":%u,\"delivered_duplicates\":%u,"
                "\"multi_mpdu_radio_capture\":%s,"
@@ -356,6 +357,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                delivered_valid && (delivered & (delivered-1u)) ? "true" : "false",
                delivered_valid && delivered==7u ? "true" : "false",
                CLEAN_RX_AMPDU_DMA ? "true" : "false",
+               CLEAN_RX_AMPDU_SHM ? "true" : "false",
                delivered,reported_delivered,delivered_valid ? "true" : "false",
                usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+8u),
                usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+12u),

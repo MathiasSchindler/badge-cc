@@ -3,7 +3,7 @@
 ## Status
 
 The recipient-side agreement, reorder, delimiter-stream and protected
-delivery software is implemented and native-tested. **Live A-MPDU reception
+delivery software is implemented and native-tested. **General live station A-MPDU reception
 and SIFS-timed Immediate Block ACK are not implemented.** Negotiated HT
 remains disabled. This work does not complete D2 or D3.
 
@@ -28,6 +28,15 @@ The final independently saved-byte campaign validates two deliveries in
 6/7 normal trials, retains one RF miss, and validates both bad-middle
 rejections. Its host independently checks all 14 saved SDIO MPDUs and FCS;
 no trial delivers the complete aggregate.
+
+The newer alternative
+[retained-SHM delivery](AMPDU_INTERFACE_INVESTIGATION.md#retained-shm-to-f2-delivery-2026-10-19)
+now delivers all three complete fixture MPDUs through SRAM/F2 to the badge
+at MCS0..7 in both directions: 16/16 fresh trials, exactly three deliveries
+and no duplicates. It preserves actual radio bytes instead of trying to
+repair the undocumented per-MPDU DMA/EOF transition. This remains a finite,
+fixed-size, one-PPDU path, not the production agreement/reorder recipient,
+and does not transmit BA or qualify SIFS.
 
 There is no controller BA-install command, station ADDBA activation, PSM
 aggregate response path or independent on-air aggregate qualification.

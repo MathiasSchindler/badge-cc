@@ -18,6 +18,163 @@ no production multi-MPDU credit/DMA/station integration, and negotiated HT
 remains disabled. Both endpoints use clean firmware; this is not an
 independent-vendor or RF-analyzer qualification.
 
+## Retained SHM-to-F2 delivery (2026-10-19)
+
+**All three complete fixture MPDUs now reach the RP2350 through the real
+SRAM/F2 receive path.** This is an alternative to the still-incomplete
+per-MPDU DMA publication experiment below, not a claimed DMA/EOF fix.
+The default-disabled `CLEAN_RX_AMPDU_SHM=1` gate requires probe/interface-3/
+handoff-2 and is mutually exclusive with `CLEAN_RX_AMPDU_DMA`.
+It remains a one-PPDU, three-by-80-byte diagnostic, not a station BA
+recipient or negotiated HT.
+
+### Ownership and validation
+
+The unchanged PSM first retains the three actual radio bodies through its
+already-proven direct-body handoff. When the controller observes a held
+receive, it pauses the PSM and verifies the paused control readback before
+copying all committed snapshot words and the three sampled good/bad
+outcomes into private controller SRAM. It never reads this record through
+the object window while the PSM is running.
+
+Each retained MPDU is independently checked for bounds, the complete
+aggregate HT-SIG, sampled outcome and full MAC/FCS before entering an
+eight-slot receive FIFO. Bad outcomes are not delivered. Invalid metadata
+or a good outcome with invalid bytes produces an explicit controller
+error. Pending records survive FIFO backpressure; queued frames survive
+SDIO backpressure. Ordinary receives in this build use the same FIFO, so
+direct publication cannot skip retained aggregate records.
+
+The ordinary held aggregate frame is reclaimed without a second
+publication. Acquisition is checked at the held-frame dispatch boundary,
+not just before polling: otherwise the last frame can become held between
+the early check and ordinary dispatch and be delivered twice. The initial
+`6a644ab8` trial demonstrated all three bytesets but counted that extra
+delivery. The corrected final build `b1a19678` reports exactly three
+deliveries and zero duplicates.
+
+The badge/collector use the existing version-5 diagnostic metadata and
+full saved-payload evidence, with actual USB-capacity assertions and
+beacon-inventory exclusion shared by both delivery paths.
+`shm_delivery_enabled` distinguishes the new path from
+`dma_experiment_enabled`; the latter is false here. No payload or FCS is
+generated on receive.
+
+### Final normal radio matrix
+
+Normal build `b1a19678`, prefixes
+`build/clean-rx/badge/d2-shm-final-{ab,ba}-m{0..7}-r0`:
+
+- **16/16 fresh one-PPDU trials deliver sequences 0, 1 and 2.**
+- Every MCS0..7/direction cell passes on its initial trial.
+- All have independently collector-validated delivery bitmap 7,
+  exactly three delivered MPDUs, zero duplicates and zero endpoint errors.
+- No Immediate BA is transmitted; BA, SIFS and HT qualification stay false.
+
+This is a finite matrix, not sustained reception, independent-vendor
+interoperability, arbitrary MPDU lengths or receive-reliability
+qualification. The SHM record has three fixed slots and is consumed once
+per firmware boot. It does not install agreements or connect the station
+reorder/security lifecycle.
+
+### Fault controls and independent byte proof
+
+Final fault prefixes are `d2-shm-final-bad{1,2,4}-{ab,ba}-m{0,7}-r0`,
+plus `d2-shm-final-bad4-ba-m7-r1`. The mask selects the deliberately bad
+first, middle or last FCS:
+
+| Build | Bad FCS mask | Successful controls | Delivered sequences |
+| --- | --- | --- | --- |
+| `760e2b9e` | 1 | 4/4 initial MCS0/7 direction trials | 1, 2 |
+| `3bb1f277` | 2 | 4/4 initial MCS0/7 direction trials | 0, 2 |
+| `dfba0bc9` | 4 | 3/4 initial trials; fresh reverse-MCS7 repeat passes | 0, 1 |
+
+The failed reverse-MCS7 `bad4` trial retained one bad/nonmatching raw
+observation and delivered nothing; it is not discarded or promoted to
+a successful rejection control. All twelve successful controls deliver
+exactly two MPDUs, with zero duplicates and endpoint errors.
+
+All-bad build `e91d443e`, mask 7, uses
+`d2-shm-final-bad7-{ab,ba}-m0-r0` plus reverse `r1`. Forward `r0` and
+reverse `r1` each retain all three intentionally invalid bodies and
+deliver none. Reverse `r0` observes none and is retained as another failed
+reception, not counted as proof of rejecting received data. These
+negative controls return failure from the accepted-data pair runner and
+do not generate a success-shaped pair summary.
+
+An independent Node pass checks **32 unique challenges**, including the
+two failed initial receptions. It reconstructs every expected byte and
+standard reflected CRC32 independently of the firmware/collector helpers.
+It verifies **72 complete saved SDIO MPDUs**, exactly one delivery per
+accepted sequence, and **90 full retained radio MPDUs** from the completed
+normal/fault controls, including the exact 18 intentionally invalid FCS
+values. It also checks sampled good/bad outcomes, builds, endpoint errors,
+all delivery flags and pair output. The failed trial's partial raw record
+is kept separate from those 90 verified bodies.
+Results: `build/clean-rx/badge/d2-shm-evidence-assertions.log`.
+
+Acquisition still requires a held receive boundary. A bad final MPDU
+or all-bad aggregate can therefore wait for a later ordinary held frame
+before the controller copies its committed record. This is an explicit
+latency limitation, not bounded EOF-to-delivery qualification. Immediate
+BA must use PSM-side receipt/retention state and an EOF/SIFS response path;
+it cannot wait for this deferred Cortex/SDIO delivery.
+
+### Native checks
+
+Default, capture-only handoff, DMA, SHM and SHM bad-mask 1/2/4/7
+controller/badge suites pass, including ASan/UBSan. The final focused HT
+suite passes in all eight profiles, including every MPDU/signature bit
+flip, all three indices, invalid counts/indices/length/format/magic,
+sampled bad outcomes and unchanged output on rejection. All sixteen
+freestanding ELFs have no undefined symbols.
+Negative production compilations reject simultaneous DMA/SHM delivery
+and an undersized 1,024-byte receipt report. The existing FIFO's native
+full-queue, retained ownership, credit and counter-wrap tests also pass.
+
+### Reproduction and rejected DMA changes
+
+Build controller and badge with matching flags:
+
+```sh
+flags='-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_AMPDU_PROBE=1 -DCLEAN_RX_AMPDU_INTERFACE=3 -DCLEAN_RX_AMPDU_HANDOFF=2 -DCLEAN_RX_AMPDU_SHM=1'
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx-d2-shm EXTRA_CFLAGS="$flags" all test
+make -C clean-rx/badge BUILD=../../build/clean-rx/badge/d2-shm CONTROLLER_BIN=../../build/clean-rx-d2-shm/cyw43_rx_fw.bin EXTRA_CFLAGS="$flags" all test
+```
+
+After fresh full-flash preservation and verified installation, use
+`CLEAN_RX_COLLECTOR=build/clean-rx/badge/d2-shm/collector` with the existing
+`ht_probe.sh TX RX PREFIX MCS --ampdu-probe` command. Restore and independently
+read back both complete original flashes afterwards.
+
+The preceding DMA probes are retained as `d2-eof-{stream,early,eoi,arm,progress}-*`.
+Keeping streaming across header publication, starting it after the next
+copy arm, and starting on apparent in-progress counts did not repair the
+DMA path. They produced stale/invalid second completions within roughly
+4..9 us of the first, rather than the expected next radio MPDU.
+Explicit event-6 clearing did not fix this. All these PSM changes were
+removed. The default, handoff and DMA PSM instruction images are unchanged.
+The new SHM build's PSM object is byte-identical to the previous
+capture-only handoff object.
+
+### Hardware preservation
+
+Fresh complete `d2-eof-start-{A,B}-full.bin` reads were compared with the
+previous independently verified originals before either badge was written.
+After all normal/fault controls, both complete original flashes were
+restored with verification and independently read back as
+`d2-shm-restored-{A,B}-full.bin`. Both 16,777,216-byte readbacks compare
+byte-for-byte with the fresh originals:
+
+- A: `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`
+- B: `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`
+
+Logs and all successful/failed RF evidence are retained under
+`build/clean-rx/badge/`, including `d2-eof-preservation.log` and
+`d2-shm-restoration.log`. Both badges remain in BOOTSEL with their
+original contents. Original applications were not booted, and no
+credentials or host networking were changed.
+
 ## Per-MPDU DMA-to-F2 delivery follow-up
 
 **The requested production aggregate/Immediate-BA integration is not
