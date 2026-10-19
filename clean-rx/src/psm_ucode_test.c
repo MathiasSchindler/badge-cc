@@ -46,6 +46,10 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+#if CLEAN_RX_HT_OBSERVER
+    restore(original,196u,WORD(0x77fu,0x1780u,0x1780u,OBSERVER_EXIT_TIMEOUT),
+            WORD(0x77fu,0x1780u,0x1780u,262u));
+#endif
 #if CLEAN_RX_AMPDU_DMA
     restore(original,219u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_DMA_LENGTH),
             WORD(0x3f0u,0x1781u,0x1800u,0x7f4u));
@@ -106,7 +110,7 @@ static void capture_layout(uint8_t original[2360]) {
         assert(instruction(295u + i) == WORD(0x3f0u,fault_regs[i],0x1800u,0x620u + i));
     assert(instruction(307u) == WORD(0x1c0u,0x7abu,0x1801u,0x7abu));
     assert(instruction(308u) == WORD(0x77fu,0x1780u,0x1780u,
-                                   CLEAN_RX_HT_RESPONSE ? HT_FAIL_ABORT : 266u));
+                                   OBSERVER_ABORT_TARGET));
     restore(original, 257u, WORD(0x77fu,0x1780u,0x1780u,295u),
             WORD(0x1c0u,0x7abu,0x1801u,0x7abu));
     for (uint32_t pc = 65u; pc <= 285u; pc += 220u) {
@@ -237,10 +241,27 @@ static uint16_t ack_operand(const uint16_t regs[0x1800], uint32_t operand) {
     return operand >= 0x1800u ? immediate(operand) : regs[operand];
 }
 
+#if CLEAN_RX_HT_EARLY_SAVE
+static uint32_t early_copy_fault;
+static uint32_t early_status_after_hint;
+#endif
 static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
                             uint32_t pc, uint32_t *steps) {
     int body = pc == RX_COMPLETE;
     for (*steps = 0u; *steps < 1000000u; ++*steps) {
+#if CLEAN_RX_HT_EARLY_SAVE
+        if (pc == OBSERVER_EARLY && early_status_after_hint) {
+            r[0x100du] |= 0x4000u;
+            early_status_after_hint = 0u;
+        }
+        if (pc == OBSERVER_EARLY_VERIFY && early_copy_fault) {
+            uint32_t target = early_copy_fault == 1u ? 0x100cu :
+                early_copy_fault == 2u ? CLEAN_OBSERVER_EPOCH :
+                CLEAN_SHM_FRAME+early_copy_fault-2u;
+            r[target] ^= 1u;
+            early_copy_fault = 0u;
+        }
+#endif
 #if CLEAN_RX_AMPDU_INTERFACE >= 3
         if (pc == AMPDU_IF_GOOD) return 197u;
 #endif
@@ -260,8 +281,15 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
         else if (op == 0xd0u) { if (av == bv) pc = d; }
         else if (op == 0xdau) { if (av < bv) pc = d; }
         else if (op == 0xdcu) { if (av > bv) pc = d; }
+        else if (op == 0xdbu) { if (av >= bv) pc = d; }
         else if (op == 0xd1u) { if (av != bv) pc = d; }
+        else if (op == 0x3f0u) r[d] = av;
+        else if (op == 0x1c0u) r[d] = (uint16_t)(av + bv);
         else if (op == 0x1d0u) r[d] = (uint16_t)(av - bv);
+        else if (op == 0x378u) r[d] = (uint16_t)((av << 8u) | (bv & 255u));
+        else if (op == 0x278u) r[d] = av >> 8u;
+        else if (op == 0x270u) r[d] = av & 255u;
+        else if (op == 0x140u) r[d] = av & bv;
         else if (op == 0x606u) { if (!(*events & (1u << 6u))) pc = d; }
         else if ((op & 0x7e0u) == 0x780u || op == 0x703u) {
             uint32_t event = 1u << (op & 31u);
@@ -313,7 +341,7 @@ static void receive_completion(void) {
             int complete = (flags & 5u) == 5u;
             assert(next == (!complete ? 262u : count < 14u ? 263u :
                             flags & 2u ? 197u : 262u));
-            assert(steps < 10u);
+            assert(steps < (CLEAN_RX_HT_OBSERVER ? 20u : 10u));
             assert(r[0x1780u] == (complete ? 1u : 0u));
         }
     }
@@ -327,7 +355,7 @@ static void receive_completion(void) {
         r[CLEAN_SHM_RXE_LIMIT] = CLEAN_RXE_BYTES;
         r[0x1780u] = 65535u;
         assert(receive_run(r, &events, RX_COMPLETE, &steps) == 262u);
-        assert(flags == 3u ? steps < 10u && r[0x1780u] == 65535u :
+        assert(flags == 3u ? steps < (CLEAN_RX_HT_OBSERVER ? 20u : 10u) && r[0x1780u] == 65535u :
                             steps > 300000u && r[0x1780u] == 0u);
     }
     puts("PSM RX: prefix EOI, terminal GoodFCS/bad-FCS, ext5/explicit abort, size and incomplete watchdog gates pass; NOT RF");
@@ -1627,7 +1655,235 @@ static void aggregate_terminal_handoff(void) {
 #endif
 }
 
+static void passive_ht_observer(void) {
+#if CLEAN_RX_HT_OBSERVER
+    uint16_t r[0x1800] = {0};
+    r[0x1782u] = 24u;
+    r[0x1009u] = 2u;
+    r[CLEAN_SHM_FRAME+1u] = 0xae00u;
+    r[CLEAN_SHM_FRAME+2u] = 0x0f00u;
+    r[CLEAN_SHM_FRAME+3u] = 0x0228u;
+    for (uint32_t i = 0u; i < 3u; ++i)
+        r[CLEAN_OBSERVER_SHM+3u+i] = r[CLEAN_SHM_FRAME+9u+i] = (uint16_t)(0x1234u+i);
+    for (uint32_t gate = 0u; gate < 2u; ++gate) {
+        r[CLEAN_OBSERVER_SHM] = (uint16_t)gate;
+        for (uint32_t n = 0u; n < CLEAN_OBSERVER_RECORDS; ++n) {
+            uint16_t before = r[CLEAN_OBSERVER_SHM+1u];
+            assert(psm_run(r,0,OBSERVER_ENTER) == 148u);
+            assert(!r[0x7a1u] && r[0x1782u] == 24u);
+            assert(r[CLEAN_OBSERVER_SHM+1u] == before + gate);
+            if (gate) {
+                uint32_t record = CLEAN_OBSERVER_SHM+CLEAN_OBSERVER_HEADER_WORDS+
+                    n*CLEAN_OBSERVER_RECORD_WORDS;
+                assert(r[record+6u] == 0xae00u && r[record+7u] == 0x0f00u &&
+                       r[record+8u] == 0x0228u);
+            }
+            assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+        }
+    }
+    uint16_t saved[CLEAN_OBSERVER_WORDS];
+    memcpy(saved,r+CLEAN_OBSERVER_SHM,sizeof(saved));
+    assert(psm_run(r,0,OBSERVER_ENTER) == 148u);
+    assert(r[CLEAN_OBSERVER_SHM+2u] == 1u);
+    assert(!memcmp(saved+CLEAN_OBSERVER_HEADER_WORDS,
+                   r+CLEAN_OBSERVER_SHM+CLEAN_OBSERVER_HEADER_WORDS,
+                   sizeof(saved)-2u*CLEAN_OBSERVER_HEADER_WORDS));
+    r[CLEAN_OBSERVER_SHM+2u] = 65535u;
+    assert(psm_run(r,0,OBSERVER_ENTER) == 148u);
+    assert(r[CLEAN_OBSERVER_SHM+2u] == 65535u);
+    memset(r+CLEAN_OBSERVER_SHM+1u,0,4u);
+    r[CLEAN_SHM_FRAME+1u] = 11u;
+    assert(psm_run(r,0,OBSERVER_ENTER) == 148u);
+    assert(!r[CLEAN_OBSERVER_SHM+1u]);
+    const uint32_t record = CLEAN_OBSERVER_SHM+CLEAN_OBSERVER_HEADER_WORDS;
+    for (uint32_t fault = 0u; fault < 10u; ++fault) {
+        memset(r,0,sizeof(r));
+        r[CLEAN_OBSERVER_SHM] = 1u;
+        r[0x1009u] = 2u; r[0x100cu] = 176u; r[0x1782u] = 24u;
+        r[CLEAN_SHM_FRAME+1u] = 0xae00u;
+        r[CLEAN_SHM_FRAME+2u] = 0x0f00u;
+        r[CLEAN_SHM_FRAME+3u] = 0x0228u;
+        for (uint32_t i = 0u; i < 20u; ++i)
+            r[CLEAN_SHM_FRAME+4u+i] = (uint16_t)(0x1120u+i);
+        assert(psm_run(r,0,OBSERVER_START) == 130u);
+        assert(psm_run(r,0,HT_TRACE_ENTER) == 148u);
+        assert(r[CLEAN_OBSERVER_PENDING] == 1u && r[record+10u] == 1u);
+        if (fault < 3u) r[CLEAN_SHM_FRAME+1u+fault] ^= 1u;
+        if (fault == 3u) ++r[CLEAN_OBSERVER_EPOCH];
+        if (fault == 4u) r[0x100cu] = 45u;
+        if (fault == 5u) assert(psm_run(r,0,OBSERVER_START) == 130u);
+        if (fault == 6u) {
+            r[CLEAN_SHM_FRAME+1u] = 11u;
+            assert(psm_run(r,0,HT_TRACE_ENTER) == 148u);
+            r[CLEAN_SHM_FRAME+1u] = 0xae00u;
+        }
+        int bad = fault == 7u;
+        assert(psm_run(r,0,bad ? HT_TRACE_BAD : HT_TRACE_GOOD) == (bad ? 263u : 198u));
+        assert(!r[CLEAN_OBSERVER_PENDING]);
+        assert(r[CLEAN_OBSERVER_HELD] == (fault >= 8u ? 1u : 0u));
+        if (fault >= 7u) {
+            assert(r[record+11u] == (bad ? 2u : 1u));
+            for (uint32_t i = 0u; i < 20u; ++i)
+                assert(r[record+18u+i] == (uint16_t)(0x1120u+i));
+            assert(r[record+38u] == 1u && r[record+39u] == 1u);
+        } else {
+            assert(r[record+11u] == (fault < 5u ? 3u : fault == 5u ? 7u : 8u));
+            assert(!r[record+18u]);
+        }
+        uint16_t committed[CLEAN_OBSERVER_RECORD_WORDS];
+        memcpy(committed,r+record,sizeof(committed));
+        assert(psm_run(r,0,HT_TRACE_GOOD) == 198u);
+        assert(!memcmp(committed,r+record,sizeof(committed)));
+        assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+    }
+    puts("PSM observer: fresh epoch/prefix/terminal ownership, bad/short/mismatched/stale rejection and immutable one-shot MAC snapshots; NOT RF");
+    for (uint32_t path = 0u; path < 6u; ++path) {
+        memset(r,0,sizeof(r));
+        r[CLEAN_OBSERVER_SHM] = r[CLEAN_OBSERVER_PENDING] = 1u;
+        r[CLEAN_OBSERVER_EPOCH] = r[record+10u] = 9u;
+        r[0x100cu] = 862u; r[0x100du] = 0x1000u;
+        r[0x1004u] = 0x8002u; r[0x1002u] = 0x3ffu;
+        r[0x102au] = 0x2345u; r[0x102bu] = 0x3456u; r[0x10afu] = 0x4567u;
+        uint32_t expected = path == 0u ? 4u : path == 1u ? 5u :
+                            path < 5u ? 6u : 7u;
+        if (path == 0u) assert(psm_run(r,0,DCF_BAD_LENGTH) == 266u && r[0x7a9u] == 1u);
+        else if (path == 1u) assert(psm_run(r,0,OBSERVER_EXIT_ABORT) == 266u);
+        else if (path == 5u) assert(psm_run(r,0,OBSERVER_START) == 130u);
+        else {
+            uint32_t events = path == 2u ? 0u : 1u<<6u, steps;
+            if (path == 4u) r[0x100du] |= 0x100u;
+            r[0x1780u] = 1u;
+            assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u);
+            assert(steps < 80u && !r[0x1780u]);
+            assert(r[record+40u] == path-1u);
+            assert(r[record+46u] == (path == 4u ? 862u : 0u));
+        }
+        assert(r[record+11u] == expected && r[record+14u] == 862u);
+        assert(r[record+41u] == 0x8002u && r[record+42u] == 0x3ffu &&
+               r[record+43u] == 0x2345u && r[record+44u] == 0x3456u &&
+               r[record+45u] == 0x4567u);
+        assert(!r[CLEAN_OBSERVER_PENDING] && !r[CLEAN_OBSERVER_HELD]);
+        assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+    }
+    memset(r,0,sizeof(r));
+    r[CLEAN_OBSERVER_PENDING] = 1u;
+    r[0x100cu] = 13u; r[0x100du] = 0x4000u;
+    uint32_t pending = 1u<<6u, steps;
+    assert(receive_run(r,&pending,RX_COMPLETE,&steps) == 263u);
+    assert(r[record+11u] == 3u && r[record+14u] == 13u &&
+           !r[CLEAN_OBSERVER_PENDING] && !r[CLEAN_OBSERVER_HELD]);
+    r[record+11u] = 1u;
+    uint16_t committed[CLEAN_OBSERVER_RECORD_WORDS];
+    memcpy(committed,r+record,sizeof(committed));
+    r[CLEAN_OBSERVER_PENDING] = 1u;
+    assert(psm_run(r,0,OBSERVER_EXIT_ABORT) == 266u);
+    assert(!memcmp(committed,r+record,sizeof(committed)));
+    memset(r,0,sizeof(r));
+    r[CLEAN_OBSERVER_PENDING] = 1u;
+    r[CLEAN_OBSERVER_PROGRESS] = 3u;
+    r[CLEAN_OBSERVER_HINT_LENGTH] = 304u;
+    r[0x100cu] = 862u; r[0x100du] = 0x1100u; r[0x1780u] = 1u;
+    pending = 1u<<6u;
+    assert(receive_run(r,&pending,RX_COMPLETE,&steps) == 262u);
+    assert(r[record+11u] == 6u && r[record+46u] == 304u);
+    puts("PSM observer exits: length, abort, watchdog, event6 and good-only hint remain distinct; no early delivery or TX");
+#endif
+}
+
+#if CLEAN_RX_HT_EARLY_SAVE
+static void early_snapshot_seed(uint16_t r[0x1800], uint32_t length) {
+    memset(r,0,0x1800u*sizeof(*r));
+    r[CLEAN_OBSERVER_SHM] = r[CLEAN_OBSERVER_PENDING] = 1u;
+    r[CLEAN_OBSERVER_EPOCH] = 9u;
+    r[0x100cu] = (uint16_t)(length+6u); r[0x100du] = 0x1100u;
+    r[0x1001u] = CLEAN_SHM_FRAME; r[0x1004u] = 0x8802u;
+    r[0x102au] = 0x222u; r[0x10afu] = 0x1000u;
+    r[0x1780u] = 1u; r[0x1782u] = 0x1234u; r[0x1783u] = 0x5678u;
+    r[CLEAN_SHM_FRAME+1u] = (uint16_t)(((length+4u)&255u)<<8u);
+    r[CLEAN_SHM_FRAME+2u] = (uint16_t)(0x0f00u|((length+4u)>>8u));
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_EARLY_MAX/2u; ++i) {
+        r[CLEAN_SHM_FRAME+4u+i] = (uint16_t)(0x3000u+i);
+        r[CLEAN_OBSERVER_EARLY_SHM+CLEAN_OBSERVER_EARLY_HEADER+i] = 0xbeefu;
+    }
+    for (uint32_t i = 0x600u; i < CLEAN_SHM_FRAME; ++i) r[i] = 0xa55au;
+}
+
+static void passive_early_snapshot(void) {
+    uint16_t r[0x1800];
+    for (uint32_t length = 44u; length <= CLEAN_OBSERVER_EARLY_MAX; ++length) {
+        early_snapshot_seed(r,length);
+        uint32_t events = 1u<<6u, steps;
+        assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u && steps < 1300u);
+        assert(r[CLEAN_OBSERVER_EARLY_SHM] == 1u &&
+               r[CLEAN_OBSERVER_EARLY_SHM+1u] == 9u &&
+               r[CLEAN_OBSERVER_EARLY_SHM+2u] == length+6u &&
+               r[CLEAN_OBSERVER_EARLY_SHM+10u] == 1u);
+        for (uint32_t i = 0u; i < CLEAN_OBSERVER_EARLY_MAX/2u; ++i)
+            assert(r[CLEAN_OBSERVER_EARLY_SHM+CLEAN_OBSERVER_EARLY_HEADER+i] ==
+                   (i < (length+1u)/2u ? (uint16_t)(0x3000u+i) : 0xbeefu));
+        for (uint32_t i = 0x600u; i < CLEAN_SHM_FRAME; ++i) assert(r[i] == 0xa55au);
+        assert(r[0x1782u] == 0x1234u && r[0x1783u] == 0x5678u &&
+               events == (1u<<6u) && !r[CLEAN_OBSERVER_HELD] &&
+               !r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+        assert(r[0x1001u] == CLEAN_SHM_FRAME && r[0x1004u] == 0x8802u &&
+               r[0x102au] == 0x222u && r[0x10afu] == 0x1000u);
+    }
+    for (uint32_t fault = 1u; fault <= 16u; ++fault) {
+        early_snapshot_seed(r,554u);
+        uint32_t events = 1u<<6u, steps;
+        if (fault <= 5u) early_copy_fault = fault;
+        if (fault == 6u) r[0x100cu] = CLEAN_OBSERVER_EARLY_MAX+7u;
+        if (fault == 7u) r[0x100cu] = 49u;
+        if (fault == 8u) r[CLEAN_SHM_FRAME+1u] |= 1u;
+        if (fault == 9u) r[CLEAN_SHM_FRAME+2u] &= ~0x800u;
+        if (fault == 10u) r[CLEAN_OBSERVER_SHM] = 0u;
+        if (fault == 11u) r[CLEAN_OBSERVER_PENDING] = 17u;
+        if (fault == 12u) r[0x100du] &= ~0x100u;
+        if (fault == 13u) events = 0u;
+        if (fault == 14u) r[0x100du] |= 0x4000u;
+        if (fault == 15u) r[CLEAN_OBSERVER_PENDING] = 0u;
+        if (fault == 16u) r[0x100du] |= 0x8000u;
+        assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u);
+        assert(!r[CLEAN_OBSERVER_EARLY_SHM]);
+        assert(r[CLEAN_OBSERVER_EARLY_SHM+11u] == (fault == 6u ? 1u : 0u));
+        assert(r[0x1782u] == 0x1234u && r[0x1783u] == 0x5678u);
+    }
+    early_snapshot_seed(r,170u);
+    uint32_t events = 1u<<6u, steps;
+    early_status_after_hint = 1u;
+    assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u);
+    assert(r[CLEAN_OBSERVER_EARLY_SHM] == 1u &&
+           r[CLEAN_OBSERVER_EARLY_SHM+3u] == 0x1100u && r[0x100du] == 0x5100u);
+    early_snapshot_seed(r,170u);
+    events = 1u<<6u;
+    assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u);
+    assert(r[CLEAN_OBSERVER_EARLY_SHM+10u] == 1u);
+    for (uint32_t attempt = 0u; attempt < 3u; ++attempt) {
+        uint16_t before[CLEAN_OBSERVER_EARLY_WORDS];
+        memcpy(before,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(before));
+        r[CLEAN_OBSERVER_PENDING] = (uint16_t)(attempt+2u);
+        r[CLEAN_OBSERVER_PROGRESS] = 0u; r[0x1780u] = 1u;
+        if (attempt) {
+            r[CLEAN_SHM_FRAME+1u] = 0x5e00u;
+            r[CLEAN_SHM_FRAME+2u] = 0x0f03u;
+        }
+        r[CLEAN_SHM_FRAME+4u] = (uint16_t)(0x7000u+attempt);
+        assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u);
+        if (attempt == 1u)
+            assert(r[CLEAN_OBSERVER_EARLY_SHM] == 3u &&
+                   r[CLEAN_OBSERVER_EARLY_SHM+10u] == 2u &&
+                   r[CLEAN_OBSERVER_EARLY_SHM+CLEAN_OBSERVER_EARLY_HEADER] == 0x7001u);
+        else assert(!memcmp(before,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(before)));
+    }
+    puts("PSM early snapshot: every length 44..1000, odd tails, control SHM/register preservation, stale-copy rejection and single-to-multi priority pass; no advance, EOI or TX");
+}
+#endif
+
 int main(void) {
+#if CLEAN_RX_HT_EARLY_SAVE
+    passive_early_snapshot();
+#endif
+    passive_ht_observer();
 #if CLEAN_RX_AMPDU_DMA
     for (uint32_t outcome=0u;outcome<=2u;++outcome)
         for (uint32_t count=1u;count<=3u;++count)

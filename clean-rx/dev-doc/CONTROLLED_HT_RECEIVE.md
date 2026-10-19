@@ -22,6 +22,74 @@ their protection/security/receive-size integration are still required.
 `clean_ht_peer_fallback()` retains its unconditional MAC fallback, and clean
 association still omits HT. No negotiated HT gate was relaxed.
 
+## Subsequent vendor-station/AP reference
+
+The separate [focused vendor burst experiment](../vendor-burst/README.md)
+now joins the approved AP using unchanged vendor firmware and sends 128
+known unicast fixtures of varied lengths while the other badge remains
+strictly receive-only. Both role assignments show actual vendor received-BA
+counter increases (103/97), together with independent CRC-valid HT-SIG
+A-MPDU-format prefixes (6/5). Raw snapshots and unsupported-query statuses
+are retained. This establishes a usable live reference, not complete
+multi-MPDU body delivery, prefix transmitter attribution or SIFS timing.
+
+The new prefix logger deliberately avoids the stale MAC/prefix bytes seen
+at the early PC153 handoff. A subsequent default-disabled lifecycle logger
+now correlates fresh RX epochs and HT signatures with terminal MAC snapshots,
+the exact F2 publication ID and complete ciphertext/FCS bytes. Final build
+`4e209642` independently verifies MPDU lengths 170/298/554 in A/B and
+170/298/1066 in B/A, including correlated A-MPDU-format receptions.
+The balanced fixture rotates the first size of four-frame groups.
+
+This closes prefix transmitter attribution for those saved samples, not
+general reception reliability or multi-MPDU delivery. Larger live PSDUs
+(2110/862 bytes) still have no observed terminal commit; one-size controls
+are retained as failures of the variable-length criterion. General
+receive/admission/lifecycle integration and clean HT advertisement remain
+gated; see the focused experiment's full result and limitations.
+
+The subsequent passive exit investigation records explicit length/short,
+abort/fault, watchdog and RX/prefix replacement exits before ownership is
+cleared. Build `95e7676c` observes 1598/1342-byte A-MPDU-format prefixes
+reach event 6 and the good-only status1 bit-8 hint, then take the existing
+abort/fault path at RX counts 560/304, with status1 `0x9922`.
+These prefixes have no retained complete body/FCS and remain unattributed;
+the observations do not prove an advance primitive, FIFO/DMA root cause
+or absence of physical EOF.
+
+Build `7f1e3e90` retains first-hint RX counts and passes five bounded
+variable-length controls across both roles with zero unaccounted prefix
+exits. Those controls do not reproduce the larger aborts. A zero-prefix
+control remains a failed qualification. Final build `d7519182` adds native-
+tested short-completion exit accounting, without another RF trial.
+See the focused experiment for raw evidence, per-trial counts and ABI 4.
+No early next-frame advance, same-PPDU multi-MPDU delivery, production BA
+or negotiated HT gate is enabled by this investigation.
+
+The next focused build, `e9008554`, preserves up to 1000 complete early
+MPDU bytes in separate SHM, with commit-last prefix identity and native
+tests for every length 44..1000, memory bounds, scratch preservation,
+stale copies and a status transition after the hint. Frozen readout still
+occurs only after the controller and PSM stop. Oversize candidates are
+counted, not truncated; ordinary receive sizes are unchanged.
+
+In `build/clean-rx/vendor-early/hint-ba-r0`, vendor B/passive A retains a
+complete FCS-valid 170-byte MPDU from fresh prefix ID4/epoch74, whose
+CRC-valid HT-SIG advertises a 478-byte A-MPDU-format PSDU. Hint status1
+is `0x1922`, with good-only bit8 set and terminal/abort bits clear.
+Ordinary 170/298-byte correlation and received-BA delta101 also pass.
+This is one concrete early-body preservation result, not two delivered
+MPDUs: the second body's bytes/FCS were not captured. Copy completion
+before physical EOF and RF/SIFS timing are not established.
+
+The other five final-build controls fail early qualification, including
+all A/B attempts; two also retain only one ordinary MPDU length. Earlier
+complete snapshots with a late terminal status read correctly fail, and
+are retained as instrumentation controls. Repeated/both-role early-byte
+capture and a justified single next-body handoff remain unqualified.
+The implementation is default-off, MCS0-only and does not advance RX,
+acknowledge early events, transmit BA or enable negotiated HT.
+
 ## Independent peer
 
 The companion lives in [peer/](../peer/). Its build includes the unchanged

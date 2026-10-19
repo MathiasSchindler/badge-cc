@@ -5,6 +5,7 @@
 #include "unicast.h"
 #include "mac.h"
 #include "ht20.h"
+#include "ht_observer.h"
 #include "../../src/shared/bytes.h"
 #ifdef CLEAN_SDIO_SELF_TEST
 #include "sdio_test.h"
@@ -398,6 +399,12 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
         pkt[9] = 8u; /* Credit */
         pkt[10] = 0u;
         pkt[11] = 0u;
+#if CLEAN_RX_HT_OBSERVER
+        /* Passive diagnostic ID; ordinary profiles keep reserved bytes zero. */
+        uint16_t correlation = shm_read16(CLEAN_OBSERVER_HELD);
+        pkt[10] = (uint8_t)correlation;
+        pkt[11] = (uint8_t)(correlation >> 8u);
+#endif
         pkt[12] = (uint8_t)CLEAN_RX_PHASE_MAGIC | (uint8_t)(rx_after_explicit_tx << 7u);
         pkt[13] = (uint8_t)(CLEAN_RX_PHASE_MAGIC >> 8u);
 

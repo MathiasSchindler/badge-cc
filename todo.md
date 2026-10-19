@@ -194,6 +194,45 @@ separates tested software from the remaining live receive/response work.
         avoid duplicate ordinary publication, without enabling production BA or HT.
       - [ ] Generalize receive lengths, admission, repeated aggregates and
         agreement/key/reorder lifecycle beyond the finite diagnostic.
+        - [x] Establish a focused unchanged-vendor/AP unicast reference
+          with a passive clean observer in both badge role assignments:
+          actual received-BA counter deltas and CRC-valid A-MPDU-format
+          HT prefixes, not merely enabled flags or submitted bursts.
+          See [reference results and limitations](clean-rx/vendor-burst/README.md).
+          Complete multi-MPDU body delivery remained unproven in that
+          initial reference; this does not close the parent item.
+        - [x] Correlate fresh RX epochs/HT prefixes with later MAC headers
+          and exact F2 publication IDs; independently validate complete
+          variable-length ciphertext MPDUs/FCS from the nonce-derived
+          vendor MAC, including A-MPDU-format receptions in both roles.
+          Retain one-size controls as failed qualifications. Larger live
+          PSDUs still lack terminal commits; multiple MPDUs from one live
+          aggregate, sustained reliability and production lifecycle remain open.
+        - [x] Add default-off bounded exit/progress records before pending
+          ownership is cleared: length/short rejection, abort/fault, watchdog
+          and RX/prefix replacement. Observe event 6, good-only bit 8,
+          terminal bit 14, raw registers and first-hint RX counts without
+          changing the receive handoff or enabling TX.
+          Larger live 1598/1342-byte prefixes reach early good-only hints
+          then abort at RX counts 560/304; they remain unattributed.
+          Five later variable-length controls pass across both roles,
+          but do not reproduce those larger exits. Short-exit coverage
+          is native-only; see the reference's build/evidence distinctions.
+        - [x] Implement default-off complete early-MPDU retention with
+          bounded SHM, commit-last fresh-prefix identity and independent
+          host FCS validation. Build `e9008554` retains one complete
+          170-byte MPDU at nonterminal hint status `0x1922` from a live
+          478-byte A-MPDU-format PPDU, vendor B/passive A. Native bounds
+          cover every length 44..1000; oversize candidates are counted.
+          No early EOI, advance, TX or production HT gate is enabled.
+        - [ ] Qualify repeated early retention, other body sizes and both
+          roles: five other final-build controls lack a qualified early
+          sample. Preserve those failures; one positive is not reliability.
+        - [ ] Qualify a justified next-frame/EOF handoff: two independently
+          FCS-valid, correctly bounded, nonduplicate MPDUs from one fresh
+          vendor PPDU, then repeated aggregates and both roles. The
+          observed 478-byte/170-byte early case is a bounded starting point,
+          not proof of the second body or a general advance interface.
       - [x] Transmit a default-disabled, explicitly armed PSM compressed BA
         for the fixed aggregate and receive matching complete BA bytes over
         the air; independently verify addresses, bitmap and FCS. All normal
