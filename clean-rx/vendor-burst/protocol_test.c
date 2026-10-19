@@ -3,6 +3,126 @@
 #include <string.h>
 #include "protocol.h"
 #include "../src/ht20.h"
+#include "../../src/platform/badger/graphics.h"
+
+static void window_encoding(void) {
+    assert(ref_timer_calibration_valid(16000u,32u));
+    assert(!ref_timer_calibration_valid(0u,32u));
+    assert(!ref_timer_calibration_valid(100001u,32u));
+    assert(!ref_timer_calibration_valid(16000u,31u));
+    assert(!ref_timer_calibration_valid(16000u,1025u));
+    assert(!ref_timer_calibration_valid(1u,1024u));
+    assert(ref_timer_us(500u,16000u,32u) == 1000u);
+    assert(ref_timer_us(0xffffffffu,16000u,32u) == 8589934590ull);
+    uint8_t window[REF_WINDOW_BYTES] = {0};
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window,REF_WINDOW_MAGIC);
+    badger_bytes_store_u32(window+4u,1u);
+    badger_bytes_store_u32(window+12u,REF_WINDOW_INTERVAL);
+    badger_bytes_store_u32(window+16u,16000u);
+    badger_bytes_store_u32(window+20u,32u);
+    uint8_t *r = window+REF_WINDOW_HEADER_BYTES;
+    badger_bytes_store_u32(r+4u,10u);
+    assert(ref_window_valid(window));
+    badger_bytes_store_u32(window+24u,2u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window+24u,0u);
+    window[32u] = 1u;
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window+24u,1u);
+    assert(ref_window_valid(window));
+    window[28u] = 1u;
+    assert(ref_window_valid(window));
+    window[64u] = 2u;
+    assert(ref_window_valid(window));
+    window[28u] = 0u;
+    assert(!ref_window_valid(window));
+    window[28u] = 2u;
+    assert(!ref_window_valid(window));
+    window[28u] = 3u;
+    assert(ref_window_valid(window));
+    window[28u] = 4u;
+    assert(!ref_window_valid(window));
+    window[28u] = window[32u] = window[64u] = 0u;
+    badger_bytes_store_u32(window+24u,0u);
+    assert(!ref_window_coherent(r));
+    badger_bytes_store_u32(r+108u,2u);
+    badger_bytes_store_u32(r+140u,2u);
+    badger_bytes_store_u32(r+144u,2u);
+    assert(ref_window_coherent(r));
+    badger_bytes_store_u32(r+144u,4u);
+    assert(!ref_window_coherent(r));
+    badger_bytes_store_u32(r+108u,3u);
+    badger_bytes_store_u32(r+140u,3u);
+    badger_bytes_store_u32(r+144u,3u);
+    assert(!ref_window_coherent(r));
+    assert(ref_window_valid(window));
+    badger_bytes_store_u32(window+4u,REF_WINDOW_RECORDS+1u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window+4u,2u);
+    uint8_t *next = r+REF_WINDOW_RECORD_BYTES;
+    badger_bytes_store_u32(next+4u,10u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(next,REF_WINDOW_INTERVAL);
+    assert(ref_window_valid(window));
+    badger_bytes_store_u32(next+4u,0xffffffffu);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(next+4u,10u);
+    window[sizeof(window)-1u] = 1u;
+    assert(!ref_window_valid(window));
+    window[sizeof(window)-1u] = 0u;
+    badger_bytes_store_u32(window+8u,3u);
+    assert(ref_window_valid(window));
+    badger_bytes_store_u32(window+12u,REF_WINDOW_INTERVAL+1u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window+12u,REF_WINDOW_INTERVAL);
+    badger_bytes_store_u32(window+4u,0u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window+4u,REF_WINDOW_RECORDS);
+    for (uint32_t i = 0u; i < REF_WINDOW_RECORDS; ++i) {
+        uint8_t *entry = window+REF_WINDOW_HEADER_BYTES+i*REF_WINDOW_RECORD_BYTES;
+        badger_bytes_store_u32(entry,i*REF_WINDOW_INTERVAL);
+        badger_bytes_store_u32(entry+4u,10u);
+    }
+    assert(ref_window_valid(window));
+    badger_bytes_store_u32(r,45000000u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(r,0u);
+    badger_bytes_store_u32(r+4u,0u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(r+4u,10u);
+    badger_bytes_store_u32(r+108u,4u);
+    badger_bytes_store_u32(r+140u,2u);
+    badger_bytes_store_u32(r+144u,2u);
+    assert(!ref_window_coherent(r));
+    badger_bytes_store_u32(window+16u,0u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window+16u,16000u);
+    badger_bytes_store_u32(window+20u,31u);
+    assert(!ref_window_valid(window));
+    badger_bytes_store_u32(window+20u,32u);
+    assert(ref_window_valid(window));
+    window[0] ^= 1u;
+    assert(!ref_window_valid(window));
+}
+
+static void phy_snapshot_commit(void) {
+    uint8_t snapshot[CLEAN_OBSERVER_PHY_BYTES] = {0};
+    assert(ref_phy_snapshot_valid(snapshot) == !CLEAN_RX_HT_PHY_SNAPSHOT);
+    badger_bytes_store_u32(snapshot,CLEAN_OBSERVER_PHY_MAGIC);
+    assert(!ref_phy_snapshot_valid(snapshot));
+    badger_bytes_store_u32(snapshot+4u,1u);
+    assert(!ref_phy_snapshot_valid(snapshot));
+    badger_bytes_store_u32(snapshot+4u,3u);
+    assert(ref_phy_snapshot_valid(snapshot) == !!CLEAN_RX_HT_PHY_SNAPSHOT);
+    memset(snapshot+8u,0xff,sizeof(snapshot)-8u);
+    assert(ref_phy_snapshot_valid(snapshot) == !!CLEAN_RX_HT_PHY_SNAPSHOT);
+    badger_bytes_store_u32(snapshot+4u,7u);
+    assert(!ref_phy_snapshot_valid(snapshot));
+    badger_bytes_store_u32(snapshot+4u,3u);
+    snapshot[0] ^= 1u;
+    assert(!ref_phy_snapshot_valid(snapshot));
+}
 
 static void delivery_accounting(void) {
     uint8_t trace[REF_TRACE_BYTES];
@@ -60,9 +180,31 @@ static void delivery_accounting(void) {
 }
 
 int main(void) {
+    assert(badger_gfx_glyph_row('A',0u) == 14u);
+    assert(badger_gfx_glyph_row('0',0u) == 14u);
+    assert(badger_gfx_glyph_row('A',7u) == 0u);
+    assert(badger_gfx_glyph_row(' ',0u) == 0u);
+    window_encoding();
+    phy_snapshot_commit();
     delivery_accounting();
     uint8_t frame[REF_FRAME_MAX+8u], nonce[16], peer[6] = {2u,1u,2u,3u,4u,5u};
     for (uint32_t i = 0u; i < 16u; ++i) nonce[i] = (uint8_t)i;
+    nonce[11] = 0u;
+    uint8_t prepared_frames[REF_EARLY_PREPARED][REF_FRAME_MAX];
+    uint32_t prepared_digests[REF_EARLY_PREPARED];
+    assert(!ref_prepare_early(prepared_frames,prepared_digests,nonce,peer));
+    for (uint32_t profile = 1u; profile <= 3u; ++profile) {
+        nonce[11] = (uint8_t)profile;
+        assert(ref_prepare_early(prepared_frames,prepared_digests,nonce,peer));
+        uint32_t expected_digest = REF_DIGEST_INITIAL;
+        for (uint32_t i = 0u; i < REF_EARLY_PREPARED; ++i) {
+            uint32_t size = ref_frame(frame,nonce,peer,i);
+            assert(!memcmp(frame,prepared_frames[i],size));
+            expected_digest = ref_digest(expected_digest,frame,size);
+            assert(prepared_digests[i] == expected_digest);
+        }
+    }
+    nonce[11] = 0u;
     uint32_t counts[4] = {0}, first_counts[4] = {0}, digest = REF_DIGEST_INITIAL;
     const uint32_t expected[16] = {1024u,1024u,1024u,1024u,
         128u,256u,128u,256u,128u,256u,128u,256u,512u,512u,512u,512u};
@@ -88,6 +230,20 @@ int main(void) {
         assert(counts[i] == 32u && first_counts[i] == (i == 0u ? 16u : i == 1u ? 0u : 8u));
     assert(digest != REF_DIGEST_INITIAL);
     assert(!ref_frame(frame,nonce,peer,REF_FRAME_COUNT));
+    for (uint32_t profile = 1u; profile <= 3u; ++profile) {
+        nonce[11] = (uint8_t)profile;
+        for (uint32_t i = 0u; i < REF_FRAME_COUNT; ++i) {
+            memset(frame,0xa5,sizeof(frame));
+            uint32_t size = ref_frame(frame,nonce,peer,i);
+            assert(size == (64u<<profile) && size == ref_fixture_size((uint8_t)profile));
+            assert(badger_bytes_load_u32(frame+size-4u) == diag_crc32(frame,size-4u));
+            assert(badger_bytes_load_u32(frame+22u) == i);
+            for (uint32_t j = size; j < sizeof(frame); ++j) assert(frame[j] == 0xa5u);
+        }
+    }
+    nonce[11] = 4u;
+    assert(!ref_frame(frame,nonce,peer,0u) && !ref_fixture_size(4u));
+    nonce[11] = 0u;
     uint8_t packet[18u+CLEAN_MPDU_BYTES], summary[REF_RX_SUMMARY_BYTES+8u];
     for (uint32_t i = 0u; i < sizeof(packet); ++i) packet[i] = (uint8_t)(i*13u);
     for (uint32_t length = 4u; length <= CLEAN_MPDU_BYTES; ++length) {
@@ -113,6 +269,40 @@ int main(void) {
     assert(!ref_rx_summary(summary,packet,21u,0u));
     assert(!ref_rx_summary(summary,packet,sizeof(packet)+1u,0u));
     assert(!memcmp(summary,saved_summary,sizeof(summary)));
+    uint8_t reason_record[CLEAN_OBSERVER_RECORD_WORDS*2u] = {0};
+    uint8_t reason_early[CLEAN_OBSERVER_EARLY_HEADER*2u] = {0};
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,1u),"invalid_ht_sig"));
+    assert(clean_ht_ampdu_probe_sig(reason_record+12u,0u));
+    reason_record[92] = 176u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,1u),"eligible_not_retained"));
+    reason_early[0] = 1u;
+    reason_early[20] = 2u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,1u),"retained_multi_candidate"));
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"prior_multi_already_retained"));
+    reason_record[92] = (CLEAN_OBSERVER_EARLY_MAX+7u)&255u;
+    reason_record[93] = (CLEAN_OBSERVER_EARLY_MAX+7u)>>8u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"early_storage_limit"));
+    reason_record[92] = 49u; reason_record[93] = 0u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"short_good_hint"));
+    reason_record[92] = (CLEAN_HT_AMPDU_PROBE_BYTES+6u)&255u;
+    reason_record[93] = (CLEAN_HT_AMPDU_PROBE_BYTES+6u)>>8u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"inconsistent_body_geometry"));
+    reason_record[92] = (CLEAN_HT_AMPDU_PROBE_BYTES+2u)&255u;
+    reason_record[93] = (CLEAN_HT_AMPDU_PROBE_BYTES+2u)>>8u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"single_body_good_hint"));
+    reason_record[92] = reason_record[93] = 0u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"no_nonterminal_good_hint"));
+    reason_record[22] = 1u;
+    reason_record[28] = (CLEAN_HT_AMPDU_PROBE_BYTES+6u)&255u;
+    reason_record[29] = (CLEAN_HT_AMPDU_PROBE_BYTES+6u)>>8u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"no_nonterminal_good_hint"));
+    reason_record[28] = (CLEAN_HT_AMPDU_PROBE_BYTES+2u)&255u;
+    reason_record[29] = (CLEAN_HT_AMPDU_PROBE_BYTES+2u)>>8u;
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"terminal_single_body"));
+    assert(clean_ht_ampdu_probe_sig(reason_record+12u,1u));
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"unsupported_early_mcs"));
+    assert(clean_ht20_sig(reason_record+12u,252u,0u));
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"not_ampdu_format"));
     for (uint32_t mcs = 0u; mcs < 8u; ++mcs) {
         uint8_t sig[6];
         assert(clean_ht_ampdu_probe_sig(sig,mcs) && ref_sig_valid(sig));

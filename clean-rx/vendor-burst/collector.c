@@ -1,10 +1,14 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 #include "protocol.h"
 #include "../src/sdio_ring.h"
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
+
+static uint32_t clock_ticks[2], clock_frames[2];
+static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]);
 
 static void deadline(int signal_number) {
     (void)signal_number;
@@ -105,7 +109,7 @@ static int stage(libusb_device_handle *device, uint8_t nonce[16], uint8_t phase,
         usb_report_u32(report+60u) != diag_crc32(report,60u)) {
         fputs("Missing or invalid nonce-bound reference report\n",stderr); return 0;
     }
-    for (uint32_t page = 0u; page < WIFI_TRACE_PAGES; ++page) {
+    for (uint32_t page = 0u; trace && page < WIFI_TRACE_PAGES; ++page) {
         uint8_t packet[64];
         int n = libusb_control_transfer(device,0xc0u,LIVE_USB_WIFI_TRACE,(uint16_t)page,
                                         0u,packet,sizeof(packet),1000u);
@@ -120,19 +124,100 @@ static int stage(libusb_device_handle *device, uint8_t nonce[16], uint8_t phase,
     FILE *out = fopen(path,"wbx");
     if (!out) { perror(path); return 0; }
     int written = fwrite(report,1u,sizeof(report),out) == sizeof(report) &&
-        fwrite(trace,1u,REF_TRACE_BYTES,out) == REF_TRACE_BYTES;
+        (!trace || fwrite(trace,1u,REF_TRACE_BYTES,out) == REF_TRACE_BYTES);
     if (fclose(out)) written = 0;
     if (!written) { fputs("Reference evidence write failed\n",stderr); return 0; }
     printf("{\"phase\":\"%s\",\"build\":\"%08x\",\"role\":%u,\"stage\":%u,"
            "\"error\":%u,\"last_command\":%u,\"controller_status\":%d}\n",
-           suffix,USB_REPORT_BUILD_ID,usb_report_u32(trace+12u),usb_report_u32(trace+4u),
-           usb_report_u32(trace+8u),usb_report_u32(trace+16u),(int32_t)usb_report_u32(trace+20u));
+           suffix,USB_REPORT_BUILD_ID,trace ? usb_report_u32(trace+12u) : role,
+           usb_report_u32(report+32u),usb_report_u32(report+36u),
+           trace ? usb_report_u32(trace+16u) : 0u,
+           trace ? (int32_t)usb_report_u32(trace+20u) : 0);
     fflush(stdout);
-    if (usb_report_u32(trace) != REF_MAGIC || usb_report_u32(trace+12u) != role ||
-        usb_report_u32(trace+4u) != phase || usb_report_u32(trace+8u) ||
-        usb_report_u32(report+36u)) {
+    {
+        uint32_t ticks = usb_report_u32(report+40u), frames = usb_report_u32(report+44u);
+        printf("{\"test\":\"timer-sof-calibration\",\"phase\":\"%s\",\"role\":%u,"
+               "\"timer_ticks\":%u,\"sof_frames\":%u}\n",suffix,role,ticks,frames);
+        if (!ref_timer_calibration_valid(ticks,frames) ||
+            (clock_ticks[role] && (clock_ticks[role] != ticks || clock_frames[role] != frames))) {
+            fputs("Invalid USB-SOF timer calibration; raw evidence saved\n",stderr); return 0;
+        }
+        clock_ticks[role] = ticks; clock_frames[role] = frames;
+    }
+    if (phase == 4u && (!trace || !summarize_window(trace))) return 0;
+    if (usb_report_u32(report+32u) != phase || usb_report_u32(report+36u) ||
+        (trace && (usb_report_u32(trace) != REF_MAGIC ||
+        usb_report_u32(trace+12u) != role || usb_report_u32(trace+4u) != phase ||
+        usb_report_u32(trace+8u)))) {
         fputs("Reference device did not complete the requested phase; raw evidence saved\n",stderr);
         return 0;
+    }
+    return 1;
+}
+
+static int host_time(uint64_t *time) {
+    struct timespec value;
+    if (clock_gettime(CLOCK_MONOTONIC,&value)) { perror("Monotonic clock"); return 0; }
+    *time = (uint64_t)value.tv_sec*1000000u+(uint64_t)value.tv_nsec/1000u;
+    return 1;
+}
+
+static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]) {
+    const uint8_t *window = trace+REF_WINDOW_BASE;
+    if (!ref_window_valid(window) || usb_report_u32(window+16u) != clock_ticks[0] ||
+        usb_report_u32(window+20u) != clock_frames[0]) {
+        fputs("Invalid receive-window encoding; raw evidence saved\n",stderr); return 0;
+    }
+    uint32_t count = usb_report_u32(window+4u);
+    uint32_t ticks = usb_report_u32(window+16u), frames = usb_report_u32(window+20u);
+    printf("{\"test\":\"receive-window\",\"records\":%u,\"missed_capacity\":%u,"
+           "\"interval_us\":%u,\"cached_fields_are_not_instantaneous\":true}\n",
+           count,usb_report_u32(window+8u),usb_report_u32(window+12u));
+    printf("{\"test\":\"rearm-decision\",\"enabled\":%u,\"words\":[",
+           usb_report_u32(window+24u));
+    for (uint32_t i = 0u; i < 16u; ++i)
+        printf("%s%u",i?",":"",(unsigned)ref_u16(window+32u+2u*i));
+    uint32_t sequence = ref_u16(window+32u);
+    printf("],\"psm_snapshot_committed\":%s,\"cached_snapshot_coherent\":%s}\n",
+           sequence && !(sequence&1u)?"true":"false",
+           ref_window_coherent(window+REF_WINDOW_HEADER_BYTES+
+               (count-1u)*REF_WINDOW_RECORD_BYTES)?"true":"false");
+    printf("{\"test\":\"rearm-first-fault\",\"recovery_mode\":%u,\"words\":[",
+           usb_report_u32(window+28u));
+    for (uint32_t i = 0u; i < 16u; ++i)
+        printf("%s%u",i?",":"",(unsigned)ref_u16(window+64u+2u*i));
+    sequence = ref_u16(window+64u);
+    printf("],\"psm_snapshot_committed\":%s}\n",
+           sequence && !(sequence&1u)?"true":"false");
+    for (uint32_t i = 0u; i < count; ++i) {
+        const uint8_t *r = window+REF_WINDOW_HEADER_BYTES+i*REF_WINDOW_RECORD_BYTES;
+        printf("{\"test\":\"receive-window-sample\",\"index\":%u,\"time_ticks\":%u,"
+               "\"read_ticks\":%u,\"time_us\":%llu,\"read_us\":%llu,"
+               "\"cached_snapshot_coherent\":%s,\"captured\":%u,"
+               "\"raw_psm_debug\":%u,\"rx_polls\":%u,\"rx_cycles\":%u,"
+               "\"cached_maccontrol\":%u,\"cached_shm_600_60f\":[",
+               i,usb_report_u32(r),usb_report_u32(r+4u),
+               (unsigned long long)ref_timer_us(usb_report_u32(r),ticks,frames),
+               (unsigned long long)ref_timer_us(usb_report_u32(r+4u),ticks,frames),
+               ref_window_coherent(r)?"true":"false",usb_report_u32(r+8u),
+               usb_report_u32(r+12u),usb_report_u32(r+16u),usb_report_u32(r+20u),
+               usb_report_u32(r+24u));
+        for (uint32_t j = 0u; j < 16u; ++j)
+            printf("%s%u",j?",":"",(unsigned)ref_u16(r+28u+2u*j));
+        printf("],\"cached_bad_fcs\":%u,\"cached_length_reject\":%u,"
+               "\"cached_rx_event_reject\":%u,\"cached_plcp_reject\":%u,"
+               "\"ht_starts\":%u,\"saved_headers\":%u,\"header_overflow\":%u,"
+               "\"early_id\":%u,\"psm_restart_attempts\":%u,\"cached_rxctl\":%u,"
+               "\"controller_state\":%u,\"controller_error\":%u,"
+               "\"controller_error_address\":%u,\"controller_error_value\":%u,"
+               "\"first_fault_sequence\":%u}\n",
+               (unsigned)ref_u16(r+76u),(unsigned)ref_u16(r+78u),
+               (unsigned)ref_u16(r+80u),(unsigned)ref_u16(r+82u),
+               (unsigned)ref_u16(r+112u),(unsigned)ref_u16(r+132u),
+               (unsigned)ref_u16(r+134u),(unsigned)ref_u16(r+136u),
+               (unsigned)ref_u16(r+138u),(unsigned)ref_u16(r+92u),
+               usb_report_u32(r+100u),usb_report_u32(r+104u),
+               usb_report_u32(r+148u),usb_report_u32(r+152u),usb_report_u32(r+156u));
     }
     return 1;
 }
@@ -157,12 +242,29 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         minimum > maximum || maximum > elapsed) {
         fputs("Invalid bounded submission timing report\n",stderr); return 0;
     }
-    printf("{\"test\":\"vendor-submission-timing\",\"pattern\":\"large-prime-small-pairs\","
-           "\"ampdu_mpdu_requested\":%u,\"frames\":%u,\"elapsed_us\":%u,"
-           "\"min_write_us\":%u,\"max_write_us\":%u,"
-           "\"write_us_buckets\":[%u,%u,%u,%u],\"bucket_upper_us\":[200,400,800,null]}\n",
-           REF_AMPDU_LIMIT,timed,elapsed,minimum,maximum,usb_report_u32(timing+16u),
-           usb_report_u32(timing+20u),usb_report_u32(timing+24u),usb_report_u32(timing+28u));
+    uint32_t first_eight = usb_report_u32(timing+32u), next_eight = usb_report_u32(timing+36u);
+    if (!first_eight || !next_eight || first_eight > elapsed ||
+        next_eight > elapsed-first_eight ||
+        usb_report_u32(timing+40u) != (nonce[11] ? REF_EARLY_PREPARED : 0u) ||
+        (nonce[11] ? !usb_report_u32(timing+44u) : usb_report_u32(timing+44u) != 0u)) {
+        fputs("Invalid prepared-fixture timing report\n",stderr); return 0;
+    }
+    printf("{\"test\":\"vendor-submission-timing\",\"pattern\":\"%s\","
+           "\"ampdu_mpdu_requested\":%u,\"frames\":%u,\"elapsed_us\":%llu,"
+           "\"min_write_us\":%llu,\"max_write_us\":%llu,"
+           "\"write_timer_tick_buckets\":[%u,%u,%u,%u],\"bucket_upper_timer_ticks\":[200,400,800,null],"
+           "\"first_eight_us\":%llu,\"next_eight_us\":%llu,\"prepared_frames\":%u,\"prepare_us\":%llu}\n",
+           nonce[11] ? "eight-prepared-constant-early-size" : "large-prime-small-pairs",
+           REF_AMPDU_LIMIT,timed,
+           (unsigned long long)ref_timer_us(elapsed,clock_ticks[1],clock_frames[1]),
+           (unsigned long long)ref_timer_us(minimum,clock_ticks[1],clock_frames[1]),
+           (unsigned long long)ref_timer_us(maximum,clock_ticks[1],clock_frames[1]),
+           usb_report_u32(timing+16u),
+           usb_report_u32(timing+20u),usb_report_u32(timing+24u),usb_report_u32(timing+28u),
+           (unsigned long long)ref_timer_us(first_eight,clock_ticks[1],clock_frames[1]),
+           (unsigned long long)ref_timer_us(next_eight,clock_ticks[1],clock_frames[1]),
+           usb_report_u32(timing+40u),
+           (unsigned long long)ref_timer_us(usb_report_u32(timing+44u),clock_ticks[1],clock_frames[1]));
     printf("{\"test\":\"vendor-queries\",\"queries\":[");
     for (uint32_t i = 0u; i < REF_QUERY_COUNT; ++i) {
         const uint8_t *q = vendor+REF_QUERY_BASE+i*REF_QUERY_BYTES;
@@ -173,6 +275,52 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                usb_report_u32(q+8u),(int32_t)usb_report_u32(q+12u),
                usb_report_u32(q+16u),usb_report_u32(q+20u));
     }
+    puts("]}");
+    const uint8_t *phy_snapshot = observer+REF_PHY_SNAPSHOT;
+    if (!ref_phy_snapshot_valid(phy_snapshot)) {
+        fputs("Invalid stopped PHY snapshot commit\n",stderr); return 0;
+    }
+    printf("{\"test\":\"stopped-phy-controls\",\"enabled\":%s",
+           CLEAN_RX_HT_PHY_SNAPSHOT ? "true" : "false");
+#if CLEAN_RX_HT_PHY_SNAPSHOT
+    static const uint16_t phy_indices[CLEAN_OBSERVER_PHY_REGS] = CLEAN_OBSERVER_PHY_INDICES;
+    printf(",\"indices\":[");
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_PHY_REGS; ++i)
+        printf("%s%u",i?",":"",(unsigned)phy_indices[i]);
+    for (uint32_t phase = 0u; phase < 2u; ++phase) {
+        printf("],\"%s\":[",phase ? "after_rx" : "before_rx");
+        for (uint32_t i = 0u; i < CLEAN_OBSERVER_PHY_REGS; ++i)
+            printf("%s%u",i?",":"",(unsigned)ref_u16(phy_snapshot+8u+
+                2u*(phase*CLEAN_OBSERVER_PHY_REGS+i)));
+    }
+    printf("]");
+#endif
+    puts("}");
+    static const char *const hardware_names[REF_HARDWARE_WORDS] = {
+        "chipcommon_id","cc_clock","d11_clock","pmu_status","pmu_resources","pmu_pending"};
+    static const char *const calibration_names[6] = {
+        "rc_lpf","rc_adc","rc_dacbuf","vco_status","dc_idac","dc_dcoe"};
+    printf("{\"test\":\"controller-calibration\"");
+    for (uint32_t i = 0u; i < 6u; ++i)
+        printf(",\"%s\":%u",calibration_names[i],usb_report_u32(observer+128u+36u+4u*i));
+    puts("}");
+    uint32_t chip = usb_report_u32(observer+REF_HARDWARE_BASE);
+    if ((chip&0xffffu) != 43439u ||
+        chip != usb_report_u32(observer+REF_HARDWARE_BASE+4u*REF_HARDWARE_WORDS)) {
+        fputs("Invalid or changing stopped radio identity\n",stderr); return 0;
+    }
+    for (uint32_t phase = 0u; phase < 2u; ++phase) {
+        printf("{\"test\":\"stopped-hardware\",\"phase\":\"%s\"",
+               phase ? "after-rx" : "before-rx");
+        for (uint32_t i = 0u; i < REF_HARDWARE_WORDS; ++i)
+            printf(",\"%s\":%u",hardware_names[i],
+                   usb_report_u32(observer+REF_HARDWARE_BASE+4u*(phase*REF_HARDWARE_WORDS+i)));
+        puts("}");
+    }
+    printf("{\"test\":\"stopped-psm\",\"raw_debug\":%u,\"shm_600_60b\":[",
+           usb_report_u32(observer+REF_STOPPED_PSM));
+    for (uint32_t i = 0u; i < REF_STOPPED_PSM_WORDS; ++i)
+        printf("%s%u",i?",":"",(unsigned)ref_u16(observer+REF_STOPPED_PSM+4u+2u*i));
     puts("]}");
     const uint8_t *log = observer+REF_OBSERVER_DETAIL;
     uint32_t count = (uint32_t)log[2] | ((uint32_t)log[3]<<8u);
@@ -339,14 +487,14 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                "\"terminal_status1\":%u,\"terminal_status2\":%u,"
                "\"progress\":%u,\"raw_1004\":%u,\"raw_1002\":%u,"
                "\"raw_102a\":%u,\"raw_102b\":%u,\"raw_10af\":%u,"
-               "\"first_good_hint_rxe_length\":%u,"
+               "\"first_good_hint_rxe_length\":%u,\"early_capture_reason\":\"%s\","
                "\"ht_sig_valid\":%s,\"ampdu_format\":%s}\n",
                (unsigned)sig[1]|((unsigned)sig[2]<<8u),sig[0]&127u,
                attributed?"true":"false",ref_u16(r+20u),ref_u16(r+22u),ref_u16(r+28u),
                outcome,usb_report_u32(r+24u),ref_u16(r+30u),ref_u16(r+32u),ref_u16(r+34u),
                ref_u16(r+80u),ref_u16(r+82u),ref_u16(r+84u),
                ref_u16(r+86u),ref_u16(r+88u),ref_u16(r+90u),
-               ref_u16(r+92u),
+               ref_u16(r+92u),ref_early_reason(r,early,i+1u),
                crc?"true":"false",ampdu?"true":"false");
     }
     uint32_t sent = usb_report_u32(vendor+28u), digest = REF_DIGEST_INITIAL;
@@ -374,7 +522,12 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
     uint32_t block_ack_delta = 0u;
     int ba_activity = decoded && ref_counter_delta(vendor+REF_COUNTER_BEFORE,
         vendor+REF_COUNTER_AFTER,416u,&block_ack_delta) && block_ack_delta != 0u;
-    printf("{\"test\":\"reference-result\",\"frames_submitted\":%u,\"sizes\":[128,256,512,1024],"
+    uint32_t fixture = ref_fixture_size(nonce[11]);
+    const char *sizes = fixture == 128u ? "[128]" : fixture == 256u ? "[256]" :
+        fixture == 512u ? "[512]" : "[128,256,512,1024]";
+    int focused_early = fixture && early_linked && ref_u16(early+20u) == 2u &&
+        early_length == fixture+42u;
+    printf("{\"test\":\"reference-result\",\"frames_submitted\":%u,\"sizes\":%s,"
            "\"channel\":%u,\"peer_ht_capable\":%s,\"authorized\":%s,"
            "\"observer_tx_enabled\":false,\"saved_headers\":%u,\"overflow\":%u,"
            "\"valid_ht_headers\":%u,\"ampdu_headers\":%u,"
@@ -384,14 +537,20 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
            "\"early_nonterminal_mpdu_proven\":%s,\"early_multi_candidate_correlated\":%s,"
            "\"phy_header_transmitter_attributed\":%s,"
            "\"vendor_block_ack_activity\":%s,\"complete_multi_mpdu_delivery_proven\":%s,"
+           "\"focused_early_capture_proven\":%s,"
            "\"plaintext_over_air_verified\":false,\"sifs_timing_qualified\":false}\n",
-           sent,usb_report_u32(vendor+24u),usb_report_u32(vendor+44u)&0x2000u?"true":"false",
+           sent,sizes,usb_report_u32(vendor+24u),usb_report_u32(vendor+44u)&0x2000u?"true":"false",
            (usb_report_u32(vendor+44u)&0x30u)==0x30u?"true":"false",
            count,overflow,valid,aggregate,aggregate?"true":"false",correlated,correlated_aggregate,
            unaccounted,ref_u16(log+14u),
            early_linked?"true":"false",early_linked && ref_u16(early+20u)==2u?"true":"false",
            correlated || early_linked?"true":"false",ba_activity?"true":"false",
-           pair_linked?"true":"false");
+           pair_linked?"true":"false",focused_early?"true":"false");
+    if (fixture) {
+        if (!focused_early || !aggregate || !ba_activity || unaccounted)
+            fputs("Focused early capture requires the requested-size nonterminal multi candidate, fresh prefix, independent FCS, vendor BA activity and accounted exits; not proven\n",stderr);
+        return focused_early && aggregate && ba_activity && !unaccounted;
+    }
     if (!aggregate || !ba_activity || correlated < 2u || !correlated_aggregate || unaccounted)
         fputs("Reference requires vendor BA activity, two fresh-prefix-linked FCS-valid MPDU lengths, a linked A-MPDU-format reception and accounted prefix exits; evidence is incomplete\n",stderr);
     if (!early_linked)
@@ -403,8 +562,16 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5 || !serial_valid(argv[1]) || !serial_valid(argv[2]) || !strcmp(argv[1],argv[2])) {
-        fputs("Usage: collector VENDOR_SERIAL OBSERVER_SERIAL PREFIX PRIVATE_SSID_FILE\n",stderr); return 2;
+    if ((argc != 5 && argc != 6) || !serial_valid(argv[1]) || !serial_valid(argv[2]) || !strcmp(argv[1],argv[2])) {
+        fputs("Usage: collector VENDOR_SERIAL OBSERVER_SERIAL PREFIX PRIVATE_SSID_FILE [mixed|128|256|512]\n",stderr); return 2;
+    }
+    uint8_t profile = 0u;
+    if (argc == 6 && strcmp(argv[5],"mixed")) {
+        profile = !strcmp(argv[5],"128") ? 1u : !strcmp(argv[5],"256") ? 2u :
+            !strcmp(argv[5],"512") ? 3u : 0u;
+        if (!profile || CLEAN_RX_HT_ADVANCE) {
+            fputs("Focused sizes require 128, 256 or 512 and an early-only build (reference-early/phy/window/rearm)\n",stderr); return 2;
+        }
     }
     if (signal(SIGALRM,deadline) == SIG_ERR) { perror("signal"); return 1; }
     alarm(60u);
@@ -414,6 +581,7 @@ int main(int argc, char **argv) {
     int ok = fread(nonce,1u,12u,random) == 12u;
     if (fclose(random)) ok = 0;
     if (!ok) { fputs("Fresh nonce generation failed\n",stderr); return 1; }
+    nonce[11] = profile;
     printf("{\"test\":\"configuration\",\"build\":\"%08x\",\"nonce\":\"",USB_REPORT_BUILD_ID);
     for (uint32_t i = 0u; i < sizeof(nonce); ++i) printf("%02x",nonce[i]);
     puts("\",\"mcs_requested\":0}");
@@ -431,9 +599,31 @@ int main(int argc, char **argv) {
         ok = stage(listener,observer_nonce,1u,0u,argv[3],"observer-ready",observer);
     }
     if (ok) {
-        int burst = stage(sender,nonce,2u,1u,argv[3],"vendor-burst",vendor);
+        uint64_t arm_before = 0u, arm_after = 0u, burst_before = 0u, burst_after = 0u;
+        if (CLEAN_RX_HT_WINDOW)
+            ok = host_time(&arm_before) &&
+                stage(listener,observer_nonce,3u,0u,argv[3],"observer-armed",NULL) &&
+                host_time(&arm_after);
+        if (ok && CLEAN_RX_HT_WINDOW) ok = host_time(&burst_before);
+        int burst = ok && stage(sender,nonce,2u,1u,argv[3],"vendor-burst",vendor);
+        int timed = !CLEAN_RX_HT_WINDOW || host_time(&burst_after);
         int frozen = stage(listener,observer_nonce,2u,0u,argv[3],"observer-capture",observer);
-        ok = burst && frozen && summarize(vendor,observer,nonce);
+        int window_ok = 1;
+        if (CLEAN_RX_HT_WINDOW) {
+            uint8_t exported[REF_TRACE_BYTES];
+            window_ok = stage(listener,observer_nonce,4u,0u,argv[3],"observer-window",exported);
+            if (burst && timed) {
+                printf("{\"test\":\"receive-window-host-bracket\","
+                       "\"arm_ack_latency_us\":%llu,\"vendor_phase_begin_min_us\":%llu,"
+                       "\"vendor_phase_begin_max_us\":%llu,\"vendor_phase_end_max_us\":%llu,"
+                       "\"not_exact_air_timing\":true}\n",
+                       (unsigned long long)(arm_after-arm_before),
+                       (unsigned long long)(burst_before-arm_after),
+                       (unsigned long long)(burst_before-arm_before),
+                       (unsigned long long)(burst_after-arm_before));
+            }
+        }
+        ok = burst && timed && frozen && window_ok && summarize(vendor,observer,nonce);
     }
     if (fflush(stdout)) { perror("Reference JSON flush"); ok = 0; }
     if (listener) {

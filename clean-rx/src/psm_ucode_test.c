@@ -46,6 +46,12 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+#if CLEAN_RX_HT_REARM_WAIT
+    restore(original,275u,WORD(0x3f0u,0x1fffu,0x1800u,0x1780u),
+            WORD(0x3f0u,0x18ffu,0x1800u,0x1780u));
+    restore(original,280u,WORD(0x77fu,0x1780u,0x1780u,OBSERVER_REARM_VERIFY),
+            WORD(0x783u,0x1780u,0x1780u,281u));
+#endif
 #if CLEAN_RX_HT_OBSERVER
     restore(original,196u,WORD(0x77fu,0x1780u,0x1780u,OBSERVER_EXIT_TIMEOUT),
             WORD(0x77fu,0x1780u,0x1780u,262u));
@@ -188,6 +194,79 @@ static int flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t limit) {
     assert(!"PSM flush did not terminate");
     return 0;
 }
+
+#if CLEAN_RX_HT_REARM_WAIT
+static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
+                       int clear_after_latch, int retry_clears) {
+    uint32_t pc = 275u, polls = 0u, retries = 0u;
+    uint16_t r[0x1800] = {0};
+    uint32_t initial_events = events;
+    for (uint32_t step = 0u; step < 800300u; ++step) {
+        if (pc == 281u || pc == 290u) {
+            int success = pc == 281u;
+            assert(r[CLEAN_OBSERVER_REARM_SHM] == 2u*(1u+retries));
+            assert(r[CLEAN_OBSERVER_REARM_SHM+10u] == (success ? 1u : 2u));
+            assert(r[CLEAN_OBSERVER_REARM_SHM+12u] ==
+                (retries ? 0u : !!(initial_events&8u)));
+            assert(success == !(r[CLEAN_OBSERVER_REARM_SHM+1u]&0x14u));
+            if (clear_after_latch) assert(r[CLEAN_OBSERVER_REARM_SHM+11u] == 0x800u);
+            assert(events == (retries ? initial_events&~0x6868u :
+                success ? initial_events&~8u : initial_events));
+#if CLEAN_RX_HT_REARM_RECOVER
+            assert(retries <= 1u);
+            assert(!!r[CLEAN_OBSERVER_REARM_SHM+16u] == !!retries);
+            if (retries) {
+                assert(r[CLEAN_OBSERVER_REARM_SHM+16u] == 2u);
+                assert(r[CLEAN_OBSERVER_REARM_SHM+17u]&0x14u);
+                assert(r[CLEAN_OBSERVER_REARM_SHM+26u] == 2u);
+                assert(r[CLEAN_OBSERVER_REARM_SHM+28u] == !!(initial_events&8u));
+            }
+#else
+            assert(!retries);
+#endif
+            if (!success) assert(r[0x602u] == 3u && r[0x1780u] == 0u);
+            return success;
+        }
+        uint64_t word = instruction(pc);
+        uint32_t op = (uint32_t)(word >> 39u), a = (uint32_t)(word >> 26u)&0x1fffu;
+        uint32_t b = (uint32_t)(word >> 13u)&0x1fffu, d = (uint32_t)word&0x1fffu;
+        if (pc == 276u)
+            r[0x1004u] = (uint16_t)(0x800u |
+                (retries && retry_clears ? 0u : polls++ < busy_polls ? busy_bits : 0u));
+        if (pc == OBSERVER_REARM_REMAINING && clear_after_latch) r[0x1004u] = 0x800u;
+        uint16_t av = a >= 0x1800u ? immediate(a) : r[a];
+        uint16_t bv = b >= 0x1800u ? immediate(b) : r[b];
+        uint32_t next = pc+1u;
+        if (op == 0x3f0u) {
+            assert(b == 0x1800u);
+            r[d] = av;
+            if (d == 0x1004u) {
+                assert(pc == 274u && av == 0x14u && retries == 0u);
+                ++retries;
+                polls = 0u;
+            }
+        } else if (op == 0x502u || op == 0x504u || op == 0x404u) {
+            assert(b == 0x1800u);
+            if (((av >> (op&15u))&1u) == (op >> 8u == 5u)) next = d;
+        } else if (op == 0x1d0u || op == 0x1c0u) {
+            r[d] = op == 0x1d0u ? (uint16_t)(av-bv) : (uint16_t)(av+bv);
+        } else if (op == 0xd1u) {
+            if (av != bv) next = d;
+        } else if (op == 0x703u || (op&0x7e0u) == 0x780u) {
+            assert(a == 0x1780u && b == 0x1780u);
+            uint32_t event = 1u << (op&31u);
+            if (events&event) next = d;
+            if (op&0x80u) events &= ~event;
+        } else {
+            assert(op == 0x77fu && a == 0x1780u && b == 0x1780u);
+            next = d;
+        }
+        pc = next;
+    }
+    assert(!"Bounded rearm flush did not terminate");
+    return 0;
+}
+#endif
 
 static uint16_t stream_prefix(uint16_t rxctl, uint16_t count,
                               uint32_t *writes, uint32_t *next) {
@@ -2100,8 +2179,25 @@ int main(void) {
                    ((bits & 0x14u) == 0u || delays[i] < limit));
             assert(flush(delays[i], bits, 255u) ==
                    ((bits & 0x14u) == 0u || delays[i] < 255u));
+#if CLEAN_RX_HT_REARM_WAIT
+            for (uint32_t event = 0u; event < 4u; ++event)
+                for (uint32_t clear = 0u; clear < 2u; ++clear)
+                    assert(rearm_flush(delays[i],bits,
+                        ((event&1u) ? 8u : 0u) | ((event&2u) ? 64u : 0u),clear,0) ==
+                           ((bits & 0x14u) == 0u || delays[i] < 65535u));
+#endif
         }
     }
+#if CLEAN_RX_HT_REARM_RECOVER
+    for (uint32_t events = 0u; events < 64u; ++events) {
+        const uint32_t bits[] = {3u,5u,6u,11u,13u,14u};
+        uint32_t pending = 1u << 9u;
+        for (uint32_t i = 0u; i < 6u; ++i)
+            if (events&(1u<<i)) pending |= 1u<<bits[i];
+        assert(rearm_flush(65536u,0x14u,pending,0,1));
+        assert(!rearm_flush(65536u,0x14u,pending,0,0));
+    }
+#endif
     puts("PSM: image identity, capture bounds, RX streaming and startup flush OK");
     puts("PSM: single-SHM inputs, pinned ACK/CTS addresses, bounded ACK suppression at all 12 rates and 100000 native ACK rearms OK; NOT RF timing");
     return 0;

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ^[0-9A-F]{16}$ ||
+if [[ $# -lt 3 || $# -gt 5 || ! $1 =~ ^[0-9A-F]{16}$ ||
       ! $2 =~ ^[0-9A-F]{16}$ || $1 == "$2" ]]; then
-    echo "Usage: bash clean-rx/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL PREFIX [PRIVATE_SSID_FILE]" >&2
+    echo "Usage: bash clean-rx/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL PREFIX [PRIVATE_SSID_FILE [EARLY_BYTES]]" >&2
     exit 2
 fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -11,6 +11,11 @@ build=build/clean-rx/vendor-burst
 picotool=build/picotool-usb/picotool
 prefix=$3
 credentials=${4:-ssid-data/ssid.txt}
+early=${5:-mixed}
+if [[ $early != mixed && $early != 128 && $early != 256 && $early != 512 ]]; then
+    echo "EARLY_BYTES must be mixed, 128, 256 or 512" >&2
+    exit 2
+fi
 mkdir -p "$(dirname "$prefix")"
 if compgen -G "$prefix*" > /dev/null; then
     echo "Use a new evidence prefix; existing trials are never overwritten" >&2
@@ -35,5 +40,5 @@ done
 "$picotool" reboot --ser "$1" > "$prefix-boot-vendor.log" 2>&1
 "$picotool" reboot --ser "$2" > "$prefix-boot-observer.log" 2>&1
 sleep 0.5
-"$build/collector" "$1" "$2" "$prefix" "$credentials" \
+"$build/collector" "$1" "$2" "$prefix" "$credentials" "$early" \
     > "$prefix.jsonl" 2> "$prefix.stderr"

@@ -7,6 +7,8 @@ extern live_usb_control_t ref_usb;
 extern uint8_t ref_detail[REF_TRACE_BYTES];
 extern uint8_t ref_ssid[33], ref_password[64];
 extern uint32_t ref_generation;
+extern uint32_t ref_clock_ticks, ref_clock_frames;
+extern const char ref_role[];
 uint32_t ref_now(void);
 int ref_service(void *context);
 void ref_run(const uint8_t nonce[16]);

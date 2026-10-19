@@ -10,6 +10,7 @@
 #define REF_TRACE_BYTES 5888u
 #define REF_FRAME_COUNT 128u
 #define REF_FRAME_MAX 1024u
+#define REF_EARLY_PREPARED 8u
 #define REF_QUERY_BASE 128u
 #define REF_QUERY_BYTES 32u
 #define REF_QUERY_COUNT 19u
@@ -25,7 +26,82 @@
 #define REF_DUMP_BYTES 384u
 #define REF_OBSERVER_DETAIL 1024u
 #define REF_DIGEST_INITIAL 0x811c9dc5u
-#define REF_OBSERVER_ABI 12u
+#define REF_OBSERVER_ABI 18u
+static inline int ref_timer_calibration_valid(uint32_t ticks, uint32_t frames) {
+    return ticks && ticks <= 100000u && frames >= 32u && frames <= 1024u &&
+        ticks*100u >= frames;
+}
+static inline uint64_t ref_timer_us(uint32_t value, uint32_t ticks, uint32_t frames) {
+    return (uint64_t)value*frames*1000u/ticks;
+}
+#define REF_WINDOW_BASE 128u
+#define REF_WINDOW_MAGIC 0x37444e57u
+#define REF_WINDOW_INTERVAL 100000u
+#define REF_WINDOW_RECORDS 35u
+#define REF_WINDOW_RECORD_BYTES 160u
+#define REF_WINDOW_HEADER_BYTES 96u
+#define REF_WINDOW_BYTES (REF_WINDOW_HEADER_BYTES+REF_WINDOW_RECORDS*REF_WINDOW_RECORD_BYTES)
+_Static_assert(REF_WINDOW_BASE+REF_WINDOW_BYTES <= REF_TRACE_BYTES,
+    "Separate receive-window export must fit the existing trace transport");
+static inline int ref_window_coherent(const uint8_t *record) {
+    uint32_t sequence = badger_bytes_load_u32(record+140u);
+    return sequence && !(sequence&1u) &&
+        sequence == badger_bytes_load_u32(record+108u) &&
+        sequence == badger_bytes_load_u32(record+144u);
+}
+static inline int ref_window_valid(const uint8_t *window) {
+    uint32_t count = badger_bytes_load_u32(window+4u), end = 0u;
+    uint32_t ticks = badger_bytes_load_u32(window+16u), frames = badger_bytes_load_u32(window+20u);
+    if (badger_bytes_load_u32(window) != REF_WINDOW_MAGIC ||
+        !count || count > REF_WINDOW_RECORDS ||
+        badger_bytes_load_u32(window+12u) != REF_WINDOW_INTERVAL ||
+        badger_bytes_load_u32(window+24u) > 1u ||
+        badger_bytes_load_u32(window+28u) > 3u ||
+        (badger_bytes_load_u32(window+28u) &&
+         (!badger_bytes_load_u32(window+24u) ||
+          !(badger_bytes_load_u32(window+28u)&1u))) ||
+        !ref_timer_calibration_valid(ticks,frames)) return 0;
+    if (!badger_bytes_load_u32(window+24u))
+        for (uint32_t i = 32u; i < REF_WINDOW_HEADER_BYTES; ++i)
+            if (window[i]) return 0;
+    if (!badger_bytes_load_u32(window+28u))
+        for (uint32_t i = 64u; i < REF_WINDOW_HEADER_BYTES; ++i)
+            if (window[i]) return 0;
+    for (uint32_t i = 0u; i < count; ++i) {
+        const uint8_t *r = window+REF_WINDOW_HEADER_BYTES+i*REF_WINDOW_RECORD_BYTES;
+        uint32_t time = badger_bytes_load_u32(r), duration = badger_bytes_load_u32(r+4u);
+        if (time < end || time >= 45000000u || !duration ||
+            duration >= 45000000u-time) return 0;
+        end = time+duration;
+    }
+    for (uint32_t i = REF_WINDOW_HEADER_BYTES+count*REF_WINDOW_RECORD_BYTES; i < REF_WINDOW_BYTES; ++i)
+        if (window[i]) return 0;
+    return 1;
+}
+#define REF_PHY_SNAPSHOT 872u
+_Static_assert(REF_PHY_SNAPSHOT+CLEAN_OBSERVER_PHY_BYTES <= REF_OBSERVER_DETAIL,
+    "Stopped PHY snapshots must precede the observer log");
+static inline int ref_phy_snapshot_valid(const uint8_t *snapshot) {
+#if CLEAN_RX_HT_PHY_SNAPSHOT
+    return badger_bytes_load_u32(snapshot) == CLEAN_OBSERVER_PHY_MAGIC &&
+        badger_bytes_load_u32(snapshot+4u) == 3u;
+#else
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_PHY_BYTES; ++i)
+        if (snapshot[i]) return 0;
+    return 1;
+#endif
+}
+#define REF_STOPPED_PSM 292u
+#define REF_STOPPED_PSM_WORDS 12u
+_Static_assert(REF_STOPPED_PSM+4u+2u*REF_STOPPED_PSM_WORDS <= 320u,
+    "Stopped PSM state must precede the mailbox tail");
+#define REF_HARDWARE_BASE 80u
+#define REF_HARDWARE_WORDS 6u
+static const uint32_t ref_hardware_addresses[REF_HARDWARE_WORDS] = {
+    0x18000000u,0x180001e0u,0x180011e0u,0x18000608u,0x1800060cu,0x18000610u
+};
+_Static_assert(REF_HARDWARE_BASE+2u*REF_HARDWARE_WORDS*4u <= 128u,
+    "Stopped hardware snapshots must precede the mailbox");
 #define REF_MBOX_TAIL 320u
 #define REF_MBOX_HEAD_BYTES 128u
 #define REF_MBOX_BYTES 480u
@@ -38,7 +114,7 @@ _Static_assert(292u <= REF_MBOX_TAIL &&
     REF_MBOX_TAIL + REF_MBOX_BYTES - REF_MBOX_HEAD_BYTES <= REF_MULTI_DETAIL &&
     REF_MULTI_DETAIL + 40u <= REF_LOADER_DETAIL &&
     REF_LOADER_DETAIL + 32u <= REF_RX_SUMMARIES &&
-    REF_RX_SUMMARIES + REF_RX_SUMMARY_COUNT*REF_RX_SUMMARY_BYTES <= REF_OBSERVER_DETAIL,
+    REF_RX_SUMMARIES + REF_RX_SUMMARY_COUNT*REF_RX_SUMMARY_BYTES <= REF_PHY_SNAPSHOT,
     "Frozen receive diagnostics must not overlap existing trace regions");
 static inline int ref_delivery_accounted(const uint8_t trace[REF_TRACE_BYTES]) {
     const uint8_t *f2 = trace+REF_MBOX_TAIL+444u-REF_MBOX_HEAD_BYTES;
@@ -127,12 +203,17 @@ static inline void ref_mac(uint8_t mac[6], const uint8_t nonce[16]) {
     badger_bytes_copy(mac + 1u, nonce, 5u);
 }
 
+static inline uint32_t ref_fixture_size(uint8_t profile) {
+    return profile >= 1u && profile <= 3u ? 64u<<profile : 0u;
+}
+
 static inline uint32_t ref_frame(uint8_t frame[REF_FRAME_MAX], const uint8_t nonce[16],
                                  const uint8_t peer[6], uint32_t sequence) {
     static const uint16_t lengths[4] = {128u,256u,512u,1024u};
-    if (sequence >= REF_FRAME_COUNT) return 0u;
+    if (sequence >= REF_FRAME_COUNT || nonce[11] > 3u) return 0u;
     uint32_t phase = sequence & 15u;
     uint32_t size = lengths[phase < 4u ? 3u : phase < 12u ? phase&1u : 2u];
+    if (nonce[11]) size = ref_fixture_size(nonce[11]);
     badger_bytes_zero(frame, size);
     badger_bytes_copy(frame, peer, 6u);
     ref_mac(frame + 6u, nonce);
@@ -165,6 +246,42 @@ static inline int ref_sig_valid(const uint8_t sig[6]) {
 
 static inline uint32_t ref_digest(uint32_t previous, const uint8_t *frame, uint32_t size) {
     return (previous * 16777619u) ^ diag_crc32(frame, size - 4u);
+}
+
+static inline int ref_prepare_early(uint8_t frames[REF_EARLY_PREPARED][REF_FRAME_MAX],
+                                    uint32_t digests[REF_EARLY_PREPARED],
+                                    const uint8_t nonce[16], const uint8_t peer[6]) {
+    if (!ref_fixture_size(nonce[11])) return 0;
+    uint32_t digest = REF_DIGEST_INITIAL;
+    for (uint32_t i = 0u; i < REF_EARLY_PREPARED; ++i) {
+        uint32_t size = ref_frame(frames[i],nonce,peer,i);
+        if (!size) return 0;
+        digests[i] = digest = ref_digest(digest,frames[i],size);
+    }
+    return 1;
+}
+
+static inline const char *ref_early_reason(const uint8_t *record, const uint8_t *early,
+                                           uint32_t id) {
+    const uint8_t *sig = record+12u;
+    uint32_t hint = ref_u16(record+92u), psdu = ref_u16(sig+1u);
+    if (!ref_sig_valid(sig)) return "invalid_ht_sig";
+    if (!(sig[3]&8u)) return "not_ampdu_format";
+    if (sig[0]&127u) return "unsupported_early_mcs";
+    if (!hint) {
+        uint32_t terminal = ref_u16(record+28u);
+        if (ref_u16(record+22u) == 1u && terminal >= 50u && psdu >= terminal-2u &&
+            psdu <= ((terminal+1u)&~3u)) return "terminal_single_body";
+        return "no_nonterminal_good_hint";
+    }
+    if (hint < 50u) return "short_good_hint";
+    if (hint > CLEAN_OBSERVER_EARLY_MAX+6u) return "early_storage_limit";
+    if (psdu < hint-2u) return "inconsistent_body_geometry";
+    if (psdu <= ((hint+1u)&~3u)) return "single_body_good_hint";
+    if (ref_u16(early) == id) return "retained_multi_candidate";
+    if (ref_u16(early) && ref_u16(early) < id && ref_u16(early+20u) == 2u)
+        return "prior_multi_already_retained";
+    return "eligible_not_retained";
 }
 
 static inline int ref_sample_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u],
@@ -254,7 +371,7 @@ static inline int ref_pair_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u]
 #endif
 }
 
-_Static_assert(REF_SUBMIT_STATS + 32u <= REF_COUNTER_BEFORE,
+_Static_assert(REF_SUBMIT_STATS + 48u <= REF_COUNTER_BEFORE,
                "Query metadata must not overlap raw counter replies");
 _Static_assert(REF_DUMP_AFTER + REF_DUMP_BYTES <= REF_TRACE_BYTES &&
     REF_OBSERVER_DETAIL + CLEAN_OBSERVER_WORDS * 2u <= REF_SAMPLE_BASE &&

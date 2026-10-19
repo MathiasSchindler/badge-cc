@@ -137,12 +137,19 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Retain two complete, FCS-valid MPDUs from one live vendor aggregate in both size orders.
 - [x] Capture and enforce reconciled controller/host receive and delivery diagnostics.
 - [x] Trace receive/copy/FIFO state across live aggregate handoffs.
+- [x] Implement size-selectable early-only captures and stopped clock/PSM diagnostics.
+- [x] Repeat complete FCS-valid 170- and 298-byte early captures in both badge roles.
+- [x] Capture complete FCS-valid 554-byte nonterminal early MPDUs in both badge roles.
+- [x] Reproduce zero-HT reception with actual PSM-state and PHY-control diagnostics.
+- [x] Implement SOF-calibrated receive timelines, decision-latched rearm diagnostics and conditional-event regression tests.
+- [x] Implement gated one-shot RXE recovery, preserved first-fault diagnostics and framebuffer-free badge status.
 - [x] Correct receive/TX ownership, discard handling and backoff publication.
 
 #### Remaining work packages
 
-- [ ] **1. Repeat early capture:** qualify complete early MPDUs at multiple
-  sizes in both badge roles; retain failed trials and identify capture losses.
+- [ ] **1. Qualify early-capture reliability:** repeat complete 554-byte bodies
+  in both roles; qualify bounded RXE flush/rearm recovery and isolate HT-only misses,
+  with independently confirmed multi-body stimulus.
 - [ ] **2. Qualify aggregate handoff:** repeat two-body capture in both badge
   roles and size orders; verify terminal, bad-frame and abort recovery.
 - [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot

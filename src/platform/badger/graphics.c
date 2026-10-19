@@ -24,7 +24,8 @@ static const uint8_t digits[10][7] = {
     {14,17,17,14,17,17,14},{14,17,17,15,1,1,14},
 };
 
-static uint8_t glyph(char c, uint32_t row) {
+uint8_t badger_gfx_glyph_row(char c, uint32_t row) {
+    if (row >= 7u) return 0u;
     if (c >= 'A' && c <= 'Z') return letters[(uint32_t)(c - 'A')][row];
     if (c >= '0' && c <= '9') return digits[(uint32_t)(c - '0')][row];
     if (c == '-') return row == 3u ? 14u : 0u;
@@ -64,7 +65,7 @@ void badger_gfx_text(badger_canvas_t *canvas, int32_t x, int32_t y,
     if (scale == 0u || scale > 4u) return;
     for (uint32_t i = 0; text[i] != '\0' && x < BADGER_GFX_WIDTH; ++i) {
         for (uint32_t row = 0; row < 7u; ++row) {
-            uint8_t bits = glyph(text[i], row);
+            uint8_t bits = badger_gfx_glyph_row(text[i], row);
             for (uint32_t column = 0; column < 5u; ++column) {
                 if ((bits & (1u << (4u - column))) != 0u) {
                     badger_gfx_rect(canvas, x + (int32_t)(column * scale),

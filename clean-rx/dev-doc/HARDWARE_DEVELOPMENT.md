@@ -232,6 +232,18 @@ encrypted reception or WPA2 support.
      bound faulted while RXCTL was still `0x0804`; a later hardware sample
      confirmed completion (`0x0800`). That startup repair changes only the
      counter load; completion/fault branches and the ARM deadline remain intact.
+   - The separate post-frame rearm still has its original 255-poll bound
+     and unchecked fall-through into event draining. The default-disabled
+     strict observer control now preserves the exact RXCTL decision operand
+     and disables automatic RX-fault restart. Its earlier false reason-3
+     faults came from a conditional-drain fall-through bug, since corrected.
+     See the [decision-level investigation](HT20_IMPLEMENTATION.md#rearm-decision-capture-and-conditional-drain-correction-2026-10-19).
+   - The separately gated `CLEAN_RX_HT_REARM_RECOVER` passive experiment
+     preserves the first busy fault, drains ext3/5/6/11/13/14 and reissues
+     the original flush once per boot. Further busy faults stop explicitly;
+     no PSM restart or diagnostic reset is allowed. Its additional
+     `CLEAN_RX_HT_REARM_INJECT` control changes only a latched decision,
+     never hardware RXCTL. Neither gate changes ordinary RX.
 2. **PLCP Detection & Prefix Copy (`event_start` -> `prefix_seen`):**
    - The original one-shot idle wait expires after 64 * 65,535 polls with
      reason 6. For live hardware DCF only, an expiry hook restarts the idle

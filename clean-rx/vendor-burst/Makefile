@@ -10,6 +10,7 @@ REF_CFLAGS := $(RP2350_CFLAGS) -DLIVE_USB_FIRMWARE -DLIVE_USB_CLEAN \
 REF_COMMON := $(REF_DIR)/main.c $(ARCH_DIR)/start.c $(ARCH_DIR)/bootrom_reboot.c \
 	src/usb/live_usb_control.c src/usb/live_usb_hw.c $(SHARED_DIR)/usb_report.c \
 	$(TOOLS_DIR)/diagnostics_logic.c $(PLATFORM_DIR)/wifi_board.c \
+	$(PLATFORM_DIR)/display.c $(PLATFORM_DIR)/graphics.c \
 	$(PLATFORM_DIR)/wifi_pio.c $(RADIO_DIR)/wifi_gspi.c $(RADIO_DIR)/wifi_probe.c \
 	$(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
 REF_VENDOR := $(REF_COMMON) $(REF_DIR)/vendor.c $(WIFI_FW_SOURCES) $(RADIO_DIR)/wifi_assets.c
@@ -22,8 +23,20 @@ REF_HEADERS := $(wildcard $(REF_DIR)/*.h clean-rx/src/*.h clean-rx/badge/loader.
 	$(SHARED_DIR)/*.h src/usb/*.h $(RADIO_DIR)/*.h $(PLATFORM_DIR)/*.h $(ARCH_DIR)/*.h)
 VPATH := $(sort $(dir $(REF_VENDOR) $(REF_OBSERVER)))
 
-.PHONY: reference reference-test reference-controller reference-force
+.PHONY: reference reference-early reference-phy reference-window reference-rearm reference-recover reference-recover-test reference-test reference-controller reference-force
 reference: $(REF_BUILD)/vendor.uf2 $(REF_BUILD)/observer.uf2 $(REF_BUILD)/collector
+reference-early:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1' reference reference-test
+reference-phy:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_PHY_SNAPSHOT=1' reference reference-test
+reference-window:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1' reference reference-test
+reference-rearm:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1' reference reference-test
+reference-recover:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1' reference reference-test
+reference-recover-test:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_INJECT=1' reference reference-test
 reference-controller:
 	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' all test
 
@@ -74,7 +87,7 @@ $(REF_BUILD)/collector: $(REF_DIR)/collector.c $(REF_BUILD)/build_id.h $(REF_HEA
 		$$(pkg-config --libs libusb-1.0) -o $@
 reference-test: $(REF_BUILD)/protocol_test
 	$(REF_BUILD)/protocol_test
-$(REF_BUILD)/protocol_test: $(REF_DIR)/protocol_test.c $(REF_HEADERS)
+$(REF_BUILD)/protocol_test: $(REF_DIR)/protocol_test.c $(REF_HEADERS) $(REF_BUILD)/build_id.h
 	@mkdir -p $(dir $@)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) -fsanitize=address,undefined \
-		$< $(TOOLS_DIR)/diagnostics_logic.c -o $@
+		$< $(TOOLS_DIR)/diagnostics_logic.c $(PLATFORM_DIR)/graphics.c -o $@

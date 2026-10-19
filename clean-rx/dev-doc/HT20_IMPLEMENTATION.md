@@ -1904,6 +1904,191 @@ Their SHA-256 values are respectively
 and `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`.
 Final serial-targeted checks confirm both badges remain in BOOTSEL.
 
+### One-shot RXE event-drain/reflush experiment (2026-10-19)
+
+The [genuine exhausted `RXCTL = 0x804` decision](#fixed-rf-comparison-and-a-genuine-exhausted-rearm)
+motivates a separate,
+default-disabled `CLEAN_RX_HT_REARM_RECOVER` control. It requires the strict
+passive window observer; ordinary RX, TX and advertised capabilities are
+unchanged. On the first busy decision, the PSM copies decision words 1..15
+to SHM `0x7c1..0x7cf`, then commits `0x7c0 = 2` last. This constant nonzero
+commit also bounds recovery to one attempt even if the main sequence wraps.
+The record retains the exact busy operand, remaining wait, later RXCTL,
+GoodFCS sample, RX epoch and counters. It is never overwritten by the retry.
+
+The PSM clears the transient reason, acknowledges only ext3/5/6/11/13/14
+and jumps to the original RXCTL flush at PC274. That reloads the strict
+65,535-poll bound. A second busy decision takes the original fatal path;
+there is no PSM restart, counter reset or unlimited retry. This tests whether
+stale receive conditions plus a fresh flush can restore progress; it does
+not establish which external condition, if any, causes a physical timeout.
+
+`CLEAN_RX_HT_REARM_INJECT`, also default-disabled and dependent on recovery,
+forces bit 2 only in the first **latched SHM decision operand**, not hardware
+RXCTL. It makes branch execution measurable without waiting for an
+intermittent timeout. A forced first fault may therefore retain `0x804`
+while later hardware RXCTL is `0x800` and the wait counter is not exhausted.
+These controls must never be counted as natural busy-timeout recoveries.
+
+ABI18/WND7 adds a separate 32-byte immutable first-fault block to the
+96-byte window header and a first-fault commit to each 160-byte sample.
+There are at most 35 samples. Recovery modes are 0 (strict/no recovery),
+1 (natural recovery enabled), and 3 (injected); mode 2 is invalid.
+The C3 independently checks the main and first-fault publications.
+A committed first-fault block does not make error-cleanup mailbox data
+coherent, nor make separately cached fields simultaneous hardware state.
+
+Native tests execute the emitted instruction words across the existing
+2,048 busy/delay/event cases and all 64 combinations of the six drained
+events, with both successful and persistently busy retries. They verify
+first-fault immutability, explicit second failure, selective event clearing,
+unchanged unrelated events and later RXCTL changes after decision latch.
+Protocol tests cover recovery modes, disabled payloads and publication
+boundaries. Display timing/cancellation and existing graphics-client tests
+also pass with ASan/UBSan.
+
+The RP2350 streams the existing project-owned glyphs directly to the TFT,
+without a framebuffer. Role, operation and experimental mode appear before
+radio start; stopped/error state, capture count and first-fault RXCTL appear
+after observer stop. There are no active-observer display updates or added
+C3 display messages. Physical screen appearance is not independently
+verified; `RADIO STOPPED` is not a qualification indicator.
+
+The first four attempted injected controls (`injected{256,512}-role{0,1}-r0`)
+failed before USB discovery, with no RF reports. The newly added main-loop
+error conversion had treated normal pre-configuration `ref_service() = 0`
+as fatal. Restoring the existing pre-configuration polling behavior fixes
+this; display-initialization/clear cancellation still aborts explicitly.
+These failed attempts remain archived, separate from subsequent RF trials.
+
+#### Injected execution controls
+
+After the USB fix, four fixed mode-3 trials with RF wrapper `6d4ba8e4`
+exercise recovery at both sizes in both roles. All retain a committed first
+fault (`0x804`, later hardware `0x800`, nonzero wait remaining), then a
+successful main decision (`0x800`, outcome 1). First-fault commit 2 is
+already visible in the first timeline sample and remains unchanged.
+Capture counts continue without PSM restart or controller error:
+
+| Trial | First to last sampled captures | Final HT starts |
+| --- | --- | --- |
+| `injected-fixed256-role0-r0` | 2 to 311 | 2 |
+| `injected-fixed256-role1-r0` | 1 to 209 | 4 |
+| `injected-fixed512-role0-r0` | 9 to 557 | 0 |
+| `injected-fixed512-role1-r0` | 7 to 563 | 5 |
+
+All four reconcile frozen capture/post/drop/consume accounting, with no
+pending frames. None qualifies an early body. The zero-HT role-0 512-byte
+trial still captures 557 frames and ends with a successful rearm decision;
+HT-only misses therefore remain a separate failure category, not evidence
+that every miss is a persistent RXE flush timeout. Three final C3 cached
+snapshots are incoherent; this does not invalidate the separately committed
+first-fault records or frozen accounting, and is not relabelled as coherence.
+These trials establish real PSM branch execution and subsequent receive
+progress, **not natural-timeout recovery qualification**.
+
+#### Strict controls and USB readiness losses
+
+Four fixed 512-byte controls use the same screen-enabled wrapper,
+`9c377cb3`, with recovery disabled. Both role-0 trials finish without
+controller fault and see HT, but retain no qualifying early body.
+Both role-1 trials genuinely exhaust the wait before the first window
+sample: they stop after 1 and 3 captures respectively. Their committed
+decisions have sequences 4 and 8, exact/later RXCTL `0x804`, zero wait
+remaining, outcome 2, GoodFCS sample 0 and no restart. RXE counts are
+984/982, status1 `0x4000`, status2 `0x4140`; both report controller
+error `0x88`, SHM `0x602 = 3`. These are real timeouts, not the corrected
+conditional-drain fall-through. Neither faulted frozen capture is counted
+as a successful delivery export.
+
+All six immediately following natural-mode invocations fail their bounded
+BOOTSEL readiness checks before loading or collecting RF evidence.
+Their logs remain under `natural{256,512}-role*-r*`; there are no matching
+RF JSON reports to count. A further 30-second serial-targeted readiness
+check also fails. IORegistry identifies the cause: Google Chrome exclusively
+owns badge A's BOOTSEL USB connection. This is a host-access failure,
+not radio evidence or slow PSM recovery. The browser is not terminated.
+After the user releases the badges, both serial-targeted checks succeed
+and the unchanged six-trial matrix runs with fresh `natural-ready*` prefixes,
+not by overwriting failures or retrying an RF trial until it qualifies.
+
+A concurrent attempt to restore the accessible badge B aborts at 87% with
+a picotool connection error during this intervention. It is not counted
+as a completed restoration; a complete rewrite and independent readback
+are required after the remaining trials. Fresh full original files remain
+unchanged.
+
+#### Natural timeout result and first both-role 554-byte proofs
+
+The six accessible trials use natural mode 1 and RF wrapper `edd21932`.
+Five complete radio capture without controller error or PSM restart.
+One activates the recovery on a **real** exhausted busy condition:
+`natural-ready256-role1-r0`. Its immutable first fault retains RXCTL
+`0x804`, wait remaining 0, RXE count 982, status1 `0x4000`, status2
+`0x4140`, GoodFCS 0, bad-FCS count 1 and RX epoch 2.
+
+The retry **does not recover** this hardware state. The later main decision
+is sequence 6, RXCTL still `0x804`, remaining 0 and outcome 2; TSF-low
+advances from 19961 to 25696 while RXE count, RX epoch and bad-FCS count
+remain unchanged. First-fault commit 2 is already present at the first
+timeline sample. All 30 samples retain one captured frame, controller
+error `0x88`, reason 3 and zero PSM restarts. The first fault and subsequent
+fatal decision survive separately. This is one physical activation and
+one failed recovery, not a successful hardware fix. Event acknowledgement
+plus another identical flush is insufficient for this observed state;
+more waiting and a software-only execution control cannot establish a
+remedy. A stronger bounded RXE/PHY reset or revised abort sequence needs
+independent hardware grounding and separate qualification before use.
+The same 982-byte RXE count occurs in a 256-byte requested-size trial,
+with zero HT starts and an already-faulted first sample. Together with
+the strict controls, this argues against attributing these timeouts
+specifically to the requested 512-byte stimulus or an observed HT aggregate.
+
+Two of the four natural 512-byte trials now qualify complete **554-byte**
+nonterminal early MPDUs, one in each role:
+
+| Trial | Prefix / RX epoch | MPDU / HT PSDU bytes |
+| --- | --- | --- |
+| `natural-ready512-role0-r0` | 2 / 121 | 554 / 1118 |
+| `natural-ready512-role1-r1` | 1 / 24 | 554 / 1118 |
+
+An independent bitwise CRC32 verifies each full body. Nonce-derived
+transmitter address, data-frame type, epoch/prefix linkage, matching
+HT-SIG bytes, HT-SIG CRC and nonterminal geometry are checked separately:
+the first delimiter plus padded body is 560 bytes, strictly below the
+1118-byte PSDU. Both collector runs also retain vendor Block ACK activity
+and accounted prefix exits. No recovery activates in either proof trial,
+so the improved capture result is **not attributable to recovery**.
+These are first both-role proofs at this size, not repeated reliability,
+second-body delivery or production aggregate qualification.
+
+Across the fixed RF matrix there are 14 actual trials (4 injected,
+4 strict, 6 natural), excluding the four pre-enumeration failures and
+six host-readiness failures. All 84 raw reports independently pass
+length and bitwise CRC checks. All 430 WND7 rows are retained with zero
+capacity loss; 210 cached publications are coherent and 220 explicitly
+incoherent. Eleven successful frozen captures reconcile captured,
+posted, dropped, consumed and pending counts. Three real faulted captures
+remain explicit errors rather than successful delivery summaries.
+The default-disabled recovery remains experimental; D2, recovery
+reliability, repeated 554-byte capture and HT-only miss isolation remain
+open. Normal HT advertisement stays disabled.
+
+Fresh full backups for this campaign are
+`build/clean-rx/rearm-recovery-investigation/original-{A,B}.bin`,
+independently matched to the preceding verified originals before testing.
+After all trials, both complete flashes are restored and independently
+reread as `restored-{A,B}-full.bin` in the same directory. Each readback
+is exactly 16777216 bytes, byte-compares with its fresh original and
+matches the verified SHA256:
+
+- A: `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`.
+- B: `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`.
+
+The final complete B rewrite supersedes the interrupted 87% attempt;
+both final load/verify operations and independent readbacks succeed.
+Serial-targeted final checks confirm both badges in BOOTSEL.
+
 ### Alternate receive-buffer control (2026-10-19)
 
 The next bounded control tests whether immediately reusing the first
@@ -1979,6 +2164,658 @@ Independent `vendor-alt-buffer/restored-A-full.bin` and
 each contain 16777216 bytes and byte-compare with the fresh full backups.
 The SHA-256 values match the preceding original-image hashes
 (`8cda7a00...23628` for A and `bc3f972d...21e2` for B).
+Final serial-targeted checks confirm both badges remain in BOOTSEL.
+
+### Early-capture causes and hardware controls (2026-10-19)
+
+This investigation separates an **observed eligible early-body opportunity**
+from a trial that merely contains A-MPDU-format headers or vendor BA activity.
+The latter can contain only singleton bodies. It also keeps early retention
+separate from the still-unqualified next-body handoff.
+
+#### Retrospective opportunity audit
+
+The 30 full captures in `vendor-receive-state/`, `vendor-handoff-state/`
+and `vendor-alt-buffer/` contain 182 retained prefix records:
+
+- 23 bounded multi-body good-hint candidates occur across 14 trials.
+  All 14 trials retain their first eligible candidate.
+- Nine subsequent candidates are intentionally ignored after immutable
+  first-multi retention, not failed copies.
+- 127 records are terminal-only singleton A-MPDU-format receptions without
+  a nonterminal good hint. Other records include singleton good hints and
+  bodies outside the diagnostic storage bound.
+
+Thus the earlier unsuccessful-trial count was not a retention-loss rate.
+This is an audit of the bounded saved log, not all transmissions: its
+16-record limit and overflow can hide later opportunities.
+
+The collector now reports `early_capture_reason` for each record, including
+unsupported MCS, missing nonterminal hint, singleton geometry, storage cap,
+inconsistent body geometry, first-multi retention and deliberately ignored
+later candidates. Singleton classification checks both lower and upper
+delimiter/padding bounds; a body larger than its PSDU is not a singleton
+success. An otherwise eligible unretained record remains an explicit
+investigation result, not a silently successful trial.
+
+#### Size-isolated, receive-only campaign
+
+`reference-early` enables HT RX, the passive observer and early save,
+**without next-body advance**. Its controller byte-compares identical to
+the previously tested save-only image. No M3, PSM, PHY/radio initialization
+or clean TX behavior was changed for this investigation.
+
+The optional runner selector submits 128 equal-size Ethernet fixtures:
+128/256/512 bytes, corresponding to measured 170/298/554-byte protected
+MPDUs. The profile is nonce/session-bound. Focused qualification requires
+the exact requested early length, a genuine nonterminal multi candidate,
+fresh transmitter/prefix/epoch correlation, independently valid complete
+FCS, vendor BA activity and accounted exits. It does not demand two
+unrelated ordinary F2 sizes or advance to a second body.
+
+All evidence is under `build/clean-rx/early-capture-causes/`:
+
+| RF build | Trial prefixes | Purpose | Qualifying trials |
+| --- | --- | --- | ---: |
+| `db3cd284`, ABI 13 | `size{128,256,512}-role{0,1}-r{0,1}` | Constant-size baseline; stopped digital hardware endpoints | 7/12 |
+| `1a2ea0e4`, ABI 13 | `prepared512-role{0,1}-r{0,1,2}` | Eight prepared fixtures; measured submission intervals | 1/6 |
+| `1a2ea0e4`, ABI 13 | `prepared256-role1-r{0,1,2}` | Repeat the role with an earlier zero-HT boot | 1/3 |
+| `17612e0b`, ABI 14 | `stopped256-role1-r{0..5}`, `stopped256-role0-r{0,1}` | Actual stopped PSM state, not normalized historical mailbox state | 8/8 |
+
+Role 0 is vendor B / observer A; role 1 is vendor A / observer B.
+A is `08DA26F86E57F5EA`, B is `9BBF88DD17D66E7D`.
+All runs used the approved AP's channel 6, requested MCS0 and clean TX off.
+Exact RF collectors, images and build identities are archived separately.
+Final native-validated builds `86101c9a` (early-only) and `a24b1a8c`
+(default advance) additionally exclude unused preparation storage from
+the advance build; they are not additional RF trials. The default controller
+byte-compares identical to the prior retained `8bbed93e` controller.
+
+Across all 29 trials:
+
+| Ethernet fixture / early MPDU | Role 0 | Role 1 |
+| --- | ---: | ---: |
+| 128 / 170 bytes | 2/2 | 2/2 |
+| 256 / 298 bytes | 4/4 | 8/11 |
+| 512 / 554 bytes | 1/5 | 0/5 |
+
+All 17 qualifying early bodies independently pass a separate bitwise CRC32
+implementation, fresh nonce-derived TA, exact size, epoch and prefix checks.
+All 116 raw phase files have the expected 5952-byte length and valid report
+CRC. The 257 retained headers contain 56 logged multi candidates:
+17 retained first candidates and 39 intentionally ignored later candidates.
+The remainder comprises 152 terminal singleton records, 20 singleton good
+hints, 28 non-A-MPDU records and one invalid HT-SIG.
+No logged eligible first-multi retention failure was found.
+All 59 old/new full captures also pass the native/sanitized complete
+capture/post/drop/consume guard. Explicit drops and pending frames are not
+counted as successful delivery.
+
+The 12 nonqualifying trials divide into nine without a logged eligible
+multi-body opportunity and three with **zero HT starts**. All three
+zero-HT cases are role 1: `size256-role1-r0`,
+`prepared512-role1-r1`, `prepared256-role1-r2`.
+They deliver only 4/4/2 ordinary frames, with no transport drops or pending
+frame, and no host resync/stall/retry state. Their bad-FCS counters are
+64/98/70, and the controller records over two million receive polls.
+This distinguishes them from an early-copy rejection and demonstrates
+some bad-frame processing; it does not prove continuous receive readiness.
+The subsequent eight stopped-state controls all qualify, so they provide
+healthy comparison data, **not** a reproduced zero-HT state or a fix.
+
+#### Submission pacing is measured, not aggregation proof
+
+At 512 bytes, the baseline's shortest host write is 836 us and a complete
+128-frame burst takes about 137.8 ms. Preparing just the first eight frames
+and prefix digests before submission removes repeated payload/digest work
+from that part of the burst, using 8224 bytes of focused vendor BSS.
+Measured prepared first-eight intervals are 6771..6783 us, versus
+8376..8385 us for the following eight generated frames; complete bursts
+take 136090..136966 us. Minimum write time remains 836 us.
+
+A 554-byte MCS0 HT20 body has nominal PHY airtime around 724 us before
+contention/response overhead. Submission can therefore limit queue buildup,
+but the vendor/AP may also batch, retry or defer traffic. One prepared
+role-0 trial retains a complete valid 554-byte early body, proving the
+save-only path works beyond the advance profile's 480-byte cap.
+This is neither repeatable in both roles nor proof that preparation caused
+that capture; the encrypted body is not attributed to one of the first
+eight submitted fixtures. No unsupported vendor aggregation-control write
+or speculative bus-clock increase was used.
+
+#### Hardware and calibration boundaries
+
+The [board record](../../docs/cyw43/hardware.md) identifies the RM2 module,
+always-on 3.3-V radio supply and shared WLON/BTON on GPIO23. GPIO24 carries
+data/IRQ, GPIO25 CS and GPIO29 the host bus clock. GPIO41 switches a
+peripheral/display rail, not the radio supply. The configured 37.4-MHz
+RF reference is not the host bus clock or an oscillator measurement.
+The [local CYW43439 datasheet](../../pimoroni/Infineon_CYW43439_DataSheet_v03_00_EN-3074791.pdf)
+is not a D11/LCN20 register-programming specification.
+
+ABI 13 snapshots six raw words before receive and after explicit controller
+stop, only while selector ownership is safe: ChipCommon ID, ChipCommon
+clock control/status, D11 clock control/status and PMU status/resources/
+pending. Every before/after vector in all 29 trials is identical:
+`[356886959,720960,118161986,62,2130329079,0]`.
+Chip word `0x1545a9af` identifies CYW43439, revision 5, package code 4;
+the separately established D11 revision is 39. Neither is the RP2350's
+A4 revision.
+
+The existing [calibration record](../../docs/cyw43/calibration.md) and
+initialization code show readiness/completion checks for PLL, RC, VCO and
+DC. These are not an analog-quality test. The saved RC values vary by
+badge and overlap successful and failed reception. In older captures,
+the exact tuple `[4871,4292,9,5,255,4095]` occurs in both zero-HT `alt-r5`
+and HT-positive `fifo-r3` with ten HT starts. Consequently these reported
+values cannot alone identify a bad calibration. The all-ones DC values
+are completion words checked by the initialization predicate, not measured
+residual DC offsets.
+
+ABI 14 additionally preserves raw D11 PSMDEBUG and actual SHM
+`0x600..0x60b` after stop. This avoids mistaking the controller's normalized
+historical mailbox state for the actual final state. PSMDEBUG remains
+unmasked; one stopped sample is not a retired-PC or continuous stuck-state
+trace. These reads do not touch PHY/radio selectors or change the receive
+timing path.
+
+| Possible cause | What this investigation establishes | What remains |
+| --- | --- | --- |
+| Incorrect opportunity denominator | Singleton receptions and immutable later-candidate policy explain many apparent missing copies | Bounded logs do not establish all on-air opportunities |
+| Wrong size/admission profile | Save-only admits 554 bytes; advance remains capped at 480 | Repeat larger early bodies in both roles |
+| Failed first-body copy | All 17 observed first eligible candidates are fresh and FCS-valid | No general lossless/rate threshold is qualified |
+| F2/USB delivery loss | Full accounts reconcile; explicit drops remain visible; zero-HT trials have no final backlog/drop | Endpoint accounting does not exclude transient receive inhibition/backpressure |
+| Cold PHY/calibration or receive state | Zero-HT is upstream of recorded HT starts, not a rejected saved body; reported calibration tuples do not separate outcomes | Reproduce a zero-HT boot with the actual stopped-state probe; compare controlled receiver initialization |
+| Badge-specific RF/power/clock problem | Both badges work with vendor firmware and both clean roles have valid early captures; digital endpoints agree | Rail ripple, RF-reference jitter, antenna/desense and transient gating are not physically measured; roles also couple transmitter and placement |
+| Next-body FIFO/copy context | Early-only success does not exercise advance; earlier alternate-buffer failures remain separate evidence | D2 package 2 remains open |
+
+Do not alter RF tuning or declare a defective badge from these observations.
+The next discriminating control is a zero-HT reproduction with actual
+stopped PSM state, followed by controlled receiver-initialization and
+physical-position comparisons. Independent air capture is needed to
+distinguish absent multi-body stimulus from missed RF opportunities;
+physical rail/reference measurements are needed for analog claims.
+Package 1 remains open for reliability/zero-HT diagnosis, and HT station
+advertisement remains disabled.
+
+Both fresh complete original images were preserved before the campaign
+and compared with the previously verified originals. After all 29 trials,
+both full flashes were restored and independently reread as
+`early-capture-causes/restored-A-full.bin` and
+`early-capture-causes/restored-B-full.bin` under `build/clean-rx/`.
+Each 16777216-byte readback byte-compares with its fresh backup and has
+the expected SHA-256:
+
+- A: `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`
+- B: `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`
+
+Final serial-targeted device checks confirm both badges are in BOOTSEL.
+Both final profiles pass controller tests and native ASan/UBSan tests; all final
+ELFs have no undefined symbols, runner syntax and whitespace checks pass,
+and the runner's invalid-size rejection and collector's advance-build
+focused-profile rejection precede their respective USB operations.
+
+### Zero-HT reproduction and PHY-control comparison (2026-10-19)
+
+The follow-up preserves evidence under
+`build/clean-rx/early-capture-followup/`. It completes **20 RF trials**:
+ten baseline trials with `86101c9a`/ABI 14, then ten opt-in PHY-control
+trials with `02242390`/ABI 15. Two additional baseline role-1/512 attempts
+fail BOOTSEL readiness and are retained separately, not counted as RF
+failures or submitted bursts.
+
+The baseline reproduces the previously missing actual stopped-state
+evidence. Four complete trials have zero HT starts:
+
+| Trial | Observer | Ordinary F2 deliveries | Bad-FCS count | Actual SHM `0x601` | Raw PSMDEBUG |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `baseline256-role1-r0` | B | 4 | 62 | 3 | 3637906 |
+| `baseline256-role1-r6` | B | 4 | 88 | 11 | 3571880 |
+| `baseline512-role0-r1` | A | 818 | 51 | 3 | 98958 |
+| `phy256-role1-r4` | B | 2 | 69 | 3 | 2392718 |
+
+These are **not one established failure mechanism**. The three B cases
+have very low ordinary reception with ongoing bad-frame processing.
+The A case delivers 818 ordinary frames despite no recorded HT start.
+Its first two ordinary samples independently pass FCS. Zero HT starts
+therefore must not be described as a dead receiver or, now, a B-only
+symptom. Vendor counters confirm all four submitted 128 frames, received
+104..124 BAs and had zero TX-error/TX-failure deltas; one has one retry.
+None has a final F2 backlog/drop or host resync/stall/retry state.
+
+Actual final PSM state/debug does not distinguish these cases from
+HT-positive reception. For example, raw debug **3637906** also occurs in
+`baseline256-role1-r4` with 18 HT starts; state **11** occurs in the earlier
+qualifying `stopped256-role1-r5`. Raw debug **2392718** also occurs in the
+HT-positive baseline repeat 7. These comparisons do not require an assumed
+PC mask. They exclude a unique terminal-state signature, not every
+transient or an unobserved in-window stall.
+
+#### Opt-in PHY endpoints
+
+`reference-phy` adds only `CLEAN_RX_HT_PHY_SNAPSHOT=1` to the early-only
+profile. The default-disabled controller probe reads six existing
+initialization/control registers using the established **16-bit PHY
+selector/read** helpers. It must not use a 32-bit write to the adjacent
+PHY address/data pair: that is a packed PHY configuration write, not a
+read-selector operation.
+
+The Cortex-M3 records the controls before MAC RX enable and after MAC/PSM
+disable, before the stop path reapplies TX inhibit. There is no per-frame
+sampling, RP2350 access to a live PHY selector, PHY configuration write,
+calibration retry or clean transmission. The 32-byte commit/phase/value
+block fits the explicitly asserted SRAM gap `0x203e0..0x203ff`; the host
+reads it only after `RX_DONE`, into trace bytes 872..903. ABI 15 requires
+the expected magic and both committed phases when enabled; disabled
+profiles report `enabled:false` and require the reserved bytes to be zero.
+
+All ten instrumented trials, **including the low-RX zero-HT boot**, have
+identical before/after controls:
+
+| PHY register | Raw value |
+| --- | ---: |
+| `0x440` | `0x3e01` |
+| `0x44a` | `0x0080` |
+| `0x4b0` | `0x0080` |
+| `0x43a` | `0x0040` |
+| `0x4b1` | `0x0004` |
+| `0x439` | `0x0bd0` |
+
+In particular, the source's PHY-deaf bit (`0x440` bit 0 clear) is not set
+and its radio-reset bit (`0x44a` bit 8) is clear at both endpoints.
+Differences in these sampled latched controls do not explain the failed
+boot. This does not measure dynamic AGC, OFDM/HT acquisition, antenna gain,
+analog calibration quality, rail noise or transient resets.
+
+All four zero-HT trials also have the same stopped clock/PMU vector as
+HT-positive trials. Completion/calibration values remain nonseparating.
+Do not replace these findings with a speculative PHY reset or calibration
+write, or hide the failure by automatically retrying until a good boot.
+
+#### Capture and infrastructure accounting
+
+The 189 saved headers contain eight logged multi candidates: three retained
+first candidates and five deliberately ignored later candidates.
+The three retained 298-byte bodies independently pass bitwise CRC32,
+fresh nonce-derived TA, prefix, epoch and exact-length checks.
+The other records are 141 terminal singletons, 31 singleton good hints
+and nine non-A-MPDU headers. No logged first eligible retention failure
+is observed. The four complete 512-byte fixture trials produce no retained
+554-byte early body; finite logs and overflow still prevent a complete
+on-air opportunity census.
+
+All 80 raw phase reports have the expected 5952-byte length and independent
+report CRC. Full delivery accounting passes for all 79 preserved old/new
+captures under ASan/UBSan.
+
+After the last baseline role-0 trial, A disappears from both BOOTSEL and
+the live-report USB interface. A serial-targeted software BOOTSEL request
+cannot find it. The user reconnects both badges in BOOTSEL, after which
+the instrumented cohort completes. This is a separate USB/reboot-transition
+failure, not proof that a cable caused the preceding RF miss. The reconnect
+also prevents treating between-cohort success differences as a controlled
+effect of instrumentation or fixed physical placement.
+
+Final native-only identities are `8736ed06` (PHY probe), `a3d7caa4`
+(early-only) and `e7fa68cc` (default advance). The additional commit/range
+tests do not change the RF-tested PHY controller. The disabled early-only
+and advance controllers byte-compare with their preceding images, and
+the ordinary non-observer controller remains byte-identical too.
+All three profiles pass controller and native/sanitizer tests.
+
+The next discriminating measurements are **burst-window** receive readiness
+and PHY-error activity, rather than only final state or totals over the
+1.2-second drain; safe comparisons of OFDM/HT acquisition state for low-RX
+boots; and independently confirmed multi-body stimulus for the 554-byte
+case. The then-reported 836-us minimum 512-byte host write was in raw TIMER0
+counts, not calibrated microseconds; see the correction below. Submission
+speed remains worth testing separately from receiver initialization. Neither
+a tuning fix nor a physical hardware defect is established.
+
+Both complete original flashes were restored after this follow-up campaign.
+Independent 16777216-byte readbacks at
+`build/clean-rx/early-capture-followup/restored-{A,B}-full.bin`
+byte-compare with the fresh originals and match their verified SHA256 hashes.
+Serial-targeted checks confirm both badges remain in BOOTSEL.
+
+### Burst-window diagnosis, RXE rearm, and fault recovery (2026-10-19)
+
+**Correction from the subsequent decision-level investigation:** the first
+strict guard had a conditional-drain fall-through bug. Its reason-3 faults
+do not establish that the longer hardware wait failed. The old native model
+incorrectly treated the conditional drain as an unconditional branch.
+See [the corrected guard investigation](#rearm-decision-capture-and-conditional-drain-correction-2026-10-19).
+Original-rearm low-RX/stale-data observations and independently verified
+captured bytes below remain valid.
+
+The next campaign uses fresh complete originals in
+`build/clean-rx/burst-window-investigation/`, independently byte/hash-matched
+to the preceding verified originals before experimental writes.
+Role 0 is vendor B / observer A; role 1 is vendor A / observer B.
+No credentials are included in the images or evidence.
+
+#### Passive window instrumentation and timing correction
+
+Default-disabled `CLEAN_RX_HT_WINDOW=1` publishes cached HT/log/early metadata
+through a seqlock in the existing 32-byte diagnostic gap at `0x203e0`.
+The RP2350 samples this publication, cached receive mailbox, capture count,
+controller errors and direct PSMDEBUG at approximately 100-ms intervals.
+It does not touch the live D11 object or PHY selectors. Phase 3 arms the
+timeline; separate phase 4 exports it after radio power-off without
+overwriting the frozen capture report. Capacity is 36 samples with explicit
+overflow accounting; final C3 cleanup invalidates the publication.
+The PHY endpoint and window profiles cannot share the gap.
+
+The first pilot exposed a measurement error: RP2350 TIMER0 counts were
+labelled microseconds despite the inherited BOOTSEL clock state.
+The application's already existing USB SOF calibration now appears in
+CRC-bound report bytes 40/44. Across the calibrated cohort, about
+15,091..15,290 ticks span 32,000 microseconds, not 15,091..15,290 microseconds.
+ABI 16 converts scalar durations with checked calibration and 64-bit
+arithmetic; bucket boundaries remain explicitly raw ticks. No clock or
+RF configuration is changed. The separate 37.4-MHz RF reference is not
+diagnosed as defective by this observation.
+
+Historical timing such as the previously labelled 836-us minimum
+512-byte write is uncalibrated raw TIMER0 counts. Exact retroconversion
+is not possible without that boot's calibration. New calibrated 256-byte
+minimum writes are 946..958 us; the guarded 512-byte minimum is about
+1771 us, compared with approximately 724-us nominal MCS0 airtime for a
+554-byte MPDU. This constrains queue buildup, but neither proves nor
+excludes aggregation. Existing firmware transport deadlines remain raw
+timer counts; this is measurement correction, not global timebase repair.
+
+#### Failure localized to receive processing, not stopped cores
+
+Four fixed pilot role-1/256 trials include two valid 298-byte early
+multi-body captures and one low-RX zero-HT failure. Eight planned calibrated
+original-rearm trials complete seven RF exchanges: four more valid 298-byte
+captures and another low-RX zero-HT failure. The eighth is a readiness
+failure, retained separately.
+
+In calibrated `timed256-role1-r3`, coherent samples show:
+
+| Elapsed us | Captured | Bad-FCS counter | RXCTL |
+| ---: | ---: | ---: | --- |
+| 14 | 1 | 1 | `0x800` |
+| 100053 | 2 | 4 | `0x806` |
+| 200089 | 2 | 10 | `0x806` |
+| 300111 | 2 | 12 | `0x806` |
+| 2830766 | 2 | 90 | `0x804` |
+
+The cached PLCP remains `403134010882`, RXE count remains 897, and HT
+starts/headers/early identity remain zero. Cortex-M3 polls advance from
+61,440 to 2,318,336 and direct PSMDEBUG changes. This excludes a permanently
+halted C3/PSM core, not every transient stall. The rising bad-FCS count
+can represent recycling of stale events rather than independent on-air
+corrupt frames. A coherent empty pre-burst observer log also excludes a
+previously consumed 16-prefix log as this failure's explanation.
+Pilot `window256-role1-r2` similarly retains four ordinary frames while
+bad-FCS advances from 10 to 93 and RXCTL stays `0x806/0x804`.
+
+An independent audit of all 79 preceding captures finds:
+
+| Capture group | Final RXCTL distribution |
+| --- | --- |
+| 68 HT-positive | 65 at `0x800`, two at `0x802`, one at `0x806` |
+| Eight low-RX zero-HT | Five at `0x804`, three at `0x806` |
+| Three ordinary-RX zero-HT | Three at `0x800` |
+
+Thus the persistent busy/stale-data/no-progress combination is a strong
+lead, but bit 2 alone is not a unique failure detector. HT-positive
+`early-capture-causes/size128-role1-r0` ends at `0x806`, and new healthy
+`timed256-role0-r2` samples `0x804` transiently. Ordinary-RX HT-only misses
+remain a different unresolved class. Prior calibration values also overlap
+healthy boots; no analog hardware defect or tuning remedy is established.
+
+A disappears from USB after the third complete calibrated role-0 trial.
+A serial-targeted software recovery finds no live interface. The user
+reconnects both badges in BOOTSEL. The USB interruption is separate from
+the RF failure; the reconnect prevents fixed-placement causal comparisons
+between the pre/post cohorts.
+
+#### Concrete rearm path and the hidden-restart confound
+
+Decoded original PSM startup and rearm paths differ:
+
+- Startup PC80..87 requests RXCTL `0x14`, waits up to 65,535 polls and
+  explicitly faults with SHM `0x602 = 3` on timeout.
+- Rearm PC274..280 requests the same flush, waits only 255 polls, then
+  silently proceeds to the external-condition drains even if bits 2/4
+  still read busy. It subsequently restores the receive base/limit and
+  returns to the receive loop.
+
+Default-disabled `CLEAN_RX_HT_REARM_WAIT=1` extends the latter bound to
+65,535 and verifies both bits before event draining, using the original
+fault capture path with reason 3 on failure. Native tests execute the
+real instruction words for all relevant bit combinations and completion
+delays `0,254,255,256,4096,65534,65535,65536`. The original disabled image
+is reconstructed byte-for-byte.
+
+The first eight guarded trials all see HT, including a valid 554-byte
+early body in `rearm512-role0-r0`. Four fixed original-rearm reversal
+trials also all see HT, with bad-FCS counts 27..203 and no early bodies.
+Neither cohort reproduces low-RX failure, so this comparison is not proof
+of a repair.
+
+More importantly, guarded bad-FCS counters decrease from one to zero in
+some timelines. The existing non-station controller automatically calls
+`d11_restart_rx_psm()` on PSM fault, resetting those diagnostics.
+Consequently the eight guarded trials test **longer wait plus existing
+fault-triggered restart**, not waiting alone. Their final zero counters
+must not be presented as absence of errors or recovery.
+
+The final strict profile disables that automatic RX-fault restart,
+counts restart attempts, and exports the actual error address/value.
+The separate restart call after an explicit TX/rearm command is not
+reachable in this passive experiment: it boots with TX disabled and
+checks that flag before arming. Other profiles retain existing behavior.
+
+Three fixed `noretry256-role1-r0..2` controls all fail explicitly with
+controller state 255 / error `0x88`, no HT starts and zero recorded restart
+attempts. The next two fixed `fault256-role1-r0..1` controls export SHM
+`0x602` reason **3**, with zero restart attempts, across all 60 retained
+samples. Both have already faulted at the first sample, before the vendor
+burst. Their PSM-latched and later RXCTL are `0x800`, so the busy condition
+is not proved permanent: it can clear between the branch decision and
+fault readout. Snapshot coherence is correctly false after fault cleanup;
+direct error fields are not claimed to be coherent live RX snapshots.
+
+The initial interpretation was that longer waiting alone failed.
+The subsequent conditional-drain correction retracts that interpretation:
+these five faults can be generated by the experimental guard itself.
+They are not a transparent reproduction of the intermittent original-rearm
+failure. The original RXE flush/stale-event lead still needs independent
+qualification. Do not promote the flawed control into normal RX.
+
+#### Evidence, validation, and qualification boundary
+
+The campaign retains 23 completed capture trials, five completed
+deliberately non-restarting fault controls, and one separate readiness
+failure. No failed trial is discarded:
+
+| Prefix/profile | Build | Format | RF exchanges |
+| --- | --- | --- | ---: |
+| `window256-role1-r0..3` | `88aabd0c` | ABI15/WND1, raw ticks | 4 |
+| `timed256-role1-r0..3`, `timed256-role0-r0..2` | `96cb83c4` | ABI16/WND2 | 7 |
+| `rearm256-role1-r0..3`, `rearm256-role0-r0..1`, `rearm512-role{0,1}-r0` | `9d736374` | ABI16/WND3, automatic recovery | 8 |
+| `reversal256-role1-r0..3` | `f1c25d92` | ABI16/WND3, original rearm | 4 |
+| `noretry256-role1-r0..2` | `236d8fa9` | ABI16/WND4, no RX-fault restart | 3 |
+| `fault256-role1-r0..1` | `ce436e87` | ABI16/WND5, actual fault reason | 2 |
+
+Each profile's images, controller, build identity and collector are archived.
+The [experiment README](../vendor-burst/README.md#timer-units-and-current-window-encoding)
+specifies the versioned window layouts. There are 168 raw phase reports:
+140 at 5952 bytes and 28 arm acknowledgements at 64 bytes. Independent
+length/CRC checks pass; all 778 timeline records are retained with no
+capacity loss. Frozen delivery accounting reconciles for the 23 completed
+captures; the five fault controls are not successful frozen captures.
+
+Seven fresh early nonterminal bodies independently pass bitwise FCS,
+nonce-derived transmitter address, epoch and HT-SIG linkage checks:
+six 298-byte bodies (`window` role1 r0/r3; `timed` role1 r1/r2 and role0
+r1/r2), plus the 554-byte guarded role-0 body. The latter is valid byte
+evidence despite the recovery confound, not reliability qualification.
+The 279 retained prefix records classify as seven retained multi candidates,
+six later prior-multi-already-retained cases, 196 terminal single bodies,
+46 single-body good hints, 22 non-A-MPDU and two invalid HT-SIG records.
+No logged first-eligible early-copy failure is demonstrated.
+
+All five final reference profiles and the ordinary controller pass focused
+build/native/ASan/UBSan tests. Ordinary, early, PHY and advance controller
+bytes remain identical to their preceding verified images. The final strict
+controller matches RF build `ce436e87`; final native-only wrapper identities
+and footprints are in the README. No HT advertisement, negotiated aggregate
+operation, physical-hardware remedy, reliability threshold or D2 completion
+is claimed.
+
+Both complete original flashes were restored after the final fault controls.
+Independent 16777216-byte readbacks at
+`build/clean-rx/burst-window-investigation/final-restored-{A,B}-full.bin`
+byte-compare with the fresh originals and match their verified SHA256 hashes.
+Serial-targeted checks confirm both badges remain in BOOTSEL. A transient
+BOOTSEL discovery failure and a rejected readback-option ordering are
+retained in the preservation logs; the corrected final verification passes.
+
+### Rearm decision capture and conditional-drain correction (2026-10-19)
+
+Tracing the strict control's exact instruction flow identifies a software
+defect in that diagnostic, not a newly established hardware defect:
+
+```
+verify RXCTL bit 2 -> fault if set
+verify RXCTL bit 4 -> fault if set
+conditionally acknowledge GoodFCS/ext3 -> original PC281 if set
+fault: reason = 3
+```
+
+When ext3 is absent, the conditional drain falls through into `fault` even
+when RXCTL is `0x800`. In the original image the drain's branch destination
+and its fall-through are both PC281. Appending a fault block immediately
+after the relocated instruction changed this property. The previous native
+rearm interpreter unconditionally assigned the branch target for opcode
+`0x783`, so it could not detect the absent-event path.
+
+The correction inserts an explicit resume jump after the conditional
+acknowledgement. Native execution now models event presence, conditional
+branching and acknowledgement separately, exercises all four ext3/ext6
+combinations across the existing 32 busy-bit / eight delay cases, and checks
+that successful rearm clears only ext3 while faults preserve pending events.
+Each case also runs with live RXCTL clearing after the decision latch, so
+the guard must still use the retained operand rather than the later read
+(2048 modeled executions in total).
+The disabled ordinary/early/PHY/advance behavior is not intentionally changed.
+No speculative drain-order change is made before testing this correction.
+
+The strict profile also retains 16 PSM decision words at SHM `0x7b0..0x7bf`:
+sequence, exact latched RXCTL branch operand, remaining wait count, RXE byte
+count, status1/2, copy length, PHY length, TSF low/high, success/fault outcome,
+later RXCTL, non-clearing GoodFCS event sample, bad-FCS count, RX epoch and
+retained-header count. Both guard tests use the same latched RXCTL value;
+the later read is separately identified. An odd/even PSM sequence protects
+updates; C3 marks a changed sequence invalid during its cached copy at
+`0x20d00`, inside the existing C3 publication. Automatic RX-fault restart
+remains disabled in the strict profile, so a true first fault is preserved.
+This is cached diagnostic evidence, not a simultaneous PHY snapshot.
+
+ABI 17 / WND6 extends the window header from 24 to 64 bytes, leaving the
+36 existing 156-byte rows and 5888-byte transport unchanged. Header words
+24/28 hold enabled/reserved fields; bytes 32..63 hold the last cached PSM
+decision. Disabled profiles require zero decision bytes. Encoding, reserved,
+disabled-data and torn-publication checks are covered by native tests.
+
+#### Fixed RF comparison and a genuine exhausted rearm
+
+Fresh complete originals in
+`build/clean-rx/rearm-decision-investigation/original-{A,B}.bin` are independently
+byte/hash-matched to the preceding verified final readbacks before flashing.
+Four original-rearm 256-byte trials (two per role) run first, followed by eight
+corrected strict trials (two per role/256-byte and role/512-byte cell).
+There are no retry-until-good trials or manual reconnects in this matrix.
+The original-rearm controller byte-matches its previous window image.
+RF wrappers are `0f33f4ae` (baseline) and `5381cb74` (corrected strict).
+
+All four baseline trials finish radio capture without controller fault or
+recorded restart, but none qualifies an early multi-body capture. All see HT.
+Seven corrected strict trials also finish without controller fault or recorded
+restart. Three qualify fresh 298-byte early bodies:
+
+| Trial | Prefix / RX epoch | Independently checked body |
+| --- | --- | --- |
+| `rearm256-role0-r0` | 5 / 47 | 298 bytes |
+| `rearm256-role1-r0` | 6 / 96 | 298 bytes |
+| `rearm256-role1-r1` | 2 / 49 | 298 bytes |
+
+Their complete-body bitwise FCS, nonce-derived transmitter address, HT-SIG
+CRC, epoch/prefix linkage and nonterminal geometry are independently checked.
+The corrected guard resumes with both absent and present GoodFCS events.
+This removes the false pre-burst reason-3 failure; the old native model
+and control are not used as evidence that waiting alone fails.
+
+Crucially, `rearm512-role0-r0` now records a **genuine** exhausted rearm:
+
+| Decision field | Retained value |
+| --- | --- |
+| PSM sequence | 1786, committed/even |
+| Exact RXCTL tested by both guard branches | `0x804` |
+| Wait counter remaining | 0 |
+| Later RXCTL | `0x804` |
+| Decision outcome | 2, busy-bit fault |
+| RXE count / status1 / status2 | 444 / `0x5800` / `0x40` |
+| GoodFCS event sample | 0 |
+| Bad-FCS count / RX epoch / retained headers | 134 / 758 / 1 |
+| Direct controller state / error / SHM reason | 255 / `0x88` / `0x602 = 3` |
+| Recorded PSM restart attempts | 0 |
+
+The last active sample at 2,900,831 us has 610 captured frames. At 2,921,820 us
+the receiver has faulted after 611 frames and one HT start. This is not a
+pre-burst startup fault or an inference from the later stopped RXCTL:
+the decision itself retains the busy operand and exhausted wait counter.
+The PSM record is committed; whole-mailbox C3 coherence is correctly false
+after fault cleanup, not relabelled as a coherent live PHY snapshot.
+One otherwise completed 256-byte trial also has a final cache-coherence
+miss; its independently verified frozen early body does not depend on that
+window snapshot.
+
+This directly establishes that a longer wait can still exhaust under real
+traffic, independently of the corrected software fall-through. It does not
+prove that every historical zero-HT case has this cause, nor establish why
+RXCTL bit 2 remains busy. Faults after hundreds of frames and transient
+healthy busy-bit samples argue against diagnosing a simple permanently
+broken radio. Preserve this first-fault record when testing one-shot
+event-drain/flush recovery; then compare fixed controls and repeat recovery
+under load before changing normal RX.
+
+No 554-byte early body qualifies in the four corrected 512-byte trials.
+Three finish without controller fault; the fourth is the genuine busy
+timeout above. A stronger independently confirmed multi-body stimulus is
+still needed, separately from receiver recovery. The four baseline plus
+seven completed strict captures retain 68 classified prefixes: 36 terminal
+single bodies, six single-body good hints, three retained multi candidates,
+one later prior-multi-already-retained, 20 non-A-MPDU, one unsupported early
+MCS and one invalid HT-SIG. The faulted trial's one header is visible only
+in cached metadata, not miscounted as a successfully exported frozen log.
+
+All 72 raw phase reports independently pass bitwise CRC and length checks:
+60 full 5952-byte reports and 12 64-byte arm acknowledgements. All 360
+window rows are retained without capacity loss. Eleven successful frozen
+captures reconcile controller/post/drop/consume accounting, including
+explicit drops and permitted pending frames; the faulted capture remains
+an error, with no synthetic successful readout.
+
+All five final reference profiles and the ordinary controller pass builds
+and focused native/ASan/UBSan tests. Ordinary, early-only, PHY, advance and
+original-rearm window controllers remain byte-identical to their preceding
+verified images. The corrected strict controller matches RF `5381cb74`;
+final native wrapper identities and measured footprints are in the README.
+The strict diagnostic remains default-disabled. Neither recovery reliability,
+554-byte repeatability, HT-only misses, normal HT advertisement nor D2
+completion is claimed.
+
+Both complete original flashes were restored after this fixed matrix.
+Independent 16777216-byte readbacks at
+`build/clean-rx/rearm-decision-investigation/restored-{A,B}-full.bin`
+byte-compare with the fresh originals and match their verified SHA256 hashes.
 Final serial-targeted checks confirm both badges remain in BOOTSEL.
 
 ### Remaining D2 work

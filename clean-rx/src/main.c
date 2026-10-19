@@ -19,6 +19,35 @@
 #define DCF_TRACE ((volatile clean_dcf_trace_t *)CLEAN_DCF_TRACE_ADDR)
 #define HT_RX ((volatile clean_ht_rx_t *)CLEAN_HT_RX_ADDR)
 #define HT_DIAG ((volatile clean_ht_diag_t *)CLEAN_HT_DIAG_ADDR)
+#if CLEAN_RX_HT_WINDOW
+static uint16_t observer_restart_attempts;
+#endif
+#if CLEAN_RX_HT_REARM_WAIT
+_Static_assert(CLEAN_AUTH_FAILURE_ADDR+sizeof(clean_auth_failure_t) <= CLEAN_OBSERVER_REARM_ADDR &&
+               CLEAN_OBSERVER_REARM_ADDR+2u*CLEAN_OBSERVER_REARM_WORDS <= 0x20d80u &&
+               CLEAN_OBSERVER_REARM_SHM >= 0x7b0u &&
+               CLEAN_OBSERVER_REARM_SHM+CLEAN_OBSERVER_REARM_WORDS <= 0x7f4u,
+               "Rearm decision trace must not overlap diagnostics or capture storage");
+#endif
+
+_Static_assert(CLEAN_RX_LAYOUT_ADDR+4u*CLEAN_RX_LAYOUT_WORDS <= CLEAN_OBSERVER_PHY_ADDR &&
+               CLEAN_OBSERVER_PHY_ADDR+CLEAN_OBSERVER_PHY_BYTES <= CLEAN_HT_FAILURE_ADDR,
+               "Stopped PHY snapshot must fit the unused layout/failure gap");
+_Static_assert(CLEAN_HT_EARLY_WORDS == 10u &&
+               4u+2u*(CLEAN_HT_EARLY_WORDS+4u) == CLEAN_OBSERVER_PHY_BYTES,
+               "Receive-window publication must fit the shared diagnostic gap");
+#if CLEAN_RX_HT_PHY_SNAPSHOT
+static void snapshot_observer_phy(uint32_t phase) {
+    static const uint16_t indices[CLEAN_OBSERVER_PHY_REGS] = CLEAN_OBSERVER_PHY_INDICES;
+    volatile uint32_t *header = (volatile uint32_t *)CLEAN_OBSERVER_PHY_ADDR;
+    volatile uint16_t *values = (volatile uint16_t *)(CLEAN_OBSERVER_PHY_ADDR+8u);
+    if (!phase) header[0] = header[1] = 0u;
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_PHY_REGS; ++i)
+        values[phase*CLEAN_OBSERVER_PHY_REGS+i] = phy_reg_read(indices[i]);
+    header[1] |= 1u<<phase;
+    if (phase) header[0] = CLEAN_OBSERVER_PHY_MAGIC;
+}
+#endif
 
 _Static_assert(CLEAN_MAC_RADIO_ADDR >= CLEAN_UNICAST_ADDR + sizeof(clean_unicast_status_t) &&
                CLEAN_MAC_RADIO_ADDR + sizeof(clean_mac_radio_status_t) <= FW_MULTI_ADDR,
@@ -1392,6 +1421,12 @@ static void snapshot_ack_rx(void) {
 }
 
 static void snapshot_psm(uint32_t started, uint32_t polls) {
+#if CLEAN_RX_HT_WINDOW
+    volatile uint32_t *commit = (volatile uint32_t *)CLEAN_OBSERVER_PHY_ADDR;
+    volatile uint16_t *live = (volatile uint16_t *)(CLEAN_OBSERVER_PHY_ADDR+4u);
+    ++*commit;
+    __asm__ volatile("dsb" ::: "memory");
+#endif
     snapshot_rx_trace();
     for (uint32_t i = 0u; i < 16u; ++i) {
         MBOX->psm_mailbox[i] = shm_read16(0x600u + i);
@@ -1402,6 +1437,25 @@ static void snapshot_psm(uint32_t started, uint32_t polls) {
     MBOX->rx_polls = polls;
     MBOX->rx_elapsed_ticks = ARM_CYCLE_COUNTER - started;
     MBOX->maccontrol_active = mmio_read32(D11_MACCONTROL);
+#if CLEAN_RX_HT_WINDOW
+    for (uint32_t i = 0u; i < CLEAN_HT_EARLY_WORDS; ++i)
+        live[i] = shm_read16(CLEAN_HT_EARLY_SHM+i);
+    live[10] = shm_read16(CLEAN_OBSERVER_SHM+1u);
+    live[11] = shm_read16(CLEAN_OBSERVER_SHM+2u);
+    live[12] = shm_read16(CLEAN_OBSERVER_EARLY_SHM);
+    live[13] = observer_restart_attempts;
+#if CLEAN_RX_HT_REARM_WAIT
+    volatile uint16_t *rearm = (volatile uint16_t *)CLEAN_OBSERVER_REARM_ADDR;
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_REARM_WORDS; ++i)
+        rearm[i] = shm_read16(CLEAN_OBSERVER_REARM_SHM+i);
+    if (rearm[0] != shm_read16(CLEAN_OBSERVER_REARM_SHM)) rearm[0] |= 1u;
+#if CLEAN_RX_HT_REARM_RECOVER
+    if (rearm[16] != shm_read16(CLEAN_OBSERVER_REARM_SHM+16u)) rearm[16] |= 1u;
+#endif
+#endif
+    __asm__ volatile("dsb" ::: "memory");
+    ++*commit;
+#endif
 }
 
 static int load_and_start_psm(uint32_t generation, uint32_t channel) {
@@ -1419,6 +1473,12 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
         }
         for (uint32_t i = 0u; i < 5u; ++i) shm_write16(locations[i], 0u);
     }
+#if CLEAN_RX_HT_REARM_WAIT
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_REARM_WORDS; ++i) {
+        shm_write16(CLEAN_OBSERVER_REARM_SHM+i,0u);
+        ((volatile uint16_t *)CLEAN_OBSERVER_REARM_ADDR)[i] = 0u;
+    }
+#endif
     uint32_t words = psm_ucode_byte_count / 4u;
     for (uint32_t i = 0u; i < words; ++i) {
         const uint8_t *b = psm_ucode_bytes + 4u * i;
@@ -1516,6 +1576,9 @@ static void d11_set_addrmatch(uint16_t offset, const volatile uint8_t *address) 
 }
 
 static int d11_restart_rx_psm(uint32_t channel) {
+#if CLEAN_RX_HT_WINDOW
+    ++observer_restart_attempts;
+#endif
     mmio_write32(D11_MACCONTROL, 0x84020400u);
     (void)mmio_read32(D11_MACCONTROL);
     uint16_t saved_tk[8];
@@ -1723,6 +1786,9 @@ void cyw43_main(void) {
     uint32_t mac_en = 0xc0020403u;
     if (flags & CFG_PROMISCUOUS)
         mac_en |= 0x01d00000u;
+#if CLEAN_RX_HT_PHY_SNAPSHOT
+    snapshot_observer_phy(0u);
+#endif
     mmio_write32(D11_MACCONTROL, mac_en);
     MBOX->maccontrol_active = mmio_read32(D11_MACCONTROL);
     MBOX->fw_state = FW_STATE_RX_ACTIVE;
@@ -2258,8 +2324,13 @@ void cyw43_main(void) {
         }
         uint16_t st = shm_read16(0x601u);
         if (st == PSM_STATE_FAULT) {
-            if (station_enabled) {
-                fail(0x88u, 0x601u, st);
+            if (station_enabled || CLEAN_RX_HT_REARM_WAIT) {
+#if CLEAN_RX_HT_REARM_WAIT
+                snapshot_psm(rx_start,polls);
+                fail(0x88u,0x602u,shm_read16(0x602u));
+#else
+                fail(0x88u,0x601u,st);
+#endif
                 break;
             }
             if (!d11_restart_rx_psm(channel)) break;
@@ -2398,11 +2469,18 @@ void cyw43_main(void) {
         }
     }
 
+#if CLEAN_RX_HT_WINDOW
+    ++*(volatile uint32_t *)CLEAN_OBSERVER_PHY_ADDR;
+    __asm__ volatile("dsb" ::: "memory");
+#endif
     MBOX->rx_elapsed_ticks = ARM_CYCLE_COUNTER - rx_start;
     MBOX->rx_polls = polls;
 
     mmio_write32(D11_MACCONTROL, 0x04020400u);
     (void)mmio_read32(D11_MACCONTROL);
+#if CLEAN_RX_HT_PHY_SNAPSHOT
+    snapshot_observer_phy(1u);
+#endif
     phy_tx_set_inhibit(1);
     MULTI->dma_status0 = mmio_read32(D11_RX_DMA_STATUS0);
     MULTI->dma_status1 = mmio_read32(D11_RX_DMA_STATUS1);

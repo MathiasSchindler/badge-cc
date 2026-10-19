@@ -2,9 +2,12 @@
 #include "../../src/radio/wifi_firmware.h"
 #include "../../src/radio/wifi_assets.h"
 
+const char ref_role[] = "VENDOR STATION";
 static wifi_fw_report_t firmware;
 static uint8_t request[REF_COUNTER_BYTES], reply[REF_COUNTER_BYTES];
 static uint8_t saved_nonce[16], tx[REF_FRAME_MAX], rx[1514];
+static uint8_t prepared[REF_EARLY_PREPARED][REF_FRAME_MAX];
+static uint32_t prepared_digest[REF_EARLY_PREPARED];
 static uint8_t ready;
 static uint32_t received;
 
@@ -73,6 +76,7 @@ static int configure(const uint8_t nonce[16]) {
     while (ssid_size < 33u && ref_ssid[ssid_size]) ++ssid_size;
     while (password_size < 64u && ref_password[password_size]) ++password_size;
     if (!ssid_size || ssid_size > 32u || password_size < 8u || password_size > 63u ||
+        nonce[11] > 3u || (CLEAN_RX_HT_ADVANCE && nonce[11]) ||
         nonce[12] > 7u) { firmware.error = WIFI_FW_PROTOCOL; return 0; }
     ref_mac(ref_detail + 32u, nonce);
     if (!scalar(3u, 1u) || !var_set("apsta", 0u, 0u)) return 0;
@@ -161,18 +165,30 @@ void ref_run(const uint8_t nonce[16]) {
     } else if (nonce[14] == 2u && ready &&
                badger_bytes_equal(nonce, saved_nonce, 13u)) {
         ok = snapshot(0u);
+        uint32_t prepared_count = !CLEAN_RX_HT_ADVANCE && nonce[11] ? REF_EARLY_PREPARED : 0u;
+        uint32_t prepare_start = ref_now();
+        if (ok && prepared_count && !ref_prepare_early(prepared,prepared_digest,nonce,ref_detail+38u)) {
+            firmware.error = WIFI_FW_PROTOCOL; ok = 0;
+        }
+        uint32_t prepare_us = prepared_count ? ref_now()-prepare_start : 0u;
         uint32_t sent = 0u, start = ref_now(), digest = REF_DIGEST_INITIAL;
+        uint32_t first_eight = 0u, next_eight = 0u;
         uint32_t minimum = 0xffffffffu, maximum = 0u, buckets[4] = {0u};
         while (ok && sent < REF_FRAME_COUNT && ref_now() - start < 6000000u) {
-            uint32_t size = ref_frame(tx, nonce, ref_detail + 38u, sent);
+            int cached = sent < prepared_count;
+            uint32_t size = cached ? ref_fixture_size(nonce[11]) :
+                ref_frame(tx, nonce, ref_detail + 38u, sent);
+            const uint8_t *frame = cached ? prepared[sent] : tx;
             uint32_t before = ref_now();
-            ok = wifi_firmware_send_frame(0u, tx, size);
+            ok = wifi_firmware_send_frame(0u, frame, size);
             uint32_t elapsed = ref_now()-before;
             if (ok) {
                 if (elapsed < minimum) minimum = elapsed;
                 if (elapsed > maximum) maximum = elapsed;
                 ++buckets[elapsed <= 200u ? 0u : elapsed <= 400u ? 1u : elapsed <= 800u ? 2u : 3u];
-                digest = ref_digest(digest, tx, size); ++sent;
+                digest = cached ? prepared_digest[sent] : ref_digest(digest,frame,size); ++sent;
+                if (sent == 8u) first_eight = ref_now()-start;
+                if (sent == 16u) next_eight = ref_now()-start-first_eight;
             }
         }
         badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS,sent);
@@ -181,6 +197,10 @@ void ref_run(const uint8_t nonce[16]) {
         badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+12u,maximum);
         for (uint32_t i = 0u; i < 4u; ++i)
             badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+16u+4u*i,buckets[i]);
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+32u,first_eight);
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+36u,next_eight);
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+40u,prepared_count);
+        badger_bytes_store_u32(ref_detail+REF_SUBMIT_STATS+44u,prepare_us);
         badger_bytes_store_u32(ref_detail + 28u, sent);
         badger_bytes_store_u32(ref_detail + 52u, digest);
         if (ok && sent != REF_FRAME_COUNT) { firmware.error = WIFI_FW_TIMEOUT; ok = 0; }
