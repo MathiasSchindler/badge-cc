@@ -5,6 +5,9 @@ REF_DIR := clean-rx/vendor-burst
 REF_BUILD := build/clean-rx/vendor-burst
 REF_CONTROLLER := $(REF_BUILD)/controller/cyw43_rx_fw.bin
 REF_FLAGS := -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1
+REF_STIMULUS ?= 0
+REF_HANDOFF ?= 0
+REF_FLAGS += -DREF_CLEAN_STIMULUS=$(REF_STIMULUS)
 REF_CFLAGS := $(RP2350_CFLAGS) -DLIVE_USB_FIRMWARE -DLIVE_USB_CLEAN \
 	-DWIFI_TRACE_SIZE=5888u -I$(REF_BUILD) -I$(WIFI_ASSET_DIR) $(REF_FLAGS)
 REF_COMMON := $(REF_DIR)/main.c $(ARCH_DIR)/start.c $(ARCH_DIR)/bootrom_reboot.c \
@@ -14,7 +17,10 @@ REF_COMMON := $(REF_DIR)/main.c $(ARCH_DIR)/start.c $(ARCH_DIR)/bootrom_reboot.c
 	$(PLATFORM_DIR)/wifi_pio.c $(RADIO_DIR)/wifi_gspi.c $(RADIO_DIR)/wifi_probe.c \
 	$(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
 REF_VENDOR := $(REF_COMMON) $(REF_DIR)/vendor.c $(WIFI_FW_SOURCES) $(RADIO_DIR)/wifi_assets.c
-REF_OBSERVER := $(REF_COMMON) $(REF_DIR)/observer.c clean-rx/badge/loader.c
+ifeq ($(REF_STIMULUS),1)
+REF_VENDOR := $(REF_COMMON) $(REF_DIR)/stimulus.c clean-rx/badge/loader.c clean-rx/src/mac.c clean-rx/src/block_ack.c
+endif
+REF_OBSERVER := $(REF_COMMON) $(REF_DIR)/observer.c clean-rx/badge/loader.c clean-rx/src/mac.c clean-rx/src/block_ack.c
 REF_VOBJS := $(addprefix $(REF_BUILD)/vendor/,$(notdir $(REF_VENDOR:.c=.o))) \
 	$(REF_BUILD)/vendor/assets.o $(REF_BUILD)/picobin.o
 REF_OOBJS := $(addprefix $(REF_BUILD)/observer/,$(notdir $(REF_OBSERVER:.c=.o))) \
@@ -23,7 +29,9 @@ REF_HEADERS := $(wildcard $(REF_DIR)/*.h clean-rx/src/*.h clean-rx/badge/loader.
 	$(SHARED_DIR)/*.h src/usb/*.h $(RADIO_DIR)/*.h $(PLATFORM_DIR)/*.h $(ARCH_DIR)/*.h)
 VPATH := $(sort $(dir $(REF_VENDOR) $(REF_OBSERVER)))
 
-.PHONY: reference reference-early reference-phy reference-window reference-rearm reference-recover reference-recover-test reference-reset reference-reset-test reference-test reference-controller reference-force
+.PHONY: reference reference-early reference-phy reference-window reference-rearm reference-recover reference-recover-test reference-reset reference-reset-test reference-stimulus reference-stimulus-fifo reference-stimulus-reset reference-stimulus-reset-test reference-park reference-stimulus-park-test reference-test reference-controller reference-force
+.PHONY: reference-stimulus-fifo-test reference-stimulus-fifo-stop-test
+.PHONY: reference-handoff reference-handoff-copy reference-handoff-wait
 reference: $(REF_BUILD)/vendor.uf2 $(REF_BUILD)/observer.uf2 $(REF_BUILD)/collector
 reference-early:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1' reference reference-test
@@ -41,14 +49,40 @@ reference-reset:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_RESET=1' reference reference-test
 reference-reset-test:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_RESET=1 -DCLEAN_RX_HT_REARM_INJECT=1' reference reference-test
+reference-stimulus:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1' reference reference-test
+reference-handoff:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1' reference reference-test
+reference-handoff-copy:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1' reference reference-test
+reference-handoff-wait:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1 -DCLEAN_RX_HT_COPY_WAIT=1' reference reference-test
+reference-stimulus-fifo:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1' reference reference-test
+reference-stimulus-fifo-test:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DREF_OBSERVER_PAUSE=1' reference reference-test
+reference-stimulus-fifo-stop-test:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DREF_OBSERVER_PAUSE=1 -DREF_OBSERVER_STOP_FULL=1' reference reference-test
+reference-stimulus-reset:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_RESET=1' reference reference-test
+reference-stimulus-reset-test:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_RESET=1 -DCLEAN_RX_HT_REARM_INJECT=1' reference reference-test
+reference-park:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_FLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_RESET=1 -DCLEAN_RX_HT_REARM_PARK=1' reference reference-test
+reference-stimulus-park-test:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_RESET=1 -DCLEAN_RX_HT_REARM_PARK=1 -DCLEAN_RX_HT_REARM_INJECT=1' reference reference-test
 reference-controller:
 	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' all test
+ifeq ($(REF_STIMULUS),1)
+	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/stimulus-controller EXTRA_CFLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=$(if $(filter 1,$(REF_HANDOFF)),0,1) -DCLEAN_RX_HT_HANDOFF_STIMULUS=$(REF_HANDOFF)' all test
+endif
 
 $(REF_BUILD)/build_id.h: reference-force reference-controller $(WIFI_ASSET_FILES)
 	@mkdir -p $(REF_BUILD)
-	@id=$$(shasum -a 256 $(REF_VENDOR) $(REF_OBSERVER) $(REF_HEADERS) \
-		$(REF_DIR)/collector.c $(REF_DIR)/Makefile $(REF_CONTROLLER) $(WIFI_ASSET_FILES) \
-		| shasum -a 256 | cut -c1-8); \
+	@id=$$({ printf '%s\n' '$(REF_FLAGS)' '$(REF_STIMULUS)' '$(REF_HANDOFF)'; \
+		shasum -a 256 $(REF_VENDOR) $(REF_OBSERVER) $(REF_HEADERS) \
+		$(REF_DIR)/collector.c $(REF_DIR)/Makefile $(REF_CONTROLLER) $(if $(filter 1,$(REF_STIMULUS)),$(REF_BUILD)/stimulus-controller/cyw43_rx_fw.bin) $(WIFI_ASSET_FILES) \
+		; } | shasum -a 256 | cut -c1-8); \
 	printf '#define USB_REPORT_BUILD_ID 0x%su\n' "$$id" > $@.tmp; \
 	if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
@@ -62,9 +96,13 @@ $(REF_BUILD)/vendor/main.o $(REF_BUILD)/observer/main.o: $(REF_DIR)/main.c $(REF
 	@mkdir -p $(dir $@)
 	$(RP2350_CC) $(REF_CFLAGS) -c $< -o $@
 $(REF_BUILD)/vendor/assets.o: $(RADIO_DIR)/wifi_assets.S $(REF_BUILD)/build_id.h
+ifeq ($(REF_STIMULUS),1)
+	$(RP2350_CC) $(REF_CFLAGS) -DCLEAN_CONTROLLER_PATH='"$(abspath $(REF_BUILD)/stimulus-controller/cyw43_rx_fw.bin)"' -c clean-rx/badge/assets.S -o $@
+else
 	$(RP2350_CC) $(REF_CFLAGS) -DWIFI_FIRMWARE_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_firmware.bin)"' \
 		-DWIFI_NVRAM_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_nvram.bin)"' \
 		-DWIFI_CLM_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_clm.bin)"' -c $< -o $@
+endif
 $(REF_BUILD)/observer/assets.o: clean-rx/badge/assets.S $(REF_BUILD)/build_id.h
 	$(RP2350_CC) $(REF_CFLAGS) -DCLEAN_CONTROLLER_PATH='"$(abspath $(REF_CONTROLLER))"' -c $< -o $@
 $(REF_BUILD)/picobin.o: $(ARCH_DIR)/picobin.S
@@ -87,11 +125,11 @@ $(REF_BUILD)/%.uf2: $(REF_BUILD)/%.bin $(BIN2UF2)
 $(REF_BUILD)/collector: $(REF_DIR)/collector.c $(REF_BUILD)/build_id.h $(REF_HEADERS)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 $(REF_FLAGS) -DWIFI_TRACE_SIZE=5888u \
 		-I$(REF_BUILD) $$(pkg-config --cflags libusb-1.0) $< $(SHARED_DIR)/usb_report.c \
-		$(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_trace.c \
+		$(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_trace.c clean-rx/src/mac.c clean-rx/src/block_ack.c \
 		$$(pkg-config --libs libusb-1.0) -o $@
 reference-test: $(REF_BUILD)/protocol_test
 	$(REF_BUILD)/protocol_test
 $(REF_BUILD)/protocol_test: $(REF_DIR)/protocol_test.c $(REF_HEADERS) $(REF_BUILD)/build_id.h
 	@mkdir -p $(dir $@)
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) -fsanitize=address,undefined \
-		$< $(TOOLS_DIR)/diagnostics_logic.c $(PLATFORM_DIR)/graphics.c -o $@
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) $(if $(filter 1,$(REF_STIMULUS)),-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=1 -DCLEAN_RX_HT_HANDOFF_STIMULUS=1) -fsanitize=address,undefined \
+		$< $(TOOLS_DIR)/diagnostics_logic.c $(PLATFORM_DIR)/graphics.c clean-rx/src/mac.c clean-rx/src/block_ack.c -o $@

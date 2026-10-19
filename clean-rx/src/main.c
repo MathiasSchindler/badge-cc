@@ -102,6 +102,9 @@ static uint32_t last_tx_identity;
 static uint8_t last_tx_valid;
 static uint8_t capture_prepared;
 static uint32_t rx_published_frames;
+#if CLEAN_RX_HT_OBSERVER_FIFO
+static uint16_t observer_capture_ids[FW_MAX_FRAMES];
+#endif
 static uint8_t policy_pending, policy_short_slot, policy_response;
 static uint16_t policy_basic;
 static uint32_t policy_command;
@@ -382,7 +385,7 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
         return 0;
     }
     if (!credit) {
-        if (!station_enabled && !CLEAN_RX_HT_DATA)
+        if (!station_enabled && !CLEAN_RX_HT_DATA && !CLEAN_RX_HT_OBSERVER_FIFO)
             MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 1u);
         return 0;
     }
@@ -394,7 +397,7 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
             return 0;
         }
         if (!available) {
-            if (!station_enabled && !CLEAN_RX_HT_DATA)
+            if (!station_enabled && !CLEAN_RX_HT_DATA && !CLEAN_RX_HT_OBSERVER_FIFO)
                 MBOX->f2_counts = clean_sdio_count(MBOX->f2_counts, 1u);
             return 0;
         }
@@ -429,12 +432,17 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
         pkt[10] = 0u;
         pkt[11] = 0u;
 #if CLEAN_RX_HT_OBSERVER
+#if CLEAN_RX_HT_OBSERVER_FIFO
+        uint16_t correlation = observer_capture_ids[
+            (slot->frame_index-1u)&(FW_MAX_FRAMES-1u)];
+#else
         /* Passive diagnostic ID; ordinary profiles keep reserved bytes zero. */
         uint16_t correlation = shm_read16(CLEAN_OBSERVER_HELD);
 #if CLEAN_RX_HT_ADVANCE
         if (correlation && correlation == shm_read16(CLEAN_OBSERVER_EARLY_SHM) &&
             shm_read16(CLEAN_OBSERVER_ADVANCE) == 1u)
             correlation |= CLEAN_OBSERVER_ADVANCE_TAG;
+#endif
 #endif
         pkt[10] = (uint8_t)correlation;
         pkt[11] = (uint8_t)(correlation >> 8u);
@@ -881,7 +889,7 @@ static int station_publish_capture(uint32_t channel) {
     int posted = sdio_f2_send_frame(slot, channel);
     if (MBOX->fw_state == FW_STATE_ERROR) return 0;
     if (!posted) return 1;
-    if (slot->rxe_len >= 34u) {
+    if (!CLEAN_RX_HT_OBSERVER_FIFO && slot->rxe_len >= 34u) {
         const volatile uint8_t *m = slot->raw + 8u;
         uint8_t bound = 1u;
         for (uint32_t i = 0u; i < 6u; ++i)
@@ -1107,6 +1115,12 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         clean_ht20_config_t config;
         if (!(ht_probe == 2u ? CLEAN_RX_HT_DATA : CLEAN_RX_HT_PROBE) ||
             !(aggregate_probe ? clean_ht_ampdu_probe_sig_valid(tx_buf, ht_length) :
+              CLEAN_RX_HT_STIMULUS &&
+              ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_STIMULUS_VERSION ?
+                  clean_ht_stimulus_sig_valid(tx_buf, ht_length) :
+              CLEAN_RX_HT_HANDOFF_STIMULUS &&
+              ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_HANDOFF_VERSION ?
+                  clean_ht_handoff_sig_valid(tx_buf, ht_length) :
                                 clean_ht20_sig_valid(tx_buf, ht_length)) ||
             !clean_ht20_configure(&config, ht_length, tx_buf[0], CLEAN_HT20_MCS_MASK))
             return fail(0x83u, FW_TX_BUF_ADDR, total_len);
@@ -1449,12 +1463,19 @@ static void observer_reset_service(void) {
             !(MBOX->config_flags&CFG_TX_ENABLE) &&
             shm_read16(CLEAN_OBSERVER_REARM_SHM+16u) == 2u;
         if (allowed) {
+#if CLEAN_RX_HT_REARM_PARK
+            uint32_t parked = mac_now();
+            uint32_t polls = 0u;
+            while (mac_now()-parked < 16u && polls < 65535u) ++polls;
+            if (mac_now()-parked < 16u) allowed = 0;
+#else
             shm_write16(CLEAN_OBSERVER_RESET_SHM+1u,1u);
 #define OBSERVER_RESET_WRITE(index,mask,value) \
             if ((mask) == 0xffffu) phy_reg_write(index,value); \
             else phy_reg_mod(index,mask,value);
             CLEAN_OBSERVER_RX_RESET_OPS(OBSERVER_RESET_WRITE)
 #undef OBSERVER_RESET_WRITE
+#endif
         }
         uint16_t phy440 = phy_reg_read(0x440u), phy44a = phy_reg_read(0x44au);
         uint16_t phya00 = phy_reg_read(0xa00u);
@@ -1468,8 +1489,15 @@ static void observer_reset_service(void) {
         shm_write16(CLEAN_OBSERVER_RESET_SHM+13u,(uint16_t)(elapsed>>16u));
         shm_write16(CLEAN_OBSERVER_RESET_SHM+15u,mmio_read16(D11_BASE+0x408u));
         shm_write16(CLEAN_OBSERVER_RESET_SHM,(uint16_t)(
-            allowed && after == 15u && (phy440&1u) &&
-            phy44a == 0x80u && phya00 == 0xffu ? 2u : 3u));
+            allowed && after == 15u &&
+#if CLEAN_RX_HT_REARM_PARK
+            phy440 == shm_read16(CLEAN_OBSERVER_RESET_SHM+4u) &&
+            phy44a == shm_read16(CLEAN_OBSERVER_RESET_SHM+5u) &&
+            phya00 == shm_read16(CLEAN_OBSERVER_RESET_SHM+6u)
+#else
+            (phy440&1u) && phy44a == 0x80u && phya00 == 0xffu
+#endif
+            ? 2u : 3u));
     }
     mmio_write32(D11_MACCONTROL,control);
     (void)mmio_read32(D11_MACCONTROL);
@@ -1854,6 +1882,9 @@ void cyw43_main(void) {
 
     uint32_t rx_start = ARM_CYCLE_COUNTER;
     uint32_t polls = 0u;
+#if CLEAN_RX_HT_OBSERVER_FIFO
+    uint32_t observer_stop_started = 0u, observer_stop_polls = 0u;
+#endif
     for (; scanner_mode || polls < 1800000u; ++polls) {
 #if CLEAN_RX_HT_REARM_RESET
         observer_reset_service();
@@ -1863,6 +1894,9 @@ void cyw43_main(void) {
             station_publish_mac();
         }
         uint32_t cmd = MBOX->host_cmd;
+#if CLEAN_RX_HT_OBSERVER_FIFO
+        if (!station_publish_capture(channel)) break;
+#endif
 #if CLEAN_RX_AMPDU_DMA
         if (!station_mac && !ampdu_dma_receive(rx_start)) break;
 #endif
@@ -1903,6 +1937,26 @@ void cyw43_main(void) {
             fail(0x87u, CLEAN_ACK_ERROR, shm_read16(CLEAN_ACK_ERROR));
             break;
         }
+#if CLEAN_RX_HT_OBSERVER_FIFO
+        if (cmd == 3u) {
+            if (!observer_stop_polls) {
+                observer_stop_started = mac_now();
+                mmio_write32(D11_MACCONTROL,0x04020400u);
+                (void)mmio_read32(D11_MACCONTROL);
+            }
+            int drain = clean_sdio_drain_state(MULTI->captured_frames,rx_published_frames,
+                FW_MAX_FRAMES,observer_stop_started,mac_now(),observer_stop_polls++);
+            if (drain < 0) {
+                fail(drain == -1 ? 0x8cu : 0x89u,FW_MULTI_ADDR,
+                     MULTI->captured_frames-rx_published_frames);
+                break;
+            }
+            uint32_t pending = MULTI->captured_frames-rx_published_frames;
+            if (shm_read16(0x601u) == PSM_STATE_CAPTURED && pending < FW_MAX_FRAMES)
+                cmd = 2u;
+            else if (drain > 0) continue;
+        }
+#endif
         if (cmd == 3u) {
             station_publish_mac();
             snapshot_ack_rx();
@@ -2386,8 +2440,8 @@ void cyw43_main(void) {
         }
         uint16_t st = shm_read16(0x601u);
         if (st == PSM_STATE_FAULT) {
-            if (station_enabled || CLEAN_RX_HT_REARM_WAIT) {
-#if CLEAN_RX_HT_REARM_WAIT
+            if (station_enabled || CLEAN_RX_HT_REARM_WAIT || CLEAN_RX_HT_COPY_WAIT) {
+#if CLEAN_RX_HT_REARM_WAIT || CLEAN_RX_HT_COPY_WAIT
                 snapshot_psm(rx_start,polls);
                 fail(0x88u,0x602u,shm_read16(0x602u));
 #else
@@ -2425,16 +2479,16 @@ void cyw43_main(void) {
                     continue;
                 }
             }
-            if (station_enabled || CLEAN_RX_HT_DATA) {
-                int credit = (station_mac || CLEAN_RX_AMPDU_SHM) ?
+            if (station_enabled || CLEAN_RX_HT_DATA || CLEAN_RX_HT_OBSERVER_FIFO) {
+                int credit = (station_mac || CLEAN_RX_AMPDU_SHM || CLEAN_RX_HT_OBSERVER_FIFO) ?
                     clean_sdio_credit_available(MULTI->captured_frames, rx_published_frames,
                                                 FW_MAX_FRAMES) :
                     clean_sdio_credit_available(sdio_tx_posted, MBOX->f2_consumed,
                                                 SDIO_TX_WINDOW);
                 if (credit < 0) {
-                    fail(0x8cu, (station_mac || CLEAN_RX_AMPDU_SHM) ? FW_MULTI_ADDR :
+                    fail(0x8cu, (station_mac || CLEAN_RX_AMPDU_SHM || CLEAN_RX_HT_OBSERVER_FIFO) ? FW_MULTI_ADDR :
                         FW_MBOX_ADDR + CLEAN_SDIO_ACK_OFFSET,
-                        (station_mac || CLEAN_RX_AMPDU_SHM) ?
+                        (station_mac || CLEAN_RX_AMPDU_SHM || CLEAN_RX_HT_OBSERVER_FIFO) ?
                             MULTI->captured_frames - rx_published_frames :
                         MBOX->f2_consumed);
                     break;
@@ -2472,6 +2526,15 @@ void cyw43_main(void) {
                     mmio_write32(D11_MACCONTROL, mac_en);
                 }
                 slot->frame_index = (uint16_t)(total + 1u);
+#if CLEAN_RX_HT_OBSERVER_FIFO
+                uint16_t correlation = shm_read16(CLEAN_OBSERVER_HELD);
+#if CLEAN_RX_HT_ADVANCE
+                if (correlation && correlation == shm_read16(CLEAN_OBSERVER_EARLY_SHM) &&
+                    shm_read16(CLEAN_OBSERVER_ADVANCE) == 1u)
+                    correlation |= CLEAN_OBSERVER_ADVANCE_TAG;
+#endif
+                observer_capture_ids[idx] = correlation;
+#endif
                 slot->rxe_len = rxe_len;
                 slot->rxe_status1 = shm_read16(0x7a7u);
                 slot->rxe_status2 = shm_read16(0x603u);
@@ -2504,7 +2567,7 @@ void cyw43_main(void) {
                 (void)rx_dma_poll_and_reclaim(slot);
                 capture_prepared = 1u;
             }
-            if (station_mac || CLEAN_RX_AMPDU_SHM) {
+            if (station_mac || CLEAN_RX_AMPDU_SHM || CLEAN_RX_HT_OBSERVER_FIFO) {
                 capture_prepared = 0u;
                 MULTI->captured_frames = total + 1u;
                 if (!scanner_mode && total + 1u >= target_frames)

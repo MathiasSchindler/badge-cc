@@ -145,6 +145,21 @@ static int stage(libusb_device_handle *device, uint8_t nonce[16], uint8_t phase,
         clock_ticks[role] = ticks; clock_frames[role] = frames;
     }
     if (phase == 4u && (!trace || !summarize_window(trace))) return 0;
+#if CLEAN_RX_HT_COPY_PROBE
+    if (trace && role == 0u &&
+        usb_report_u32(trace+REF_COPY_FAULT_BASE) == REF_COPY_FAULT_MAGIC) {
+        const uint8_t *fault = trace+REF_COPY_FAULT_BASE, *copy = trace+REF_COPY_BASE;
+        printf("{\"test\":\"handoff-copy-fault\",\"snapshot_collected\":%s,"
+               "\"diagnostic_error\":%u,\"original_receive_error\":%u,"
+               "\"psm_reason\":%u,\"copy_phase\":%u,\"status1\":%u,"
+               "\"wait_observed_count\":%u,\"wait_budget_remaining\":%u,"
+               "\"wait_tsf_delta\":%u}\n",
+               usb_report_u32(fault+4u) == 1u?"true":"false",usb_report_u32(fault+8u),
+               usb_report_u32(fault+12u),usb_report_u32(fault+16u),ref_u16(copy+4u),
+               ref_u16(copy+22u),ref_u16(copy+80u),ref_u16(copy+82u),
+               usb_report_u32(copy+76u)-usb_report_u32(copy+72u));
+    }
+#endif
     if (usb_report_u32(report+32u) != phase || usb_report_u32(report+36u) ||
         (trace && (usb_report_u32(trace) != REF_MAGIC ||
         usb_report_u32(trace+12u) != role || usb_report_u32(trace+4u) != phase ||
@@ -189,8 +204,9 @@ static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]) {
     sequence = ref_u16(window+64u);
     printf("],\"psm_snapshot_committed\":%s}\n",
            sequence && !(sequence&1u)?"true":"false");
-    printf("{\"test\":\"rearm-phy-reset\",\"enabled\":%s,\"words\":[",
-           usb_report_u32(window+28u)&4u?"true":"false");
+    printf("{\"test\":\"rearm-phy-reset\",\"enabled\":%s,\"park_only\":%s,\"words\":[",
+           (usb_report_u32(window+28u)&12u) == 4u?"true":"false",
+           usb_report_u32(window+28u)&8u?"true":"false");
     for (uint32_t i = 0u; i < 16u; ++i)
         printf("%s%u",i?",":"",(unsigned)ref_u16(window+96u+2u*i));
     puts("]}");
@@ -236,6 +252,7 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         usb_report_u32(observer+64u) != REF_OBSERVER_ABI) {
         fputs("Reference identity or receive-only configuration mismatch\n",stderr); return 0;
     }
+    if (!REF_CLEAN_STIMULUS) {
     const uint8_t *timing = vendor+REF_SUBMIT_STATS;
     uint32_t timed = usb_report_u32(timing), elapsed = usb_report_u32(timing+4u);
     uint32_t minimum = usb_report_u32(timing+8u), maximum = usb_report_u32(timing+12u), total = 0u;
@@ -282,6 +299,7 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                usb_report_u32(q+16u),usb_report_u32(q+20u));
     }
     puts("]}");
+    }
     const uint8_t *phy_snapshot = observer+REF_PHY_SNAPSHOT;
     if (!ref_phy_snapshot_valid(phy_snapshot)) {
         fputs("Invalid stopped PHY snapshot commit\n",stderr); return 0;
@@ -344,6 +362,24 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
     uint32_t f2_counts = usb_report_u32(f2), summaries = usb_report_u32(loader+28u);
     if (!ref_delivery_accounted(observer)) {
         fputs("Invalid frozen observer delivery accounting\n",stderr); return 0;
+    }
+    if (CLEAN_RX_HT_OBSERVER_FIFO) {
+        uint32_t pause = usb_report_u32(observer+REF_FIFO_PAUSE_STATE);
+        uint32_t peak = usb_report_u32(observer+REF_FIFO_PEAK);
+        uint32_t held = usb_report_u32(observer+REF_FIFO_HELD_SAMPLES);
+        int valid = REF_OBSERVER_PAUSE ?
+            pause == (REF_OBSERVER_STOP_FULL ? 3u : 2u) && peak == 8u && held :
+            !pause && !peak && !held;
+        printf("{\"test\":\"observer-fifo\",\"slots\":8,\"pause_enabled\":%s,"
+               "\"pause_until_stop\":%s,"
+               "\"pause_state\":%u,\"observed_peak_queued\":%u,\"full_held_samples\":%u,"
+               "\"stress_ownership_proven\":%s}\n",
+               REF_OBSERVER_PAUSE?"true":"false",REF_OBSERVER_STOP_FULL?"true":"false",pause,peak,held,
+               REF_OBSERVER_PAUSE && valid?"true":"false");
+        if (!valid) {
+            fputs("Invalid observer FIFO pause/ownership evidence\n",stderr);
+            return 0;
+        }
     }
     printf("{\"test\":\"observer-delivery-state\",\"controller_state\":%u,"
            "\"controller_error\":%u,\"rx_polls\":%u,\"rx_cycles\":%u,"
@@ -434,6 +470,34 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                ref_u16(r+18u),ref_u16(r+20u),ref_u16(r+22u));
     }
     const uint8_t *second = observer+REF_SECOND_BASE;
+#if CLEAN_RX_HT_COPY_PROBE
+    const uint8_t *copy = observer+REF_COPY_BASE;
+    if (!ref_copy_probe_valid(copy,early,second)) {
+        fputs("Invalid receive-copy probe ownership, phase or seed readback\n",stderr);
+        return 0;
+    }
+    uint32_t retained = 0u;
+    if (ref_u16(copy+4u) == 3u)
+        for (uint32_t i = 0u; i < 4u; ++i)
+            if (ref_u16(copy+40u+2u*i) == CLEAN_OBSERVER_COPY_CANARY) retained |= 1u<<i;
+    printf("{\"test\":\"handoff-copy-probe\",\"prefix_id\":%u,\"epoch\":%u,"
+           "\"phase\":%u,\"seed_readback_valid\":%s,\"retained_canary_mask\":%u,"
+           "\"terminal_rxe_length\":%u,\"status1\":%u,\"status2\":%u,"
+           "\"copy_control\":%u,\"rx_base\":%u,\"copy_end\":%u,\"next_length\":%u,"
+           "\"raw_1002\":%u,\"raw_1024\":%u,\"raw_1078\":%u,"
+           "\"terminal_prefix_stable\":%s,\"terminal_words\":[%u,%u,%u,%u],"
+           "\"fresh_count_wait_enabled\":%s,\"wait_start_tsf\":%u,\"wait_end_tsf\":%u,"
+           "\"fresh_count\":%u,\"wait_budget_remaining\":%u}\n",
+           ref_u16(copy),ref_u16(copy+2u),ref_u16(copy+4u),
+           ref_u16(copy)?"true":"false",retained,ref_u16(copy+20u),
+           ref_u16(copy+22u),ref_u16(copy+24u),ref_u16(copy+26u),
+           ref_u16(copy+28u),ref_u16(copy+30u),ref_u16(copy+32u),
+           ref_u16(copy+34u),ref_u16(copy+36u),ref_u16(copy+38u),
+           ref_u16(copy+4u) == 3u && !memcmp(copy+48u,second+24u,24u)?"true":"false",
+           ref_u16(copy+40u),ref_u16(copy+42u),ref_u16(copy+44u),ref_u16(copy+46u),
+           CLEAN_RX_HT_COPY_WAIT?"true":"false",usb_report_u32(copy+72u),
+           usb_report_u32(copy+76u),ref_u16(copy+80u),ref_u16(copy+82u));
+#endif
     uint32_t second_rxe = ref_u16(second+4u);
     uint32_t second_length = second_rxe >= 6u ? second_rxe-6u : 0u;
     int second_fcs = CLEAN_RX_HT_ADVANCE && ref_u16(second) &&
@@ -503,6 +567,153 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                ref_u16(r+92u),ref_early_reason(r,early,i+1u),
                crc?"true":"false",ampdu?"true":"false");
     }
+    if (REF_CLEAN_STIMULUS) {
+        uint8_t bound_nonce[14], expected[CLEAN_HT_STIMULUS_STORAGE];
+        memcpy(bound_nonce,nonce,sizeof(bound_nonce));
+        bound_nonce[13] = (uint8_t)usb_report_u32(vendor+24u);
+        if (usb_report_u32(vendor+28u) != CLEAN_HT_STIMULUS_COUNT) {
+            fputs("Incomplete fixed stimulus; retained transmission records are not RF qualification\n",stderr);
+            return 0;
+        }
+        for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i) {
+            const uint8_t *r = vendor+REF_STIMULUS_RECORD_BASE+i*REF_STIMULUS_RECORD_BYTES;
+            if (!ref_stimulus_record_valid(r,bound_nonce,i)) {
+                fprintf(stderr,"Invalid fixed stimulus record %u\n",i); return 0;
+            }
+            printf("{\"test\":\"fixed-stimulus-tx\",\"index\":%u,\"kind\":%u,"
+                   "\"psdu_bytes\":%u,\"trigger_tsf\":%u,\"complete_tsf\":%u,"
+                   "\"conditions\":7,\"phy_error\":0,\"template_verified\":true,"
+                   "\"raw_txe_56a\":%u}\n",
+                   i,i%3u,usb_report_u32(r+32u)-6u,
+                   usb_report_u32(r+16u),usb_report_u32(r+20u),(unsigned)ref_u16(r+56u));
+        }
+        (void)ref_source_frame(expected,bound_nonce,CLEAN_HT_STIMULUS_COUNT-1u);
+        if (memcmp(expected,vendor+REF_STIMULUS_PACKET_BASE,sizeof(expected))) {
+            fputs("Fixed stimulus last descriptor/bytes mismatch\n",stderr); return 0;
+        }
+        if (REF_CLEAN_HANDOFF) {
+            uint32_t first = clean_ht_handoff_length(bound_nonce,0u);
+            uint32_t mode = bound_nonce[10], early_index = CLEAN_HT_STIMULUS_COUNT;
+            int exact_first = 0, exact_pair = 0;
+            if (early_linked && early_length == first && ref_u16(early+15u) == CLEAN_HT_HANDOFF_PSDU) {
+                const uint8_t *body = early+CLEAN_OBSERVER_EARLY_HEADER*2u;
+                uint32_t sequence = ref_u16(body+22u)>>4u;
+                early_index = sequence/2u;
+                if (!(sequence&1u) && early_index%3u == 2u &&
+                    clean_ht_handoff_frame(expected,bound_nonce,early_index))
+                    exact_first = !memcmp(body,expected+18u,first);
+                for (uint32_t i = 0u; exact_first && i < samples; ++i) {
+                    const uint8_t *sample = observer+REF_SAMPLE_BASE+i*REF_SAMPLE_BYTES;
+                    uint32_t at = 18u+4u+((first+3u)&~3u);
+                    if (ref_pair_correlated(log,early,sample,mac) &&
+                        !memcmp(sample+16u,expected+at,clean_ht_handoff_length(bound_nonce,1u)))
+                        exact_pair = 1;
+                }
+            }
+            uint32_t negative_outcome = 0u, negative_length = 0u, negative_id = 0u;
+            (void)clean_ht_handoff_frame(expected,bound_nonce,2u);
+            for (uint32_t i = 0u; i < count; ++i) {
+                const uint8_t *record = log+2u*CLEAN_OBSERVER_HEADER_WORDS+
+                    i*2u*CLEAN_OBSERVER_RECORD_WORDS;
+                if (!memcmp(record+12u,expected+8u,6u) && !memcmp(record+36u,expected+18u,40u)) {
+                    negative_id = i+1u;
+                    negative_outcome = ref_u16(record+22u);
+                    negative_length = ref_u16(record+28u);
+                }
+            }
+            if (exact_first && early_index == 2u) {
+                negative_id = ref_u16(early);
+                const uint8_t *record = log+2u*CLEAN_OBSERVER_HEADER_WORDS+
+                    (negative_id-1u)*2u*CLEAN_OBSERVER_RECORD_WORDS;
+                negative_outcome = ref_u16(record+22u);
+                negative_length = ref_u16(record+28u);
+            }
+            uint32_t mask = usb_report_u32(observer+REF_STIMULUS_RX_MASK), required = 0u;
+            for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i)
+                if (i%3u != 2u) required |= 1u<<i;
+            int clean = !(mask&~required) && !usb_report_u32(observer+REF_STIMULUS_RX_DUPLICATES) &&
+                !usb_report_u32(observer+REF_STIMULUS_RX_INVALID) && !unaccounted;
+            uint32_t after = (1u<<3u)|(1u<<4u)|(1u<<21u)|(1u<<22u);
+            int recovered = (mask&after) == after;
+            int exact_bad_second = ref_handoff_bad_second(log,early,observer+REF_SECOND_BASE,bound_nonce);
+            int negative = mode == 1u ? negative_id && negative_outcome == 2u &&
+                exact_pair && early_index > 2u :
+                mode == 2u ? exact_first && early_index == 2u && !exact_pair &&
+                    exact_bad_second && negative_outcome == 2u : 0;
+            printf("{\"test\":\"controlled-handoff-result\",\"case\":%u,\"first_bytes\":%u,"
+                   "\"second_bytes\":%u,\"transmissions\":24,\"exact_first\":%s,"
+                   "\"exact_pair\":%s,\"early_source_index\":%u,\"advance\":%u,"
+                   "\"case_prefix_id\":%u,\"case_terminal_outcome\":%u,\"case_terminal_length\":%u,"
+                   "\"exact_bad_second\":%s,"
+                   "\"recovery_controls_received\":%s,\"negative_case_proven\":%s,"
+                   "\"received_control_mask\":%u,\"expected_control_mask\":%u,"
+                   "\"all_controls_received\":%s,\"delivery_integrity\":%s,"
+                   "\"ht_station_qualified\":false}\n",
+                   mode,first,clean_ht_handoff_length(bound_nonce,1u),
+                   exact_first?"true":"false",exact_pair?"true":"false",early_index,
+                   ref_u16(early+24u),negative_id,negative_outcome,negative_length,
+                   exact_bad_second?"true":"false",
+                   recovered?"true":"false",negative && recovered && clean?"true":"false",
+                   mask,required,mask == required?"true":"false",clean?"true":"false");
+            int passed = clean && (mode ? negative && recovered : exact_pair && mask == required);
+            if (!passed) fputs("Controlled handoff qualification not proven; raw failed trial retained\n",stderr);
+            return passed;
+        }
+        int exact_early = 0;
+        if (early_linked && early_length == CLEAN_HT_STIMULUS_MPDU &&
+            ref_u16(early+20u) == 2u && ref_u16(early+15u) == CLEAN_HT_STIMULUS_PSDU) {
+            const uint8_t *body = early+CLEAN_OBSERVER_EARLY_HEADER*2u;
+            uint32_t sequence = ref_u16(body+22u)>>4u, index = sequence/2u;
+            if (!(sequence&1u) && index%3u == 2u &&
+                clean_ht_stimulus_frame(expected,bound_nonce,index))
+                exact_early = !memcmp(body,expected+CLEAN_HT_DATA_HEADER+10u,
+                                     CLEAN_HT_STIMULUS_MPDU);
+        }
+        uint32_t rx_mask = usb_report_u32(observer+REF_STIMULUS_RX_MASK);
+        const uint8_t *legacy = observer+REF_SAMPLE_BASE+REF_SAMPLE_BYTES;
+        uint32_t legacy_index = ref_stimulus_rx_index(legacy+16u,usb_report_u32(legacy),bound_nonce);
+        int legacy_proof = legacy_index < CLEAN_HT_STIMULUS_COUNT && legacy_index%3u == 0u;
+        uint32_t ht_mask = 0u, legacy_mask = 0u;
+        for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; i += 3u) {
+            legacy_mask |= 1u<<i; ht_mask |= 1u<<(i+1u);
+        }
+        if (rx_mask&~(ht_mask|legacy_mask)) {
+            fputs("Invalid fixed stimulus receive bitmap\n",stderr); return 0;
+        }
+        uint32_t prefix_mask = 0u;
+        for (uint32_t i = 0u; i < count; ++i) {
+            const uint8_t *r = log+2u*CLEAN_OBSERVER_HEADER_WORDS+i*2u*CLEAN_OBSERVER_RECORD_WORDS;
+            uint32_t index = ref_stimulus_prefix_index(r,bound_nonce);
+            if (index < CLEAN_HT_STIMULUS_COUNT) prefix_mask |= 1u<<index;
+        }
+        for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i)
+            printf("{\"test\":\"fixed-stimulus-observed\",\"index\":%u,\"kind\":%u,"
+                   "\"complete_control_delivered\":%s,\"single_ht_prefix_bytes_match\":%s,"
+                   "\"prefix_log_complete\":%s}\n",i,i%3u,
+                   rx_mask&(1u<<i)?"true":"false",prefix_mask&(1u<<i)?"true":"false",
+                   overflow?"false":"true");
+        int controls = (rx_mask&(ht_mask|legacy_mask)) == (ht_mask|legacy_mask) &&
+            legacy_proof && !usb_report_u32(observer+REF_STIMULUS_RX_DUPLICATES) &&
+            !usb_report_u32(observer+REF_STIMULUS_RX_INVALID);
+        printf("{\"test\":\"fixed-stimulus-result\",\"transmissions\":%u,"
+               "\"legacy_controls\":8,\"single_ht_controls\":8,\"two_body_attempts\":8,"
+               "\"valid_ht_headers\":%u,\"ampdu_headers\":%u,"
+               "\"exact_554_byte_nonterminal_body\":%s,\"unaccounted_prefix_exits\":%u,"
+               "\"received_control_mask\":%u,\"expected_control_mask\":%u,"
+               "\"control_duplicates\":%u,\"control_invalid\":%u,"
+               "\"independent_legacy_bytes\":%s,\"all_controls_received\":%s,"
+               "\"single_ht_prefix_mask\":%u,\"single_ht_missing_prefix_mask\":%u,"
+               "\"single_ht_prefix_without_delivery_mask\":%u,\"prefix_log_complete\":%s,"
+               "\"independent_third_receiver\":false,\"ht_station_qualified\":false}\n",
+               CLEAN_HT_STIMULUS_COUNT,valid,aggregate,exact_early?"true":"false",unaccounted,
+               rx_mask,ht_mask|legacy_mask,usb_report_u32(observer+REF_STIMULUS_RX_DUPLICATES),
+               usb_report_u32(observer+REF_STIMULUS_RX_INVALID),legacy_proof?"true":"false",
+               controls?"true":"false",prefix_mask,ht_mask&~prefix_mask,
+               prefix_mask&~rx_mask,overflow?"false":"true");
+        if (!exact_early || unaccounted || !controls)
+            fputs("Fixed stimulus requires an exact 554-byte nonterminal body, all legacy/single-HT controls without duplicate/corrupt delivery and accounted exits; not proven\n",stderr);
+        return exact_early && !unaccounted && controls;
+    }
     uint32_t sent = usb_report_u32(vendor+28u), digest = REF_DIGEST_INITIAL;
     uint8_t frame[REF_FRAME_MAX];
     for (uint32_t i = 0u; i < sent && i < REF_FRAME_COUNT; ++i) {
@@ -568,16 +779,33 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 5 && argc != 6) || !serial_valid(argv[1]) || !serial_valid(argv[2]) || !strcmp(argv[1],argv[2])) {
-        fputs("Usage: collector VENDOR_SERIAL OBSERVER_SERIAL PREFIX PRIVATE_SSID_FILE [mixed|128|256|512]\n",stderr); return 2;
+    if ((argc != 5 && argc != 6 && argc != 7) || !serial_valid(argv[1]) || !serial_valid(argv[2]) || !strcmp(argv[1],argv[2])) {
+        fputs("Usage: collector VENDOR_SERIAL OBSERVER_SERIAL PREFIX PRIVATE_SSID_FILE [mixed|128|256|512] [HANDOFF_CASE]\n",stderr); return 2;
     }
-    uint8_t profile = 0u;
-    if (argc == 6 && strcmp(argv[5],"mixed")) {
+    uint8_t profile = 0u, handoff_case = 0u;
+    if (argc == 7) {
+        static const char *const names[] = {"good","bad-first","bad-last","bad-delimiter","truncated-body"};
+        uint32_t i;
+        for (i = 0u; i < CLEAN_HT_HANDOFF_CASES; ++i)
+            if (!strcmp(argv[6],names[i])) { handoff_case = (uint8_t)i; break; }
+        if (!REF_CLEAN_HANDOFF || i == CLEAN_HT_HANDOFF_CASES) {
+            fputs("HANDOFF_CASE requires reference-handoff and a supported case name\n",stderr); return 2;
+        }
+    }
+    if (argc >= 6 && strcmp(argv[5],"mixed")) {
         profile = !strcmp(argv[5],"128") ? 1u : !strcmp(argv[5],"256") ? 2u :
             !strcmp(argv[5],"512") ? 3u : 0u;
-        if (!profile || CLEAN_RX_HT_ADVANCE) {
+        if (!profile || (CLEAN_RX_HT_ADVANCE && !REF_CLEAN_HANDOFF)) {
             fputs("Focused sizes require 128, 256 or 512 and an early-only build (reference-early/phy/window/rearm)\n",stderr); return 2;
         }
+        if (REF_CLEAN_STIMULUS && !REF_CLEAN_HANDOFF && profile != 3u) {
+            fputs("Fixed stimulus requires the explicit 512 profile; no AP credentials are used\n",stderr);
+            return 2;
+        }
+    }
+    if (REF_CLEAN_HANDOFF && profile != 1u && profile != 2u) {
+        fputs("Controlled handoff requires explicit 128 (170/298) or 256 (298/170)\n",stderr);
+        return 2;
     }
     if (signal(SIGALRM,deadline) == SIG_ERR) { perror("signal"); return 1; }
     alarm(60u);
@@ -588,6 +816,7 @@ int main(int argc, char **argv) {
     if (fclose(random)) ok = 0;
     if (!ok) { fputs("Fresh nonce generation failed\n",stderr); return 1; }
     nonce[11] = profile;
+    if (REF_CLEAN_HANDOFF) nonce[10] = handoff_case;
     printf("{\"test\":\"configuration\",\"build\":\"%08x\",\"nonce\":\"",USB_REPORT_BUILD_ID);
     for (uint32_t i = 0u; i < sizeof(nonce); ++i) printf("%02x",nonce[i]);
     puts("\",\"mcs_requested\":0}");
@@ -597,7 +826,7 @@ int main(int argc, char **argv) {
     if (status) { fprintf(stderr,"USB init: %s\n",libusb_error_name(status)); return 1; }
     libusb_device_handle *sender = open_badge(context,argv[1]), *listener = NULL;
     if (sender) listener = open_badge(context,argv[2]);
-    ok = sender && listener && provision(sender,argv[4]) &&
+    ok = sender && listener && (REF_CLEAN_STIMULUS || provision(sender,argv[4])) &&
         stage(sender,nonce,1u,1u,argv[3],"vendor-ready",vendor);
     if (ok) {
         memcpy(observer_nonce,nonce,sizeof(nonce));

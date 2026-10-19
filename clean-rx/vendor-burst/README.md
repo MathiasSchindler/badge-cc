@@ -16,6 +16,147 @@ Shared board, USB, transport and loader code
 is reused. The host collector uses the repository's existing libusb transport.
 Vendor assets are not dependencies of the clean controller.
 
+## Experimental observer FIFO
+
+`reference-stimulus-fifo` enables `CLEAN_RX_HT_OBSERVER_FIFO=1`, which
+defaults off. It uses the existing eight-slot controller SRAM FIFO instead
+of dropping a completed passive capture when the single F2 credit is busy.
+Full queues retain the next completed frame in SHM. Each queued frame keeps
+its own passive correlation ID, including the advance tag.
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-stimulus-fifo
+bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL \
+    build/clean-rx/vendor-burst/NEW_FIFO_PREFIX - 512
+```
+
+This is the fixed clean RF source, not the vendor/AP source; `-` is only
+the credential-position placeholder. No AP credentials are read.
+`reference-stimulus-fifo-test` deliberately stops host frame polling for
+600000 SOF-calibrated microseconds after single-HT control 1.
+`reference-stimulus-fifo-stop-test` keeps that pause until the stop request.
+Both continue cached timeline sampling and USB service. They must actually
+observe eight queued frames, an outstanding F2 credit and cached
+`PSM_STATE_CAPTURED` before reporting `stress_ownership_proven`.
+These stress profiles deliberately miss later RF frames; their ordinary
+all-controls qualification remains a failure, not a substituted success.
+
+Stop freezes MAC/PSM reception, drains SRAM and any completed held-SHM
+frame, and acknowledges only after all captures are posted. The host also
+consumes the final F2 packet before freezing its report. The controller
+has a 500000-microsecond / 1000000-poll drain bound; the host has a
+1000000-raw-tick / 10000-poll bound. A stalled clock, invalid occupancy or
+failed drain is an explicit error. An unfinished radio frame can still be
+aborted by stop; only completed retained captures are conserved.
+
+Observer ABI 21 uses bytes 16/20 for stress peak occupancy/held-snapshot
+count and byte 52 for pause state: 0 not triggered, 1 active, 2 timed pause
+finished, 3 cancelled by stop. Error reports reuse bytes 16/20 for loader
+stage/address and are not qualification evidence. FIFO frozen reports
+require `captured == posted == consumed`, zero dropped frames and zero
+duplicate/corrupt controls. Non-FIFO profiles retain their previous
+accounting rules. WND9 is unchanged.
+
+Profile flags now participate in the build ID so host-only pause switches
+cannot reuse another profile's RP images or collector.
+See the [FIFO qualification record](../dev-doc/HT20_IMPLEMENTATION.md#passive-observer-fifo-qualification-2026-10-19)
+for retained failures, pre-prefix losses and short bad-FCS exits. This gate
+does not fix persistent RXE busy states or qualify general aggregate RX.
+
+## Controlled 170/298-byte handoff
+
+The default-disabled version-7 source removes vendor aggregation timing
+from the existing one-shot next-body diagnostic:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff
+bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
+```
+
+Use `128` for 170-to-298-byte MPDUs or `256` for the reverse order.
+The optional sixth argument is `good` (default), `bad-first`, `bad-last`,
+`bad-delimiter` or `truncated-body`. These arguments require this profile;
+they are not interchangeable with the fixed 554-byte source. The fourth
+argument is only a placeholder: no AP credentials are read or provisioned.
+
+Each run sends eight cycles of legacy OFDM, single HT and a 478-byte
+two-MPDU HT PPDU, on channel 6/MCS0, with calibrated 40-ms gaps.
+Only aggregate index 2 has the selected fault. The truncated-body case
+increases the second delimiter's claimed length by eight bytes without
+changing the actual finite PPDU or HT-SIG; it does not force TX underrun.
+The final source sets More Data only in the first unicast FromDS MPDU,
+so a genuine second prefix differs from an old first prefix.
+
+The source controller enables `CLEAN_RX_HT_HANDOFF_STIMULUS=1`; the
+observer enables passive early retention, one-shot advance and the
+eight-slot FIFO, without timeline sampling. The source stages and
+readback-checks all 1132 bytes, including the zero tail. This is not
+general A-MPDU TX, negotiated station operation or a BA agreement.
+
+`controlled-handoff-result` requires independently correlated, complete,
+exact first and second MPDUs for good-pair qualification. Bad-first needs
+a later exact pair; bad-last additionally needs the complete, deliberately
+corrupted second bytes with matching owner/epoch, terminal status and
+invalid FCS (`exact_bad_second`), not just a generic bad-FCS exit.
+Negative qualification also requires later controls and clean delivery
+accounting. Delimiter/truncation cases remain diagnostic-only and cannot
+return a successful negative qualification.
+
+Current trials reproduce a bad/abort continuation after a fresh second
+eight-byte prefix in both roles/orders, not a complete pair. Nonzero runner
+exit and retained failed reports are expected until that blocker is fixed.
+See the [controlled handoff evidence](../dev-doc/HT20_IMPLEMENTATION.md#controlled-handoff-stimulus-and-reproducible-continuation-failure).
+Do not reuse an evidence prefix or rebuild the shared images during a run.
+Save full badge originals before flashing; restore and independently
+readback-verify both complete flashes afterward.
+
+### Copy-progress probe and rejected wait control
+
+`reference-handoff-copy` adds `CLEAN_RX_HT_COPY_PROBE=1`, default off
+and requiring the passive one-shot advance. It uses the same source and
+runner arguments as `reference-handoff`. After retaining the complete
+first body, it seeds/readback-checks four `0xa55a` words at MPDU byte
+offsets 8, 32, 64 and 128, then performs the original EOI/rearm.
+It records terminal RXE registers, those four words and an independent
+24-byte prefix before taking the existing full continuation snapshot.
+This changes the first live buffer and adds pre-EOI instructions; use
+baseline controls, not a claim of nonintrusive general receive support.
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-copy
+bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
+```
+
+`handoff-copy-probe` reports owner/epoch, seed readback, phase and
+`retained_canary_mask`. Mask zero means all four locations changed,
+**not** that the expected second body arrived. `terminal_prefix_stable`
+compares the independently sampled 24 bytes with the later continuation
+snapshot. It is not a complete-body/FCS check.
+
+`reference-handoff-wait` additionally enables the default-disabled
+`CLEAN_RX_HT_COPY_WAIT` control. After EOI, it waits for a count of at least
+six bytes smaller than the retained first count, with a finite 16-bit
+countdown and explicit EOF/abort/timeout failure. Failure records SHM
+reason 9 and faults the controller; no restart or stronger reset is tried.
+**This control failed in both roles/orders and is not a recovery fix:**
+the first count remained latched until EOF without the original rearm.
+
+Copy-probe fault handling pauses PSM and uses a separate diagnostic loader
+to export SHM/mailbox state before power-off, preserving the original
+receive error. The host emits `handoff-copy-fault` even though phase
+completion still fails. Collection success/failure and its own error are
+separate fields; neither a stopped fault snapshot nor queued captures
+constitute a successful stop/drain or normal delivery qualification.
+
+Observer ABI 21's existing 512-word early SHM export contains the probe at
+word `0x5ca`: owner, epoch, phase and version, four seed readbacks,
+12 terminal register words, four terminal samples, 12 prefix words and
+six wait fields. Phase 1 is armed, 3 is a committed terminal snapshot,
+5 is explicit wait failure; version 1 is the probe, 2 is the wait control.
+The RP-only `FCP1` fault record occupies trace bytes 5792..5823, beyond
+that export. It does not change normal F2 or station receive ABI.
+See the [copy-progress campaign](../dev-doc/HT20_IMPLEMENTATION.md#second-body-overwrite-probe-and-rejected-fresh-count-wait).
+
 ## Build and run
 
 From the repository root:
@@ -41,8 +182,9 @@ bash clean-rx/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL \
 ```
 
 The optional fifth argument is `mixed` (default), `128`, `256` or `512`.
-Constant-size profiles require an early-only profile; the collector rejects them
-in the advance build. The shared output directory holds only one profile at
+Constant-size vendor/AP profiles require an early-only profile; the collector
+rejects them in the ordinary advance build. The controlled handoff profile
+above is the explicit exception. The shared output directory holds one profile at
 a time: do not rebuild it while a campaign is loading its images.
 `reference-phy` additionally enables stopped Cortex-M3 PHY-control snapshots;
 the probe remains disabled in the ordinary early-only and advance builds.
@@ -78,6 +220,81 @@ The PSM resumes only after successful PHY/control readbacks; rejected
 requests and reply timeouts fail explicitly (SHM reasons 8 and 7).
 The subsequent original RXE flush still has its own strict bound.
 No core/PSM restart, diagnostic reset or normal-profile change is included.
+
+`reference-park` selects a default-disabled `CLEAN_RX_HT_REARM_PARK`
+control using the same one-shot handoff, guards and strict retry. C3 parks
+the PSM for at least 16 TSF units, bounded by 65,535 polls, without executing
+any PHY-reset writes. Completion requires unchanged PHY readbacks and TX
+inhibition; actual reset count remains zero. The measured complete service
+takes 29..30 TSF units, versus 16 for the reset trials: this is a separate
+pause/delay control, **not an exactly time-matched experiment**.
+
+### Fixed two-body stimulus
+
+The default-disabled fixed-source profiles remove dependence on vendor
+queue timing:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-stimulus
+bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 512
+```
+
+`reference-stimulus-reset` enables natural one-shot PHY recovery;
+`reference-stimulus-reset-test` injects the first latched busy decision.
+`reference-stimulus-park-test` instead exercises the injected park-only
+control. All profiles require the explicit `512` runner argument and use
+channel 6/MCS0. They do not associate or read/provision AP credentials;
+the fourth argument is only a positional placeholder.
+
+The source badge runs a separate clean controller with
+`CLEAN_RX_HT_STIMULUS=1`, `CLEAN_RX_HT_DATA=1` and extended RX. It sends
+eight cycles of a 554-byte legacy OFDM frame, a 554-byte single HT frame,
+and a fixed two-by-554-byte HT aggregate, with 40-ms calibrated gaps.
+There are exactly 24 single-attempt transmissions, no controller ACK wait
+or retries. These are broadcast-addressed, unprotected raw PHY fixtures,
+not a negotiated unicast A-MPDU exchange. The aggregate has PSDU length
+1118: two four-byte delimiters,
+two complete MPDUs and two padding bytes after the first body.
+Nonce-derived source addresses, per-frame sequence numbers, deterministic
+body bytes and independent FCS values bind the whole experiment.
+These fixtures are **unprotected**, unlike the vendor/AP protected frames.
+
+Command-12 version 6 accepts only that exact finite aggregate fixture.
+Other lengths, bytes, extra flags, station mode and disabled gates are
+rejected. Version 1 and the existing legacy path carry the controls.
+The sender verifies SRAM staging; the controller verifies template and HT
+controls and requires all three completion conditions with no PHY error.
+Each transmission exports a 64-byte record at trace `128 + 64*index`:
+index/command, raw RP start/end ticks, TSF trigger/completion, PHY error,
+completion conditions, logical template length, whole-descriptor CRC,
+TX diagnostic magic, six PLCP bytes, four sampled TXE controls and channel.
+The complete last aggregate descriptor is also retained at trace 4096.
+The sampled TXE `0x56a` is exported raw, not interpreted as the logical
+template length or used to infer aggregation.
+
+The observer compares every complete control frame against the exact
+fixture, including FCS and passive-observer metadata. Trace words 40/44/48
+hold a received-index bitmap, duplicate count and invalid-control count.
+The first complete legacy wrapper/body is retained at trace 3664, outside
+the ordinary counted HT sample. The collector independently regenerates
+the complete early body, the saved legacy body and all sender descriptors.
+It distinguishes missing single-HT prefixes from prefixes without F2
+delivery. Prefix-capacity loss explicitly disqualifies absence inferences.
+Ordinary HT metadata remains deliberately unsupported/unadvertised in this
+passive observer; it is not the negotiated version-1 station metadata.
+
+Success requires one exact nonce-bound nonterminal 554-byte early body,
+all sixteen complete controls without corrupt/duplicate delivery, and
+accounted prefix exits. Failed trials remain failures even when their
+early body is valid. Sender completion alone is not an OTA proof: the
+independent receiver's HT-SIG, complete FCS-valid body and nonterminal
+geometry establish the actual multi-body opportunity. There is no third
+receiver, no per-attempt independent RF denominator and no qualification
+of the second body's reception or protected AP interoperability.
+
+The [fixed-stimulus campaign](../dev-doc/HT20_IMPLEMENTATION.md#fixed-stimulus-early-capture-qualification-2026-10-19)
+records 24/24 corrected trials with an exact early body, 13/24 passing the
+stricter all-control gate, and continuing natural RXE recovery failures.
 
 The screen shows badge role, operation and experimental mode before radio
 start, then stopped/error status, capture count and first-fault RXCTL after
@@ -185,7 +402,7 @@ No public vendor implementation was copied into the clean firmware.
 `CLEAN_RX_HT_OBSERVER=1` requires extended HT RX, excludes the aggregate
 fixture/interface/delivery profiles and defaults off. It retains at most 16 prefixes
 in SHM `0x100`; overflow is counted and retained entries never overwritten.
-The observer trace has ABI 19 at byte 64. The 16-word SHM header holds session
+The observer trace has ABI 21 at byte 64. The 16-word SHM header holds session
 identity, permit/count/overflow, pending/held IDs, RX epoch, progress and the
 first good-only hint's RX count. Each 47-word record has an append-only
 prefix and a one-shot terminal/exit snapshot:
@@ -905,8 +1122,8 @@ The current separate window trace starts at byte 128:
 
 | Window offset | Contents |
 | --- | --- |
-| 0..23 | Magic `WND8` (`0x38444e57`), retained count, capacity misses, nominal 100000-us interval, calibration ticks/SOF frames |
-| 24..31 | Strict decision-trace enable (0/1), recovery mode (0 strict/no recovery, 1 reflush, 3 injected reflush, 5 PHY reset, 7 injected PHY reset) |
+| 0..23 | Magic `WND9` (`0x39444e57`), retained count, capacity misses, nominal 100000-us interval, calibration ticks/SOF frames |
+| 24..31 | Strict decision-trace enable (0/1), recovery mode (0 strict/no recovery, 1 reflush, 3 injected reflush, 5 PHY reset, 7 injected PHY reset, 13 park only, 15 injected park) |
 | 32..63 | Last cached 16-word PSM decision trace; all zero when disabled |
 | 64..95 | Immutable first-fault 16-word record; zero without recovery |
 | 96..127 | Sixteen-word PHY reset/handoff record; zero without reset |
@@ -931,6 +1148,7 @@ collector with its matching format. WND6 has a 64-byte header and 36 rows
 of 156 bytes; WND7 has a 96-byte header and adds the first-fault block and
 per-sample 32-bit commit. WND8 has a 128-byte header and splits that final
 sample word into commit/reset state. Always use the matching collector.
+WND9 keeps that layout and adds explicitly labelled park-only modes.
 The `rearm-decision` JSON record exports raw words and separately reports
 PSM commit validity and C3 cache coherence. Its exact word layout is in the
 development record; the trace ends in success (1) or genuine busy-bit fault

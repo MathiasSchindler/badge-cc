@@ -128,8 +128,11 @@ void bare_main(void) {
                     badger_display_end();
                     screen_line(12u,ref_role,0xffffu);
                     screen_line(40u,ref_role[0] == 'C' ?
-                        "PASSIVE RX - NO TX" : "JOIN THEN SEND 128",0x07ffu);
-                    screen_line(68u,CLEAN_RX_HT_REARM_RESET ?
+                        "PASSIVE RX - NO TX" : REF_CLEAN_STIMULUS ?
+                        "FIXED LEGACY HT AGGREGATE" : "JOIN THEN SEND 128",0x07ffu);
+                    screen_line(68u,CLEAN_RX_HT_REARM_PARK ?
+                        (CLEAN_RX_HT_REARM_INJECT ? "INJECTED PARK CONTROL" : "PARK ONLY CONTROL") :
+                        CLEAN_RX_HT_REARM_RESET ?
                         (CLEAN_RX_HT_REARM_INJECT ? "INJECTED PHY RESET" : "PHY RESET RECOVERY") :
                         CLEAN_RX_HT_REARM_INJECT ? "INJECTED RECOVERY TEST" :
                         CLEAN_RX_HT_REARM_RECOVER ? "ONE SHOT RECOVERY" :
@@ -141,7 +144,8 @@ void bare_main(void) {
             }
             if (!usb_error && nonce[14] == 2u &&
                 badger_bytes_load_u32(ref_detail+12u) == 1u)
-                screen_line(40u,"SENDING 128 FRAMES",0x07ffu);
+                screen_line(40u,REF_CLEAN_STIMULUS ? "SENDING 24 FIXED PPDUS" :
+                            "SENDING 128 FRAMES",0x07ffu);
             if (!usb_error) ref_run(nonce);
             if (!usb_error && (nonce[14] == 2u || nonce[14] == 4u)) screen_result();
             uint8_t report[64];

@@ -16,6 +16,20 @@
 #ifndef CLEAN_RX_HT_DATA
 #define CLEAN_RX_HT_DATA 0
 #endif
+#ifndef CLEAN_RX_HT_STIMULUS
+#define CLEAN_RX_HT_STIMULUS 0
+#endif
+#ifndef CLEAN_RX_HT_HANDOFF_STIMULUS
+#define CLEAN_RX_HT_HANDOFF_STIMULUS 0
+#endif
+_Static_assert(CLEAN_RX_HT_HANDOFF_STIMULUS == 0 || CLEAN_RX_HT_HANDOFF_STIMULUS == 1,
+               "Handoff stimulus gate");
+_Static_assert(!CLEAN_RX_HT_HANDOFF_STIMULUS || (CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX),
+               "Handoff stimulus requires the extended HT payload API");
+_Static_assert(CLEAN_RX_HT_STIMULUS == 0 || CLEAN_RX_HT_STIMULUS == 1,
+               "Fixed HT stimulus gate");
+_Static_assert(!CLEAN_RX_HT_STIMULUS || (CLEAN_RX_HT_DATA && CLEAN_RX_HT_RX),
+               "Fixed HT stimulus requires the extended HT payload API");
 
 _Static_assert(CLEAN_RX_HT_CLEAR_SIG_CRC == 0 ||
                (CLEAN_RX_HT_CLEAR_SIG_CRC == 1 && CLEAN_RX_HT_PROBE),
@@ -258,14 +272,18 @@ static inline int clean_ht_ampdu_ba_match(const uint8_t *m, uint32_t length,
     return 1;
 }
 
-static inline int clean_ht_ampdu_probe_sig(uint8_t sig[6], uint32_t mcs) {
-    if (!clean_ht20_sig(sig, CLEAN_HT_AMPDU_PROBE_BYTES, mcs)) return 0;
+static inline int clean_ht20_ampdu_sig(uint8_t sig[6], uint32_t length, uint32_t mcs) {
+    if (!clean_ht20_sig(sig, length, mcs)) return 0;
     sig[3] |= 8u;
     sig[4] = sig[5] = 0u;
     uint8_t crc = clean_ht20_crc(sig);
     for (uint32_t i = 0u; i < 8u; ++i)
         sig[(34u+i)/8u] |= (uint8_t)(((crc >> (7u-i)) & 1u) << ((34u+i)&7u));
     return 1;
+}
+
+static inline int clean_ht_ampdu_probe_sig(uint8_t sig[6], uint32_t mcs) {
+    return clean_ht20_ampdu_sig(sig,CLEAN_HT_AMPDU_PROBE_BYTES,mcs);
 }
 
 static inline int clean_ht_ampdu_probe_sig_valid(const volatile uint8_t sig[6],
@@ -437,6 +455,164 @@ static inline int clean_ht_ampdu_probe_command(uint32_t cmd,
     return 1;
 }
 
+#define CLEAN_HT_STIMULUS_VERSION 6u
+#define CLEAN_HT_STIMULUS_MPDU 554u
+#define CLEAN_HT_STIMULUS_PSDU 1118u
+#define CLEAN_HT_STIMULUS_STORAGE 1132u
+#define CLEAN_HT_STIMULUS_COUNT 24u
+_Static_assert(CLEAN_HT_STIMULUS_PSDU ==
+               4u+((CLEAN_HT_STIMULUS_MPDU+3u)&~3u)+4u+CLEAN_HT_STIMULUS_MPDU &&
+               CLEAN_HT_STIMULUS_STORAGE == CLEAN_HT_DATA_HEADER+6u+CLEAN_HT_STIMULUS_PSDU,
+               "Fixed two-body stimulus length and staging geometry");
+
+static inline int clean_ht_stimulus_sig(uint8_t sig[6], uint32_t mcs) {
+    return clean_ht20_ampdu_sig(sig,CLEAN_HT_STIMULUS_PSDU,mcs);
+}
+
+static inline int clean_ht_stimulus_sig_valid(const volatile uint8_t *sig, uint32_t length) {
+    uint8_t expected[6];
+    if (!CLEAN_RX_HT_STIMULUS || length != CLEAN_HT_STIMULUS_PSDU ||
+        !clean_ht_stimulus_sig(expected,sig[0])) return 0;
+    for (uint32_t i = 0u; i < 6u; ++i)
+        if (sig[i] != expected[i]) return 0;
+    return 1;
+}
+
+/* Kinds cycle through legacy OFDM, single HT and a fixed two-body HT PPDU. */
+static inline uint32_t clean_ht_stimulus_frame(uint8_t packet[CLEAN_HT_STIMULUS_STORAGE],
+                                               const uint8_t nonce[14], uint32_t index) {
+    if (nonce[12] >= 8u || index >= CLEAN_HT_STIMULUS_COUNT) return 0u;
+    uint32_t kind = index%3u, aggregate = kind == 2u;
+    uint32_t length = aggregate ? CLEAN_HT_STIMULUS_PSDU : CLEAN_HT_STIMULUS_MPDU;
+    for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_STORAGE; ++i) packet[i] = 0u;
+    uint8_t *sig = packet+CLEAN_HT_DATA_HEADER;
+    if (kind == 0u) {
+        if (!clean_ofdm_plcp_rate(sig,length,0u)) return 0u;
+    } else if (!(aggregate ? clean_ht_stimulus_sig(sig,nonce[12]) :
+                            clean_ht20_sig(sig,length,nonce[12]))) return 0u;
+    packet[0] = aggregate ? CLEAN_HT_STIMULUS_VERSION : CLEAN_HT_DATA_VERSION;
+    packet[2] = nonce[12];
+    packet[4] = (uint8_t)length; packet[5] = (uint8_t)(length>>8u);
+    for (uint32_t body = 0u; body < (aggregate ? 2u : 1u); ++body) {
+        uint8_t *m = sig+6u;
+        if (aggregate) {
+            uint8_t *d = m+body*560u;
+            d[0] = 0xa0u; d[1] = 0x22u;
+            d[2] = clean_ampdu_delimiter_crc(d); d[3] = 0x4eu;
+            m = d+4u;
+        }
+        m[0] = aggregate ? 0x88u : 8u;
+        for (uint32_t i = 0u; i < 6u; ++i) m[4u+i] = m[16u+i] = 255u;
+        m[10] = 2u;
+        for (uint32_t i = 0u; i < 5u; ++i) m[11u+i] = nonce[i];
+        uint32_t sequence = 2u*index+body;
+        m[22] = (uint8_t)(sequence<<4u); m[23] = (uint8_t)(sequence>>4u);
+        if (aggregate) m[24] = 0x60u;
+        for (uint32_t i = 0u; i < 14u; ++i) m[26u+i] = nonce[i];
+        m[40] = 'D'; m[41] = '2'; m[42] = (uint8_t)kind; m[43] = (uint8_t)body;
+        for (uint32_t i = 44u; i < CLEAN_HT_STIMULUS_MPDU-4u; ++i)
+            m[i] = (uint8_t)(nonce[i%14u]^i^sequence);
+        uint32_t fcs = clean_mac_fcs(m,CLEAN_HT_STIMULUS_MPDU-4u);
+        for (uint32_t i = 0u; i < 4u; ++i)
+            m[CLEAN_HT_STIMULUS_MPDU-4u+i] = (uint8_t)(fcs>>(8u*i));
+    }
+    return kind == 0u ? 5u | clean_tx_length_bits(length+6u) | (1u<<18u) | (1u<<19u) :
+        CLEAN_HT_DATA_CMD | clean_tx_length_bits(length+6u) | (1u<<19u);
+}
+
+static inline int clean_ht_stimulus_command(uint32_t cmd, const volatile uint8_t *packet) {
+    if (!CLEAN_RX_HT_STIMULUS || packet[0] != CLEAN_HT_STIMULUS_VERSION) return 0;
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE], nonce[14];
+    const volatile uint8_t *m = packet+CLEAN_HT_DATA_HEADER+10u;
+    for (uint32_t i = 0u; i < 14u; ++i) nonce[i] = m[26u+i];
+    uint32_t sequence = ((uint32_t)m[22] | ((uint32_t)m[23]<<8u))>>4u;
+    uint32_t index = sequence/2u;
+    if (index%3u != 2u || cmd != clean_ht_stimulus_frame(expected,nonce,index)) return 0;
+    for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_STORAGE; ++i)
+        if (packet[i] != expected[i]) return 0;
+    return 1;
+}
+
+#define CLEAN_HT_HANDOFF_VERSION 7u
+#define CLEAN_HT_HANDOFF_PSDU 478u
+#define CLEAN_HT_HANDOFF_CASES 5u
+
+static inline uint32_t clean_ht_handoff_length(const uint8_t nonce[14], uint32_t body) {
+    return (nonce[11] == 1u) != (body != 0u) ? 170u : 298u;
+}
+
+/* Only aggregate 2 carries the selected fault; later PPDUs remain good. */
+static inline uint32_t clean_ht_handoff_frame(uint8_t packet[CLEAN_HT_STIMULUS_STORAGE],
+                                              const uint8_t nonce[14], uint32_t index) {
+    if (nonce[10] >= CLEAN_HT_HANDOFF_CASES || (nonce[11] != 1u && nonce[11] != 2u) ||
+        !clean_ht_stimulus_frame(packet,nonce,index)) return 0u;
+    uint32_t kind = index%3u, first = clean_ht_handoff_length(nonce,0u);
+    uint32_t second = clean_ht_handoff_length(nonce,1u);
+    uint32_t length = kind == 2u ? CLEAN_HT_HANDOFF_PSDU : first;
+    uint8_t *sig = packet+CLEAN_HT_DATA_HEADER, *m = sig+6u;
+    if (kind == 2u) {
+        uint32_t at = 4u+((first+3u)&~3u);
+        for (uint32_t i = 0u; i < second; ++i) m[at+4u+i] = m[564u+i];
+        for (uint32_t body = 0u; body < 2u; ++body) {
+            uint8_t *delimiter = m+(body ? at : 0u), *bytes = delimiter+4u;
+            uint32_t size = body ? second : first;
+            /* Legal More Data variation distinguishes even a stale MAC prefix. */
+            bytes[1] = body ? 2u : 0x22u;
+            bytes[4] = bytes[16] = 2u;
+            for (uint32_t i = 0u; i < 5u; ++i)
+                bytes[5u+i] = bytes[17u+i] = nonce[i];
+            bytes[9] ^= 0x80u;
+            delimiter[0] = (uint8_t)(size<<4u); delimiter[1] = (uint8_t)(size>>4u);
+            delimiter[2] = clean_ampdu_delimiter_crc(delimiter); delimiter[3] = 0x4eu;
+            uint32_t fcs = clean_mac_fcs(bytes,size-4u);
+            for (uint32_t i = 0u; i < 4u; ++i) bytes[size-4u+i] = (uint8_t)(fcs>>(8u*i));
+        }
+        for (uint32_t i = first+4u; i < at; ++i) m[i] = 0u;
+        if (index == 2u) {
+            if (nonce[10] == 1u) m[4u+first-1u] ^= 1u;
+            if (nonce[10] == 2u) m[at+4u+second-1u] ^= 1u;
+            if (nonce[10] == 3u) m[at+2u] ^= 1u;
+            if (nonce[10] == 4u) {
+                uint32_t truncated = second+8u;
+                m[at] = (uint8_t)(truncated<<4u); m[at+1u] = (uint8_t)(truncated>>4u);
+                m[at+2u] = clean_ampdu_delimiter_crc(m+at);
+            }
+        }
+        packet[0] = CLEAN_HT_HANDOFF_VERSION;
+        if (!clean_ht20_ampdu_sig(sig,length,nonce[12])) return 0u;
+    } else {
+        uint32_t fcs = clean_mac_fcs(m,first-4u);
+        for (uint32_t i = 0u; i < 4u; ++i) m[first-4u+i] = (uint8_t)(fcs>>(8u*i));
+        if (!(kind ? clean_ht20_sig(sig,length,nonce[12]) :
+                     clean_ofdm_plcp_rate(sig,length,0u))) return 0u;
+    }
+    packet[4] = (uint8_t)length; packet[5] = (uint8_t)(length>>8u);
+    for (uint32_t i = CLEAN_HT_DATA_HEADER+6u+length; i < CLEAN_HT_STIMULUS_STORAGE; ++i)
+        packet[i] = 0u;
+    return kind == 0u ? 5u | clean_tx_length_bits(length+6u) | (1u<<18u) | (1u<<19u) :
+        CLEAN_HT_DATA_CMD | clean_tx_length_bits(length+6u) | (1u<<19u);
+}
+
+static inline int clean_ht_handoff_sig_valid(const volatile uint8_t *sig, uint32_t length) {
+    uint8_t expected[6];
+    if (!CLEAN_RX_HT_HANDOFF_STIMULUS || length != CLEAN_HT_HANDOFF_PSDU ||
+        !clean_ht20_ampdu_sig(expected,length,sig[0])) return 0;
+    for (uint32_t i = 0u; i < 6u; ++i) if (sig[i] != expected[i]) return 0;
+    return 1;
+}
+
+static inline int clean_ht_handoff_command(uint32_t cmd, const volatile uint8_t *packet) {
+    if (!CLEAN_RX_HT_HANDOFF_STIMULUS || packet[0] != CLEAN_HT_HANDOFF_VERSION) return 0;
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE], nonce[14];
+    const volatile uint8_t *m = packet+CLEAN_HT_DATA_HEADER+10u;
+    for (uint32_t i = 0u; i < 14u; ++i) nonce[i] = m[26u+i];
+    uint32_t index = (((uint32_t)m[22] | ((uint32_t)m[23]<<8u))>>4u)/2u;
+    if (index%3u != 2u || cmd != clean_ht_handoff_frame(expected,nonce,index)) return 0;
+    for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_STORAGE; ++i)
+        if (packet[i] != expected[i]) return 0;
+    return 1;
+}
+
 static inline uint8_t clean_ht_data_byte(uint32_t at, const uint8_t nonce[14]);
 static inline uint8_t clean_ht_amsdu_byte(uint32_t at, const uint8_t nonce[14]);
 static inline uint8_t clean_ht_ack_byte(uint32_t at, const uint8_t nonce[14]);
@@ -487,7 +663,9 @@ static inline int clean_ht_payload_command_valid(uint32_t cmd, uint32_t enabled,
 
 static inline int clean_ht_data_command_valid(uint32_t cmd, uint32_t enabled,
         uint32_t station, const volatile uint8_t *packet) {
-    return !station && enabled && (clean_ht_ampdu_probe_command(cmd,packet) ||
+    return !station && enabled && (clean_ht_stimulus_command(cmd,packet) ||
+        clean_ht_handoff_command(cmd,packet) ||
+        clean_ht_ampdu_probe_command(cmd,packet) ||
         clean_ht_payload_command_valid(cmd, enabled, 0u, packet));
 }
 

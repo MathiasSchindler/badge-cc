@@ -7,6 +7,17 @@
 #define CLEAN_SDIO_WINDOW 1u
 #define CLEAN_SDIO_ACK_OFFSET 448u
 #define CLEAN_SDIO_POSTED_OFFSET 452u
+#define CLEAN_SDIO_DRAIN_US 500000u
+#define CLEAN_SDIO_DRAIN_POLLS 1000000u
+
+static inline int clean_sdio_drain_state(uint32_t captured, uint32_t published,
+        uint32_t capacity, uint32_t started, uint32_t now, uint32_t polls) {
+    uint32_t pending = captured-published;
+    if (!capacity || capacity > 16u || pending > capacity) return -1;
+    if (!pending) return 0;
+    if (now-started >= CLEAN_SDIO_DRAIN_US || polls >= CLEAN_SDIO_DRAIN_POLLS) return -2;
+    return 1;
+}
 
 static inline int clean_sdio_credit_available(uint32_t posted, uint32_t consumed,
                                                uint32_t window) {

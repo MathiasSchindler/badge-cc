@@ -3039,6 +3039,600 @@ The reset remains default-disabled; one recovered episode does not
 qualify general RXE recovery, HT reliability, repeated 554-byte capture,
 normal HT advertisement or D2 completion.
 
+### Fixed-stimulus early-capture qualification (2026-10-19)
+
+**Result: complete 554-byte nonterminal early bodies now repeat in both
+roles with independently checked bytes and multi-body geometry. General
+receive reliability and physical busy recovery remain unqualified.**
+
+Evidence, matching UF2s/controllers/collectors, failed trials and the
+independent bitwise-CRC/fixture audit are retained under
+`build/clean-rx/early-reliability/`. `audit.js` regenerates the fixed source
+without calling firmware helpers; `audit-final.jsonl` contains each result.
+Role 0 observes on A; role 1 observes on B.
+
+#### Deterministic source and evidence
+
+The vendor's focused submissions still take roughly 1.8..2.7 ms per
+512-byte Ethernet frame. An aggregation request and received BA count
+cannot establish a multi-body PPDU. The new separate clean source sends
+eight cycles of:
+
+1. One 554-byte legacy OFDM control at 6 Mbps.
+2. One 554-byte nonaggregated HT20/MCS0 control.
+3. One HT20/MCS0 aggregate containing two complete 554-byte MPDUs.
+
+Forty calibrated milliseconds separate transmissions. The aggregate PSDU
+is 1118 bytes: delimiter + 554-byte body + two padding bytes + delimiter +
+554-byte terminal body. Source addresses, sequence numbers, payload nonce,
+deterministic bytes, delimiter CRCs, HT-SIG CRC and both MPDU FCS values
+are checked. Frames are broadcast-addressed, unprotected raw PHY fixtures,
+not a negotiated unicast A-MPDU exchange; this does not qualify protected
+AP traffic or either body's general delivery.
+
+`CLEAN_RX_HT_STIMULUS` defaults off and requires HT data/extended RX.
+Command-12 version 6 admits only this exact fixture with one attempt, no
+extra flags and no station mode. Native tests cover MCS0..7; RF uses MCS0.
+The existing finite aggregate and new source share HT-SIG construction.
+The source wrapper runs a separate clean controller, not vendor firmware,
+and does not read or provision credentials. The observer stays TX-inhibited
+and passive. Neither default station behavior nor HT advertisement changes.
+
+Every source attempt exports its command, raw host ticks, TSF interval,
+logical length, descriptor CRC, PLCP, sampled TXE controls, three actual
+completion conditions and zero PHY error. Staging/template/control checks
+precede transmission; the final complete aggregate descriptor is retained.
+These records establish checked source execution, **not independent OTA
+receipt for every attempt**. Actual multi-body reception is established by
+the separate badge's matching HT-SIG/1118-byte geometry and a complete,
+nonce-bound, FCS-valid, byte-for-byte expected nonterminal body.
+There is no third receiver or independently measured per-attempt RF loss
+denominator. A second complete body is not claimed.
+
+The observer validates every delivered control's complete bytes and
+passive metadata, retains a cumulative index bitmap and duplicate/invalid
+counts, and separately saves a complete legacy wrapper/body. The collector
+checks that saved body independently and correlates single-HT prefix
+bytes with scheduled indices. Prefix-log overflow disqualifies absence
+inferences. The stronger diagnostic pass requires all sixteen controls
+and one exact early body; this conservative pass gate is not a general
+zero-loss RF specification.
+
+#### Fixed matrix and retained failures
+
+| Corrected fixed-source profile | Trials per role | Exact early body, both roles | All-control pass |
+| --- | ---: | ---: | ---: |
+| Strict rearm, first matrix | 4 | 8/8 | 4/8 |
+| Natural PHY-reset gate | 4 | 8/8 | 4/8 |
+| Injected PHY-reset branch | 2 | 4/4 | 3/4 |
+| Injected park-only branch | 1 | 2/2 | 1/2 |
+| Final strict/reporting check | 1 | 2/2 | 1/2 |
+| **Total** | **12** | **24/24** | **13/24** |
+
+Both badges therefore retain an exact early body in 12/12 corrected
+fixed-source boots. One body is retained per boot; this is not 192/192
+aggregate-body retention or a per-frame capture probability.
+The stricter all-control passes are 3/12 observing on A and 10/12 observing
+on B. That finite asymmetry does not establish a defective badge.
+
+Ten earlier fixed trials remain explicit instrumentation failures:
+two pilot collectors wrongly required sampled TXE `0x56a` to equal the
+logical template length; eight subsequent trials wrongly required the
+ordinary negotiated HT metadata in the deliberately passive observer.
+The final collector retains `0x56a` raw without assigning undocumented
+length semantics, and validates the actual passive metadata explicitly.
+All ten nevertheless contain independently valid 554-byte early bodies.
+They are excluded from the corrected reliability matrix, not relabelled
+as passing runs or silently discarded.
+
+#### Loss isolation
+
+Across the 24 corrected trials, complete control delivery is 180/192
+legacy and 181/192 single HT, with no corrupt or duplicate control
+accepted. These are device-validated full-frame bitmaps, not independent
+host captures of all 384 frames; the saved complete bodies and native
+validators provide separate checks.
+
+Ten missing single-HT controls also lack their expected HT prefix in a
+nonoverflowed log. One has a matching prefix but no complete F2 delivery:
+
+- `strict-v3-role1-r0`: control 19 has no HT prefix; all eight legacy
+  controls arrive, including neighboring indices 18 and 21. There is no
+  exhausted-rearm fault. This isolates a selective pre-prefix miss from
+  the old globally stuck `0x804` condition and downstream USB delivery.
+  It does not identify RF interference, PHY detection or pre-log receive
+  ownership as the unique physical cause.
+- `reset-role0-r0`: control 16 reaches prefix 10/epoch 38 with complete
+  560-byte RXE length and terminal good outcome 1, but not the control
+  delivery bitmap. Frozen accounting is captures 47 = posted 45 + dropped
+  2, consumed 45, pending zero. This places that miss after prefix/good
+  capture and before host delivery; it does not uniquely assign either
+  aggregate drop to that specific frame. Controls 13 and 22 separately
+  lack prefixes. No PHY recovery activates in this trial.
+
+The live RP2350 fixture comparator adds host-side CPU work. These diagnostic
+loss counts must not be extrapolated to ordinary station reception;
+instrumentation overhead remains a candidate for post-capture losses.
+
+Thus not every HT-only miss is an RXE flush timeout, and not every missing
+delivered control is a failed HT PHY decode. Extending the flush wait or
+repeating the PHY reset cannot, by itself, explain both classes.
+
+#### Bounded reset and park-only controls
+
+All four injected PHY controls execute exactly one checked reset, retain
+TX-inhibit masks 15/15 and subsequently capture the exact HT early body.
+The early epochs are later than the preserved injected first fault;
+PSM restart attempts remain zero. This proves reception after actual
+reset execution, not recovery from a natural physical busy state.
+
+`CLEAN_RX_HT_REARM_PARK` adds a separate default-disabled no-reset
+control using the same handoff, TX guards and strict retry. It performs
+no PHY-reset writes, waits at least 16 TSF units with a 65,535-poll bound,
+and requires unchanged PHY readbacks. The two injected park trials record
+completion state 2, actual reset count zero, guards 15/15, and a later
+exact early body in both roles. Full service takes 29 TSF units, compared
+with 16 for injected reset: **not an exactly time-matched control**.
+Observer ABI20/WND9 adds modes 13/15; matching archived ABI19/WND8
+collectors remain necessary for earlier trials.
+
+A separately fixed vendor/AP matrix has eight natural reset trials and
+four natural park-only trials:
+
+- Three real reset activations (`vendor-reset-role1-r0/r2/r3`) exhaust
+  their first waits at RXCTL `0x804`, RXE 924/982/986 and raw status
+  `0x4000/0x4140`. A reset executes once, readbacks/guards pass, but RXCTL
+  stays `0x804` and the bounded retry fails with reason 3.
+- One real park activation (`vendor-park-role1-r0`) has RXE 978 and the
+  same raw status group. Actual reset count stays zero, complete service
+  takes 30 TSF units, and the retry likewise faults. These raw groups are
+  not assigned undocumented hardware meanings.
+- The remaining eight do not activate recovery. One,
+  `vendor-park-role0-r1`, independently captures another protected
+  554-byte vendor early body: prefix 3, epoch 266, PSDU 1118, valid FCS,
+  fresh nonce MAC, matching HT-SIG/CRC and nonterminal geometry.
+  It is not evidence of park recovery, which never ran.
+
+No new naturally busy state recovers. The earlier single midstream
+recovery remains valid evidence for that episode only. Persistent
+startup-like busy handling still needs a hardware-grounded RXE-specific
+solution; enabling repeated resets or PSM restarts would hide the failure.
+
+#### Audit, validation and preservation
+
+All 46 actual trials, including instrumentation failures, are retained.
+The independent audit checks 276 nonce/build-bound report CRCs and 881
+window rows with no window-capacity loss. Forty-two successful frozen
+exports reconcile 5643 captures, including 130 explicit drops; the four
+genuine faulted captures remain errors.
+
+Native ASan/UBSan tests cover all source rates/indices, exact delimiters,
+padding, HT-SIG, FCS, disabled/station gates, every command bit and every
+byte mutation of a representative aggregate, passive control metadata,
+corrupt control/prefix rejection, and sender evidence thresholds.
+PSM reply success/rejection/absence/boundary and strict retry tests remain
+enabled. Builds, unresolved-symbol checks and native tests pass for the
+ordinary, window, reset, park and fixed-source profiles. The ordinary
+controller is byte-identical to the preceding verified default image.
+
+The final strict observer and fixed-transmitter controller binaries also
+byte-compare with their archived RF-tested images; the final natural-reset
+controller matches its RF-tested image.
+
+The original full flashes were saved fresh before testing. Both complete
+originals are now restored and independently reread:
+`restored-A-full.bin` and `restored-B-full.bin` each have 16777216 bytes,
+byte-compare with the fresh originals, and have SHA256:
+
+- A: `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628`.
+- B: `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2`.
+
+Both complete load/verify operations succeed, and final serial-targeted
+checks confirm both badges in BOOTSEL.
+
+The first D2 work package stays open for persistent busy recovery and
+remaining pre-prefix/post-capture losses. Repeating the 554-byte body and
+providing confirmed multi-body stimulus are now completed foundations.
+
+### Passive observer FIFO qualification (2026-10-19)
+
+Evidence: `build/clean-rx/observer-fifo/`. The independent `audit.js`
+checks all 28 RF trials / 168 raw reports, source fixture CRCs and saved
+descriptor bytes, exact early MPDU/SIG/epoch ownership, frozen transport
+counts and final full-queue stop retention. `audit.jsonl` retains per-trial
+failures and cohort totals. Seven additional BOOTSEL-readiness failures
+never reached RF and remain in their readiness logs; macOS USB ownership
+was released by the user, not by terminating applications.
+
+#### Ownership fix
+
+The passive observer previously released a completed capture even if F2
+posting returned zero for unavailable credit or DMA descriptors. Its
+saturating drop counter recorded that loss, but no controller FIFO held
+the frame. The station path already had an eight-slot SRAM FIFO.
+
+`CLEAN_RX_HT_OBSERVER_FIFO=1` now reuses that FIFO. It defaults off and
+requires the passive observer. When full, the PSM's completed SHM capture
+remains held instead of being overwritten. A gated 16-byte side array
+latches each slot's prefix correlation before releasing SHM; delayed F2
+publication no longer reads the live next-frame correlation. Ordinary
+station accounting is not applied to these passive frames.
+
+Stop freezes MAC/PSM reception, copies a completed held-SHM frame when
+space becomes available, and drains all queued captures. It does not
+restart the PSM. The RP continues receiving while waiting for the stopped
+controller and consumes the last posted packet before saving diagnostics.
+FIFO reports require exact `captured == posted == consumed`, with no
+dropped frames or outstanding packets. Controller draining has both
+500000-microsecond and 1000000-poll limits; the host has independent raw
+timer/poll limits. Invalid occupancy and exhausted bounds fault explicitly.
+An unfinished PPDU can still be aborted at stop; this is not a promise to
+finish an arbitrary in-progress radio reception.
+
+#### RF matrix and retained failures
+
+All source runs attempted the same 24 one-shot channel-6 transmissions:
+eight each of legacy OFDM, single HT20/MCS0 and exact two-by-554-byte
+aggregates. No vendor image, association or credential provisioning was
+used. Both badge roles were exercised.
+
+| Cohort | RF trials | Controller captures | Exact 554-byte early body | All 16 controls |
+| --- | ---: | ---: | ---: | ---: |
+| Initial FIFO, four trials per role | 8 | 484 | 8/8 | 4/8 |
+| Timed host pause, two per role | 4 | 176 | 4/4 | 0/4 |
+| Initial stop while full, two per role | 4 | 58 | 4/4 | 0/4 |
+| Stale-profile trials, excluded from normal qualification | 4 | 105 | 4/4 | 0/4 |
+| Final flag-bound normal FIFO, two per role | 4 | 264 | 4/4 | 0/4 |
+| Final stop including held SHM, two per role | 4 | 68 | 3/4 | 0/4 |
+
+Every one of the **1155 completed controller captures** was posted and
+consumed, with zero transport drops, duplicate controls, corrupt accepted
+controls or final pending packets. No strict first fault or PSM restart
+was recorded. These totals include failed trials; they do not establish
+that every transmitted RF frame reached controller capture.
+
+Normal FIFO trials repeat exact nonterminal early bodies in **12/12
+boots, six per role**, while the stricter all-controls gate passes only
+4/12. They receive 88/96 legacy and 87/96 single-HT controls. Seven missing
+single-HT controls have no logged matching prefix. Two more match a logged
+prefix but exit with bad FCS and short RXE lengths:
+
+- `verified-fifo-role0-r0`, control 13: prefix 7, epoch 41,
+  outcome 2, RXE length 51 instead of 560.
+- `verified-fifo-role1-r0`, control 13: prefix 7, epoch 56,
+  outcome 2, RXE length 83 instead of 560.
+
+Those two are **pre-capture radio exits**, not losses of completed
+controller frames on F2. Matching HT-SIG and saved body-prefix bytes bind
+them to the controlled source. The evidence does not distinguish
+interference, PHY truncation or an internal receive-abort cause, and no
+undocumented status-bit meaning or reset mask is inferred.
+
+The timed-pause profile withholds host frame polling for 600000
+SOF-calibrated microseconds after control 1. All four trials observe all
+eight SRAM slots occupied, one F2 credit outstanding, and cached PSM state
+14 holding the next frame. After host polling resumes, every completed
+controller capture drains. The intentional RF misses remain strict-gate
+failures rather than being relabelled as a full RF success.
+
+The full-stop profile withholds polling until stop. In the four final
+trials, the last pre-stop timeline counts are 16, 14, 20 and 14; frozen
+counts become 17, 15, 21 and 15. Each conserves the additional completed
+held-SHM frame, not just the eight SRAM slots. All four pass the explicit
+full-queue ownership proof. The last trial misses every complete early
+aggregate body, which is retained as a failure rather than omitted.
+
+#### Build-profile correction and validation
+
+Four trials labelled `final-fifo-*` unexpectedly reused the preceding
+stop-test image. Their source flags changed only host code, leaving the
+controller bytes and old build-ID inputs unchanged. Build-ID-dependent
+RP objects and collector were consequently stale. Three actually ran
+full-stop pauses; the fourth never triggered its pause. These trials
+remain available but are excluded from normal-FIFO qualification.
+
+Build IDs now include `REF_FLAGS` and `REF_STIMULUS`. A regression switches
+normal FIFO to full-stop FIFO and verifies different build IDs and RP
+observer objects while the C3 controller remains byte-identical to the
+final RF-tested ownership code. Both profiles run native ASan/UBSan
+tests. Existing non-FIFO frozen-report rules remain tested, while FIFO
+tests additionally reject dropped or unconsumed captures. Queue tests
+cover immutable IDs across 16/32-bit counter wrap, full occupancy,
+one-credit draining, invalid occupancy, exact deadline boundaries and a
+nonadvancing clock bounded by polls.
+
+An initial pause build exposed an unwanted `__aeabi_uldivmod` dependency.
+The calibrated pause threshold now uses bounded 32-bit arithmetic; final
+RP ELFs pass the existing unresolved-symbol checks and remain nolibc.
+The ordinary controller passes native tests and remains byte-identical
+to `phy-reset-investigation/verified-default/cyw43_rx_fw.bin`.
+
+Fresh full originals were saved before experimental flashing. The final
+restoration/readback evidence is `final-restore-{A,B}.log`,
+`final-readback-{A,B}.log`, `final-restored-{A,B}-full.bin` and
+`final-bootsel-{A,B}.log`. Both complete 16-MiB readbacks byte-compare
+with the fresh originals and retain the original SHA256 values recorded
+above. Both final serial-targeted checks confirm BOOTSEL.
+
+This completes a bounded passive-transport foundation, not D2 work
+package 1 or 3. Persistent RXE busy recovery, pre-prefix and truncated-body
+losses, repeated variable-length aggregate reception, aggregate handoff
+negative cases and mandatory station MAC integration remain unqualified.
+HT association advertisement stays disabled.
+
+### Controlled handoff stimulus and reproducible continuation failure
+
+This campaign implements a deterministic source for the existing bounded
+170/298-byte next-body diagnostic, not a generalized receive engine or HT
+station. The previous historical vendor pair captures remain valid;
+repeatability, malformed-input recovery and negotiated operation are still
+open. The current campaign does not reproduce a complete valid pair.
+
+#### Implemented source and evidence guards
+
+`CLEAN_RX_HT_HANDOFF_STIMULUS`, default zero, enables exact command-12
+version 7. It requires HT data and extended RX, rejects station mode and
+extra flags, and regenerates and compares every one of the 1132 staged
+bytes. Construction reuses the existing fixed-source scratch buffer.
+The 478-byte physical PPDU contains delimiter + padded first body +
+delimiter + second body, in 170/298 or 298/170 order. The logical
+descriptor is 492 bytes; the source stages/readback-checks the zero tail
+as well. HT-SIG always describes the actual finite PPDU.
+
+The source interleaves eight legacy/single-HT/aggregate cycles, with
+calibrated 40-ms gaps. Cases are good, bad first FCS, bad last FCS,
+bad second delimiter CRC and a second delimiter claiming eight bytes
+beyond the physical remainder. Only index 2 is faulted; subsequent
+aggregates remain good. The malformed case does not transmit an
+incorrect HT-SIG or deliberately underrun the TX engine.
+
+The new `reference-handoff` profile wires source selection through RP
+staging, controller admission, sender records, passive observer byte
+validation, frozen sample retention, collector and runner. Use the
+[profile instructions](../vendor-burst/README.md#controlled-170298-byte-handoff)
+and [API contract](../doc/HT20.md#finite-aggregate-diagnostic).
+The observer reuses the FIFO and existing one-shot advance; no receive
+register/reset experiment or per-frame TFT operation was added.
+
+An initial collector weakness could count a generic second bad-FCS
+outcome plus recovery controls as a bad-last success, even though good
+controls also failed there. The corrected guard requires complete exact
+bad-second bytes, invalid FCS and matching early/second owner and epoch.
+The native tests exercise acceptance and ownership, length, terminal,
+body and FCS mutations in both orders. Old apparent bad-last passes are
+retained as insufficient instrumentation, not negative qualification.
+Bad-first qualification still requires a later complete valid pair.
+Bad-delimiter/truncated-body cases intentionally cannot pass negative
+qualification until their complete expected behavior is established.
+
+Native tests cover both orders, five cases, eight MCS and all 24 indices,
+including delimiter/FCS geometry, zero tails, source/receive validation,
+disabled/station/command-bit rejection and every staging-byte mutation
+of representative aggregate descriptors. Controller and protocol native
+tests run with ASan/UBSan. The normal controller remains byte-identical
+to the preceding verified default. The old fixed-source FIFO profile
+also builds/tests and its controller remains byte-identical to the
+previous verified FIFO image. Matching final handoff images/collector
+were rebuilt and byte-compared to their RF archives.
+
+#### Retained hardware campaign
+
+Evidence is under `build/clean-rx/controlled-handoff/`: raw reports,
+JSONL, stderr, loader logs, archived source/observer images and collectors,
+fresh full originals, restore readbacks, and independent `audit.js` /
+`audit.jsonl`. Role 0 is B source/A observer; role 1 reverses them.
+All controlled-source RF trials use MCS0; eight-rate native coverage is
+not an eight-rate RF qualification.
+
+| Cohort | Trials | Completed captures | Exact early bodies | Advances | Bad/abort continuations | All controls received |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Initial broadcast fixtures | 4 | 239 | 4 | 4 | 4 | 3 |
+| Unicast pilots | 12 | 817 | 12 | 10 | 10 | 4 |
+| Strict five-case/two-order/two-role matrix | 20 | 1405 | 20 | 16 | 16 | 7 |
+| Distinct-prefix unicast follow-up | 4 | 296 | 4 | 4 | 4 | 2 |
+| Vendor/AP controls, mixed sizes | 4 | 1304 | 1 | 1 | 1 | Not comparable |
+| Total | 44 | 4061 | 41 | 35 | 35 | |
+
+The independent audit verifies all 176 raw report headers/build IDs/
+session nonces, all 960 controlled-source transmission records against
+an independently reconstructed fixture, the final staged descriptors,
+complete early bytes/FCS and fresh owner/epoch correlation. All 4061
+completed controller captures were posted and consumed, with zero F2
+drops. Every populated retained sample has matching stored/computed FCS,
+and none is tagged as advanced. All 35 continuation snapshots match their early owner/epoch
+and have outcome 2 (bad/abort); no exact valid second body or exact
+intentionally bad last body is established.
+
+This conservation result is not zero RF loss: only 7/20 strict-matrix
+trials received every interleaved control, and only 12/20 received the
+selected recovery controls. All 40 controlled-source trials retain an
+exact first body, but the diagnostic retains one early body per boot;
+that is not evidence of receiving every aggregate or every first body.
+The four vendor controls use the existing independent vendor/AP path
+with a byte-identical C3 observer; one reproduces the bad continuation.
+They weaken a clean-transmitter-only explanation but do not independently
+prove that either source's complete second body was correct over the air.
+
+#### Fresh prefix discriminator and narrowed boundary
+
+In all 30 original controlled-source advances, exactly the first eight
+snapshot bytes matched the expected second body, then diverged. Those
+eight bytes were also identical in the first body, so they could not
+prove that a new second prefix had arrived. To remove that ambiguity,
+the final source sets the legal More Data bit in the first FromDS frame
+and clears it in the second. Addresses and TID remain unchanged; this
+does not invent fragments, protected frames or a new receive policy.
+
+All four follow-ups, covering both roles/orders, retain first FC
+`88 22`, then a fresh second FC `88 02` and the correct remaining
+eight-byte prefix. Thus the second snapshot is not just the unchanged
+first header. In every case the first mismatch is byte 8; second RXE
+counts are 304/306 or 176/178, versus expected 304 or 176 including
+the six-byte receive header. The outcome remains bad/abort and the
+remaining bytes do not establish the expected MPDU.
+
+This narrows the observed boundary to reception/copy/terminal handling
+after a fresh next-body prefix, rather than missing the entire aggregate,
+failure to take the advance, host credit loss or stale early ownership.
+It does **not** prove that the radio payload physically corrupts at byte 8:
+an invalid/aborted snapshot need not contain a completed hardware copy.
+It also rules out treating an isolated final-FCS overwrite as sufficient
+explanation for the observed non-FCS byte mismatches.
+
+The actual PSM image was decoded through copy setup, body loop and
+GoodFCS completion. Event-drain instructions at PCs 163/164 are
+conditional; their fall-through is already represented by existing
+event-aware native tests. No new event-semantics defect was demonstrated,
+so no speculative receive-loop patch, delay, undocumented TX control
+or stronger reset was introduced. The next discriminator is the
+next-body copy-engine progress/terminal transition, or an independent
+complete on-air second-body capture, not more identical blind repeats.
+Correct live multi-body handling remains the blocker for work package 2.
+HT association, BA lifecycle/Immediate BA and protection gates remain off.
+
+The final marked-prefix build is `8cdf0e3a`. Its 60004-byte observer
+controller has SHA256
+`c070b8ad26798a9996be960fe0d1ee0e9d21d388cd939cd1a274ce0958d7daec`;
+the identical complete binary is embedded in the archived vendor/AP
+observer UF2. Fresh 16-MiB originals were saved before experiments.
+After the last marked-prefix trial, both entire originals were restored,
+independently saved as `restored-final-{A,B}-full.bin`, byte-compared
+and SHA256-verified. Both were left in BOOTSEL; final info logs are
+`bootsel-final-{A,B}.log`.
+
+| Badge | Original and final full-readback SHA256 |
+| --- | --- |
+| A | `8cda7a00468339ca723305f3ee7cd5755875ce3f4ffe747f5d0a23d2b0a23628` |
+| B | `bc3f972dcff6724638956cd5b8fd59a4f061b52d7a22eb87470a1f27067721e2` |
+
+### Second-body overwrite probe and rejected fresh-count wait
+
+This follow-up distinguishes a stalled live-SHM copy from a changing
+diagnostic snapshot, then tests the specific stale-count rearm hypothesis.
+It does not repair or qualify the second-body receive path.
+
+#### Bounded implementation and fault evidence
+
+The default-disabled `CLEAN_RX_HT_COPY_PROBE` gate requires passive early
+retention and one-shot advance. After the complete first body is saved,
+it writes and reads back four `0xa55a` sentinel words in the live receive
+buffer at MPDU offsets 8, 32, 64 and 128. The original EOI/base/end/copy
+sequence then runs. At the continuation terminal entry, a separate
+snapshot records 12 existing RXE/TSF registers, the sentinel locations and
+24 prefix bytes, before the existing complete continuation snapshot.
+Owner/epoch, seed readback and commit phase are checked; no new register
+mask, radio reset or source payload is introduced. The probe adds
+pre-EOI instructions and changes live first-body bytes after retention,
+so it is a controlled intervention, not passive timing qualification.
+
+The dependent `CLEAN_RX_HT_COPY_WAIT` experiment tests whether arming
+against the previous body's count causes the failure. It acknowledges
+EOI, then waits for a latched count in `[6, first_count)`, checking
+EOF/abort and a 65,535-decrement budget before original rearm. Failure
+records phase 5/reason 9 and takes the existing PSM fault path; C3 reports
+error `0x88` instead of automatically restarting. This gate defaults off
+and is deliberately **not** promoted as a fix.
+
+The first four wait trials exposed a diagnostic gap: the RP powered off
+after a controller error without exporting stopped SHM. They remain
+retained but cannot establish the exact fault state. The copy-probe
+error path now pauses PSM and uses an isolated diagnostic loader to read
+SHM/mailbox evidence before power-off. It never clears the original
+loader/receive failure. Separate collection success/error and reason
+fields remain available even though the requested phase still fails.
+Two further trials verify the collector's structured `handoff-copy-fault`
+output against the raw retained snapshot. Error snapshots are not
+success-shaped reports or normal stop/drain evidence.
+
+The probe fits unused SHM words `0x5ca..0x5f3` already included in the
+existing 512-word export. The RP-only fault metadata occupies trace bytes
+5792..5823. No normal capture/F2 layout is expanded.
+See [profiles and field layout](../vendor-burst/README.md#copy-progress-probe-and-rejected-wait-control).
+
+#### Hardware comparisons and independent audit
+
+All evidence is under `build/clean-rx/copy-progress/`, with fresh full
+originals, archived matching images/collectors, source records, raw
+reports/JSONL, failed trials, build logs and `audit.js` / `audit.jsonl`.
+Source B/observer A is role 0; role 1 reverses them. All RF uses MCS0
+and both 170/298-byte orders.
+
+| Cohort | Trials | Completed captures | Result |
+| --- | ---: | ---: | --- |
+| Ordinary handoff baseline | 4 | 167 | Fresh prefix; bad continuation |
+| Initial sentinel probe | 4 | 390 | All sentinel locations overwritten; bad continuation |
+| Repeated good/bad-last probe | 8 | 361 | Same overwrite result; no exact good or injected-bad second body |
+| Initial wait faults, before SHM export fix | 4 | Not qualified | Original controller failure retained; detailed fault unavailable |
+| Wait faults with stopped SHM export | 4 | 9, not drain-qualified | EOF with unchanged first count, reason 9 |
+| Structured fault-output verification | 2 | 3, not drain-qualified | Same failure; raw and JSON fields agree |
+
+The independent audit validates 104 raw report headers/build/session
+bindings and 624 source records against independently constructed
+fixtures, including the final full staged descriptor per run. Every
+source-controller binary is byte-identical across these experiments.
+The baseline observer controller is byte-identical to the previous
+marked-prefix campaign. Normal and final probe controller binaries
+are compared against their RF archives after rebuilding.
+
+All 918 completed captures in the 16 normally stopped trials were
+posted and consumed, with zero F2 drops. Each of those trials has an
+exact first body and a fresh second eight-byte prefix, but no valid
+pair. Only 6/16 received every interleaved control: RF losses remain.
+The 12 completed captures reported in stopped-fault snapshots are kept
+separate: a controller fault prevents normal drain qualification.
+The four original unexported fault trials are not assigned capture or
+mechanism results merely from their sender completion.
+
+Across all 12 sentinel trials, all four seeds first read back correctly
+and all four terminal locations differed from the seeds. Every terminal
+location agrees with the later full continuation snapshot, and all
+24 independently sampled prefix bytes are stable between snapshots.
+The expected body nevertheless fails after the fresh header, and
+bad-last trials do not retain the exact intentionally corrupted body.
+This excludes a wholly untouched receive buffer and weakens an
+unstable diagnostic-copy explanation. It does not establish that every
+byte was correctly copied or identify where physical corruption begins.
+
+All six exported wait faults retain the first count (176 or 304), with
+EOF status and nonzero remaining budget. EOF arrives after roughly
+175..340 TSF units; this is not a countdown timeout. The hypothesized
+fresh-count wait therefore prevents the original continuation and
+cannot be used as a repair. A pre-arm count is not an independently
+advancing freshness signal in this experiment. No undocumented
+reset, delay or event-clear sequence was substituted.
+
+#### Validation and remaining boundary
+
+Native ASan/UBSan tests cover both size orders, exact sentinel placement
+and readback, first-body retention, terminal register/data snapshots,
+unchanged owner/epoch, immutable records across new RX, bounds and no TX.
+Wait tests model a fresh count, stale-count exhaustion, EOF and abort;
+faults must take the explicit bounded failure path without arming.
+Protocol tests reject missing owners, wrong epochs/versions/phases,
+seed corruption and invalid terminal count geometry.
+The ordinary handoff and production-default controller binaries remain
+byte-identical to their verified predecessors. All builds remain
+freestanding/nolibc; a compiler-generated struct-copy helper was replaced
+with the existing byte-copy helper rather than adding a runtime dependency.
+
+The current boundary is an active overwrite path yielding stable but
+incorrect continuation bytes, not missing host credit, wholly stalled
+copy or merely a moving terminal snapshot. Next work needs a
+discriminator for receive/FIFO boundary/length handling versus incorrect
+on-air second bytes; independent complete RF evidence remains valuable.
+The wait experiment is a rejected hypothesis, not general recovery.
+Work package 2, negotiated aggregation, Immediate BA and HT association
+remain unqualified.
+
+The final non-wait probe build is `337b6c20`; structured fault-output
+verification used `1b01c4b9`. The shared build is left on the non-wait
+probe, not the rejected wait control. After the last RF trial, both
+original 16-MiB flashes from this campaign were restored and independently
+saved as `restored-{A,B}-full.bin`, byte-compared and SHA256-verified
+against the fresh backups (the A/B hashes listed above). Final
+`bootsel-{A,B}.log` reads confirm both badges were left in BOOTSEL.
+No AP credentials were read or provisioned in this campaign.
+
 ### Remaining D2 work
 
 Use the [consolidated D2 work packages](../../todo.md#remaining-work-packages)

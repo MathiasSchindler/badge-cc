@@ -139,7 +139,11 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Trace receive/copy/FIFO state across live aggregate handoffs.
 - [x] Implement size-selectable early-only captures and stopped clock/PSM diagnostics.
 - [x] Repeat complete FCS-valid 170- and 298-byte early captures in both badge roles.
-- [x] Capture complete FCS-valid 554-byte nonterminal early MPDUs in both badge roles.
+- [x] Repeat complete FCS-valid 554-byte nonterminal early MPDUs in both badge roles.
+- [x] Implement fixed two-body RF stimulus with exact-body checks and interleaved legacy/HT loss accounting.
+- [x] Implement exact-size handoff stimulus, bad-frame/malformed cases and fresh second-prefix discrimination.
+- [x] Instrument bounded second-body overwrite and preserve stopped controller-fault evidence.
+- [x] Implement gated passive-observer FIFO retention and bounded stop/drain.
 - [x] Reproduce zero-HT reception with actual PSM-state and PHY-control diagnostics.
 - [x] Implement SOF-calibrated receive timelines, decision-latched rearm diagnostics and conditional-event regression tests.
 - [x] Implement gated one-shot RXE/PHY recovery controls, preserved first-fault diagnostics and framebuffer-free badge status.
@@ -147,11 +151,11 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 
 #### Remaining work packages
 
-- [ ] **1. Qualify early-capture reliability:** repeat complete 554-byte bodies
-  in both roles; qualify bounded RXE/PHY recovery and isolate HT-only misses,
-  with independently confirmed multi-body stimulus.
-- [ ] **2. Qualify aggregate handoff:** repeat two-body capture in both badge
-  roles and size orders; verify terminal, bad-frame and abort recovery.
+- [ ] **1. Qualify early-capture reliability:** qualify FIFO-backed delivery
+  and resolve persistent RXE busy, pre-prefix and truncated-body losses;
+  repeat loss-accounted tests with confirmed multi-body stimulus.
+- [ ] **2. Qualify aggregate handoff:** resolve second-body byte/FCS failures;
+  repeat complete pairs in both roles/orders and verify bad-frame/abort recovery.
 - [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot
   assumptions and qualify bounded buffering, transport backpressure,
   malformed/truncated input and recovery across successive PPDUs.

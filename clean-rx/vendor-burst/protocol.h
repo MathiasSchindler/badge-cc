@@ -5,6 +5,54 @@
 #include "../src/frame_limits.h"
 #include "../src/ht_observer.h"
 #include "../src/sdio_ring.h"
+#include "../src/ht20.h"
+
+#ifndef REF_CLEAN_STIMULUS
+#define REF_CLEAN_STIMULUS 0
+#endif
+#ifndef REF_CLEAN_HANDOFF
+#define REF_CLEAN_HANDOFF 0
+#endif
+_Static_assert(REF_CLEAN_HANDOFF == 0 || REF_CLEAN_HANDOFF == 1,
+    "Controlled handoff gate must be zero or one");
+_Static_assert(!REF_CLEAN_HANDOFF ||
+    (REF_CLEAN_STIMULUS && CLEAN_RX_HT_ADVANCE && CLEAN_RX_HT_EARLY_SAVE &&
+     CLEAN_RX_HT_OBSERVER_FIFO && !CLEAN_RX_HT_WINDOW),
+    "Controlled handoff requires the FIFO-backed passive advance diagnostic");
+#ifndef REF_OBSERVER_PAUSE
+#define REF_OBSERVER_PAUSE 0
+#endif
+#ifndef REF_OBSERVER_STOP_FULL
+#define REF_OBSERVER_STOP_FULL 0
+#endif
+_Static_assert(REF_OBSERVER_STOP_FULL == 0 || REF_OBSERVER_STOP_FULL == 1,
+    "Full-queue stop gate must be zero or one");
+_Static_assert(!REF_OBSERVER_STOP_FULL || REF_OBSERVER_PAUSE,
+    "Full-queue stop requires the host pause diagnostic");
+_Static_assert(REF_OBSERVER_PAUSE == 0 || REF_OBSERVER_PAUSE == 1,
+    "Observer pause gate must be zero or one");
+_Static_assert(!REF_OBSERVER_PAUSE ||
+    (REF_CLEAN_STIMULUS && CLEAN_RX_HT_OBSERVER_FIFO),
+    "Observer pause requires the fixed-source FIFO diagnostic");
+#define REF_FIFO_PEAK 16u
+#define REF_FIFO_HELD_SAMPLES 20u
+#define REF_FIFO_PAUSE_STATE 52u
+_Static_assert(REF_CLEAN_STIMULUS == 0 || REF_CLEAN_STIMULUS == 1,
+    "Fixed reference source gate must be zero or one");
+_Static_assert(!REF_CLEAN_STIMULUS ||
+    REF_CLEAN_HANDOFF ||
+    (CLEAN_RX_HT_WINDOW && CLEAN_RX_HT_EARLY_SAVE && !CLEAN_RX_HT_ADVANCE),
+    "Fixed source requires the early-only timeline or controlled handoff");
+#define REF_STIMULUS_RECORD_BASE 128u
+#define REF_STIMULUS_RECORD_BYTES 64u
+#define REF_STIMULUS_PACKET_BASE 4096u
+#define REF_STIMULUS_RX_MASK 40u
+#define REF_STIMULUS_RX_DUPLICATES 44u
+#define REF_STIMULUS_RX_INVALID 48u
+_Static_assert(REF_STIMULUS_RECORD_BASE+CLEAN_HT_STIMULUS_COUNT*REF_STIMULUS_RECORD_BYTES <=
+    REF_STIMULUS_PACKET_BASE &&
+    REF_STIMULUS_PACKET_BASE+CLEAN_HT_STIMULUS_STORAGE <= 5888u,
+    "Fixed stimulus evidence must fit the trace");
 
 #define REF_MAGIC 0x31524648u
 #define REF_TRACE_BYTES 5888u
@@ -26,9 +74,74 @@
 #define REF_DUMP_BYTES 384u
 #define REF_OBSERVER_DETAIL 1024u
 #define REF_DIGEST_INITIAL 0x811c9dc5u
-#define REF_OBSERVER_ABI 19u
+#define REF_OBSERVER_ABI 21u
 static inline uint16_t ref_u16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8u));
+}
+static inline uint32_t ref_source_frame(uint8_t packet[CLEAN_HT_STIMULUS_STORAGE],
+                                       const uint8_t nonce[14], uint32_t index) {
+    return REF_CLEAN_HANDOFF ? clean_ht_handoff_frame(packet,nonce,index) :
+                              clean_ht_stimulus_frame(packet,nonce,index);
+}
+static inline uint32_t ref_source_control_length(const uint8_t nonce[14]) {
+    return REF_CLEAN_HANDOFF ? clean_ht_handoff_length(nonce,0u) : CLEAN_HT_STIMULUS_MPDU;
+}
+static inline int ref_stimulus_record_valid(const uint8_t *r, const uint8_t nonce[14],
+                                            uint32_t index) {
+    uint8_t packet[CLEAN_HT_STIMULUS_STORAGE];
+    uint32_t cmd = ref_source_frame(packet,nonce,index);
+    uint32_t total = clean_tx_length(cmd), kind = index%3u;
+    return cmd && badger_bytes_load_u32(r) == index &&
+        badger_bytes_load_u32(r+4u) == cmd &&
+        badger_bytes_load_u32(r+12u)-badger_bytes_load_u32(r+8u) < 1000000u &&
+        badger_bytes_load_u32(r+20u)-badger_bytes_load_u32(r+16u) >=
+            (kind ? clean_ht20_airtime_us(total-6u,nonce[12]) :
+                    clean_ofdm_airtime_us(total-6u,0u)) &&
+        badger_bytes_load_u32(r+20u)-badger_bytes_load_u32(r+16u) < 100000u &&
+        !badger_bytes_load_u32(r+24u) && badger_bytes_load_u32(r+28u) == 7u &&
+        badger_bytes_load_u32(r+32u) == total &&
+        badger_bytes_load_u32(r+36u) == diag_crc32(packet,sizeof(packet)) &&
+        badger_bytes_load_u32(r+40u) == CLEAN_TX_DIAG_MAGIC &&
+        badger_bytes_equal(r+44u,packet+CLEAN_HT_DATA_HEADER,6u) &&
+        ref_u16(r+50u) == (kind ? 0x42u : 0x41u) &&
+        ref_u16(r+52u) == (kind ? clean_ht20_rates[nonce[12]].phyctl1 :
+                                 clean_ofdm_rates[0].phyctl1) &&
+        ref_u16(r+54u) == 0x826u &&
+        badger_bytes_load_u32(r+60u) == nonce[13];
+}
+static inline uint32_t ref_stimulus_rx_index(const uint8_t *packet, uint32_t size,
+                                             const uint8_t nonce[14]) {
+    uint32_t length = ref_source_control_length(nonce);
+    if (size != 18u+length) return CLEAN_HT_STIMULUS_COUNT;
+    uint32_t sequence = ref_u16(packet+18u+22u)>>4u, index = sequence/2u;
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE];
+    if ((sequence&1u) || index%3u == 2u ||
+        !ref_source_frame(expected,nonce,index) ||
+        packet[15] != expected[CLEAN_HT_DATA_HEADER] || packet[17] ||
+        packet[16] != ((index%3u == 1u ? CLEAN_RX_UNSUPPORTED_PHY : CLEAN_RX_OFDM)|nonce[13]) ||
+        (index%3u == 1u && (!ref_u16(packet+10u) ||
+                          ref_u16(packet+10u) > CLEAN_OBSERVER_RECORDS)) ||
+        !badger_bytes_equal(packet+18u,expected+CLEAN_HT_DATA_HEADER+6u,
+                           length)) return CLEAN_HT_STIMULUS_COUNT;
+    return index;
+}
+static inline uint32_t ref_handoff_rx_index(const uint8_t *packet, uint32_t size,
+                                           const uint8_t nonce[14]) {
+    if (!REF_CLEAN_HANDOFF || size < 18u+44u) return CLEAN_HT_STIMULUS_COUNT;
+    uint32_t sequence = ref_u16(packet+40u)>>4u, index = sequence/2u, ordinal = sequence&1u;
+    uint32_t length = clean_ht_handoff_length(nonce,ordinal);
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE];
+    if (index%3u != 2u || size != 18u+length ||
+        !clean_ht_handoff_frame(expected,nonce,index)) return CLEAN_HT_STIMULUS_COUNT;
+    uint32_t offset = CLEAN_HT_DATA_HEADER+10u+
+        (ordinal ? 4u+((clean_ht_handoff_length(nonce,0u)+3u)&~3u) : 0u);
+    if (packet[15] != nonce[12] || packet[16] != (CLEAN_RX_UNSUPPORTED_PHY|nonce[13]) ||
+        packet[17] || !(ref_u16(packet+10u)&~CLEAN_OBSERVER_ADVANCE_TAG) ||
+        (ref_u16(packet+10u)&~CLEAN_OBSERVER_ADVANCE_TAG) > CLEAN_OBSERVER_RECORDS ||
+        !badger_bytes_equal(packet+18u,expected+offset,length) ||
+        diag_crc32(packet+18u,length-4u) != badger_bytes_load_u32(packet+size-4u))
+        return CLEAN_HT_STIMULUS_COUNT;
+    return index;
 }
 static inline int ref_timer_calibration_valid(uint32_t ticks, uint32_t frames) {
     return ticks && ticks <= 100000u && frames >= 32u && frames <= 1024u &&
@@ -38,7 +151,7 @@ static inline uint64_t ref_timer_us(uint32_t value, uint32_t ticks, uint32_t fra
     return (uint64_t)value*frames*1000u/ticks;
 }
 #define REF_WINDOW_BASE 128u
-#define REF_WINDOW_MAGIC 0x38444e57u
+#define REF_WINDOW_MAGIC 0x39444e57u
 #define REF_WINDOW_INTERVAL 100000u
 #define REF_WINDOW_RECORDS 35u
 #define REF_WINDOW_RECORD_BYTES 160u
@@ -59,7 +172,9 @@ static inline int ref_window_valid(const uint8_t *window) {
         !count || count > REF_WINDOW_RECORDS ||
         badger_bytes_load_u32(window+12u) != REF_WINDOW_INTERVAL ||
         badger_bytes_load_u32(window+24u) > 1u ||
-        badger_bytes_load_u32(window+28u) > 7u ||
+        badger_bytes_load_u32(window+28u) > 15u ||
+        ((badger_bytes_load_u32(window+28u)&8u) &&
+         !(badger_bytes_load_u32(window+28u)&4u)) ||
         (badger_bytes_load_u32(window+28u) &&
          (!badger_bytes_load_u32(window+24u) ||
           !(badger_bytes_load_u32(window+28u)&1u))) ||
@@ -134,6 +249,7 @@ static inline int ref_delivery_accounted(const uint8_t trace[REF_TRACE_BYTES]) {
     uint32_t captured = badger_bytes_load_u32(trace+REF_MULTI_DETAIL+8u);
     uint32_t posted = badger_bytes_load_u32(f2+8u), consumed = badger_bytes_load_u32(f2+4u);
     uint32_t counts = badger_bytes_load_u32(f2);
+    if (CLEAN_RX_HT_OBSERVER_FIFO && (captured != posted || posted != consumed)) return 0;
     /* Reference counters start at zero; wraparound is not a bounded report. */
     if (badger_bytes_load_u32(trace+128u) != 0x4f505258u ||
         badger_bytes_load_u32(trace+REF_MULTI_DETAIL) != 0x4d554c54u ||
@@ -167,7 +283,33 @@ static inline int ref_rx_summary(uint8_t summary[REF_RX_SUMMARY_BYTES],
 #define REF_EARLY_BASE (REF_SAMPLE_BASE + REF_SAMPLES*REF_SAMPLE_BYTES)
 #define REF_SECOND_BASE (REF_EARLY_BASE + 2u*(CLEAN_OBSERVER_SECOND_SHM-CLEAN_OBSERVER_EARLY_SHM))
 #define REF_HANDOFF_BASE (REF_EARLY_BASE + 2u*(CLEAN_OBSERVER_HANDOFF_SHM-CLEAN_OBSERVER_EARLY_SHM))
+#define REF_COPY_BASE (REF_EARLY_BASE + 2u*(CLEAN_OBSERVER_COPY_SHM-CLEAN_OBSERVER_EARLY_SHM))
+#define REF_COPY_FAULT_BASE (REF_EARLY_BASE+2u*CLEAN_OBSERVER_EARLY_WORDS)
+#define REF_COPY_FAULT_MAGIC 0x31504346u
+_Static_assert(REF_COPY_BASE+2u*CLEAN_OBSERVER_COPY_WORDS <= REF_TRACE_BYTES,
+    "Receive-copy probe must fit the existing early SHM export");
+_Static_assert(REF_COPY_FAULT_BASE+32u <= REF_TRACE_BYTES,
+    "Copy fault evidence must fit beyond the complete early SHM export");
 #define REF_ADVANCED_SAMPLE 0x100u
+static inline int ref_copy_probe_valid(const uint8_t *copy, const uint8_t *early,
+                                       const uint8_t *second) {
+    uint32_t owner = ref_u16(copy), phase = ref_u16(copy+4u);
+    if (!owner) {
+        for (uint32_t i = 0u; i < 2u*CLEAN_OBSERVER_COPY_WORDS; ++i)
+            if (copy[i]) return 0;
+        return !ref_u16(early+24u);
+    }
+    if (owner > CLEAN_OBSERVER_RECORDS || owner != ref_u16(early) ||
+        ref_u16(copy+2u) != ref_u16(early+2u) ||
+        ref_u16(early+24u) != 1u ||
+        (phase != 1u && phase != 3u && !(CLEAN_RX_HT_COPY_WAIT && phase == 5u)) ||
+        ref_u16(copy+6u) != CLEAN_OBSERVER_COPY_VERSION) return 0;
+    for (uint32_t i = 0u; i < 4u; ++i)
+        if (ref_u16(copy+8u+2u*i) != CLEAN_OBSERVER_COPY_CANARY) return 0;
+    return phase != 3u || (ref_u16(second) == owner &&
+        ref_u16(second+2u) == ref_u16(copy+2u) &&
+        ref_u16(copy+20u) >= 50u && ref_u16(copy+20u) <= 306u);
+}
 static inline uint32_t ref_sample_slot(const uint8_t *samples, uint32_t count,
                                        uint32_t length, uint32_t identity, uint32_t advanced) {
     for (uint32_t i = 0u; i < count; ++i) {
@@ -250,6 +392,19 @@ static inline int ref_sig_valid(const uint8_t sig[6]) {
         if (((sig[(34u+i)/8u] >> ((34u+i)&7u)) & 1u) != ((crc >> (7u-i)) & 1u))
             return 0;
     return 1;
+}
+
+static inline uint32_t ref_stimulus_prefix_index(const uint8_t *record,
+                                                 const uint8_t nonce[14]) {
+    const uint8_t *m = record+36u;
+    uint32_t sequence = ref_u16(m+22u)>>4u, index = sequence/2u;
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE];
+    if ((sequence&1u) || index%3u != 1u ||
+        !clean_ht_stimulus_frame(expected,nonce,index) ||
+        !badger_bytes_equal(record+12u,expected+CLEAN_HT_DATA_HEADER,6u) ||
+        !badger_bytes_equal(m,expected+CLEAN_HT_DATA_HEADER+6u,40u))
+        return CLEAN_HT_STIMULUS_COUNT;
+    return index;
 }
 
 static inline uint32_t ref_digest(uint32_t previous, const uint8_t *frame, uint32_t size) {
@@ -377,6 +532,25 @@ static inline int ref_pair_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u]
     (void)log; (void)early; (void)sample; (void)mac;
     return 0;
 #endif
+}
+
+static inline int ref_handoff_bad_second(const uint8_t *log, const uint8_t *early,
+                                         const uint8_t *second, const uint8_t nonce[14]) {
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE], mac[6];
+    mac[0] = 2u;
+    for (uint32_t i = 0u; i < 5u; ++i) mac[i+1u] = nonce[i];
+    uint32_t first = clean_ht_handoff_length(nonce,0u), length = clean_ht_handoff_length(nonce,1u);
+    uint32_t offset = 18u+4u+((first+3u)&~3u);
+    if (!REF_CLEAN_HANDOFF || nonce[10] != 2u ||
+        !clean_ht_handoff_frame(expected,nonce,2u) || !ref_early_correlated(log,early,mac) ||
+        ref_u16(early+24u) != 1u || ref_u16(second) != ref_u16(early) ||
+        ref_u16(second+2u) != ref_u16(early+2u) || ref_u16(second+4u) != length+6u ||
+        (ref_u16(second+6u)&0xc000u) != 0x4000u || ref_u16(second+20u) != 2u ||
+        !badger_bytes_equal(early+CLEAN_OBSERVER_EARLY_HEADER*2u,expected+18u,first) ||
+        !badger_bytes_equal(second+CLEAN_OBSERVER_SECOND_HEADER*2u,expected+offset,length))
+        return 0;
+    return diag_crc32(second+CLEAN_OBSERVER_SECOND_HEADER*2u,length-4u) !=
+        badger_bytes_load_u32(second+CLEAN_OBSERVER_SECOND_HEADER*2u+length-4u);
 }
 
 _Static_assert(REF_SUBMIT_STATS + 48u <= REF_COUNTER_BEFORE,

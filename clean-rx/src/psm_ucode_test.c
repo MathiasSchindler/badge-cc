@@ -348,10 +348,25 @@ static uint32_t early_status_after_hint;
 #if CLEAN_RX_HT_ADVANCE
 static uint32_t handoff_state_after_arm;
 #endif
+#if CLEAN_RX_HT_COPY_WAIT
+static uint32_t handoff_wait_fault;
+#endif
 static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
                             uint32_t pc, uint32_t *steps) {
     int body = pc == RX_COMPLETE;
     for (*steps = 0u; *steps < 1000000u; ++*steps) {
+#if CLEAN_RX_HT_COPY_WAIT
+        if (pc == 290u) return pc;
+        if (pc == OBSERVER_COPY_WAIT_EOF && r[0x1780u] == 65534u) {
+            if (handoff_wait_fault == 2u) r[0x100du] |= 0x4000u;
+            if (handoff_wait_fault == 3u) r[0x100du] |= 0x8000u;
+        }
+        if (pc == OBSERVER_COPY_WAIT_LENGTH && !handoff_wait_fault &&
+            r[0x1780u] == 65534u) {
+            r[0x100cu] = 6u;
+            r[0x100du] &= (uint16_t)~0x100u;
+        }
+#endif
 #if CLEAN_RX_HT_ADVANCE
         if (pc == 163u && r[CLEAN_OBSERVER_ADVANCE]) return pc;
         if (pc == OBSERVER_HANDOFF_2_0 && handoff_state_after_arm) {
@@ -2030,10 +2045,21 @@ static void passive_early_snapshot(void) {
                    r[CLEAN_OBSERVER_HANDOFF_SHM+1u] == 9u &&
                    r[CLEAN_OBSERVER_HANDOFF_SHM+2u] == 7u &&
                    !r[CLEAN_OBSERVER_HANDOFF_SHM+3u]);
+#if CLEAN_RX_HT_COPY_PROBE
+            const uint16_t *copy = r+CLEAN_OBSERVER_COPY_SHM;
+            assert(copy[0] == 1u && copy[1] == 9u && copy[2] == 1u &&
+                   copy[3] == CLEAN_OBSERVER_COPY_VERSION);
+            const uint32_t offsets[] = CLEAN_OBSERVER_COPY_OFFSETS;
+            for (uint32_t i = 0u; i < 4u; ++i) {
+                assert(copy[4u+i] == CLEAN_OBSERVER_COPY_CANARY);
+                assert(r[CLEAN_SHM_FRAME+4u+offsets[i]/2u] == CLEAN_OBSERVER_COPY_CANARY);
+            }
+#endif
             for (uint32_t phase = 0u; phase < CLEAN_OBSERVER_HANDOFF_RECORDS; ++phase) {
                 const uint16_t *h = r+CLEAN_OBSERVER_HANDOFF_SHM+
                     CLEAN_OBSERVER_HANDOFF_HEADER+phase*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS;
-                assert(h[2] == first+6u && h[3] == 0x1100u &&
+                assert(h[2] == (CLEAN_RX_HT_COPY_WAIT && phase == 2u ? 6u : first+6u) &&
+                       h[3] == (CLEAN_RX_HT_COPY_WAIT && phase == 2u ? 0x1000u : 0x1100u) &&
                        h[6] == CLEAN_SHM_FRAME && h[8] == second);
                 assert(h[5] == (phase == 2u ? ((0x8802u&~0x3fc0u)|0x20c0u) : 0x8802u));
                 assert(h[7] == (phase == 2u ? second : 0x222u));
@@ -2049,6 +2075,22 @@ static void passive_early_snapshot(void) {
         assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
     }
     puts("PSM bounded advance: exact 478-byte 170/298 pair in both orders, GoodFCS, EOF/abort exclusion, one-shot arm, prefix/epoch preservation and no TX; NOT RF");
+#if CLEAN_RX_HT_COPY_WAIT
+    for (uint32_t fault = 1u; fault <= 3u; ++fault) {
+        early_snapshot_seed(r,170u);
+        r[CLEAN_SHM_FRAME+1u] = 0xde00u;
+        r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+        r[0x102bu] = 298u; events = (1u<<6u)|(1u<<3u);
+        handoff_wait_fault = fault;
+        assert(receive_run(r,&events,RX_COMPLETE,&steps) == 290u);
+        assert(r[0x602u] == 9u && r[CLEAN_OBSERVER_COPY_SHM+2u] == 5u);
+        assert(r[0x102au] == 0x222u && r[CLEAN_OBSERVER_HANDOFF_SHM+2u] == 3u);
+        if (fault == 1u) assert(!r[CLEAN_OBSERVER_COPY_SHM+41u]);
+        assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
+    }
+    handoff_wait_fault = 0u;
+    puts("PSM fresh-count control: waits for a new >=6-byte count, rejects stale count/EOF/abort and faults within a finite budget; NOT RF");
+#endif
     early_snapshot_seed(r,170u);
     r[CLEAN_SHM_FRAME+1u] = 0xde00u;
     r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
@@ -2082,7 +2124,8 @@ static void passive_early_snapshot(void) {
         memcpy(handoff,r+CLEAN_OBSERVER_HANDOFF_SHM,sizeof(handoff));
         /* Inject a modeled hardware body; this does not validate the RF handoff. */
         r[0x100cu] = 304u; r[0x100du] = 0x5100u;
-        for (uint32_t i = 0u; i < 20u; ++i) r[CLEAN_SHM_FRAME+4u+i] = (uint16_t)(0x4000u+i);
+        for (uint32_t i = 0u; i < CLEAN_OBSERVER_SECOND_MAX/2u; ++i)
+            r[CLEAN_SHM_FRAME+4u+i] = (uint16_t)(0x4000u+i);
         uint32_t target = outcome == 0u ? HT_TRACE_GOOD : outcome == 1u ? HT_TRACE_BAD :
             outcome == 2u ? OBSERVER_EXIT_ABORT : OBSERVER_EXIT_TIMEOUT;
         uint32_t end = psm_run(r,0,target);
@@ -2102,10 +2145,27 @@ static void passive_early_snapshot(void) {
                        r[CLEAN_SHM_FRAME+4u+i]);
             assert(r[0x600u] == 0xa55au);
         } else assert(!r[CLEAN_OBSERVER_SECOND_SHM]);
+#if CLEAN_RX_HT_COPY_PROBE
+        uint16_t copy[CLEAN_OBSERVER_COPY_WORDS];
+        memcpy(copy,r+CLEAN_OBSERVER_COPY_SHM,sizeof(copy));
+        assert(copy[0] == 1u && copy[1] == 9u && copy[2] == (outcome < 2u ? 3u : 1u));
+        if (outcome < 2u) {
+            assert(copy[10u] == 304u && copy[11u] == 0x5100u);
+            const uint32_t offsets[] = CLEAN_OBSERVER_COPY_OFFSETS;
+            for (uint32_t i = 0u; i < 4u; ++i) {
+                assert(copy[4u+i] == CLEAN_OBSERVER_COPY_CANARY);
+                assert(copy[20u+i] == (uint16_t)(0x4000u+offsets[i]/2u));
+            }
+            for (uint32_t i = 0u; i < 12u; ++i) assert(copy[24u+i] == 0x4000u+i);
+        }
+#endif
         assert(psm_run(r,0,OBSERVER_START) == 130u);
         assert(!r[CLEAN_OBSERVER_PENDING] && !r[CLEAN_OBSERVER_HELD] && r[CLEAN_OBSERVER_EPOCH] == 10u);
         assert(!memcmp(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained)));
         assert(!memcmp(handoff,r+CLEAN_OBSERVER_HANDOFF_SHM,sizeof(handoff)));
+#if CLEAN_RX_HT_COPY_PROBE
+        assert(!memcmp(copy,r+CLEAN_OBSERVER_COPY_SHM,sizeof(copy)));
+#endif
         assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
     }
     puts("PSM bounded advance: modeled second-body terminal/bad/abort/watchdog ownership and new-RX retention pass; NOT RF/DMA recovery qualification");

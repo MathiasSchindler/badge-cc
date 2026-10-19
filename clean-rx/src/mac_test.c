@@ -712,16 +712,21 @@ static void capture_queue(void) {
     assert(!memcmp(detail + CLEAN_STATION_TRACE_DETAIL, &trace, sizeof(trace)));
     for (uint32_t start = 0xfffffff0u; start != 16u; ++start) {
         uint32_t slots[8], captured = start, published = start, posted = start, consumed = start;
+        uint16_t correlations[8];
         for (uint32_t round = 0u; round < 8u; ++round) {
             for (uint32_t n = 0u; n < 8u; ++n) {
                 assert(clean_sdio_credit_available(captured, published, 8u) == 1);
                 slots[captured & 7u] = captured;
+                correlations[captured & 7u] = (uint16_t)(0x8000u | ((captured % 16u)+1u));
                 ++captured;
             }
             assert(!clean_sdio_credit_available(captured, published, 8u));
             assert(clean_sdio_credit_available(captured + 1u, published, 8u) == -1);
             for (uint32_t n = 0u; n < 8u; ++n) {
                 assert(slots[published & 7u] == published);
+                uint16_t index = (uint16_t)(published+1u);
+                assert(correlations[(index-1u)&7u] ==
+                    (uint16_t)(0x8000u | ((published % 16u)+1u)));
                 assert(clean_sdio_credit_available(posted, consumed, CLEAN_SDIO_WINDOW) == 1);
                 ++posted;
                 ++published;
@@ -732,7 +737,20 @@ static void capture_queue(void) {
             assert(captured == published && posted == consumed);
         }
     }
-    puts("RX staging: eight-slot FIFO ownership, full-queue retention, one-credit F2 drain and 32-bit counter wrap pass");
+    assert(clean_sdio_drain_state(8u,0u,8u,0u,0u,0u) == 1);
+    assert(clean_sdio_drain_state(9u,0u,8u,0u,0u,0u) == -1);
+    assert(clean_sdio_drain_state(0u,1u,8u,0u,0u,0u) == -1);
+    assert(clean_sdio_drain_state(0u,0u,0u,0u,0u,0u) == -1);
+    assert(clean_sdio_drain_state(0u,0u,17u,0u,0u,0u) == -1);
+    assert(clean_sdio_drain_state(1u,0u,8u,0xfffffff0u,
+        0xfffffff0u+CLEAN_SDIO_DRAIN_US-1u,CLEAN_SDIO_DRAIN_POLLS-1u) == 1);
+    assert(clean_sdio_drain_state(1u,0u,8u,0xfffffff0u,
+        0xfffffff0u+CLEAN_SDIO_DRAIN_US,0u) == -2);
+    assert(clean_sdio_drain_state(1u,0u,8u,0u,0u,CLEAN_SDIO_DRAIN_POLLS) == -2);
+    assert(clean_sdio_drain_state(1u,1u,8u,0u,CLEAN_SDIO_DRAIN_US,
+        CLEAN_SDIO_DRAIN_POLLS) == 0);
+    assert(clean_sdio_drain_state(3u,0xfffffffbu,8u,0u,0u,0u) == 1);
+    puts("RX staging: eight-slot FIFO, immutable correlation across counter wrap, one-credit drain and bounded stop pass");
 }
 
 static void fcs_reference(void) {

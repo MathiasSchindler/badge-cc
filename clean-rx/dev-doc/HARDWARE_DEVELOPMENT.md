@@ -250,6 +250,17 @@ encrypted reception or WPA2 support.
      final PHY readbacks before allowing the single flush retry. Rejected
      or unanswered requests fault explicitly; no core/PSM restart occurs.
      See the [instrumented reset experiment](HT20_IMPLEMENTATION.md#parked-one-shot-phy-receive-reset-2026-10-19).
+   - `CLEAN_RX_HT_REARM_PARK` adds a bounded pause/delay-only control
+     with unchanged PHY readbacks and actual reset count zero. The
+     [fixed-stimulus campaign](HT20_IMPLEMENTATION.md#fixed-stimulus-early-capture-qualification-2026-10-19)
+     repeats exact 554-byte early bodies in both roles, distinguishes
+     pre-prefix from post-capture misses, and retains naturally busy
+     failures after both reset and park-only retries.
+   - `CLEAN_RX_HT_OBSERVER_FIFO` reuses bounded SRAM staging for passive
+     captures, preserves per-frame IDs and drains SRAM/held SHM on stop.
+     The [FIFO qualification](HT20_IMPLEMENTATION.md#passive-observer-fifo-qualification-2026-10-19)
+     separates conserved controller captures from short bad-FCS radio
+     exits; this default-disabled gate is not an RXE reset.
 2. **PLCP Detection & Prefix Copy (`event_start` -> `prefix_seen`):**
    - The original one-shot idle wait expires after 64 * 65,535 polls with
      reason 6. For live hardware DCF only, an expiry hook restarts the idle
