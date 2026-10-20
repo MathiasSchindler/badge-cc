@@ -29,13 +29,14 @@ uint32_t wifi_control_request(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence
     return total;
 }
 
-int wifi_control_parse(const uint8_t *packet, uint32_t length, wifi_control_packet_t *out) {
+static int parse(const uint8_t *packet, uint32_t length, wifi_control_packet_t *out,
+                  uint8_t raw) {
     if (packet == 0 || out == 0 || length < 12u || length > WIFI_CONTROL_MAX) return 0;
     uint32_t size = (uint32_t)packet[0] | (uint32_t)packet[1] << 8u;
     uint32_t inverse = (uint32_t)packet[2] | (uint32_t)packet[3] << 8u;
     uint32_t header = packet[7];
     if ((size ^ inverse) != 0xffffu || size < 12u || size > length ||
-        header < 12u || header > size || (packet[5] & 15u) > 2u) return 0;
+        header < 12u || header > size || (!raw && (packet[5] & 15u) > 2u)) return 0;
     out->size = (uint16_t)size;
     out->channel = packet[5] & 15u;
     out->flow = packet[8];
@@ -54,6 +55,14 @@ int wifi_control_parse(const uint8_t *packet, uint32_t length, wifi_control_pack
     out->payload = packet + header + 16u;
     out->payload_size = declared;
     return 1;
+}
+
+int wifi_control_parse(const uint8_t *packet, uint32_t length, wifi_control_packet_t *out) {
+    return parse(packet, length, out, 0u);
+}
+
+int wifi_control_parse_raw(const uint8_t *packet, uint32_t length, wifi_control_packet_t *out) {
+    return parse(packet, length, out, 1u);
 }
 
 int wifi_control_version(const wifi_control_packet_t *packet, uint16_t id, char output[192]) {

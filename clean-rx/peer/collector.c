@@ -15,7 +15,8 @@ static void deadline(int number) {
     _exit(124);
 }
 
-static int collect(libusb_device_handle *device, const char *path, const uint8_t *challenge) {
+static int collect(libusb_device_handle *device, const char *path, const uint8_t *challenge,
+                   int monitor) {
     uint8_t info[12], nonce[16], request[64], report[64], trace[CLEAN_PEER_TRACE_BYTES];
     const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
@@ -29,7 +30,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     int ok = fread(nonce, 1u, sizeof(nonce), random) == sizeof(nonce);
     if (fclose(random)) ok = 0;
     if (!ok) { fputs("Cannot read a fresh peer nonce\n", stderr); return 0; }
-    nonce[14] = 0u;
+    nonce[14] = monitor ? 2u : 0u;
     if (challenge) {
         memcpy(nonce, challenge, 14u);
         nonce[14] = 1u;
@@ -61,7 +62,8 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
             return 0;
         }
     }
-    if (!clean_peer_trace_valid(trace)) {
+    if (!clean_peer_trace_valid(trace) ||
+        usb_report_u32(trace + 20u) != (monitor ? 2u : 1u)) {
         fputs("Invalid vendor peer evidence layout\n", stderr);
         return 0;
     }
@@ -87,25 +89,32 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
             usb_report_u32(t + 12u) == CLEAN_PEER_FRAME_COUNT && !usb_report_u32(t + 16u);
     }
     printf("{\"build\":\"%08x\",\"firmware_stage\":%u,\"firmware_error\":%u,"
-           "\"firmware_crc\":\"%08x\",\"radio_tx_requested\":false,\"queries\":[",
-           USB_REPORT_BUILD_ID, flags & 255u, flags >> 8u, usb_report_u32(trace + 4u));
+           "\"firmware_crc\":\"%08x\",\"radio_tx_requested\":false,"
+           "\"monitor_probe\":%s,\"monitor_enable_readback_supported\":%s,"
+           "\"raw_receive_proven\":false,\"queries\":[",
+           USB_REPORT_BUILD_ID, flags & 255u, flags >> 8u, usb_report_u32(trace + 4u),
+           monitor ? "true" : "false",
+           monitor && clean_peer_monitor_supported(trace) ? "true" : "false");
     for (uint32_t i = 0u; i < completed; ++i) {
         const uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
         printf("%s{\"name\":\"%s\",\"ok\":%s,\"error\":%u,\"controller_status\":%d,"
-               "\"length\":%u,\"value\":%u}", i ? "," : "", clean_peer_variables[i],
+               "\"length\":%u,\"value\":%u}", i ? "," : "",
+               monitor ? clean_peer_monitor_operations[i] : clean_peer_variables[i],
                usb_report_u32(r + 4u) ? "true" : "false", usb_report_u32(r + 8u),
                (int32_t)usb_report_u32(r + 12u), usb_report_u32(r + 16u),
                usb_report_u32(r + 20u));
     }
     puts("]}");
-    return (flags & 255u) == 11u && !(flags >> 8u) && completed == CLEAN_PEER_RECORDS;
+    return (flags & 255u) == 11u && !(flags >> 8u) && completed == CLEAN_PEER_RECORDS &&
+        (!monitor || clean_peer_monitor_supported(trace));
 }
 
 int main(int argc, char **argv) {
     uint8_t challenge[14];
     int tx = argc == 5 && !strcmp(argv[3], "--tx-multicast");
-    if ((argc != 3 && !tx) || strlen(argv[1]) != 16u) {
-        fputs("Usage: collector SERIAL EVIDENCE_BIN [--tx-multicast CHALLENGE_HEX_28]\n", stderr);
+    int monitor = argc == 4 && !strcmp(argv[3], "--monitor-probe");
+    if ((argc != 3 && !tx && !monitor) || strlen(argv[1]) != 16u) {
+        fputs("Usage: collector SERIAL EVIDENCE_BIN [--tx-multicast CHALLENGE_HEX_28 | --monitor-probe]\n", stderr);
         return 2;
     }
     if (tx) {
@@ -141,7 +150,7 @@ int main(int argc, char **argv) {
     if (!status && configuration != 1) status = libusb_set_configuration(device, 1);
     if (!status) status = libusb_claim_interface(device, 0);
     int ok = 0;
-    if (!status) ok = collect(device, argv[2], tx ? challenge : NULL);
+    if (!status) ok = collect(device, argv[2], tx ? challenge : NULL, monitor);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     if (fflush(stdout)) { perror("Vendor peer JSON flush"); ok = 0; }
     int rebooted = transfer(device, 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);

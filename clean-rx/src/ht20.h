@@ -533,8 +533,6 @@ static inline int clean_ht_stimulus_command(uint32_t cmd, const volatile uint8_t
     return 1;
 }
 
-#define CLEAN_HT_HANDOFF_VERSION 7u
-#define CLEAN_HT_HANDOFF_PSDU 478u
 #define CLEAN_HT_HANDOFF_CASES 5u
 
 static inline uint32_t clean_ht_handoff_length(const uint8_t nonce[14], uint32_t body) {
@@ -568,6 +566,22 @@ static inline uint32_t clean_ht_handoff_frame(uint8_t packet[CLEAN_HT_STIMULUS_S
             for (uint32_t i = 0u; i < 4u; ++i) bytes[size-4u+i] = (uint8_t)(fcs>>(8u*i));
         }
         for (uint32_t i = first+4u; i < at; ++i) m[i] = 0u;
+#if CLEAN_RX_HT_HANDOFF_GUARD
+        uint32_t guard_at = at+4u+((second+3u)&~3u);
+        uint8_t *guard = m+guard_at+4u;
+        for (uint32_t i = at+4u+second; i < guard_at; ++i) m[i] = 0u;
+        for (uint32_t i = 0u; i < CLEAN_HT_HANDOFF_GUARD_BYTES; ++i) guard[i] = m[at+4u+i];
+        guard[22] = (uint8_t)((2u*index+2u)<<4u);
+        guard[23] = (uint8_t)((2u*index+2u)>>4u);
+        guard[43] = 2u;
+        uint32_t guard_fcs = clean_mac_fcs(guard,CLEAN_HT_HANDOFF_GUARD_BYTES-4u);
+        for (uint32_t i = 0u; i < 4u; ++i)
+            guard[CLEAN_HT_HANDOFF_GUARD_BYTES-4u+i] = (uint8_t)(guard_fcs>>(8u*i));
+        m[guard_at] = (uint8_t)(CLEAN_HT_HANDOFF_GUARD_BYTES<<4u);
+        m[guard_at+1u] = (uint8_t)(CLEAN_HT_HANDOFF_GUARD_BYTES>>4u);
+        m[guard_at+2u] = clean_ampdu_delimiter_crc(m+guard_at);
+        m[guard_at+3u] = 0x4eu;
+#endif
         if (index == 2u) {
             if (nonce[10] == 1u) m[4u+first-1u] ^= 1u;
             if (nonce[10] == 2u) m[at+4u+second-1u] ^= 1u;

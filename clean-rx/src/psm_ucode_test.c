@@ -414,6 +414,7 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
         else if (op == 0x1d0u) r[d] = (uint16_t)(av - bv);
         else if (op == 0x378u) r[d] = (uint16_t)((av << 8u) | (bv & 255u));
         else if (op == 0x376u) r[d] = (uint16_t)((bv & ~0x3fc0u) | ((av << 6u)&0x3fc0u));
+        else if (op == 0x310u) r[d] = (uint16_t)((bv & ~3u) | (av & 3u));
         else if (op == 0x307u) r[d] = (uint16_t)((bv & ~0x80u) | ((av << 7u)&0x80u));
         else if (op == 0x278u) r[d] = av >> 8u;
         else if (op == 0x270u) r[d] = av & 255u;
@@ -2018,8 +2019,8 @@ static void passive_early_snapshot(void) {
     for (uint32_t fault = 0u; fault < 8u; ++fault) {
         uint32_t first = order ? 298u : 170u, second = order ? 170u : 298u;
         early_snapshot_seed(r,first);
-        r[CLEAN_SHM_FRAME+1u] = 0xde00u;
-        r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+        r[CLEAN_SHM_FRAME+1u] = (uint16_t)((CLEAN_HT_HANDOFF_PSDU&255u)<<8u);
+        r[CLEAN_SHM_FRAME+2u] = (uint16_t)(0x0f00u|(CLEAN_HT_HANDOFF_PSDU>>8u));
         r[CLEAN_SHM_FRAME+3u] = 0x03b0u;
         r[0x102bu] = (uint16_t)second; r[0x1078u] = 0xffffu;
         events = (1u<<6u)|(1u<<3u);
@@ -2033,12 +2034,13 @@ static void passive_early_snapshot(void) {
         uint32_t next = receive_run(r,&events,RX_COMPLETE,&steps);
         if (!fault) {
             assert(next == 163u && r[CLEAN_OBSERVER_ADVANCE] == 1u);
-            assert(r[CLEAN_OBSERVER_ADVANCE+1u] == second && r[0x102au] == second);
+            assert(r[CLEAN_OBSERVER_ADVANCE+1u] == second &&
+                   r[0x102au] == second+(CLEAN_RX_HT_COPY_END_PLUS6 ? 6u : 0u));
             assert(r[0x1001u] == CLEAN_SHM_FRAME && r[0x1078u] == 0xff7fu);
             assert(r[0x1780u] == 65535u && !(events&(1u<<6u)));
             assert(r[CLEAN_OBSERVER_PENDING] == 1u && r[CLEAN_OBSERVER_EPOCH] == 9u);
-            assert(r[CLEAN_SHM_FRAME+1u] == 0xde00u &&
-                   r[CLEAN_SHM_FRAME+2u] == 0x0f01u &&
+            assert(r[CLEAN_SHM_FRAME+1u] == ((CLEAN_HT_HANDOFF_PSDU&255u)<<8u) &&
+                   r[CLEAN_SHM_FRAME+2u] == (0x0f00u|(CLEAN_HT_HANDOFF_PSDU>>8u)) &&
                    r[CLEAN_SHM_FRAME+3u] == 0x03b0u);
             assert(steps <= 400u);
             assert(r[CLEAN_OBSERVER_HANDOFF_SHM] == 1u &&
@@ -2049,6 +2051,8 @@ static void passive_early_snapshot(void) {
             const uint16_t *copy = r+CLEAN_OBSERVER_COPY_SHM;
             assert(copy[0] == 1u && copy[1] == 9u && copy[2] == 1u &&
                    copy[3] == CLEAN_OBSERVER_COPY_VERSION);
+            assert(copy[42u] == (CLEAN_RX_HT_COPY_QUIET ? 0x8802u : 0u) &&
+                   copy[43u] == (CLEAN_RX_HT_COPY_QUIET ? 0x8800u : 0u));
             const uint32_t offsets[] = CLEAN_OBSERVER_COPY_OFFSETS;
             for (uint32_t i = 0u; i < 4u; ++i) {
                 assert(copy[4u+i] == CLEAN_OBSERVER_COPY_CANARY);
@@ -2061,8 +2065,10 @@ static void passive_early_snapshot(void) {
                 assert(h[2] == (CLEAN_RX_HT_COPY_WAIT && phase == 2u ? 6u : first+6u) &&
                        h[3] == (CLEAN_RX_HT_COPY_WAIT && phase == 2u ? 0x1000u : 0x1100u) &&
                        h[6] == CLEAN_SHM_FRAME && h[8] == second);
-                assert(h[5] == (phase == 2u ? ((0x8802u&~0x3fc0u)|0x20c0u) : 0x8802u));
-                assert(h[7] == (phase == 2u ? second : 0x222u));
+                assert(h[5] == (phase == 2u ?
+                    ((0x8802u&~(0x3fc0u|(CLEAN_RX_HT_COPY_QUIET ? 3u : 0u)))|0x20c0u) : 0x8802u));
+                assert(h[7] == (phase == 2u ?
+                    second+(CLEAN_RX_HT_COPY_END_PLUS6 ? 6u : 0u) : 0x222u));
                 assert(h[11] == (phase == 2u ? 0xff7fu : 0xffffu));
                 assert(h[10] == 0xa3ffu);
             }
@@ -2074,12 +2080,12 @@ static void passive_early_snapshot(void) {
         assert(r[0x1782u] == 0x1234u && r[0x1783u] == 0x5678u);
         assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
     }
-    puts("PSM bounded advance: exact 478-byte 170/298 pair in both orders, GoodFCS, EOF/abort exclusion, one-shot arm, prefix/epoch preservation and no TX; NOT RF");
+    puts("PSM bounded advance: exact gated PSDU with 170/298 pair in both orders, GoodFCS, EOF/abort exclusion, one-shot arm, prefix/epoch preservation and no TX; NOT RF");
 #if CLEAN_RX_HT_COPY_WAIT
     for (uint32_t fault = 1u; fault <= 3u; ++fault) {
         early_snapshot_seed(r,170u);
-        r[CLEAN_SHM_FRAME+1u] = 0xde00u;
-        r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+        r[CLEAN_SHM_FRAME+1u] = (uint16_t)((CLEAN_HT_HANDOFF_PSDU&255u)<<8u);
+        r[CLEAN_SHM_FRAME+2u] = (uint16_t)(0x0f00u|(CLEAN_HT_HANDOFF_PSDU>>8u));
         r[0x102bu] = 298u; events = (1u<<6u)|(1u<<3u);
         handoff_wait_fault = fault;
         assert(receive_run(r,&events,RX_COMPLETE,&steps) == 290u);
@@ -2092,8 +2098,8 @@ static void passive_early_snapshot(void) {
     puts("PSM fresh-count control: waits for a new >=6-byte count, rejects stale count/EOF/abort and faults within a finite budget; NOT RF");
 #endif
     early_snapshot_seed(r,170u);
-    r[CLEAN_SHM_FRAME+1u] = 0xde00u;
-    r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+    r[CLEAN_SHM_FRAME+1u] = (uint16_t)((CLEAN_HT_HANDOFF_PSDU&255u)<<8u);
+    r[CLEAN_SHM_FRAME+2u] = (uint16_t)(0x0f00u|(CLEAN_HT_HANDOFF_PSDU>>8u));
     r[0x102bu] = 298u;
     events = (1u<<6u)|(1u<<3u);
     handoff_state_after_arm = 1u;
@@ -2112,8 +2118,8 @@ static void passive_early_snapshot(void) {
         early_snapshot_seed(r,170u);
         const uint32_t record = CLEAN_OBSERVER_SHM+CLEAN_OBSERVER_HEADER_WORDS;
         r[CLEAN_OBSERVER_SHM+1u] = 1u; r[record+10u] = 9u;
-        r[record+6u] = r[CLEAN_SHM_FRAME+1u] = 0xde00u;
-        r[record+7u] = r[CLEAN_SHM_FRAME+2u] = 0x0f01u;
+        r[record+6u] = r[CLEAN_SHM_FRAME+1u] = (uint16_t)((CLEAN_HT_HANDOFF_PSDU&255u)<<8u);
+        r[record+7u] = r[CLEAN_SHM_FRAME+2u] = (uint16_t)(0x0f00u|(CLEAN_HT_HANDOFF_PSDU>>8u));
         r[record+8u] = r[CLEAN_SHM_FRAME+3u] = 0x03b0u;
         r[0x102bu] = 298u; events = (1u<<6u)|(1u<<3u);
         assert(receive_run(r,&events,RX_COMPLETE,&steps) == 163u);
@@ -2134,11 +2140,12 @@ static void passive_early_snapshot(void) {
         assert(!r[CLEAN_OBSERVER_PENDING] && r[CLEAN_OBSERVER_HELD] == (outcome == 0u));
         assert(r[record+14u] == 304u && r[record+38u] == 9u && r[record+39u] == 1u);
         if (outcome < 2u) assert(r[record+18u] == 0x4000u);
-        if (outcome < 2u) {
+        int snapshot = outcome < 2u || (CLEAN_RX_HT_COPY_PROBE && outcome == 2u);
+        if (snapshot) {
             assert(r[CLEAN_OBSERVER_SECOND_SHM] == 1u &&
                    r[CLEAN_OBSERVER_SECOND_SHM+1u] == 9u &&
                    r[CLEAN_OBSERVER_SECOND_SHM+2u] == 304u &&
-                   r[CLEAN_OBSERVER_SECOND_SHM+10u] == outcome+1u);
+                   r[CLEAN_OBSERVER_SECOND_SHM+10u] == (outcome == 2u ? 5u : outcome+1u));
             assert(r[CLEAN_OBSERVER_SECOND_SHM+CLEAN_OBSERVER_SECOND_HEADER] == 0x4000u);
             for (uint32_t i = 0u; i < CLEAN_OBSERVER_SECOND_MAX/2u; ++i)
                 assert(r[CLEAN_OBSERVER_SECOND_SHM+CLEAN_OBSERVER_SECOND_HEADER+i] ==
@@ -2148,8 +2155,8 @@ static void passive_early_snapshot(void) {
 #if CLEAN_RX_HT_COPY_PROBE
         uint16_t copy[CLEAN_OBSERVER_COPY_WORDS];
         memcpy(copy,r+CLEAN_OBSERVER_COPY_SHM,sizeof(copy));
-        assert(copy[0] == 1u && copy[1] == 9u && copy[2] == (outcome < 2u ? 3u : 1u));
-        if (outcome < 2u) {
+        assert(copy[0] == 1u && copy[1] == 9u && copy[2] == (snapshot ? 3u : 1u));
+        if (snapshot) {
             assert(copy[10u] == 304u && copy[11u] == 0x5100u);
             const uint32_t offsets[] = CLEAN_OBSERVER_COPY_OFFSETS;
             for (uint32_t i = 0u; i < 4u; ++i) {
@@ -2169,12 +2176,13 @@ static void passive_early_snapshot(void) {
         assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
     }
     puts("PSM bounded advance: modeled second-body terminal/bad/abort/watchdog ownership and new-RX retention pass; NOT RF/DMA recovery qualification");
+    for (uint32_t abort = 0u; abort < (CLEAN_RX_HT_COPY_PROBE ? 2u : 1u); ++abort)
     for (uint32_t fault = 0u; fault < 6u; ++fault) {
         early_snapshot_seed(r,170u);
         r[CLEAN_OBSERVER_EARLY_SHM] = 1u;
         r[CLEAN_OBSERVER_EARLY_SHM+1u] = 9u;
         r[CLEAN_OBSERVER_ADVANCE] = 1u;
-        r[CLEAN_OBSERVER_OUTCOME] = 1u;
+        r[CLEAN_OBSERVER_OUTCOME] = abort ? 5u : 1u;
         if (fault == 0u) r[CLEAN_OBSERVER_ADVANCE] = 0u;
         if (fault == 1u) r[CLEAN_OBSERVER_PENDING] = 2u;
         if (fault == 2u) r[CLEAN_OBSERVER_EPOCH] = 10u;
@@ -2183,7 +2191,7 @@ static void passive_early_snapshot(void) {
         if (fault == 5u) r[CLEAN_OBSERVER_SECOND_SHM] = 7u;
         uint16_t retained[CLEAN_OBSERVER_EARLY_RETAIN_WORDS];
         memcpy(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained));
-        assert(psm_run(r,0,OBSERVER_SECOND) == 198u);
+        assert(psm_run(r,0,abort ? OBSERVER_EXIT_ABORT : OBSERVER_SECOND) == (abort ? 266u : 198u));
         assert(r[CLEAN_OBSERVER_SECOND_SHM] == (fault == 5u ? 7u : 0u));
         assert(!memcmp(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained)));
         assert(r[0x600u] == 0xa55au);

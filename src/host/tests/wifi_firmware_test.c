@@ -21,6 +21,15 @@ static uint32_t asset_calls, advance_ticks, advanced, advance_at;
 static wifi_fw_stage_t advance_stage;
 static int cancel_assets;
 static wifi_fw_assets_t assets;
+static uint32_t raw_packets;
+
+static void raw_receive(void *context, const uint8_t *packet, uint32_t length) {
+    assert(context == &raw_packets);
+    wifi_control_packet_t decoded;
+    assert(wifi_control_parse_raw(packet, length, &decoded) && decoded.size == length);
+    assert(decoded.channel != 0u);
+    ++raw_packets;
+}
 
 static uint32_t read32(const uint8_t *bytes) { return usb_report_u32(bytes); }
 static void store(uint8_t *bytes, uint32_t value) {
@@ -244,6 +253,18 @@ static void protocol_tests(void) {
     assert(wifi_control_parse(packet,size,&decoded) && !wifi_data_decode(&decoded,&interface,&frame,&frame_length));
     packet[17]=0u;packet[14]=0x10u;
     assert(wifi_control_parse(packet,size,&decoded) && !wifi_data_decode(&decoded,&interface,&frame,&frame_length));
+    for (uint32_t channel = 1u; channel < 16u; ++channel) {
+        packet[5] = (uint8_t)channel;
+        assert(wifi_control_parse(packet,size,&decoded) == (channel <= 2u));
+        assert(wifi_control_parse_raw(packet,size,&decoded) && decoded.channel == channel);
+        packet[2] ^= 1u;
+        assert(!wifi_control_parse_raw(packet,size,&decoded));
+        packet[2] ^= 1u;
+        uint8_t header = packet[7];
+        packet[7] = 255u;
+        assert(!wifi_control_parse_raw(packet,size,&decoded));
+        packet[7] = header;
+    }
 }
 
 int main(void) {
@@ -306,6 +327,8 @@ int main(void) {
     assert(wifi_firmware_control(262u,0u,0u,version_request,sizeof(version_request),
                                  version_reply,sizeof(version_reply),&reply_size));
     assert(wifi_firmware_data_enable());
+    assert(!wifi_firmware_raw_enable(raw_receive, &raw_packets) &&
+           report.error == WIFI_FW_PROTOCOL);
     for(unsigned i=0u;i<5u;++i) {
         inject_data=1u;
         assert(wifi_firmware_control(262u,0u,0u,version_request,sizeof(version_request),
@@ -329,7 +352,35 @@ int main(void) {
     assert(!wifi_firmware_control(262u,0u,0u,version_request,sizeof(version_request),
                                   version_reply,sizeof(version_reply),&reply_size));
     initialize();
+    assert(wifi_firmware_begin(&wire,&assets,&report,progress,0));
+    assert(wifi_firmware_raw_poll() == -1 && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_raw_enable(0, 0) && report.error == WIFI_FW_PROTOCOL);
+    raw_packets = 0u;
+    assert(wifi_firmware_raw_enable(raw_receive, &raw_packets));
+    assert(!wifi_firmware_data_enable() && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_raw_enable(raw_receive, &raw_packets));
+    assert(wifi_firmware_raw_poll() == 0);
+    for (uint32_t channel = 1u; channel < 16u; ++channel) {
+        data_size = wifi_data_frame(data_queue, 0u, 0u, ethernet, sizeof(ethernet));
+        data_queue[5] = (uint8_t)channel;
+        assert(wifi_firmware_raw_poll() == 1 && raw_packets == channel);
+    }
+    inject_data = 1u;
+    assert(wifi_firmware_control(262u,0u,0u,version_request,sizeof(version_request),
+                                 version_reply,sizeof(version_reply),&reply_size));
+    assert(raw_packets == 16u && wifi_firmware_rx_dropped() == 0u);
+    data_size = wifi_data_frame(data_queue, 0u, 0u, ethernet, sizeof(ethernet));
+    data_queue[2] ^= 1u;
+    assert(wifi_firmware_raw_poll() == -1 && report.error == WIFI_FW_PROTOCOL &&
+           raw_packets == 16u);
+    assert(!wifi_firmware_send_frame(0u, ethernet, sizeof(ethernet)));
+    wifi_firmware_stop();
+    assert(wifi_firmware_raw_poll() == -1);
+    assert(off_count == 1u);
+    initialize();
     assert(wifi_firmware_begin(&wire, &assets, &report, progress, 0));
+    assert(wifi_firmware_raw_poll() == -1 && report.error == WIFI_FW_PROTOCOL);
+    assert(raw_packets == 16u);
     advance_stage = WIFI_FW_DONE;
     advance_ticks = 3000000u;
     assert(!wifi_firmware_control(262u, 0u, 0u, version_request, sizeof(version_request),

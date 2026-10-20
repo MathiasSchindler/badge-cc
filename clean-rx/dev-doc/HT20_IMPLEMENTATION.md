@@ -3633,6 +3633,299 @@ against the fresh backups (the A/B hashes listed above). Final
 `bootsel-{A,B}.log` reads confirm both badges were left in BOOTSEL.
 No AP credentials were read or provisioned in this campaign.
 
+### Nonterminal second-body and copy-end boundary controls (2026-10-20)
+
+This campaign tests whether the failing second MPDU depends specifically
+on PPDU EOF, and whether the six-byte PLCP/count convention explains the
+copy-end error. A follow-up tests the first-body streaming transition.
+None of these controls repairs reception. They do not uniquely
+distinguish RXE/FIFO corruption from incorrect transmitted second-body
+bytes, and it does not complete D2 work package 2.
+
+#### Implemented controls and evidence repair
+
+- `CLEAN_RX_HT_HANDOFF_GUARD`, default zero, selects exact command-12
+  version 8 and a 564-byte physical PSDU. It appends two alignment bytes,
+  a valid delimiter and an 80-byte FCS-valid guard to the original pair.
+  For a fixed nonce/index, the first and second MPDU bytes are unchanged.
+  The guard clones the second header/payload prefix, uses sequence
+  `2*index+2`, body marker 2 and a recomputed FCS. HT-SIG describes the
+  actual longer PPDU. Staging still verifies every one of 1132 bytes.
+  Source, observer length admission, protocol correlation and build
+  identity are wired together; version 7 stays unchanged with the gate off.
+- `reference-handoff-guard` retains the existing one-shot advance and
+  copy probe. It tests only the first two bodies, not delivery of the
+  guard. The host rejects non-good case arguments before USB access:
+  a second body followed by a guard is no longer the last body, and
+  the old overlong-second claim is no longer a physical PPDU truncation.
+  Exact raw fault fixtures remain native-tested, not RF-qualified cases.
+  The guarded pair predicate requires the 564-byte source and a good,
+  non-EOF/non-aborted second-body status; it cannot substitute a terminal
+  snapshot or ordinary two-body geometry.
+- `CLEAN_RX_HT_COPY_END_PLUS6`, default zero, requires the non-wait copy
+  probe. `reference-handoff-end6` changes the copy-end instruction from
+  saved next length to saved next length plus six. No source bytes,
+  reset bits, delay or stronger event clearing are changed. It is a
+  bounded perturbation of the PLCP-inclusive count hypothesis, not a
+  proposed general length rule.
+- `CLEAN_RX_HT_COPY_QUIET`, default zero, requires the unmodified-end
+  non-wait copy probe. `reference-handoff-quiet` clears only the existing
+  low two-bit streaming field in RX control after first-body retention
+  and before EOI. It records the immediate before/after values in probe
+  words 42/43, expanding the probe to 44 words inside the unchanged
+  early SHM export. The ordinary 128-byte streaming threshold remains;
+  no flush, reset or source change is added. This follows a code-path
+  difference from the working fixed 80-byte aggregate diagnostic, which
+  stays below that threshold. Native execution verifies the field clear,
+  preserved surrounding control bits/registers, unchanged copy end and
+  count, and no TX.
+- Initial guarded trials exposed a missing evidence path: explicit
+  aborts were logged but skipped the full continuation snapshot. With
+  the copy probe enabled, outcome 5 now passes through the existing
+  bounded snapshot, owner/epoch/length stability checks, and then the
+  original abort cleanup. Aborted data is never delivered or recast as
+  a good/bad-FCS completion. Wrong/stale owners, already committed
+  snapshots and counts outside 50..306 still cannot commit.
+  The collector exposes `terminal_sample_committed` and
+  `copy_end_plus6_enabled`; an armed-only mask zero is not overwrite proof.
+
+#### Retained RF campaign and interpretation
+
+Evidence is under `build/clean-rx/terminal-boundary/`, including matching
+image/controller/collector archives, all failed raw reports, logs and an
+independent `audit.js` / `audit.jsonl`. Role 0 remains B source/A observer;
+role 1 reverses them. Every cohort covers both 170/298 orders and both
+badge roles. RF stimulus is MCS0; native tests cover MCS0..7.
+
+| Cohort | Trials | Completed captures | All controls received | Abort exits | Bad-FCS exits | Committed second snapshots |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Initial guard, before abort export | 4 | 106 | 2 | 4 | 0 | 0 |
+| Guard with abort export | 4 | 107 | 2 | 4 | 0 | 4 |
+| Two-body copy-end plus six | 4 | 72 | 1 | 2 | 2 | 3 |
+| Matched two-body baseline | 4 | 74 | 2 | 3 | 1 | 4 |
+| Two-body stream field clear | 4 | 132 | 4 | 2 | 2 | 4 |
+
+All 20 trials retain an exact first body from source index 2 and perform
+the one-shot advance. None establishes a complete valid pair. The eight
+guarded exits have RX abort set and EOF clear, at counts
+223/304/178/178 before abort export and 306/196/62/178 afterward. A
+failure that requires reaching PPDU EOF is therefore insufficient to
+explain this behavior; a nonterminal second body fails too.
+
+All 15 committed continuation samples have the correct fresh first
+eight bytes, with the first mismatch at byte 8. Independent terminal
+prefix samples agree with the later full snapshots. Twelve samples
+overwrite all four sentinels. Three short aborts, at counts 59/62/62,
+retain the two higher sentinels: their mask is 12, not an all-buffer
+overwrite. Bytes beyond the reported short count are stale diagnostics,
+not received-body evidence. No complete exact second body, good or
+deliberately bad, is inferred from these snapshots.
+
+The copy-end control reads back the expected six-byte bias in every
+trial. Its exits are counts 190/310/59/182, compared with matched
+baseline counts 190/196/62/178. The 310-byte exit is preserved in the
+ordinary terminal record but exceeds the unchanged continuation-copy
+ceiling, so no full sample is committed. In the reverse-role short-body
+cell, count changes from 178 to 182 while the body remains incorrect.
+This rejects the specific plus-six fix; it does not establish a general
+RXE count interpretation or rule out other FIFO/boundary mistakes.
+The source controller is byte-identical across baseline/end6 and to
+the preceding copy-progress campaign. Guard-source controllers are
+byte-identical before and after the abort-export change.
+
+All four stream-field trials independently record `0x802 -> 0x800`
+before EOI, with the ordinary copy end unchanged. Counts
+306/196/140/178 still end bad/abort; all four retained second prefixes
+diverge at byte 8. The source controller remains byte-identical to
+baseline/end6. Receiving every interleaved control in these four boots
+is encouraging but is neither statistical recovery qualification nor
+a handoff repair. This rejects the specific clear-before-EOI strategy,
+not FIFO streaming/ownership as a class of causes.
+
+Across 20 trials, all 491 completed controller captures are posted and
+consumed, with zero F2 drops. Only 11/20 receive every interleaved control;
+some aborts are followed by substantial RF loss. Conservation of
+completed captures does not qualify receive recovery or early reliability.
+The independent audit reconstructs all 480 transmitted fixtures and
+checks 80 report headers/CRCs/builds/nonces, source record/staging/SIG
+bytes, exact early bodies, owner/epoch, programmed copy ends/stream
+readbacks, bounded
+second snapshots, terminal outcomes and normal drain accounting.
+
+Two attempted cells failed BOOTSEL readiness before flashing or RF and
+have readiness logs only; successful repeats use new prefixes. Badge B
+intermittently exposed its mass-storage interface while picotool reported
+exclusive USB ownership. Serial-to-disk mapping was verified before
+copying the existing auto-BOOTSEL observer UF2 to that badge's volume.
+The existing collector's missing-peer cleanup then requested BOOTSEL
+without starting an RF session. Both recovery-only failures are retained
+separately and excluded from the 20 RF trials. No unrelated process was
+terminated or USB device reset.
+
+#### Validation, restoration and next discriminator
+
+Guard, end6, quiet, ordinary probe and rejected wait profiles run existing
+native ASan/UBSan tests and freestanding C3/RP links. Tests exercise guard
+delimiter/padding/FCS geometry, all supported fixture indices/rates,
+exact staging admission and mutation rejection, nonterminal pair
+status/geometry rejection, end-register values, abort snapshot
+ownership/bounds/immutability, preserved abort cleanup and no TX.
+Final guard, end6 and ordinary probe controller bytes are compared with
+their RF archives; the quiet archive retains the exact native-tested
+RF image. The ordinary production controller remains byte-identical
+to the preceding verified default.
+
+Fresh complete originals were saved before flashing. Both full 16-MiB
+flashes were restored and independently verified after the first 16
+trials; those fresh full readbacks also preserve the originals before
+the quiet follow-up. After the final trial both entire originals were
+restored again, independently reread into
+`final-restored-{A,B}-full.bin`, byte-compared and SHA256-verified against the
+fresh backups. They retain the A/B hashes recorded above.
+`final-restore-{A,B}.log`, `final-readback-{A,B}.log` and `final-bootsel-{A,B}.log`
+record the final restoration and BOOTSEL checks. No AP credentials
+were read or provisioned.
+
+Remaining discrimination needs either an independent complete on-air
+second-body decode or a causal receiver-only change that restores exact
+bytes/FCS with the same source. The evidence now excludes EOF-only
+failure and rejects a simple plus-six copy-end repair; it does not
+repair reception by clearing the first-body stream field either. It does not
+justify guessed RXE reset masks, a larger successful-looking snapshot
+bound, or HT association. D2 handoff, recovery, variable-length buffering,
+secure BA lifecycle, Immediate BA/SIFS, mandatory protection and negotiated
+interoperability remain open.
+
+### Independent vendor raw receiver (2026-10-20)
+
+The preceding boundary campaign could not distinguish wrong on-air bytes
+from a clean receive/configuration defect. This campaign replaces only the
+listener with the existing production vendor firmware, while retaining the
+exact version-7 MCS0/channel-6 source controller and staged fixtures.
+The source controller byte-compares with
+`terminal-boundary/baseline-images/source-controller.bin`.
+
+#### Capability, implementation and qualification gate
+
+The existing vendor peer had only queried GET_MONITOR. A bounded new
+`--monitor-probe` mode records GET_MONITOR, radio up, channel 6, enable,
+enabled readback, disable and disabled readback. Badge A passes all seven
+operations, with monitor state 0/1/0, build `50ff7cae`. This result alone
+does not qualify raw receive.
+
+`reference-handoff-monitor` now pairs the unchanged clean source with
+`vendor-burst/monitor.c`. The listener uses no clean controller/receive
+program, credentials, association, scan, Ethernet TX or requested data
+transmission. It disables MPC/PM, enables/readback-checks monitor mode and
+verifies actual/target channel 6. Capture has a calibrated twelve-second
+bound; normal freeze performs a 300-ms drain, disables/readback-checks
+monitor mode and powers off. The existing TFT identifies passive RX.
+
+An opt-in callback in the shared vendor transport exports complete
+validated non-control SDPCM packets, including packets received while
+waiting for CDC responses. This is separate from Ethernet decoding and
+cannot be enabled together with the Ethernet receive queue. Raw mode
+permits uninterpreted non-control channels; ordinary parsing retains its
+original channel limit. Flow and credit handling remain active.
+
+The raw trace is a distinct `MON1` format, not clean observer ABI 21.
+It retains nine setup/cleanup CDC records, channel and selection counts,
+and eight immutable complete challenge-bearing SDPCM packets, each up
+to 640 bytes. Unrelated packet contents are not saved. Oversize and
+selection-full exclusions are explicit and do not masquerade as successful
+captures or clean F2 drops. Monitor mode or generic Ethernet delivery
+alone cannot qualify a trial.
+
+The collector checks every source descriptor/staging record, final staging,
+raw length/complement/header/CRC and selection conservation. Its success
+gate requires complete exact legacy and single-HT controls and both
+complete aggregate bodies at a common transmitted index, **including
+the exact FCS bytes**. Payload-only matches remain diagnostic-only.
+There are no retries of individual PPDUs in this stimulus.
+
+#### Eight-trial result
+
+Evidence: `build/clean-rx/independent-rx/`, RF build **`dc77ae04`**.
+Matching UF2s, collector, build ID and source controller are archived in
+`monitor-images/`; the earlier capability-only images are in `probe-images/`.
+
+| Vendor listener | Body order | Trials | Complete exact saved MPDUs | Complete aggregate pairs |
+| --- | --- | ---: | ---: | ---: |
+| A | 170 to 298 | 2 | 16 | 4 |
+| A | 298 to 170 | 2 | 16 | 4 |
+| B | 170 to 298 | 2 | 16 | 4 |
+| B | 298 to 170 | 2 | 16 | 4 |
+| **Total** | Both | **8** | **64** | **16** |
+
+Every trial retains the first eight challenge-bearing packets: exact
+legacy controls at source indices 0/3, single-HT controls at 1/4, and
+both aggregate bodies at indices 2/5. Their complete MAC bytes and FCS
+match the independently reconstructed fixtures. All retained RF data
+arrives on SDPCM channel 2; an ordinary Ethernet decoder is not used.
+
+The 32 raw reports include 192 source records. Across the eight trials,
+240 non-control SDPCM packets reach the callback. Of 166 packets carrying
+the full challenge, 64 are saved and 102 intentionally exceed the
+eight-slot selection; none exceed 640 bytes. Another 74 packets lack
+the challenge and are counted without retaining content. These counts
+are not a complete on-air receive denominator. Vendor-internal filtering
+or drops are unknown, and the campaign does **not** qualify receive
+reliability or claim lossless transport.
+
+The independent ignored `audit.js` reconstructs every source fixture,
+uses a separate bitwise IEEE CRC32, checks all 32 report bindings/CRCs,
+192 source staging CRCs, final staging, all 64 complete raw bodies/FCS,
+selection/channel accounting, four repeated cells and original restoration.
+`node build/clean-rx/independent-rx/audit.js` produces retained `audit.jsonl`:
+eight trials, 64 exact bodies and 16 exact pairs.
+
+One attempted second B/170 trial fails BOOTSEL readiness before flashing
+or RF. The successful repeat has a new `-retry` prefix. Badge A exposes
+mass storage but not the vendor USB interface, reproducing the prior macOS
+ownership quirk. After explicitly mapping A to its disk/mount, the archived
+monitor UF2 is copied only to A's volume. The existing collector's
+missing-live-peer cleanup returns it to BOOTSEL without starting RF.
+Readiness-only and recovery-only failures remain separate from the eight
+RF trials; no unrelated USB device or process is reset/terminated.
+
+#### Interpretation, validation and restoration
+
+The same two physical radios independently decode the controlled second
+body in both roles and both size orders when running vendor receive.
+Together with unchanged source controller bytes and exact staging checks,
+this excludes systematically incorrect second-body transmission for the
+tested fixture. The observed clean second-body divergence at byte 8 is now
+localized to the clean receive/configuration path, rather than an inherent
+radio inability to receive the source. It is **not** yet a proof of one
+particular FIFO/end/EOI rule: receiver PHY/MAC setup, RXE context, streaming,
+copy ownership and early-retention timing still need causal isolation.
+No new guessed register masks or purported receive repair are promoted.
+
+ASan/UBSan tests cover raw versus ordinary channel admission, malformed
+envelopes, raw callbacks during CDC waits, RX-mode exclusion, session reset,
+no Ethernet TX, exact 640-byte storage, overflow/oversize accounting,
+immutable slots, CRC rejection, payload truncation, byte-8 corruption,
+bad/missing FCS and the exact common-index/FCS qualification gate.
+The original vendor peer and ordinary clean handoff/copy profiles retain
+native tests and freestanding links with no undefined runtime symbols.
+Final shared harness outputs are left on ordinary `reference-handoff-copy`.
+Its source and probe-observer controllers remain byte-identical to the
+preceding RF archives; the default production controller also remains
+byte-identical to the prior verified default.
+
+Fresh complete originals are saved before any flashing. Both full
+16-MiB flashes are restored afterward and independently saved as
+`restored-{A,B}-full.bin`, byte-compared and SHA256-verified against those
+backups. Hashes retain A `8cda7a00...23628` and B `bc3f972d...21e2`.
+`restore-{A,B}.log`, `readback-{A,B}.log` and `bootsel-{A,B}.log` record
+restoration and final serial-targeted BOOTSEL checks. No private AP
+credentials are read or provisioned.
+
+This supplies the missing independent multi-body stimulus proof. It does
+not mark D2 complete: clean handoff/abort recovery, repeated variable-size
+buffering, secure BA lifecycle, Immediate BA/SIFS, mandatory protection and
+negotiated HT interoperability remain open.
+
 ### Remaining D2 work
 
 Use the [consolidated D2 work packages](../../todo.md#remaining-work-packages)

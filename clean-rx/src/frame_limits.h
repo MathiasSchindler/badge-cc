@@ -7,6 +7,16 @@
 #ifndef CLEAN_RX_HT_RX
 #define CLEAN_RX_HT_RX 0
 #endif
+#ifndef CLEAN_RX_HT_HANDOFF_GUARD
+#define CLEAN_RX_HT_HANDOFF_GUARD 0
+#endif
+_Static_assert(CLEAN_RX_HT_HANDOFF_GUARD == 0 || CLEAN_RX_HT_HANDOFF_GUARD == 1,
+               "Handoff guard gate must be zero or one");
+_Static_assert(!CLEAN_RX_HT_HANDOFF_GUARD || CLEAN_RX_HT_RX,
+               "Handoff guard requires extended HT receive geometry");
+#define CLEAN_HT_HANDOFF_VERSION (CLEAN_RX_HT_HANDOFF_GUARD ? 8u : 7u)
+#define CLEAN_HT_HANDOFF_PSDU (CLEAN_RX_HT_HANDOFF_GUARD ? 564u : 478u)
+#define CLEAN_HT_HANDOFF_GUARD_BYTES 80u
 #ifndef CLEAN_RX_AMPDU_PROBE
 #define CLEAN_RX_AMPDU_PROBE 0
 #endif

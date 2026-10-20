@@ -52,8 +52,60 @@ static void frame_tests(void) {
         }
 }
 
+static void monitor_tests(void) {
+    uint8_t request[CLEAN_PEER_CONTROL_BYTES], set, trace[CLEAN_PEER_TRACE_BYTES] = {0};
+    uint32_t command;
+    static const uint32_t commands[] = {107u, 2u, 30u, 108u, 107u, 108u, 107u};
+    static const uint8_t setters[] = {0u, 1u, 1u, 1u, 0u, 1u, 0u};
+    for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {
+        assert(clean_peer_prepare_monitor(i, request, &command, &set) == 4u);
+        assert(command == commands[i] && set == setters[i]);
+        assert(usb_report_u32(request) == (i == 2u ? 6u : i == 3u ? 1u : 0u));
+        for (uint32_t j = 4u; j < sizeof(request); ++j) assert(!request[j]);
+    }
+    assert(!clean_peer_prepare_monitor(CLEAN_PEER_RECORDS, request, &command, &set));
+    badger_bytes_store_u32(trace, CLEAN_PEER_MAGIC);
+    badger_bytes_store_u32(trace + 16u, CLEAN_PEER_RECORDS);
+    badger_bytes_store_u32(trace + 20u, 2u);
+    badger_bytes_store_u32(trace + 24u, CLEAN_PEER_RECORDS);
+    for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {
+        uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
+        badger_bytes_store_u32(r, i);
+        badger_bytes_store_u32(r + 4u, 1u);
+        badger_bytes_store_u32(r + 16u, 4u);
+        badger_bytes_store_u32(r + 20u, i == 4u ? 1u : 0u);
+    }
+    assert(clean_peer_monitor_supported(trace));
+    for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {
+        uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
+        badger_bytes_store_u32(r + 4u, 0u);
+        badger_bytes_store_u32(r + 8u, 8u);
+        badger_bytes_store_u32(r + 12u, (uint32_t)-23);
+        assert(clean_peer_trace_valid(trace) && !clean_peer_monitor_supported(trace));
+        badger_bytes_store_u32(r + 4u, 1u);
+        badger_bytes_store_u32(r + 8u, 0u);
+        badger_bytes_store_u32(r + 12u, 0u);
+        if (i == 0u || i == 4u || i == 6u) {
+            for (uint32_t size = 0u; size < 8u; ++size) {
+                badger_bytes_store_u32(r + 16u, size);
+                assert(clean_peer_monitor_supported(trace) == (size == 4u));
+            }
+            badger_bytes_store_u32(r + 16u, 4u);
+            r[20u] ^= 1u;
+            assert(!clean_peer_monitor_supported(trace));
+            r[20u] ^= 1u;
+        }
+    }
+    badger_bytes_store_u32(trace + 24u, CLEAN_PEER_RECORDS - 1u);
+    assert(!clean_peer_monitor_supported(trace));
+    badger_bytes_store_u32(trace + 24u, CLEAN_PEER_RECORDS);
+    badger_bytes_store_u32(trace + 20u, 1u);
+    assert(!clean_peer_monitor_supported(trace));
+}
+
 int main(void) {
     frame_tests();
+    monitor_tests();
     uint8_t control[CLEAN_PEER_CONTROL_BYTES], set;
     uint32_t command;
     for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {

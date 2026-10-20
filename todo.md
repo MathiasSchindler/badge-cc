@@ -143,6 +143,8 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Implement fixed two-body RF stimulus with exact-body checks and interleaved legacy/HT loss accounting.
 - [x] Implement exact-size handoff stimulus, bad-frame/malformed cases and fresh second-prefix discrimination.
 - [x] Instrument bounded second-body overwrite and preserve stopped controller-fault evidence.
+- [x] Implement guard-body/copy-end/stream-boundary controls and retain abort continuation snapshots.
+- [x] Independently decode complete controlled aggregate bodies/FCS with vendor RX in both roles/orders.
 - [x] Implement gated passive-observer FIFO retention and bounded stop/drain.
 - [x] Reproduce zero-HT reception with actual PSM-state and PHY-control diagnostics.
 - [x] Implement SOF-calibrated receive timelines, decision-latched rearm diagnostics and conditional-event regression tests.
@@ -154,8 +156,9 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [ ] **1. Qualify early-capture reliability:** qualify FIFO-backed delivery
   and resolve persistent RXE busy, pre-prefix and truncated-body losses;
   repeat loss-accounted tests with confirmed multi-body stimulus.
-- [ ] **2. Qualify aggregate handoff:** resolve second-body byte/FCS failures;
-  repeat complete pairs in both roles/orders and verify bad-frame/abort recovery.
+- [ ] **2. Qualify aggregate handoff:** resolve clean-receiver second-body
+  byte/FCS failures; repeat clean complete pairs in both roles/orders and
+  verify bad-frame/abort recovery.
 - [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot
   assumptions and qualify bounded buffering, transport backpressure,
   malformed/truncated input and recovery across successive PPDUs.

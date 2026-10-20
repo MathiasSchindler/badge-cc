@@ -22,6 +22,8 @@ uint32_t wifi_control_request(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence
                               uint16_t id, uint32_t command, uint8_t set,
                               const uint8_t *payload, uint32_t size);
 int wifi_control_parse(const uint8_t *packet, uint32_t length, wifi_control_packet_t *out);
+/* Diagnostic SDPCM envelope parsing; does not interpret non-control channels. */
+int wifi_control_parse_raw(const uint8_t *packet, uint32_t length, wifi_control_packet_t *out);
 int wifi_control_version(const wifi_control_packet_t *packet, uint16_t id, char output[192]);
 uint32_t wifi_data_frame(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
                          uint8_t interface, const uint8_t *frame, uint32_t length);

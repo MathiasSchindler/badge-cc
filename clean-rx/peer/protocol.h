@@ -16,6 +16,23 @@ static const char *const clean_peer_variables[CLEAN_PEER_RECORDS] = {
     "pkteng.stop", "monitor.get"
 };
 
+static const char *const clean_peer_monitor_operations[CLEAN_PEER_RECORDS] = {
+    "monitor.before", "radio.up", "channel.set", "monitor.enable",
+    "monitor.enabled", "monitor.disable", "monitor.disabled"
+};
+
+static inline uint32_t clean_peer_prepare_monitor(uint32_t id,
+                                                  uint8_t request[CLEAN_PEER_CONTROL_BYTES],
+                                                  uint32_t *command, uint8_t *set) {
+    static const uint32_t commands[CLEAN_PEER_RECORDS] = {107u, 2u, 30u, 108u, 107u, 108u, 107u};
+    if (id >= CLEAN_PEER_RECORDS) return 0u;
+    for (uint32_t i = 0u; i < CLEAN_PEER_CONTROL_BYTES; ++i) request[i] = 0u;
+    *command = commands[id];
+    *set = id == 1u || id == 2u || id == 3u || id == 5u;
+    request[0] = id == 2u ? 6u : id == 3u ? 1u : 0u;
+    return 4u;
+}
+
 static inline uint32_t clean_peer_prepare_query(uint32_t id,
                                                 uint8_t request[CLEAN_PEER_CONTROL_BYTES],
                                                 uint32_t *command, uint8_t *set) {
@@ -53,7 +70,7 @@ static inline int clean_peer_report_valid(const uint8_t report[64],
 static inline int clean_peer_trace_valid(const uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
     if (usb_report_u32(trace) != CLEAN_PEER_MAGIC ||
         usb_report_u32(trace + 16u) != CLEAN_PEER_RECORDS ||
-        usb_report_u32(trace + 20u) != 1u ||
+        (usb_report_u32(trace + 20u) != 1u && usb_report_u32(trace + 20u) != 2u) ||
         usb_report_u32(trace + 24u) > CLEAN_PEER_RECORDS) return 0;
     uint32_t completed = usb_report_u32(trace + 24u);
     for (uint32_t i = 0u; i < completed; ++i) {
@@ -63,6 +80,19 @@ static inline int clean_peer_trace_valid(const uint8_t trace[CLEAN_PEER_TRACE_BY
             usb_report_u32(r + 16u) > 1024u) return 0;
         if (usb_report_u32(r + 4u) &&
             (usb_report_u32(r + 8u) || usb_report_u32(r + 12u))) return 0;
+    }
+    return 1;
+}
+
+static inline int clean_peer_monitor_supported(const uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
+    if (!clean_peer_trace_valid(trace) || usb_report_u32(trace + 20u) != 2u ||
+        usb_report_u32(trace + 24u) != CLEAN_PEER_RECORDS) return 0;
+    for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {
+        const uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
+        if (!usb_report_u32(r + 4u)) return 0;
+        if (i == 0u || i == 4u || i == 6u)
+            if (usb_report_u32(r + 16u) != 4u ||
+                usb_report_u32(r + 20u) != (i == 4u ? 1u : 0u)) return 0;
     }
     return 1;
 }

@@ -13,6 +13,13 @@
 #ifndef REF_CLEAN_HANDOFF
 #define REF_CLEAN_HANDOFF 0
 #endif
+#ifndef REF_VENDOR_MONITOR
+#define REF_VENDOR_MONITOR 0
+#endif
+_Static_assert(REF_VENDOR_MONITOR == 0 || REF_VENDOR_MONITOR == 1,
+    "Vendor monitor gate must be zero or one");
+_Static_assert(!REF_VENDOR_MONITOR || (REF_CLEAN_HANDOFF && !CLEAN_RX_HT_HANDOFF_GUARD),
+    "Vendor monitor requires the unchanged two-body handoff source");
 _Static_assert(REF_CLEAN_HANDOFF == 0 || REF_CLEAN_HANDOFF == 1,
     "Controlled handoff gate must be zero or one");
 _Static_assert(!REF_CLEAN_HANDOFF ||
@@ -518,16 +525,22 @@ static inline int ref_pair_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u]
     for (uint32_t i = 4u; i < 22u; ++i)
         if (first[i] != second[i]) return 0;
     uint16_t first_sequence = ref_u16(first+22u), second_sequence = ref_u16(second+22u);
+    uint32_t pair_psdu = 4u+((first_length+3u)&~3u)+4u+second_length;
+    uint32_t terminal = ref_u16(record+32u)&0xc100u;
+    int boundary = ref_u16(early+15u) == pair_psdu && (terminal&0xc000u) == 0x4000u;
+#if CLEAN_RX_HT_HANDOFF_GUARD
+    boundary |= ref_u16(early+15u) == CLEAN_HT_HANDOFF_PSDU &&
+        pair_psdu == 478u && terminal == 0x100u;
+#endif
     return ((first_length == 170u && second_length == 298u) ||
             (first_length == 298u && second_length == 170u)) &&
         ref_u16(early+26u) == second_length &&
-        ref_u16(early+15u) == 4u+((first_length+3u)&~3u)+4u+second_length &&
+        boundary &&
         !(first_sequence&15u) && !(second_sequence&15u) &&
         (first_sequence>>4u) != (second_sequence>>4u) &&
         (first[0]&0xfcu) == 0x88u && (second[0]&0xfcu) == 0x88u &&
         (first[1]&7u) == (second[1]&7u) && (first[1]&3u) != 3u && !(first[1]&4u) &&
-        (first[24]&15u) == (second[24]&15u) &&
-        (ref_u16(record+32u)&0xc000u) == 0x4000u;
+        (first[24]&15u) == (second[24]&15u);
 #else
     (void)log; (void)early; (void)sample; (void)mac;
     return 0;
@@ -545,7 +558,8 @@ static inline int ref_handoff_bad_second(const uint8_t *log, const uint8_t *earl
         !clean_ht_handoff_frame(expected,nonce,2u) || !ref_early_correlated(log,early,mac) ||
         ref_u16(early+24u) != 1u || ref_u16(second) != ref_u16(early) ||
         ref_u16(second+2u) != ref_u16(early+2u) || ref_u16(second+4u) != length+6u ||
-        (ref_u16(second+6u)&0xc000u) != 0x4000u || ref_u16(second+20u) != 2u ||
+        (ref_u16(second+6u)&0xc100u) != (CLEAN_RX_HT_HANDOFF_GUARD ? 0u : 0x4000u) ||
+        ref_u16(second+20u) != 2u ||
         !badger_bytes_equal(early+CLEAN_OBSERVER_EARLY_HEADER*2u,expected+18u,first) ||
         !badger_bytes_equal(second+CLEAN_OBSERVER_SECOND_HEADER*2u,expected+offset,length))
         return 0;

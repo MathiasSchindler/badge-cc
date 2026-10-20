@@ -41,6 +41,8 @@ typedef struct {
     uint8_t rx_head;
     uint8_t rx_count;
     uint32_t rx_dropped;
+    wifi_fw_raw_receive_t raw_receive;
+    void *raw_context;
     received_frame_t frames[RX_FRAME_SLOTS];
     uint8_t tx[WIFI_CONTROL_MAX + 4u];
     uint8_t rx[WIFI_CONTROL_MAX + WIFI_GSPI_BACKPLANE_PAD];
@@ -232,7 +234,8 @@ static int poll_packet(wifi_control_packet_t *packet) {
     for (uint32_t i = 0u; i < 28u; ++i) {
         state.report->last_rx_prefix[i] = i < length ? state.control_rx[i] : 0u;
     }
-    if (!wifi_control_parse(state.control_rx, length, packet)) {
+    if (!(state.raw_receive ? wifi_control_parse_raw(state.control_rx, length, packet) :
+                            wifi_control_parse(state.control_rx, length, packet))) {
         uint32_t header = state.control_rx[7];
         state.report->expected = length;
         state.report->actual = usb_report_u32(state.control_rx);
@@ -243,6 +246,8 @@ static int poll_packet(wifi_control_packet_t *packet) {
     }
     state.flow = packet->flow;
     state.credit = packet->credit;
+    if (state.raw_receive && packet->channel != 0u)
+        state.raw_receive(state.raw_context, state.control_rx, packet->size);
     if (state.data_enabled && packet->channel == 2u) {
         const uint8_t *frame;
         uint32_t size;
@@ -384,6 +389,8 @@ static void initialize(const wifi_wire_t *wire, const wifi_fw_assets_t *assets,
     state.interface = 0u;
     state.data_enabled = state.rx_head = state.rx_count = 0u;
     state.rx_dropped = 0u;
+    state.raw_receive = 0;
+    state.raw_context = 0;
     uint32_t value = 0u;
     wifi_probe_report_t probe;
     wifi_control_packet_t reply;
@@ -501,14 +508,36 @@ void wifi_firmware_stop(void) {
     if (state.ready) wifi_wire_power_off(state.wire);
     state.ready = 0u;
     state.data_enabled = 0u;
+    state.raw_receive = 0;
+    state.raw_context = 0;
 }
 
 int wifi_firmware_data_enable(void) {
     if (!state.ready) return 0;
+    if (state.raw_receive) return failed(WIFI_FW_PROTOCOL);
     state.data_enabled = 1u;
     state.rx_head = state.rx_count = 0u;
     state.rx_dropped = 0u;
     return 1;
+}
+
+int wifi_firmware_raw_enable(wifi_fw_raw_receive_t receive, void *context) {
+    if (!state.ready) return 0;
+    if (!receive || state.data_enabled || state.raw_receive) return failed(WIFI_FW_PROTOCOL);
+    state.raw_receive = receive;
+    state.raw_context = context;
+    return 1;
+}
+
+int wifi_firmware_raw_poll(void) {
+    if (!state.ready) return -1;
+    if (!state.raw_receive) { failed(WIFI_FW_PROTOCOL); return -1; }
+    state.report->error = WIFI_FW_OK;
+    state.operation_start = state.wire->now_us(state.wire->context);
+    state.callback_at = state.operation_start - 5000u;
+    wifi_control_packet_t packet;
+    if (!service()) return -1;
+    return poll_packet(&packet);
 }
 
 int wifi_firmware_send_frame(uint8_t interface, const uint8_t *frame, uint32_t length) {

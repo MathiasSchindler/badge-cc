@@ -2,10 +2,91 @@
 #include <stdio.h>
 #include <string.h>
 #include "protocol.h"
+#include "monitor.h"
 #include "../src/ht20.h"
 #include "../../src/platform/badger/graphics.h"
 
+static void monitor_encoding(void) {
+    uint32_t fcs_masks[4] = {1u, 2u, 4u, 4u};
+    assert(ref_monitor_qualified(fcs_masks));
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        uint32_t saved = fcs_masks[i];
+        fcs_masks[i] = 0u;
+        assert(!ref_monitor_qualified(fcs_masks));
+        fcs_masks[i] = saved;
+    }
+    fcs_masks[3] = 8u;
+    assert(!ref_monitor_qualified(fcs_masks));
+    fcs_masks[3] = 12u;
+    assert(ref_monitor_qualified(fcs_masks));
+    uint8_t trace[REF_TRACE_BYTES] = {0}, nonce[14] = {1u,2u,3u};
+    uint8_t packet[WIFI_CONTROL_MAX], body[14];
+    memcpy(body, nonce, sizeof(body));
+    uint32_t length = wifi_data_frame(packet, 0u, 0u, body, sizeof(body));
+    assert(length == 32u);
+    for (uint32_t i = 0u; i < REF_MONITOR_SLOTS; ++i) {
+        packet[5] = (uint8_t)(i + 1u);
+        ref_monitor_packet(trace, nonce, packet, length, 10u + i);
+        const uint8_t *slot = trace + REF_MONITOR_PACKETS + i*REF_MONITOR_SLOT_BYTES;
+        assert(ref_monitor_slot_valid(slot));
+        assert(badger_bytes_load_u32(slot + 4u) == 10u + i);
+        assert(!memcmp(slot + 16u, packet, length));
+        assert(ref_monitor_contains(slot + 16u, length, body, sizeof(body)));
+        body[13] ^= 1u;
+        assert(!ref_monitor_contains(slot + 16u, length, body, sizeof(body)));
+        body[13] ^= 1u;
+    }
+    assert(badger_bytes_load_u32(trace + 76u) == REF_MONITOR_SLOTS);
+    uint8_t saved[REF_MONITOR_SLOTS*REF_MONITOR_SLOT_BYTES];
+    memcpy(saved, trace + REF_MONITOR_PACKETS, sizeof(saved));
+    ref_monitor_packet(trace, nonce, packet, length, 99u);
+    assert(badger_bytes_load_u32(trace + 80u) == 1u);
+    ref_monitor_packet(trace, nonce, packet, REF_MONITOR_PACKET_BYTES + 1u, 99u);
+    assert(badger_bytes_load_u32(trace + 84u) == 1u);
+    nonce[13] ^= 1u;
+    ref_monitor_packet(trace, nonce, packet, length, 99u);
+    assert(badger_bytes_load_u32(trace + 88u) == 1u);
+    assert(badger_bytes_load_u32(trace + 72u) == REF_MONITOR_SLOTS + 3u);
+    assert(badger_bytes_load_u32(trace + 92u) == REF_MONITOR_SLOTS + 2u);
+    assert(!memcmp(saved, trace + REF_MONITOR_PACKETS, sizeof(saved)));
+    uint8_t *slot = trace + REF_MONITOR_PACKETS;
+    slot[16u + 2u] ^= 1u;
+    assert(!ref_monitor_slot_valid(slot));
+    slot[16u + 2u] ^= 1u;
+    slot[12u] ^= 1u;
+    assert(!ref_monitor_slot_valid(slot));
+    slot[12u] ^= 1u;
+    badger_bytes_store_u32(slot, REF_MONITOR_PACKET_BYTES + 1u);
+    assert(!ref_monitor_slot_valid(slot));
+    assert(!ref_monitor_contains(packet, length, body, length + 1u));
+    assert(!ref_monitor_contains(packet, length, body, 0u));
+    memset(trace, 0, sizeof(trace));
+    uint8_t large[REF_MONITOR_PACKET_BYTES - 18u] = {0};
+    memcpy(large, nonce, sizeof(nonce));
+    length = wifi_data_frame(packet, 0u, 0u, large, sizeof(large));
+    assert(length == REF_MONITOR_PACKET_BYTES);
+    ref_monitor_packet(trace, nonce, packet, length, 100u);
+    assert(ref_monitor_slot_valid(trace + REF_MONITOR_PACKETS));
+    assert(badger_bytes_load_u32(trace + REF_MONITOR_PACKETS) == REF_MONITOR_PACKET_BYTES);
+    for (uint32_t bytes = 170u; bytes <= 298u; bytes += 128u) {
+        uint8_t mpdu[298];
+        for (uint32_t i = 0u; i < bytes; ++i) mpdu[i] = (uint8_t)(i ^ 0x5au);
+        badger_bytes_store_u32(mpdu + bytes - 4u, diag_crc32(mpdu, bytes - 4u));
+        memcpy(packet, mpdu, bytes);
+        assert(ref_monitor_contains(packet, bytes, mpdu, bytes));
+        assert(ref_monitor_contains(packet, bytes - 4u, mpdu, bytes - 4u));
+        assert(!ref_monitor_contains(packet, bytes - 4u, mpdu, bytes));
+        packet[8u] ^= 1u;
+        assert(!ref_monitor_contains(packet, bytes, mpdu, bytes - 4u));
+        packet[8u] ^= 1u;
+        packet[bytes - 1u] ^= 1u;
+        assert(ref_monitor_contains(packet, bytes, mpdu, bytes - 4u));
+        assert(!ref_monitor_contains(packet, bytes, mpdu, bytes));
+    }
+}
+
 static void window_encoding(void) {
+    monitor_encoding();
     assert(ref_timer_calibration_valid(16000u,32u));
     assert(!ref_timer_calibration_valid(0u,32u));
     assert(!ref_timer_calibration_valid(100001u,32u));
@@ -322,9 +403,24 @@ static void handoff_stimulus(void) {
         nonce[10] = (uint8_t)mode; nonce[11] = (uint8_t)order; nonce[12] = (uint8_t)mcs;
         uint32_t cmd = clean_ht_handoff_frame(packet,nonce,index), kind = index%3u;
         uint32_t first = order == 1u ? 170u : 298u, second = 468u-first;
-        assert(cmd && clean_tx_length(cmd) == 6u+(kind == 2u ? 478u : first));
+        assert(cmd && clean_tx_length(cmd) == 6u+(kind == 2u ? CLEAN_HT_HANDOFF_PSDU : first));
         assert(kind ? ref_sig_valid(packet+8u) : clean_ofdm_plcp_valid(packet+8u,first));
-        if (kind == 2u) assert(ref_u16(packet+9u) == 478u && (packet[11]&8u));
+        if (kind == 2u) assert(ref_u16(packet+9u) == CLEAN_HT_HANDOFF_PSDU && (packet[11]&8u));
+#if CLEAN_RX_HT_HANDOFF_GUARD
+        if (kind == 2u) {
+            uint32_t at = 14u+4u+((first+3u)&~3u)+4u+((second+3u)&~3u);
+            const uint8_t *d = packet+at, *guard = d+4u;
+            assert(ref_u16(d)>>4u == CLEAN_HT_HANDOFF_GUARD_BYTES);
+            assert(d[2] == clean_ampdu_delimiter_crc(d) && d[3] == 0x4eu);
+            assert(at+4u+CLEAN_HT_HANDOFF_GUARD_BYTES == 14u+CLEAN_HT_HANDOFF_PSDU);
+            assert(packet[at-1u] == 0u && packet[at-2u] == 0u);
+            assert(guard[0] == 0x88u && guard[1] == 2u && guard[24] == 0x60u &&
+                guard[43] == 2u && ref_u16(guard+22u)>>4u == 2u*index+2u);
+            assert(!memcmp(guard+26u,nonce,14u));
+            assert(diag_crc32(guard,CLEAN_HT_HANDOFF_GUARD_BYTES-4u) ==
+                badger_bytes_load_u32(guard+CLEAN_HT_HANDOFF_GUARD_BYTES-4u));
+        }
+#endif
         for (uint32_t i = CLEAN_HT_DATA_HEADER+clean_tx_length(cmd); i < sizeof(packet); ++i)
             assert(!packet[i]);
         for (uint32_t ordinal = 0u; ordinal < (kind == 2u ? 2u : 1u); ++ordinal) {
@@ -398,7 +494,7 @@ static void handoff_stimulus(void) {
         memcpy(early+CLEAN_OBSERVER_EARLY_HEADER*2u,packet+18u,first);
         second[0] = 1u; second[2] = 7u;
         second[4] = (uint8_t)(last+6u); second[5] = (uint8_t)((last+6u)>>8u);
-        second[7] = 0x40u; second[20] = 2u;
+        second[7] = CLEAN_RX_HT_HANDOFF_GUARD ? 0u : 0x40u; second[20] = 2u;
         memcpy(second+CLEAN_OBSERVER_SECOND_HEADER*2u,
             packet+18u+4u+((first+3u)&~3u),last);
         assert(ref_handoff_bad_second(log,early,second,nonce));
@@ -698,6 +794,17 @@ int main(void) {
     badger_bytes_store_u32(sample+12u,diag_crc32(mpdu,294u));
     memcpy(record+36u,mpdu,40u);
     assert(ref_pair_correlated(log,early,sample,mac));
+    uint8_t guard_sig[6];
+    assert(clean_ht20_ampdu_sig(guard_sig,564u,0u));
+    memcpy(early+14u,guard_sig,6u); memcpy(record+12u,guard_sig,6u);
+    record[33] = 1u;
+    assert(ref_pair_correlated(log,early,sample,mac) == CLEAN_RX_HT_HANDOFF_GUARD);
+    for (uint32_t status = 0u; status < 3u; ++status) {
+        record[33] = status == 0u ? 0u : status == 1u ? 0x41u : 0x81u;
+        assert(!ref_pair_correlated(log,early,sample,mac));
+    }
+    memcpy(early+14u,pair_sig,6u); memcpy(record+12u,pair_sig,6u);
+    record[33] = 0x40u;
     for (uint32_t fault = 0u; fault < 13u; ++fault) {
         uint8_t saved_early[sizeof(early)], saved_sample[sizeof(sample)], saved_log[sizeof(log)];
         memcpy(saved_early,early,sizeof(early));

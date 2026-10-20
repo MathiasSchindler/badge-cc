@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <time.h>
 #include "protocol.h"
+#include "monitor.h"
 #include "../src/sdio_ring.h"
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
@@ -244,8 +245,115 @@ static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]) {
     return 1;
 }
 
+static int summarize_source(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t nonce[14]) {
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE];
+    if (usb_report_u32(vendor+28u) != CLEAN_HT_STIMULUS_COUNT) {
+        fputs("Incomplete fixed stimulus; retained transmission records are not RF qualification\n",stderr);
+        return 0;
+    }
+    for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i) {
+        const uint8_t *r = vendor+REF_STIMULUS_RECORD_BASE+i*REF_STIMULUS_RECORD_BYTES;
+        if (!ref_stimulus_record_valid(r,nonce,i)) {
+            fprintf(stderr,"Invalid fixed stimulus record %u\n",i); return 0;
+        }
+        printf("{\"test\":\"fixed-stimulus-tx\",\"index\":%u,\"kind\":%u,"
+               "\"psdu_bytes\":%u,\"trigger_tsf\":%u,\"complete_tsf\":%u,"
+               "\"conditions\":7,\"phy_error\":0,\"template_verified\":true,"
+               "\"raw_txe_56a\":%u}\n",
+               i,i%3u,usb_report_u32(r+32u)-6u,
+               usb_report_u32(r+16u),usb_report_u32(r+20u),(unsigned)ref_u16(r+56u));
+    }
+    (void)ref_source_frame(expected,nonce,CLEAN_HT_STIMULUS_COUNT-1u);
+    if (memcmp(expected,vendor+REF_STIMULUS_PACKET_BASE,sizeof(expected))) {
+        fputs("Fixed stimulus last descriptor/bytes mismatch\n",stderr); return 0;
+    }
+    return 1;
+}
+
+static int summarize_monitor(const uint8_t source[REF_TRACE_BYTES],
+                              const uint8_t monitor[REF_TRACE_BYTES], const uint8_t nonce[16]) {
+    uint8_t bound[14], expected[CLEAN_HT_STIMULUS_STORAGE], mac[6];
+    memcpy(bound, nonce, sizeof(bound));
+    bound[13] = 6u;
+    ref_mac(mac, nonce);
+    uint32_t saved = usb_report_u32(monitor + 76u);
+    uint32_t packets = usb_report_u32(monitor + 72u), matched = usb_report_u32(monitor + 92u);
+    if (usb_report_u32(source + 24u) != 6u || memcmp(source + 32u, mac, 6u) ||
+        memcmp(monitor + 32u, mac, 6u) || usb_report_u32(monitor + 64u) != REF_MONITOR_MAGIC ||
+        usb_report_u32(monitor + 68u) != 1u || saved > REF_MONITOR_SLOTS ||
+        (uint64_t)saved + usb_report_u32(monitor + 80u) + usb_report_u32(monitor + 84u) != matched ||
+        (uint64_t)matched + usb_report_u32(monitor + 88u) != packets ||
+        usb_report_u32(monitor + 96u) != 9u || usb_report_u32(monitor + 108u) != 1u ||
+        usb_report_u32(monitor + 112u) != 6u || usb_report_u32(monitor + 116u) != 6u) {
+        fputs("Invalid independent monitor identity, setup or capture accounting\n", stderr);
+        return 0;
+    }
+    uint64_t channels = 0u;
+    for (uint32_t i = 0u; i < 16u; ++i) channels += usb_report_u32(monitor + 128u + 4u*i);
+    if (channels != packets || usb_report_u32(monitor + 128u)) {
+        fputs("Independent monitor SDPCM channel accounting mismatch\n", stderr);
+        return 0;
+    }
+    static const uint32_t commands[] = {263u,86u,2u,30u,108u,107u,29u,108u,107u};
+    for (uint32_t i = 0u; i < 9u; ++i) {
+        const uint8_t *r = monitor + REF_MONITOR_CONTROLS + i*REF_MONITOR_CONTROL_BYTES;
+        uint32_t get = i == 5u || i == 6u || i == 8u;
+        if (usb_report_u32(r) != commands[i] || usb_report_u32(r + 4u) != !get ||
+            usb_report_u32(r + 8u) != 1u || usb_report_u32(r + 12u) ||
+            usb_report_u32(r + 16u) || usb_report_u32(r + 20u) > 16u ||
+            (get && usb_report_u32(r + 20u) != (i == 6u ? 12u : 4u)) ||
+            (i == 5u && usb_report_u32(r + 24u) != 1u) ||
+            (i == 6u && (usb_report_u32(r + 24u) != 6u || usb_report_u32(r + 28u) != 6u)) ||
+            (i == 8u && usb_report_u32(r + 24u))) {
+            fprintf(stderr, "Independent monitor command %u failed validation\n", i);
+            return 0;
+        }
+    }
+    if (!summarize_source(source, bound)) return 0;
+    uint32_t masks[4] = {0}, fcs_masks[4] = {0};
+    for (uint32_t s = 0u; s < saved; ++s) {
+        const uint8_t *slot = monitor + REF_MONITOR_PACKETS + s*REF_MONITOR_SLOT_BYTES;
+        if (!ref_monitor_slot_valid(slot)) {
+            fprintf(stderr, "Invalid independent monitor raw packet %u\n", s);
+            return 0;
+        }
+        uint32_t length = usb_report_u32(slot);
+        for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i) {
+            (void)ref_source_frame(expected, bound, i);
+            for (uint32_t body = 0u; body < (i%3u == 2u ? 2u : 1u); ++body) {
+                uint32_t bytes = clean_ht_handoff_length(bound, body);
+                uint32_t offset = CLEAN_HT_DATA_HEADER + 6u + (i%3u == 2u ? 4u : 0u);
+                if (body) offset += 4u + ((clean_ht_handoff_length(bound, 0u) + 3u) & ~3u);
+                uint32_t kind = i%3u == 2u ? 2u + body : i%3u;
+                if (!ref_monitor_contains(slot + 16u, length, expected + offset, bytes - 4u)) continue;
+                int fcs = ref_monitor_contains(slot + 16u, length, expected + offset, bytes);
+                masks[kind] |= 1u << i;
+                if (fcs) fcs_masks[kind] |= 1u << i;
+                printf("{\"test\":\"independent-raw-body\",\"slot\":%u,\"index\":%u,"
+                       "\"kind\":%u,\"body\":%u,\"mpdu_bytes\":%u,\"sdpcm_channel\":%u,"
+                       "\"exact_mac_payload\":true,\"exact_fcs_bytes_present\":%s}\n",
+                       s,i,i%3u,body,bytes,usb_report_u32(slot + 8u),fcs ? "true" : "false");
+            }
+        }
+    }
+    int pair = (masks[2] & masks[3]) != 0u, proven = ref_monitor_qualified(fcs_masks);
+    printf("{\"test\":\"independent-monitor-result\",\"sdpcm_packets\":%u,"
+           "\"saved_nonce_packets\":%u,\"matched_packets\":%u,\"selection_full\":%u,"
+           "\"oversized_nonce_packets\":%u,\"legacy_mask\":%u,\"single_ht_mask\":%u,"
+           "\"aggregate_first_mask\":%u,\"aggregate_second_mask\":%u,"
+           "\"pair_payload_bytes_confirmed\":%s,\"pair_fcs_bytes_confirmed\":%s,"
+           "\"raw_receive_proven\":%s,\"vendor_internal_drops_known\":false,"
+           "\"ht_interoperability_qualified\":false}\n",
+           packets,saved,matched,usb_report_u32(monitor + 80u),usb_report_u32(monitor + 84u),
+           masks[0],masks[1],masks[2],masks[3],pair ? "true" : "false",
+           (fcs_masks[2] & fcs_masks[3]) ? "true" : "false",proven ? "true" : "false");
+    if (!proven) fputs("Independent monitor requires complete exact first/second bodies and both controls, including FCS; raw failures retained\n", stderr);
+    return proven;
+}
+
 static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observer[REF_TRACE_BYTES],
                       const uint8_t nonce[16]) {
+    if (REF_VENDOR_MONITOR) return summarize_monitor(vendor, observer, nonce);
     uint8_t mac[6]; ref_mac(mac,nonce);
     if (memcmp(vendor+32u,mac,6u) || memcmp(observer+32u,mac,6u) ||
         (usb_report_u32(observer+56u)&0x100u) ||
@@ -482,6 +590,9 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
             if (ref_u16(copy+40u+2u*i) == CLEAN_OBSERVER_COPY_CANARY) retained |= 1u<<i;
     printf("{\"test\":\"handoff-copy-probe\",\"prefix_id\":%u,\"epoch\":%u,"
            "\"phase\":%u,\"seed_readback_valid\":%s,\"retained_canary_mask\":%u,"
+           "\"terminal_sample_committed\":%s,\"copy_end_plus6_enabled\":%s,"
+           "\"stream_quiet_enabled\":%s,\"stream_control_before\":%u,"
+           "\"stream_control_after\":%u,"
            "\"terminal_rxe_length\":%u,\"status1\":%u,\"status2\":%u,"
            "\"copy_control\":%u,\"rx_base\":%u,\"copy_end\":%u,\"next_length\":%u,"
            "\"raw_1002\":%u,\"raw_1024\":%u,\"raw_1078\":%u,"
@@ -489,7 +600,11 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
            "\"fresh_count_wait_enabled\":%s,\"wait_start_tsf\":%u,\"wait_end_tsf\":%u,"
            "\"fresh_count\":%u,\"wait_budget_remaining\":%u}\n",
            ref_u16(copy),ref_u16(copy+2u),ref_u16(copy+4u),
-           ref_u16(copy)?"true":"false",retained,ref_u16(copy+20u),
+           ref_u16(copy)?"true":"false",retained,
+           ref_u16(copy+4u) == 3u?"true":"false",CLEAN_RX_HT_COPY_END_PLUS6?"true":"false",
+           CLEAN_RX_HT_COPY_QUIET?"true":"false",
+           ref_u16(copy+84u),ref_u16(copy+86u),
+           ref_u16(copy+20u),
            ref_u16(copy+22u),ref_u16(copy+24u),ref_u16(copy+26u),
            ref_u16(copy+28u),ref_u16(copy+30u),ref_u16(copy+32u),
            ref_u16(copy+34u),ref_u16(copy+36u),ref_u16(copy+38u),
@@ -571,26 +686,8 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         uint8_t bound_nonce[14], expected[CLEAN_HT_STIMULUS_STORAGE];
         memcpy(bound_nonce,nonce,sizeof(bound_nonce));
         bound_nonce[13] = (uint8_t)usb_report_u32(vendor+24u);
-        if (usb_report_u32(vendor+28u) != CLEAN_HT_STIMULUS_COUNT) {
-            fputs("Incomplete fixed stimulus; retained transmission records are not RF qualification\n",stderr);
-            return 0;
-        }
-        for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i) {
-            const uint8_t *r = vendor+REF_STIMULUS_RECORD_BASE+i*REF_STIMULUS_RECORD_BYTES;
-            if (!ref_stimulus_record_valid(r,bound_nonce,i)) {
-                fprintf(stderr,"Invalid fixed stimulus record %u\n",i); return 0;
-            }
-            printf("{\"test\":\"fixed-stimulus-tx\",\"index\":%u,\"kind\":%u,"
-                   "\"psdu_bytes\":%u,\"trigger_tsf\":%u,\"complete_tsf\":%u,"
-                   "\"conditions\":7,\"phy_error\":0,\"template_verified\":true,"
-                   "\"raw_txe_56a\":%u}\n",
-                   i,i%3u,usb_report_u32(r+32u)-6u,
-                   usb_report_u32(r+16u),usb_report_u32(r+20u),(unsigned)ref_u16(r+56u));
-        }
+        if (!summarize_source(vendor,bound_nonce)) return 0;
         (void)ref_source_frame(expected,bound_nonce,CLEAN_HT_STIMULUS_COUNT-1u);
-        if (memcmp(expected,vendor+REF_STIMULUS_PACKET_BASE,sizeof(expected))) {
-            fputs("Fixed stimulus last descriptor/bytes mismatch\n",stderr); return 0;
-        }
         if (REF_CLEAN_HANDOFF) {
             uint32_t first = clean_ht_handoff_length(bound_nonce,0u);
             uint32_t mode = bound_nonce[10], early_index = CLEAN_HT_STIMULUS_COUNT;
@@ -641,7 +738,8 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                 mode == 2u ? exact_first && early_index == 2u && !exact_pair &&
                     exact_bad_second && negative_outcome == 2u : 0;
             printf("{\"test\":\"controlled-handoff-result\",\"case\":%u,\"first_bytes\":%u,"
-                   "\"second_bytes\":%u,\"transmissions\":24,\"exact_first\":%s,"
+                   "\"second_bytes\":%u,\"guard_body\":%s,\"psdu_bytes\":%u,"
+                   "\"transmissions\":24,\"exact_first\":%s,"
                    "\"exact_pair\":%s,\"early_source_index\":%u,\"advance\":%u,"
                    "\"case_prefix_id\":%u,\"case_terminal_outcome\":%u,\"case_terminal_length\":%u,"
                    "\"exact_bad_second\":%s,"
@@ -650,6 +748,7 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                    "\"all_controls_received\":%s,\"delivery_integrity\":%s,"
                    "\"ht_station_qualified\":false}\n",
                    mode,first,clean_ht_handoff_length(bound_nonce,1u),
+                   CLEAN_RX_HT_HANDOFF_GUARD?"true":"false",CLEAN_HT_HANDOFF_PSDU,
                    exact_first?"true":"false",exact_pair?"true":"false",early_index,
                    ref_u16(early+24u),negative_id,negative_outcome,negative_length,
                    exact_bad_second?"true":"false",
@@ -805,6 +904,14 @@ int main(int argc, char **argv) {
     }
     if (REF_CLEAN_HANDOFF && profile != 1u && profile != 2u) {
         fputs("Controlled handoff requires explicit 128 (170/298) or 256 (298/170)\n",stderr);
+        return 2;
+    }
+    if (CLEAN_RX_HT_HANDOFF_GUARD && handoff_case) {
+        fputs("Guard-body boundary control supports only good; two-body negative-case semantics do not apply\n",stderr);
+        return 2;
+    }
+    if (REF_VENDOR_MONITOR && handoff_case) {
+        fputs("Independent raw monitor currently requires the unchanged good two-body source\n", stderr);
         return 2;
     }
     if (signal(SIGALRM,deadline) == SIG_ERR) { perror("signal"); return 1; }

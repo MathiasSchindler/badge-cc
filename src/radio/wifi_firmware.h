@@ -51,6 +51,7 @@ typedef struct {
 } wifi_fw_report_t;
 
 typedef int (*wifi_fw_service_t)(void *context, const wifi_fw_report_t *report);
+typedef void (*wifi_fw_raw_receive_t)(void *context, const uint8_t *packet, uint32_t length);
 
 void wifi_firmware_run(const wifi_wire_t *wire, const wifi_fw_assets_t *assets,
                         wifi_fw_report_t *report, wifi_fw_service_t service, void *context);
@@ -62,6 +63,11 @@ int wifi_firmware_control(uint32_t command, uint8_t set, uint8_t interface,
                            uint8_t *reply, uint32_t capacity, uint32_t *reply_size);
 void wifi_firmware_stop(void);
 int wifi_firmware_data_enable(void);
+/* Opt-in diagnostic alternative to Ethernet RX. Callback storage is borrowed.
+ * Every non-control SDPCM packet is delivered, including during CDC commands. */
+int wifi_firmware_raw_enable(wifi_fw_raw_receive_t receive, void *context);
+/* 1 packet processed, 0 none, -1 radio/protocol error; never transmits data. */
+int wifi_firmware_raw_poll(void);
 int wifi_firmware_send_frame(uint8_t interface, const uint8_t *frame, uint32_t length);
 /* 1 frame copied, 0 no frame, -1 radio/protocol error. */
 int wifi_firmware_read_frame(uint8_t frame[1514], uint32_t *length, uint8_t *interface);

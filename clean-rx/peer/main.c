@@ -152,7 +152,7 @@ static void probe(const uint8_t nonce[16]) {
     badger_bytes_store_u32(evidence + 8u, assets->nvram_crc);
     badger_bytes_store_u32(evidence + 12u, assets->clm_crc);
     badger_bytes_store_u32(evidence + 16u, CLEAN_PEER_RECORDS);
-    badger_bytes_store_u32(evidence + 20u, 1u);
+    badger_bytes_store_u32(evidence + 20u, nonce[14] == 2u ? 2u : 1u);
     int ready = wifi_firmware_begin(wifi_board_wire(), assets, &firmware, service, 0);
     uint8_t report[64];
     wifi_firmware_report(report, USB_REPORT_BUILD_ID, nonce, &firmware);
@@ -164,7 +164,9 @@ static void probe(const uint8_t nonce[16]) {
         for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS && service(0, 0); ++i) {
             uint8_t request[CLEAN_PEER_CONTROL_BYTES], reply[CLEAN_PEER_CONTROL_BYTES], set;
             uint32_t command, received = 0u;
-            uint32_t size = clean_peer_prepare_query(i, request, &command, &set);
+            uint32_t size = nonce[14] == 2u ?
+                clean_peer_prepare_monitor(i, request, &command, &set) :
+                clean_peer_prepare_query(i, request, &command, &set);
             int ok = wifi_firmware_control(command, set, 0u, request, size,
                                             reply, sizeof(reply), &received);
             uint8_t *r = evidence + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;

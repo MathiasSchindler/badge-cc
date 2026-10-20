@@ -110,6 +110,10 @@ The production vendor firmware was queried before selecting a TX method:
 There was no packet-engine start request, manufacturing firmware, continuous
 tone, count-zero transmission, or arbitrary PHY/radio-register experiment.
 GET_MONITOR support alone does not establish working monitor reception.
+The later [independent raw receive campaign](HT20_IMPLEMENTATION.md#independent-vendor-raw-receiver-2026-10-20)
+actually enables/readback-checks/disables monitor mode and retains 16
+complete controlled pairs with both FCS values, across both roles/orders.
+That independent receive role does not use this peer's AP/TX configuration.
 
 The alternative uses the existing open-AP configuration on channel 1 and
 sets interface 1's `2g_mrate` to `0x01010000 | MCS`. This requests HT20,
