@@ -117,9 +117,14 @@ static void capture_layout(uint8_t original[2360]) {
     assert(instruction(310u) == WORD(0x77fu,0x1780u,0x1780u,OBSERVER_STREAM_PHASE_CHECK));
     assert(instruction(311u) == WORD(0x77fu,0x1780u,0x1780u,OBSERVER_STREAM_PHASE_WRITE));
 #else
+#if CLEAN_RX_HT_SHORT_STREAM
+    assert(instruction(310u) == WORD(0x77fu,0x1780u,0x1780u,OBSERVER_SHORT_STREAM));
+#else
     assert(instruction(310u) ==
            WORD(0xdau,0x100cu,0x1800u | CLEAN_RX_STREAM_PREFIX_BYTES,312u));
-    assert(instruction(311u) == WORD(0x310u,0x1802u,0x1004u,0x1004u));
+#endif
+    assert(instruction(311u) == (CLEAN_RX_HT_SHM_ONLY ?
+        WORD(0x77fu,0x1780u,0x1780u,312u) : WORD(0x310u,0x1802u,0x1004u,0x1004u)));
 #endif
     assert(instruction(312u) == WORD(0x77fu,0x1780u,0x1780u,RX_COMPLETE));
     assert(instruction(313u) == WORD(0x77fu,0x1780u,0x1780u,192u));
@@ -323,7 +328,9 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
 #endif
 
 static uint16_t stream_prefix(uint16_t rxctl, uint16_t count, uint16_t advance, uint16_t marker,
+                              uint16_t copy_end, uint16_t sig_flags, uint16_t pending,
                               uint32_t *writes, uint32_t *next) {
+    (void)copy_end; (void)sig_flags; (void)pending;
     uint32_t pc = 191u;
 #if CLEAN_RX_HT_COPY_SCOPE >= 3
     uint16_t r3 = 0u, saved_r3 = 0u;
@@ -354,12 +361,21 @@ static uint16_t stream_prefix(uint16_t rxctl, uint16_t count, uint16_t advance, 
 #if CLEAN_RX_HT_COPY_SCOPE >= 3
             if (a == CLEAN_COPY_SCOPE_SHM) { pc = d; continue; }
 #endif
-            assert(a == 0x100cu);
-            if (count < immediate(b)) pc = d;
+            assert(a == 0x100cu || a == 0x102au);
+            if ((a == 0x100cu ? count : copy_end) < immediate(b)) pc = d;
+        } else if (op == 0xdcu) {
+            assert(a == 0x102au);
+            if (copy_end > immediate(b)) pc = d;
+        } else if (op == 0xd0u) {
+            assert(a == CLEAN_OBSERVER_PENDING && b == 0x1800u);
+            if (!pending) pc = d;
+        } else if (op == 0x40bu) {
+            assert(a == CLEAN_SHM_FRAME+2u && b == 0x1800u);
+            if (!(sig_flags&0x800u)) pc = d;
         } else if (op == 0xd1u) {
             if (a == CLEAN_OBSERVER_ADVANCE) {
-                assert(b == 0x1801u);
-                if (advance != 1u) pc = d;
+                assert(b == 0x1801u || b == 0x1800u);
+                if (advance != immediate(b)) pc = d;
             }
 #if CLEAN_RX_HT_COPY_SCOPE >= 3
             else if (a == 0x1783u) {
@@ -403,9 +419,10 @@ static void streaming(void) {
         for (uint32_t count = 0u; count <= CLEAN_RXE_BYTES; ++count) {
             for (uint32_t state = 0u; state < 256u; ++state) {
                 uint16_t before = (uint16_t)(0x2800u | state);
-                int enable = (before & 2u) == 0u && count >= threshold;
+                int enable = !CLEAN_RX_HT_SHM_ONLY && (before & 2u) == 0u && count >= threshold;
                 uint32_t writes, next, expected_next = RX_COMPLETE;
-                uint16_t after = stream_prefix(before, (uint16_t)count, phases[phase], 0u, &writes, &next);
+                uint16_t after = stream_prefix(before, (uint16_t)count, phases[phase], 0u,
+                                               0u,0u,0u,&writes,&next);
                 uint16_t expected = enable ? (uint16_t)((before & ~3u) | 2u) : before;
                 if (enable && phases[phase] == 1u && CLEAN_RX_HT_COPY_STREAM_REARM == 2)
                     expected = (uint16_t)((expected & ~0x3fc0u) | ((0x83u<<6u)&0x3fc0u));
@@ -415,7 +432,8 @@ static void streaming(void) {
                 assert(after == expected);
                 assert(writes == (uint32_t)enable && next == expected_next);
                 uint32_t again;
-                assert(stream_prefix(after, (uint16_t)count, phases[phase], 1u, &again, &next) == after);
+                assert(stream_prefix(after, (uint16_t)count, phases[phase], 1u,
+                                     0u,0u,0u,&again,&next) == after);
                 assert(again == 0u && next == RX_COMPLETE);
             }
         }
@@ -424,12 +442,30 @@ static void streaming(void) {
         for (uint32_t marker = 1u; marker <= 2u; ++marker) {
             uint32_t writes, next;
             uint16_t after = stream_prefix(0x2800u,(uint16_t)count,1u,
-                marker == 1u ? 1u : 0xffffu,&writes,&next);
-            int enable = count >= CLEAN_RX_CONTINUATION_STREAM_BYTES;
+                marker == 1u ? 1u : 0xffffu,0u,0u,0u,&writes,&next);
+            int enable = !CLEAN_RX_HT_SHM_ONLY && count >= CLEAN_RX_CONTINUATION_STREAM_BYTES;
             assert(after == (enable ? 0x2802u : 0x2800u));
             assert(writes == (uint32_t)enable && next == RX_COMPLETE);
         }
     }
+#if CLEAN_RX_HT_SHORT_STREAM
+    const uint16_t lengths[] = {0u,44u,63u,64u,80u,121u,122u,127u,170u,554u};
+    for (uint32_t i = 0u; i < sizeof(lengths)/sizeof(lengths[0]); ++i)
+    for (uint32_t context = 0u; context < 8u; ++context)
+    for (uint32_t count = 0u; count <= 560u; ++count) {
+        uint16_t advance = (uint16_t)(context&1u), pending = context&2u ? 7u : 0u;
+        uint16_t flags = context&4u ? 0x800u : 0u;
+        uint32_t threshold = !advance && pending && flags &&
+            lengths[i] >= 64u && lengths[i] <= 121u ? 64u : 128u;
+        uint32_t writes, next;
+        uint16_t after = stream_prefix(0x2801u,(uint16_t)count,advance,0u,
+            lengths[i],flags,pending,&writes,&next);
+        int enabled = count >= threshold;
+        assert(after == (enabled ? 0x2802u : 0x2801u));
+        assert(writes == (uint32_t)enabled && next == RX_COMPLETE);
+    }
+    puts("PSM short-first streaming: 44880 emitted-program boundary/context cases; ordinary/single-HT/continuation thresholds unchanged; NOT RF");
+#endif
 }
 
 static uint16_t ack_operand(const uint16_t regs[0x1800], uint32_t operand) {
@@ -2296,7 +2332,7 @@ static void passive_early_snapshot(void) {
     const uint32_t variable_next[] = {44u,80u,173u,255u,298u,381u,480u,554u};
     for (uint32_t i = 0u; i < sizeof(variable_first)/sizeof(variable_first[0]); ++i)
     for (uint32_t j = 0u; j < sizeof(variable_next)/sizeof(variable_next[0]); ++j)
-    for (uint32_t fault = 0u; fault < 5u; ++fault) {
+    for (uint32_t fault = 0u; fault < 6u; ++fault) {
         uint32_t first = variable_first[i], second = variable_next[j];
         uint32_t psdu = 8u+((first+3u)&~3u)+second;
         early_snapshot_seed(r,first);
@@ -2310,13 +2346,15 @@ static void passive_early_snapshot(void) {
         if (fault == 2u) r[CLEAN_SHM_FRAME+1u] ^= 0x100u;
         if (fault == 3u) events &= ~(1u<<3u);
         if (fault == 4u) r[CLEAN_SHM_FRAME+2u] ^= 1u;
+        if (fault == 5u) r[0x100eu] |= 16u;
+        int rejected = fault && (fault != 5u || CLEAN_RX_HT_DELIMITER_GUARD);
         uint32_t next = receive_run(r,&events,RX_COMPLETE,&steps);
-        if (next != (fault ? 262u : 163u))
+        if (next != (rejected ? 262u : 163u))
             fprintf(stderr,"Variable advance first=%u second=%u fault=%u next=%u\n",
                     first,second,fault,next);
-        assert(next == (fault ? 262u : 163u));
-        assert(r[CLEAN_OBSERVER_ADVANCE] == !fault);
-        if (!fault) {
+        assert(next == (rejected ? 262u : 163u));
+        assert(r[CLEAN_OBSERVER_ADVANCE] == !rejected);
+        if (!rejected) {
             assert(r[CLEAN_OBSERVER_ADVANCE+1u] == second && r[0x102au] == second);
 #if CLEAN_RX_HT_NEXT_STREAM
             assert((r[0x1004u]&3u) == ((control&3u)|2u));
@@ -2329,7 +2367,7 @@ static void passive_early_snapshot(void) {
         }
         assert(r[0x1782u] == 0x1234u && r[0x1783u] == 0x5678u);
     }
-    puts("PSM variable advance: 400 emitted-program cases, odd tails, bounded lengths, busy delimiter, exact padded PSDU and GoodFCS gates; NOT RF");
+    puts("PSM variable advance: 480 emitted-program cases, odd tails, bounded lengths, busy/error delimiter, exact padded PSDU and GoodFCS gates; NOT RF");
 #endif
 #if CLEAN_RX_HT_COPY_WAIT
     for (uint32_t fault = 1u; fault <= 3u; ++fault) {
@@ -2442,7 +2480,8 @@ static void passive_early_snapshot(void) {
         if (fault == 5u) r[CLEAN_OBSERVER_SECOND_SHM] = 7u;
         uint16_t retained[CLEAN_OBSERVER_EARLY_RETAIN_WORDS];
         memcpy(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained));
-        int quarantined = CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD != 0x83u && fault >= 3u;
+        int quarantined = (CLEAN_RX_HT_VARIABLE ||
+            CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD != 0x83u) && fault >= 3u;
         uint16_t length_rejects = r[0x7a9u];
         assert(psm_run(r,0,abort ? OBSERVER_EXIT_ABORT : OBSERVER_SECOND) ==
             (abort || quarantined ? 266u : 198u));
@@ -2459,6 +2498,34 @@ static void passive_early_snapshot(void) {
         assert(r[0x600u] == 0xa55au);
         assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
     }
+#if CLEAN_RX_HT_VARIABLE
+    const uint16_t expected_lengths[] = {44u,80u,127u,255u,298u,381u,554u};
+    for (uint32_t i = 0u; i < sizeof(expected_lengths)/sizeof(expected_lengths[0]); ++i)
+    for (uint32_t fault = 0u; fault < 5u; ++fault) {
+        uint16_t expected = expected_lengths[i];
+        early_snapshot_seed(r,expected);
+        r[CLEAN_OBSERVER_EARLY_SHM] = 1u;
+        r[CLEAN_OBSERVER_EARLY_SHM+1u] = 9u;
+        r[CLEAN_OBSERVER_ADVANCE] = 1u;
+        r[CLEAN_OBSERVER_ADVANCE+1u] = expected;
+        r[CLEAN_OBSERVER_OUTCOME] = 1u;
+        r[0x100du] = 0x4100u;
+        if (fault == 1u) --r[0x100cu];
+        if (fault == 2u) ++r[0x100cu];
+        if (fault == 3u) r[0x100cu] = 6u;
+        if (fault == 4u) r[0x100cu] = 243u;
+        uint16_t native_count = r[0x100cu];
+        int reject = native_count != expected+6u;
+        assert(psm_run(r,0,OBSERVER_SECOND) == (reject ? 266u : 198u));
+        assert(r[CLEAN_OBSERVER_OUTCOME] == (reject ? 4u : 1u));
+        assert(r[0x100cu] == native_count && r[0x100du] == 0x4100u);
+        if (r[CLEAN_OBSERVER_SECOND_SHM]) {
+            assert(r[CLEAN_OBSERVER_SECOND_SHM+2u] == native_count);
+            assert(r[CLEAN_OBSERVER_SECOND_SHM+10u] == 1u);
+        } else assert(native_count < 50u || native_count > 306u);
+    }
+    puts("PSM variable continuation admission: 35 exact/short/long/stuck-count cases; native count and GoodFCS snapshot unchanged; mismatches quarantined before FIFO");
+#endif
     puts("PSM continuation snapshot: exact copy bounds, missing/wrong owner, epoch, short/oversize and immutable commit guards pass");
 #endif
 }

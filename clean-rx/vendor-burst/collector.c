@@ -1176,8 +1176,12 @@ int main(int argc, char **argv) {
     if (CLEAN_RX_HT_VARIABLE) nonce[11] = (uint8_t)(4u+2u*variable_pair+(profile == 2u));
     if (REF_CLEAN_HANDOFF) nonce[10] = handoff_case;
     printf("{\"test\":\"configuration\",\"build\":\"%08x\","
-           "\"next_mpdu_command_field\":%u,\"continuation_stream_probe\":%u,\"nonce\":\"",
-           USB_REPORT_BUILD_ID,CLEAN_RX_HT_NEXT_FIELD,CLEAN_RX_HT_NEXT_STREAM);
+           "\"next_mpdu_command_field\":%u,\"continuation_stream_probe\":%u,"
+           "\"shm_capture_only\":%s,\"short_first_streaming\":%s,"
+           "\"delimiter_status_guard\":%s,\"nonce\":\"",
+           USB_REPORT_BUILD_ID,CLEAN_RX_HT_NEXT_FIELD,CLEAN_RX_HT_NEXT_STREAM,
+           CLEAN_RX_HT_SHM_ONLY?"true":"false",CLEAN_RX_HT_SHORT_STREAM?"true":"false",
+           CLEAN_RX_HT_DELIMITER_GUARD?"true":"false");
     for (uint32_t i = 0u; i < sizeof(nonce); ++i) printf("%02x",nonce[i]);
     puts("\",\"mcs_requested\":0}");
     fflush(stdout);

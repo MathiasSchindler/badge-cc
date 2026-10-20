@@ -126,6 +126,7 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Parse AP HT/WMM capabilities and constrain the profile on association and beacon updates.
 - [x] Implement common-MCS selection, exact rate requests, PHY configuration and airtime deadlines.
 - [x] Implement bounded mixed-format HT TX/RX at MCS0..7 and explicit legacy fallback.
+- [x] Build and hardware-test an autonomous two-badge HT20 button messenger with application acknowledgements, bounded retries and visible recovery; retain startup failures without claiming D2 reliability.
 - [x] Implement non-HT WMM/EDCA, protected QoS, per-TID CCMP and bounded A-MSDU receive software.
 - [x] Implement native-tested Block ACK agreements, A-MPDU parsing and ciphertext reordering.
 - [x] Implement readback-verified atomic station/controller policy commits.
@@ -158,6 +159,7 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Isolate next-MPDU command semantics: repeat exact streaming 170/298-byte FIFO pairs with native length/GoodFCS; retain reliability and malformed-input gaps.
 - [x] Test bounded ordered-flush and instrumented stuck-prefix diagnostics; preserve event-10 failures and distinguish injected execution from unproven physical recovery.
 - [x] Extend the c3 boundary microscope to variable/odd MPDU lengths through 554-byte continuations; test both roles/orders and isolate the short-first native-stream-state dependency without normalizing counts or hiding losses.
+- [x] Verify remaining vendor hints: reject general SHM-only capture with matched RF aborts; implement gated short-first streaming and delimiter-status exclusion, plus native-count quarantine for every variable handoff; retain reliability failures.
 - [x] Implement gated passive-observer FIFO retention and bounded stop/drain.
 - [x] Implement acknowledged repeated early-MPDU FIFO/F2 delivery and complete packet archives; preserve final RF misses as unqualified.
 - [x] Implement full fixed-source vendor raw archives; identify monitor cutoff/timeouts and exclude them as a qualified RF-loss baseline.
@@ -172,7 +174,7 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
   and resolve persistent RXE busy, pre-prefix and truncated-body losses;
   repeat loss-accounted tests with confirmed multi-body stimulus.
 - [ ] **2. Qualify aggregate handoff:** generalize the bounded next-MPDU
-  streaming repair, including short-first initial copy-state handling;
+  streaming repair beyond the bounded short-first fix;
   validate full-body ownership/FIFO publication beyond one-shot variable fixtures;
   complete loss-accounted both-role/order qualification and
   malformed/truncated-frame and abort recovery.

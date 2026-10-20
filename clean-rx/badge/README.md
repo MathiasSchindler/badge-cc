@@ -42,6 +42,12 @@ See the map's build/run instructions and evidence limits.
 Default builds preserve legacy-only association even when an AP advertises
 HT/WMM. The separate opt-in WMM build described below still omits HT.
 
+For an autonomous two-badge application rather than this USB-driven
+diagnostic, see the [direct HT20 button messenger](../messenger/README.md).
+It uses short MCS0 broadcasts, application acknowledgements and visible
+bounded retry/restart handling; it does not enable HT station association
+or qualify D2 reliability.
+
 For an independent vendor-to-clean HT receive control, see
 [the controlled receive record](../dev-doc/CONTROLLED_HT_RECEIVE.md).
 The clean collector's `--vendor-ht-rx CHALLENGE_HEX_28 MCS:0-7` validates

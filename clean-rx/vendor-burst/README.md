@@ -113,7 +113,7 @@ retains at most one eligible aggregate's first body, up to 480 bytes.
 A later selected source index is **not** proof of reception of aggregate 2;
 in particular, a 554-byte first body cannot fit this slot. Continuations
 up to 554 bytes are compared in full through the archived F2 sample.
-The separate terminal SHM snapshot remains limited to 298 bytes; its
+The separate terminal SHM snapshot remains limited to 300 bytes; its
 `fcs_valid:false` is not a full-body FCS verdict for a larger continuation.
 
 The observer requires a fresh matching owner/count, native GoodFCS, a
@@ -140,6 +140,58 @@ collector-policy passes. See the
 [variable-length evidence](../dev-doc/HT20_IMPLEMENTATION.md#variable-length-boundaries-and-initial-stream-state-2026-10-20).
 General N-body delimiter/EOF handling and repeated buffering/backpressure
 remain open.
+
+### Verified hint follow-up: bounded short-first streaming
+
+The follow-up tests the hints' SHM-only proposal directly. Disabling the
+mid-body stream instruction does **not** support general long captures:
+80/554, 127/381, 257/255 and 479/554 abort reproducibly in both roles.
+The measured cumulative native counts cluster around 512 despite a much
+larger SHM window. SHM address space does not prove upstream capacity.
+`reference-handoff-shm-only` retains this default-off diagnostic; do not
+use it as a firmware repair.
+
+The supported experimental improvement is narrower:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile \
+  REF_BUILD=build/clean-rx/NEW_SAFE_VARIABLE reference-handoff-safe-variable
+CLEAN_RX_REFERENCE_BUILD=build/clean-rx/NEW_SAFE_VARIABLE \
+  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good 0
+```
+
+This combines:
+
+- `CLEAN_RX_HT_SHORT_STREAM=1`: start at native count 64 **only** for a
+  pending first aggregate body whose current copy length is 64..121 bytes.
+  Ordinary/single-HT reception, larger first bodies and continuations keep
+  the normal 128-count threshold. Initial and continuation copy commands,
+  replay, native counts and GoodFCS policy are unchanged.
+- `CLEAN_RX_HT_DELIMITER_GUARD=1`: exclude `SPR0x00e` bit 4 before advancing,
+  matching the locally verified vendor instruction. Emitted-program
+  fault tests verify exclusion. Terminal snapshots of the real malformed
+  fixtures do not retain that bit; physical CRC-error mapping and complete
+  malformed-input recovery remain unqualified.
+- All variable handoff builds now enforce native continuation count
+  `saved_next_length + 6` before FIFO admission, with matching owner/epoch.
+  Mismatches are explicit outcome 4, not normalized counts. Native count,
+  status and the bounded snapshot remain available. This extends the
+  earlier replay-only quarantine after a new pre-fix trial exported a
+  malformed 237-byte prefix despite native GoodFCS.
+
+`reference-handoff-short-stream` selects the short-first path alone;
+`REF_DELIMITER_GUARD=1` adds the status guard. Both gates default off.
+`REF_SHM_ONLY=1` cannot be combined with short-first/global-64 streaming.
+
+The final build has exact selected pairs in **16/16** good trials,
+including all eight pairs in both badge roles. Its full 24-trial campaign
+has **364/384 controls**, zero invalid/duplicate controls, and only
+**10 collector-policy passes**. All earlier failed and malformed exports
+remain in the 64-trial evidence; the final native-count guard is also
+tested against the reproduced 243-versus-387 count mismatch.
+This is not N-body buffering, all-rate qualification or permission to
+advertise HT. See the
+[hint follow-up evidence](../dev-doc/HT20_IMPLEMENTATION.md#verified-hint-follow-up-shm-limits-short-first-streaming-and-admission-2026-10-20).
 
 ## Experimental observer FIFO
 

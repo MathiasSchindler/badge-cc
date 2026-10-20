@@ -5682,7 +5682,7 @@ continuation to 44..554 bytes, and requires:
 There is no count normalization, replay or destination splice. Odd first
 bodies exercise padding and odd last bodies exercise complete software
 FCS/F2 verification. The terminal snapshot still holds only the first
-298 bytes of a continuation; larger-body integrity comes from the full
+300 bytes of a continuation; larger-body integrity comes from the full
 archived F2 sample, not reading beyond that snapshot. Bad-second exact
 correlation explicitly refuses lengths exceeding its snapshot capacity.
 
@@ -5759,7 +5759,7 @@ Across **all 50 RF trials** (not just successful cells):
 `audit.js` and its passing `audit.jsonl` independently reconstruct every
 source packet, compare complete F2 bytes/FCS and native terminal counts,
 check every denominator and failure, and verify final flash restoration.
-The 480-byte early slot and 298-byte terminal snapshot remain explicit
+The 480-byte early slot and 300-byte terminal snapshot remain explicit
 bounds, not inferred upstream staging capacities.
 
 ASan/UBSan source tests cover **1,920** variable fixtures, both orders,
@@ -5790,6 +5790,167 @@ retention with bounded per-body ownership, delimiter/EOF advancement and
 transport backpressure. No N-body ring or generalized malformed/abort
 recovery was implemented or qualified by this fixture extension.
 D2 remains incomplete and HT advertisement remains off.
+
+### Verified hint follow-up: SHM limits, short-first streaming and admission (2026-10-20)
+
+The remaining useful hints were tested against the new size matrix rather
+than assuming register meanings or extrapolating from 170/298. Evidence is
+under `build/clean-rx/hints-shm/`.
+`vendor-instructions.jsonl` records a direct seven-byte big-endian decode
+of selected instructions in the local vendor image, including
+`0x08aa: op 0x504, a 0x100e`, the stream/split writes, and delimiter-ready/
+EOF polling. This verifies the cited predicates, not every semantic label
+or claimed timing/capacity in the hints.
+
+#### SHM-only proposal: tested and rejected for general reception
+
+`CLEAN_RX_HT_SHM_ONLY=1` replaces only the PC-311 mid-body stream write
+with a jump to the existing completion path. Initial commands, `0xc3`,
+copy base/end, native count/FCS checks and final header publication remain
+unchanged. The matched variable fixture was run in both badge roles:
+
+| Selected first / second | Native first count | Terminal continuation count | Result in each role |
+| --- | --- | --- | --- |
+| 80 / 554 | 86 | 426 | Abort |
+| 127 / 381 | 133 | 382 | Abort |
+| 170 / 298 | 176 | 304 | Exact pair |
+| 257 / 255 | 263 | 250 | Abort |
+| 479 / 554 | 485 | 26 | Abort |
+| 321 / 173 | 327 | 179 | Exact pair |
+
+Thus all eight long-case failures reproduce with matching native counts
+across both roles. The failing cumulative counts are 512, 515, 513 and
+511; exact smaller pairs total 480 and 506. This is evidence of a bounded
+upstream resource near that region, **not** proof of an exact universal
+512-byte FIFO model: alignment/prefix bookkeeping and the internal
+mechanism remain unresolved. The 4-KiB SHM address window does not remove
+this limit. The hints' claim that disabling streaming permits full bodies
+through 3,896 bytes is therefore not adopted.
+
+#### Implemented: short-first-only streaming and delimiter predicate
+
+`CLEAN_RX_HT_SHORT_STREAM=1` uses a bounded, register-preserving PSM
+threshold dispatcher. Only a pending **first aggregate body** with current
+copy length 64..121 selects native count 64. It explicitly checks pending
+ownership, no prior advance and the aggregate HT-SIG flag. All other
+cases retain 128: ordinary/legacy frames, single HT frames, larger first
+bodies and continuations. The 64-byte minimum remains beyond the required
+MAC/CCMP prefix. Bodies shorter than 64 are not generalized by this change.
+The initial command, continuation `0xc3`, copy geometry, replay and FCS
+policy are unchanged; there is no counter reconstruction.
+
+This makes the earlier global-64 diagnostic more surgical. Four targeted
+80/554 trials of the isolated short-first path select aggregate 2 and
+deliver both bodies exactly in both roles/repeats, with native count 560.
+Its six canonical/80-byte regression trials also select exact pairs.
+Ordinary losses remain visible rather than being inferred away from those
+ten pair successes.
+
+`CLEAN_RX_HT_DELIMITER_GUARD=1` adds the vendor's `SPR0x00e` bit-4 exclusion
+at the actual next-body admission point, in addition to busy/length/
+padding/EOF/abort/GoodFCS gates. It is verified by direct vendor decoding
+and emitted-program fault tests with valid next length/native GoodFCS.
+Real malformed-delimiter tests still show no bit 4 in their **terminal**
+status-2 snapshots. Do not claim that a real latched CRC-error trigger or
+general malformed recovery was demonstrated. Invalid/null delimiter
+handling beyond this bounded two-body fixture remains open.
+
+#### Implemented: reject short native counts even when GoodFCS is set
+
+A pre-fix `short-guard-A-128-p1` trial retains first body 127 and expected
+continuation 381, but native terminal count is **243 instead of 387**,
+with native status 1 `0x4100` (GoodFCS/EOF). The old copy admission accepts
+this and publishes a **237-byte** advanced F2 prefix with invalid software
+FCS. Its original source, snapshot, raw native status/count and invalid
+F2 bytes are retained. This is a failed trial, not an exact-pair result.
+It exposes a safety gap even without modified mid-body replay.
+
+The existing owner/epoch-aware native-length quarantine now applies to
+**all variable handoff profiles**, not just altered-replay profiles.
+An advanced, owned GoodFCS completion must have native count
+`saved_next_length + 6` before FIFO admission. Otherwise outcome 4 and
+the existing length-rejection counter are recorded, without changing
+native count/status or rewriting the earlier immutable snapshot's native
+outcome. There is no software-FCS waiver or success-shaped fallback.
+This reuses the established quarantine rather than adding another
+publication path.
+
+Emitted-program tests exercise exact counts and one-byte short/long,
+stuck count 6 and the real 243-count failure across seven lengths:
+**35** admission cases. All mismatches reject before FIFO; native
+registers remain unchanged and snapshots preserve native data when their
+bounded geometry permits a snapshot. Good exact-length bodies still pass.
+No natural copy-count fault happened in the final RF matrix, so rejection
+of that fault is proven by these emitted-program cases, not presented as
+a physical-wedge recovery result.
+
+#### Final build, complete campaign and hardware restoration
+
+The public `reference-handoff-safe-variable` target selects short-first
+streaming plus the delimiter-status predicate; every variable build gets
+the native-length quarantine. These remain opt-in diagnostics. RF images
+are frozen under `safe-short/`.
+
+The final matrix is **24 trials**:
+
+- **16/16 selected good pairs**, all eight length pairs in both roles,
+  with exact source index 2, complete bytes/software FCS, native GoodFCS
+  and native continuation count. This includes 80/554 at count 560 and
+  127/381 at count 387.
+- Eight negative trials retain bad-first/bad-last rejection. Four pass
+  the existing negative/recovery policy; malformed/truncated cases remain
+  unqualified even where later source pairs arrive.
+- **364/384 controls**, **837** conserved captures, zero invalid or
+  duplicate controls. Only **10/24** pass the existing collector policy
+  (six good, four negative); the exact-pair count is not reliability.
+- No malformed archived F2 sample in the final profile. The malformed
+  pre-fix prefix remains separately auditable.
+
+Across **all 64** exploratory/final RF trials: **256** full reports,
+**1,536** verified source records, **4,513** conserved captures,
+**944/1,024** controls, **47** retained exact pairs and **126** exact
+archived F2 bodies. The **one malformed archived F2 sample**, two
+delivery-integrity failures and all control misses remain failures.
+There are **20** existing collector-policy passes and seven qualified
+negative-policy results, not 64 reliable receptions.
+
+`audit.js` adapts the earlier independent fixture reconstruction with
+explicit allowances only to **record** pre-fix malformed output and
+non-exact native snapshots. It prohibits malformed archived output in
+the final profile and preserves all denominators. Its passing
+`audit.jsonl` also verifies raw report CRC/build/nonce/source geometry,
+sample FCS/native count/owner, conservation and original-flash restoration.
+
+ASan/UBSan builds test 1,920 source fixtures, **480** geometry/delimiter/
+GoodFCS cases, the 35 native-admission cases and **44,880** exhaustive
+short-first threshold/context cases. Ordinary and continuation thresholds
+are tested unchanged. Default and the canonical non-variable `0xc3`
+receiver images remain byte-identical to the earlier archives; both final
+receiver/source controller binaries byte-match the final RF archive.
+The final default comparison uses
+`variable-handoff/validation-default/cyw43_rx_fw.bin` as its archive.
+All 21 invalid-value, missing-parent and conflicting-gate compile cases
+fail through the intended static assertions; `git diff --check` passes.
+
+After 40 exploratory trials both full originals were restored. The final
+matrix then paused on badge B's BOOTSEL readiness failure, before flashing
+the next trial. Badge A was fully restored immediately; after the user's
+USB replug, badge B was fully restored/verified before resuming.
+Following the last trial both original 16-MiB flashes were again restored,
+independently reread and byte/hash checked, with BOOTSEL confirmed.
+Authoritative **last** evidence:
+`hints-shm/last-restored-{A,B}-full.bin` and matching info/log files,
+A `8cda7a00...23628`, B `bc3f972d...21e2`.
+Earlier `final-restored-*` files precede the last RF matrix.
+No credentials were read.
+
+The hints' already-tested `0xc3` lead remains useful; ordered-flush and
+250-us prefix recovery keep their earlier physical-recovery limitations.
+Count normalization, presumed unlimited SHM-only capture, nonexistent
+descriptor-ring symbols and the suggested incorrect MAC/BA offsets are
+not adopted. N-body ownership/backpressure, all-rate receive reliability,
+malformed/abort recovery and HT MAC/BA obligations remain open. HT
+advertisement stays disabled and D2 is not complete.
 
 ### Remaining D2 work
 
