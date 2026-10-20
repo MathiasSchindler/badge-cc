@@ -212,12 +212,28 @@ static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]) {
     sequence = ref_u16(window+64u);
     printf("],\"psm_snapshot_committed\":%s}\n",
            sequence && !(sequence&1u)?"true":"false");
+    if (usb_report_u32(window+28u)&16u) {
+        const uint8_t *recovery = window+96u;
+        printf("{\"test\":\"ordered-rx-recovery\",\"ordered_flush\":true,\"flush_mode\":%u,"
+               "\"prefix_recovery\":%s,\"flush_attempts\":%u,\"flush_phase\":%u,"
+               "\"flush_busy_polls\":%u,\"prefix_entries\":%u,\"count2_polls\":%u,"
+               "\"prefix_recoveries\":%u,\"trigger_count\":%u,"
+               "\"trigger_status1\":%u,\"trigger_elapsed_us\":%u,\"words\":[",
+               CLEAN_RX_HT_ORDERED_FLUSH,usb_report_u32(window+28u)&32u?"true":"false",
+               ref_u16(recovery),ref_u16(recovery+2u),ref_u16(recovery+6u),
+               ref_u16(recovery+16u),ref_u16(recovery+18u),ref_u16(recovery+20u),
+               ref_u16(recovery+24u),ref_u16(recovery+26u),ref_u16(recovery+30u));
+        for (uint32_t i = 0u; i < 16u; ++i)
+            printf("%s%u",i?",":"",(unsigned)ref_u16(recovery+2u*i));
+        puts("]}");
+    } else {
     printf("{\"test\":\"rearm-phy-reset\",\"enabled\":%s,\"park_only\":%s,\"words\":[",
            (usb_report_u32(window+28u)&12u) == 4u?"true":"false",
            usb_report_u32(window+28u)&8u?"true":"false");
     for (uint32_t i = 0u; i < 16u; ++i)
         printf("%s%u",i?",":"",(unsigned)ref_u16(window+96u+2u*i));
     puts("]}");
+    }
     for (uint32_t i = 0u; i < count; ++i) {
         const uint8_t *r = window+REF_WINDOW_HEADER_BYTES+i*REF_WINDOW_RECORD_BYTES;
         printf("{\"test\":\"receive-window-sample\",\"index\":%u,\"time_ticks\":%u,"
@@ -346,10 +362,10 @@ static int summarize_monitor(const uint8_t source[REF_TRACE_BYTES],
         for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i) {
             (void)ref_source_frame(expected, bound, i);
             for (uint32_t body = 0u; body < (i%3u == 2u ? 2u : 1u); ++body) {
-                uint32_t bytes = REF_CLEAN_HANDOFF ? clean_ht_handoff_length(bound, body) :
+                uint32_t bytes = REF_CLEAN_HANDOFF ? clean_ht_handoff_length_at(bound,i,body) :
                     CLEAN_HT_STIMULUS_MPDU;
                 uint32_t offset = CLEAN_HT_DATA_HEADER + 6u + (i%3u == 2u ? 4u : 0u);
-                if (body) offset += 4u + ((ref_source_control_length(bound) + 3u) & ~3u);
+                if (body) offset += 4u + ((clean_ht_handoff_length_at(bound,i,0u) + 3u) & ~3u);
                 uint32_t kind = i%3u == 2u ? 2u + body : i%3u;
                 if (!ref_monitor_contains(slot + 16u, length, expected + offset, bytes - 4u)) continue;
                 int fcs = ref_monitor_contains(slot + 16u, length, expected + offset, bytes);
@@ -823,7 +839,12 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         if (!summarize_source(vendor,bound_nonce)) return 0;
         (void)ref_source_frame(expected,bound_nonce,CLEAN_HT_STIMULUS_COUNT-1u);
         if (REF_CLEAN_HANDOFF) {
-            uint32_t first = clean_ht_handoff_length(bound_nonce,0u);
+            uint32_t retained_index = ref_u16(early) ?
+                (ref_u16(early+2u*CLEAN_OBSERVER_EARLY_HEADER+22u)>>4u)/2u : 2u;
+            if (retained_index >= CLEAN_HT_STIMULUS_COUNT) {
+                fputs("Invalid retained handoff source index\n",stderr); return 0;
+            }
+            uint32_t first = clean_ht_handoff_length_at(bound_nonce,retained_index,0u);
             if (CLEAN_RX_HT_COPY_DMA_PROBE) {
                 const uint8_t *dma = observer+REF_SAMPLE_BASE;
                 uint32_t saved = usb_report_u32(dma+8u);
@@ -859,8 +880,9 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                     for (uint32_t index = 0u; index < CLEAN_HT_STIMULUS_COUNT; ++index) {
                         (void)clean_ht_handoff_frame(expected,bound_nonce,index);
                         for (uint32_t part = 0u; part < (index%3u == 2u ? 2u : 1u); ++part) {
-                            uint32_t length = clean_ht_handoff_length(bound_nonce,part);
-                            uint32_t offset = part ? 18u+4u+((first+3u)&~3u) :
+                            uint32_t length = clean_ht_handoff_length_at(bound_nonce,index,part);
+                            uint32_t offset = part ? 18u+4u+
+                                ((clean_ht_handoff_length_at(bound_nonce,index,0u)+3u)&~3u) :
                                 index%3u == 2u ? 18u : 14u;
                             for (uint32_t at = 0u; at+length <= CLEAN_OBSERVER_DMA_PREFIX; ++at) {
                                 if (memcmp(bytes+at,expected+offset,length)) continue;
@@ -877,7 +899,9 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
             }
             uint32_t mode = bound_nonce[10], early_index = CLEAN_HT_STIMULUS_COUNT;
             int exact_first = 0, exact_pair = 0;
-            if (early_linked && early_length == first && ref_u16(early+15u) == CLEAN_HT_HANDOFF_PSDU) {
+            if (early_linked && early_length == first && ref_u16(early+15u) ==
+                (CLEAN_RX_HT_HANDOFF_GUARD ? CLEAN_HT_HANDOFF_PSDU :
+                 clean_ht_handoff_psdu(bound_nonce,retained_index))) {
                 const uint8_t *body = early+CLEAN_OBSERVER_EARLY_HEADER*2u;
                 uint32_t sequence = ref_u16(body+22u)>>4u;
                 early_index = sequence/2u;
@@ -888,7 +912,8 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                     const uint8_t *sample = observer+REF_SAMPLE_BASE+i*REF_SAMPLE_BYTES;
                     uint32_t at = 18u+4u+((first+3u)&~3u);
                     if (ref_pair_correlated(log,early,sample,mac) &&
-                        !memcmp(sample+16u,expected+at,clean_ht_handoff_length(bound_nonce,1u)))
+                        !memcmp(sample+16u,expected+at,
+                            clean_ht_handoff_length_at(bound_nonce,early_index,1u)))
                         exact_pair = 1;
                 }
             }
@@ -937,8 +962,10 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                    "\"received_control_mask\":%u,\"expected_control_mask\":%u,"
                    "\"all_controls_received\":%s,\"delivery_integrity\":%s,"
                    "\"ht_station_qualified\":false}\n",
-                   mode,first,clean_ht_handoff_length(bound_nonce,1u),
-                   CLEAN_RX_HT_HANDOFF_GUARD?"true":"false",CLEAN_HT_HANDOFF_PSDU,
+                   mode,first,clean_ht_handoff_length_at(bound_nonce,retained_index,1u),
+                   CLEAN_RX_HT_HANDOFF_GUARD?"true":"false",
+                   CLEAN_RX_HT_HANDOFF_GUARD ? CLEAN_HT_HANDOFF_PSDU :
+                       clean_ht_handoff_psdu(bound_nonce,retained_index),
                    CLEAN_RX_STREAM_PREFIX_BYTES,CLEAN_RX_HT_COPY_DEFER_STREAM?"true":"false",
                    CLEAN_RX_HT_COPY_DEFER_STREAM && stream_control_proven?"true":"false",
                    CLEAN_RX_HT_COPY_STREAM_PHASE,CLEAN_RX_CONTINUATION_STREAM_BYTES,
@@ -1093,11 +1120,19 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 5 && argc != 6 && argc != 7) || !serial_valid(argv[1]) || !serial_valid(argv[2]) || !strcmp(argv[1],argv[2])) {
-        fputs("Usage: collector VENDOR_SERIAL OBSERVER_SERIAL PREFIX PRIVATE_SSID_FILE [mixed|128|256|512] [HANDOFF_CASE]\n",stderr); return 2;
+    if ((argc < 5 || argc > 8) || !serial_valid(argv[1]) || !serial_valid(argv[2]) || !strcmp(argv[1],argv[2])) {
+        fputs("Usage: collector VENDOR_SERIAL OBSERVER_SERIAL PREFIX PRIVATE_SSID_FILE [mixed|128|256|512] [HANDOFF_CASE] [VARIABLE_PAIR_0_TO_7]\n",stderr); return 2;
     }
-    uint8_t profile = 0u, handoff_case = 0u;
-    if (argc == 7) {
+    uint8_t profile = 0u, handoff_case = 0u, variable_pair = 0u;
+    if (argc == 8) {
+        if (!CLEAN_RX_HT_VARIABLE || !REF_CLEAN_HANDOFF || strlen(argv[7]) != 1u ||
+            argv[7][0] < '0' || argv[7][0] > '7') {
+            fputs("VARIABLE_PAIR_0_TO_7 requires the variable handoff build and a digit 0..7\n",stderr);
+            return 2;
+        }
+        variable_pair = (uint8_t)(argv[7][0]-'0');
+    }
+    if (argc >= 7) {
         static const char *const names[] = {"good","bad-first","bad-last","bad-delimiter","truncated-body"};
         uint32_t i;
         for (i = 0u; i < CLEAN_HT_HANDOFF_CASES; ++i)
@@ -1138,8 +1173,11 @@ int main(int argc, char **argv) {
     if (fclose(random)) ok = 0;
     if (!ok) { fputs("Fresh nonce generation failed\n",stderr); return 1; }
     nonce[11] = profile;
+    if (CLEAN_RX_HT_VARIABLE) nonce[11] = (uint8_t)(4u+2u*variable_pair+(profile == 2u));
     if (REF_CLEAN_HANDOFF) nonce[10] = handoff_case;
-    printf("{\"test\":\"configuration\",\"build\":\"%08x\",\"nonce\":\"",USB_REPORT_BUILD_ID);
+    printf("{\"test\":\"configuration\",\"build\":\"%08x\","
+           "\"next_mpdu_command_field\":%u,\"continuation_stream_probe\":%u,\"nonce\":\"",
+           USB_REPORT_BUILD_ID,CLEAN_RX_HT_NEXT_FIELD,CLEAN_RX_HT_NEXT_STREAM);
     for (uint32_t i = 0u; i < sizeof(nonce); ++i) printf("%02x",nonce[i]);
     puts("\",\"mcs_requested\":0}");
     fflush(stdout);

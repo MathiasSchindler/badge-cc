@@ -16,6 +16,131 @@ Shared board, USB, transport and loader code
 is reused. The host collector uses the repository's existing libusb transport.
 Vendor assets are not dependencies of the clean controller.
 
+## Next-MPDU command and RX recovery diagnostics
+
+The default-disabled next-MPDU discriminator changes only the observer's
+actual continuation-start command from field `0x83` to `0xc3`.
+Initial body commands and mid-body replay remain unchanged:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile \
+  REF_BUILD=build/clean-rx/NEW_C3 reference-handoff-next-c3
+CLEAN_RX_REFERENCE_BUILD=build/clean-rx/NEW_C3 \
+  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
+```
+
+Use `256` for the reverse size order, or the existing named negative
+cases for deliberately damaged source aggregate 2.
+`reference-handoff-defer-next-c3` is the matched deferred-stream control.
+`CLEAN_RX_HT_NEXT_FIELD` defaults to `0x83`; selecting `0xc3` requires
+the bounded advance/copy profile. Six ordinary-threshold good trials
+retain exact 170/298-byte pairs with native GoodFCS, correct native
+length and exact advanced F2 delivery. Four matched `0x83` trials fail
+the continuation. Residual control losses, missed first bodies and
+unqualified malformed/truncated recovery remain failures.
+
+Separate fixed-554-byte early-FIFO profiles investigate rearm recovery:
+
+| Target | Diagnostic |
+| --- | --- |
+| `reference-early-fifo-recovery` | Existing one-shot rearm recovery control |
+| `reference-early-fifo-ordered` | Ordered RXE/crypto flush at every rearm |
+| `reference-early-fifo-prefix` | Above plus 250-us count-2/RX-active prefix recovery |
+| `reference-early-fifo-ordered-retry` | Ordered flush only after the existing first rearm fault |
+| `reference-early-fifo-prefix-retry` | Fault-only flush plus prefix recovery instrumentation |
+| `reference-early-fifo-ordered-retry-test` | Fault-only flush with the existing software-latched fault injection |
+
+Build with a fresh `REF_BUILD`, select that same directory through
+`CLEAN_RX_REFERENCE_BUILD`, and run with `NEW_PREFIX - 512` and **no
+handoff-case argument**. This source does not accept `128`/`256`.
+No credentials are read.
+
+`CLEAN_RX_HT_ORDERED_FLUSH` defaults off: 1 means every rearm, 2 means
+fault-only. It requires passive timeline/recovery and excludes host PHY
+reset. Event-10 polling is bounded at 65,535; expiration stops with
+explicit PSM reason 9. `CLEAN_RX_HT_PREFIX_RECOVERY` also defaults off
+and requires ordered flush. It records count/status/PHY-control/elapsed
+time before the PHY pulse; it does not reinterpret RX count or FCS.
+Its fallback prefix budget increases from 1,023 to 65,535 polls so
+the separate 250-us TSF deadline can operate.
+
+WND9 flags 16 and 32 distinguish ordered and prefix diagnostics. The last
+16 words of the existing rearm export hold counters/trigger evidence
+instead of the mutually excluded host-reset record.
+Collector JSON reports `ordered-rx-recovery`, including attempts, phase,
+busy polls, count-2 observations and actual prefix-recovery triggers.
+Phase 3 means the sequence reached normal RXCTL verification, not proof
+of physical-wedge recovery; phase 4 is the bounded event-10 timeout.
+
+Proactive ordered flush still causes early event-10 timeouts and is
+**not a generally usable rearm replacement**. The fault-only injected
+tests execute the sequence on both badges with exact delivery, but
+the injected fault is software state, not a physical `0x804` wedge.
+No natural 250-us prefix recovery triggered. All these profiles remain
+diagnostic; HT association stays disabled.
+See the [matched boundary and recovery evidence](../dev-doc/HT20_IMPLEMENTATION.md#next-mpdu-command-and-bounded-rx-recovery-experiments-2026-10-20).
+
+## Variable-length boundary microscope
+
+`reference-handoff-variable` enables a separate version-9 source fixture and
+bounded two-body observer using `0xc3`. It does **not** enable an N-body
+receiver or HT association:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile \
+  REF_BUILD=build/clean-rx/NEW_VARIABLE reference-handoff-variable
+CLEAN_RX_REFERENCE_BUILD=build/clean-rx/NEW_VARIABLE \
+  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good 0
+```
+
+The final argument is a rotation selector, `0..7`, not a byte length:
+
+| Selector | Source aggregate 2: first / second MPDU bytes |
+| --- | --- |
+| 0 | 80 / 554 |
+| 1 | 127 / 381 |
+| 2 | 170 / 298 |
+| 3 | 298 / 170 |
+| 4 | 257 / 255 |
+| 5 | 479 / 554 |
+| 6 | 80 / 80 |
+| 7 | 321 / 173 |
+
+Use `256` instead of `128` to reverse each aggregate's body order. Subsequent
+aggregates rotate through the remaining pairs; the sixteen legacy/single-HT
+controls keep the original 170- or 298-byte size. The immutable early slot
+retains at most one eligible aggregate's first body, up to 480 bytes.
+A later selected source index is **not** proof of reception of aggregate 2;
+in particular, a 554-byte first body cannot fit this slot. Continuations
+up to 554 bytes are compared in full through the archived F2 sample.
+The separate terminal SHM snapshot remains limited to 298 bytes; its
+`fcs_valid:false` is not a full-body FCS verdict for a larger continuation.
+
+The observer requires a fresh matching owner/count, native GoodFCS, a
+non-busy next-length register, bounded lengths, no EOF/abort, and exact
+`PSDU = 8 + align4(first) + second` before advancing once. Deliberately
+malformed delimiter and truncated-body cases are retained as evidence,
+not treated as qualified recovery. Use the existing case names and
+selector 4 to test odd-sized bad first/last bodies.
+
+Matched experimental controls, all default off:
+
+- `REF_NEXT_STREAM=1` or `2` adds one preserved-bit OR of `SPR0x004` bit 1
+  immediately before or after the next-body command. Both failed to fix
+  the 80/554 case in both badge roles.
+- `REF_VARIABLE_STREAM64=1` starts normal streaming at native count 64
+  instead of 128. This produces exact 80/554 pairs in both roles, without
+  changing initial-body commands, replay, count or FCS policy. Repeats still
+  miss controls/eligible bodies and one trial records an invalid control;
+  this is a causal diagnostic, **not** a qualified replacement threshold.
+
+The 50-trial campaign retains all failures: 39 exact selected pairs,
+726/800 controls, one delivery-integrity failure, and only 13 existing
+collector-policy passes. See the
+[variable-length evidence](../dev-doc/HT20_IMPLEMENTATION.md#variable-length-boundaries-and-initial-stream-state-2026-10-20).
+General N-body delimiter/EOF handling and repeated buffering/backpressure
+remain open.
+
 ## Experimental observer FIFO
 
 `reference-stimulus-fifo` enables `CLEAN_RX_HT_OBSERVER_FIFO=1`, which

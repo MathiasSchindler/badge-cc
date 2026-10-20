@@ -10,11 +10,18 @@
 #ifndef CLEAN_RX_HT_HANDOFF_GUARD
 #define CLEAN_RX_HT_HANDOFF_GUARD 0
 #endif
+#ifndef CLEAN_RX_HT_VARIABLE
+#define CLEAN_RX_HT_VARIABLE 0
+#endif
+_Static_assert(CLEAN_RX_HT_VARIABLE == 0 || CLEAN_RX_HT_VARIABLE == 1,
+               "Variable handoff diagnostic must be zero or one");
+_Static_assert(!CLEAN_RX_HT_VARIABLE || (CLEAN_RX_HT_RX && !CLEAN_RX_HT_HANDOFF_GUARD),
+               "Variable handoff requires extended RX without the fixed guard body");
 _Static_assert(CLEAN_RX_HT_HANDOFF_GUARD == 0 || CLEAN_RX_HT_HANDOFF_GUARD == 1,
                "Handoff guard gate must be zero or one");
 _Static_assert(!CLEAN_RX_HT_HANDOFF_GUARD || CLEAN_RX_HT_RX,
                "Handoff guard requires extended HT receive geometry");
-#define CLEAN_HT_HANDOFF_VERSION (CLEAN_RX_HT_HANDOFF_GUARD ? 8u : 7u)
+#define CLEAN_HT_HANDOFF_VERSION (CLEAN_RX_HT_VARIABLE ? 9u : CLEAN_RX_HT_HANDOFF_GUARD ? 8u : 7u)
 #define CLEAN_HT_HANDOFF_PSDU (CLEAN_RX_HT_HANDOFF_GUARD ? 564u : 478u)
 #define CLEAN_HT_HANDOFF_GUARD_BYTES 80u
 #ifndef CLEAN_RX_AMPDU_PROBE
@@ -136,7 +143,16 @@ _Static_assert(80u + CLEAN_AMPDU_BA_WORDS <= CLEAN_AMPDU_HANDOFF_COMMIT &&
 #endif
 _Static_assert(CLEAN_RX_HT_COPY_DEFER_STREAM == 0 || CLEAN_RX_HT_COPY_DEFER_STREAM == 1,
                "Deferred streaming control must be zero or one");
-#define CLEAN_RX_STREAM_PREFIX_BYTES (CLEAN_RX_HT_COPY_DEFER_STREAM ? 384u : 128u)
+#ifndef CLEAN_RX_HT_VARIABLE_STREAM64
+#define CLEAN_RX_HT_VARIABLE_STREAM64 0
+#endif
+_Static_assert(CLEAN_RX_HT_VARIABLE_STREAM64 == 0 || CLEAN_RX_HT_VARIABLE_STREAM64 == 1,
+               "Variable early streaming probe must be zero or one");
+_Static_assert(!CLEAN_RX_HT_VARIABLE_STREAM64 ||
+               (CLEAN_RX_HT_VARIABLE && !CLEAN_RX_HT_COPY_DEFER_STREAM),
+               "64-byte streaming requires the variable non-deferred fixture");
+#define CLEAN_RX_STREAM_PREFIX_BYTES (CLEAN_RX_HT_VARIABLE_STREAM64 ? 64u : \
+    CLEAN_RX_HT_COPY_DEFER_STREAM ? 384u : 128u)
 #ifndef CLEAN_RX_HT_COPY_STREAM_PHASE
 #define CLEAN_RX_HT_COPY_STREAM_PHASE 0
 #endif

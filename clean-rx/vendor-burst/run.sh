@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# -lt 3 || $# -gt 6 || ! $1 =~ ^[0-9A-F]{16}$ ||
+if [[ $# -lt 3 || $# -gt 7 || ! $1 =~ ^[0-9A-F]{16}$ ||
       ! $2 =~ ^[0-9A-F]{16}$ || $1 == "$2" ]]; then
-    echo "Usage: bash clean-rx/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL PREFIX [PRIVATE_SSID_FILE [EARLY_BYTES [HANDOFF_CASE]]]" >&2
+    echo "Usage: bash clean-rx/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL PREFIX [PRIVATE_SSID_FILE [EARLY_BYTES [HANDOFF_CASE [VARIABLE_PAIR_0_TO_7]]]]" >&2
+    exit 2
+fi
+if [[ $# == 7 && ! $7 =~ ^[0-7]$ ]]; then
+    echo "VARIABLE_PAIR_0_TO_7 must be a digit 0..7" >&2
     exit 2
 fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -40,5 +44,5 @@ done
 "$picotool" reboot --ser "$1" > "$prefix-boot-vendor.log" 2>&1
 "$picotool" reboot --ser "$2" > "$prefix-boot-observer.log" 2>&1
 sleep 0.5
-"$build/collector" "$1" "$2" "$prefix" "$credentials" "$early" ${6+"$6"} \
+"$build/collector" "$1" "$2" "$prefix" "$credentials" "$early" ${6+"$6"} ${7+"$7"} \
     > "$prefix.jsonl" 2> "$prefix.stderr"

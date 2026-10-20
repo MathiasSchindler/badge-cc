@@ -62,7 +62,8 @@ static int transmit(uint32_t index) {
 void ref_run(const uint8_t nonce[16]) {
     int ok = 0;
     if (nonce[14] == 1u && !active && nonce[12] == 0u &&
-        (REF_CLEAN_HANDOFF ? (nonce[11] == 1u || nonce[11] == 2u) &&
+        (REF_CLEAN_HANDOFF ? (nonce[11] == 1u || nonce[11] == 2u ||
+                            (CLEAN_RX_HT_VARIABLE && nonce[11] >= 4u && nonce[11] < 20u)) &&
                             nonce[10] < CLEAN_HT_HANDOFF_CASES : nonce[11] == 3u)) {
         badger_bytes_zero(ref_detail,REF_TRACE_BYTES);
         badger_bytes_copy(session,nonce,sizeof(session));

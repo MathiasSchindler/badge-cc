@@ -46,6 +46,16 @@ static void restore(uint8_t original[2360], uint32_t pc, uint64_t expected, uint
 }
 
 static void capture_layout(uint8_t original[2360]) {
+#if CLEAN_RX_HT_ORDERED_FLUSH == 1
+    restore(original,266u,WORD(0x77fu,0x1780u,0x1780u,RX_REARM_ENTRY),
+            WORD(0x3f0u,0x1800u,0x1800u,0x1782u));
+#endif
+#if CLEAN_RX_HT_PREFIX_RECOVERY
+    restore(original,136u,WORD(0x77fu,0x1780u,0x1780u,RX_PREFIX_INIT),
+            WORD(0x3f0u,0x1bffu,0x1800u,0x1780u));
+    restore(original,144u,WORD(0x77fu,0x1780u,0x1780u,RX_PREFIX_TICK),
+            WORD(0x1d0u,0x1780u,0x1801u,0x1780u));
+#endif
 #if CLEAN_RX_HT_REARM_WAIT
     restore(original,275u,WORD(0x3f0u,0x1fffu,0x1800u,0x1780u),
             WORD(0x3f0u,0x18ffu,0x1800u,0x1780u));
@@ -251,6 +261,13 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
         uint64_t word = instruction(pc);
         uint32_t op = (uint32_t)(word >> 39u), a = (uint32_t)(word >> 26u)&0x1fffu;
         uint32_t b = (uint32_t)(word >> 13u)&0x1fffu, d = (uint32_t)word&0x1fffu;
+#if CLEAN_RX_HT_ORDERED_FLUSH == 2
+        if (pc == RX_ORDERED_START) {
+            assert(!retries);
+            ++retries;
+            polls = 0u;
+        }
+#endif
         if (pc == 276u)
             r[0x1004u] = (uint16_t)(0x800u |
                 (retries && retry_clears ? 0u : polls++ < busy_polls ? busy_bits : 0u));
@@ -265,12 +282,23 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
         uint32_t next = pc+1u;
         if (op == 0x3f0u) {
             assert(b == 0x1800u);
-            r[d] = av;
+            if (d != 0x1800u) r[d] = av;
             if (d == 0x1004u) {
+#if CLEAN_RX_HT_ORDERED_FLUSH == 2
+                assert((pc == RX_ORDERED_FLUSH1 || pc == RX_ORDERED_FLUSH2) &&
+                    av == 0x14u && retries == 1u);
+#else
                 assert(pc == 274u && av == 0x14u && retries == 0u);
                 ++retries;
                 polls = 0u;
+#endif
             }
+        } else if (op == 0x378u) {
+            r[d] = (uint16_t)((bv&255u)|(av<<8u));
+        } else if (op == 0x370u) {
+            r[d] = (uint16_t)((bv&0xff00u)|(av&255u));
+        } else if (op == 0x306u) {
+            r[d] = (uint16_t)((bv&~0x40u)|((av&1u)<<6u));
         } else if (op == 0x502u || op == 0x504u || op == 0x404u) {
             assert(b == 0x1800u);
             if (((av >> (op&15u))&1u) == (op >> 8u == 5u)) next = d;
@@ -278,10 +306,10 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
             r[d] = op == 0x1d0u ? (uint16_t)(av-bv) : (uint16_t)(av+bv);
         } else if (op == 0xd1u || op == 0xd0u) {
             if (op == 0xd1u ? av != bv : av == bv) next = d;
-        } else if (op == 0x703u || (op&0x7e0u) == 0x780u) {
+        } else if (op == 0x703u || op == 0x60au || (op&0x7e0u) == 0x780u) {
             assert(a == 0x1780u && b == 0x1780u);
             uint32_t event = 1u << (op&31u);
-            if (events&event) next = d;
+            if (op == 0x60au ? !(events&event) : !!(events&event)) next = d;
             if (op&0x80u) events &= ~event;
         } else {
             assert(op == 0x77fu && a == 0x1780u && b == 0x1780u);
@@ -513,6 +541,7 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
         else if (op == 0x278u) r[d] = av >> 8u;
         else if (op == 0x270u) r[d] = av & 255u;
         else if (op == 0x140u) r[d] = av & bv;
+        else if (op == 0x160u) r[d] = av | bv;
         else if (op == 0x606u) { if (!(*events & (1u << 6u))) pc = d; }
         else if ((op & 0x7e0u) == 0x780u || op == 0x703u) {
             uint32_t event = 1u << (op & 31u);
@@ -2186,6 +2215,15 @@ static void passive_early_snapshot(void) {
     puts("PSM early FIFO: acknowledged new epochs recycle; missing/stale ACK, same epoch and absent owner preserve retained bytes");
 #endif
 #if CLEAN_RX_HT_ADVANCE
+    assert(instruction(161u) == WORD(0x376u,0x1883u,0x1004u,0x1004u));
+    assert(instruction(OBSERVER_ADVANCE_COPY) ==
+        WORD(0x376u,0x1800u|CLEAN_RX_HT_NEXT_FIELD,0x1004u,0x1004u));
+#if CLEAN_RX_HT_NEXT_STREAM
+    assert(instruction(OBSERVER_ADVANCE_STREAM_SET) ==
+        WORD(0x160u,0x1004u,0x1802u,0x1004u));
+    assert(OBSERVER_ADVANCE_STREAM_SET ==
+        (CLEAN_RX_HT_NEXT_STREAM == 1 ? OBSERVER_ADVANCE_COPY-1u : OBSERVER_ADVANCE_COPY+1u));
+#endif
     for (uint32_t order = 0u; order < 2u; ++order)
     for (uint32_t fault = 0u; fault < 8u; ++fault) {
         uint32_t first = order ? 298u : 170u, second = order ? 170u : 298u;
@@ -2195,13 +2233,13 @@ static void passive_early_snapshot(void) {
         r[CLEAN_SHM_FRAME+3u] = 0x03b0u;
         r[0x102bu] = (uint16_t)second; r[0x1078u] = 0xffffu;
         events = (1u<<6u)|(1u<<3u);
-        if (fault == 1u) r[0x102bu] = 554u;
+        if (fault == 1u) r[0x102bu] = CLEAN_RX_HT_VARIABLE ? 555u : 554u;
         if (fault == 2u) events &= ~(1u<<3u);
         if (fault == 3u) r[CLEAN_SHM_FRAME+1u] = 0x5e00u;
         if (fault == 4u) r[0x100du] |= 0x4000u;
         if (fault == 5u) r[0x100du] |= 0x8000u;
         if (fault == 6u) r[CLEAN_OBSERVER_ADVANCE] = 1u;
-        if (fault == 7u) r[0x102bu] = (uint16_t)first;
+        if (fault == 7u) r[0x102bu] = CLEAN_RX_HT_VARIABLE ? 43u : (uint16_t)first;
         uint32_t next = receive_run(r,&events,RX_COMPLETE,&steps);
         if (!fault) {
             assert(next == 163u && r[CLEAN_OBSERVER_ADVANCE] == 1u);
@@ -2237,7 +2275,8 @@ static void passive_early_snapshot(void) {
                        h[3] == (CLEAN_RX_HT_COPY_WAIT && phase == 2u ? 0x1000u : 0x1100u) &&
                        h[6] == CLEAN_SHM_FRAME && h[8] == second);
                 assert(h[5] == (phase == 2u ?
-                    ((0x8802u&~(0x3fc0u|(CLEAN_RX_HT_COPY_QUIET ? 3u : 0u)))|0x20c0u) : 0x8802u));
+                    ((0x8802u&~(0x3fc0u|(CLEAN_RX_HT_COPY_QUIET ? 3u : 0u)))|
+                     (CLEAN_RX_HT_NEXT_FIELD<<6u)) : 0x8802u));
                 assert(h[7] == (phase == 2u ?
                     second+(CLEAN_RX_HT_COPY_END_PLUS6 ? 6u : 0u) : 0x222u));
                 assert(h[11] == (phase == 2u ? 0xff7fu : 0xffffu));
@@ -2252,6 +2291,46 @@ static void passive_early_snapshot(void) {
         assert(!r[0x1080u] && !r[0x1081u] && !r[0x10b4u]);
     }
     puts("PSM bounded advance: exact gated PSDU with 170/298 pair in both orders, GoodFCS, EOF/abort exclusion, one-shot arm, prefix/epoch preservation and no TX; NOT RF");
+#if CLEAN_RX_HT_VARIABLE
+    const uint32_t variable_first[] = {44u,80u,127u,170u,255u,257u,298u,321u,479u,480u};
+    const uint32_t variable_next[] = {44u,80u,173u,255u,298u,381u,480u,554u};
+    for (uint32_t i = 0u; i < sizeof(variable_first)/sizeof(variable_first[0]); ++i)
+    for (uint32_t j = 0u; j < sizeof(variable_next)/sizeof(variable_next[0]); ++j)
+    for (uint32_t fault = 0u; fault < 5u; ++fault) {
+        uint32_t first = variable_first[i], second = variable_next[j];
+        uint32_t psdu = 8u+((first+3u)&~3u)+second;
+        early_snapshot_seed(r,first);
+        r[CLEAN_SHM_FRAME+1u] = (uint16_t)((psdu&255u)<<8u);
+        r[CLEAN_SHM_FRAME+2u] = (uint16_t)(0x0f00u|(psdu>>8u));
+        r[0x102bu] = (uint16_t)second;
+        uint16_t control = (uint16_t)(0x8800u+(i&1u));
+        r[0x1004u] = control;
+        events = (1u<<6u)|(1u<<3u);
+        if (fault == 1u) r[0x102bu] |= 0x8000u;
+        if (fault == 2u) r[CLEAN_SHM_FRAME+1u] ^= 0x100u;
+        if (fault == 3u) events &= ~(1u<<3u);
+        if (fault == 4u) r[CLEAN_SHM_FRAME+2u] ^= 1u;
+        uint32_t next = receive_run(r,&events,RX_COMPLETE,&steps);
+        if (next != (fault ? 262u : 163u))
+            fprintf(stderr,"Variable advance first=%u second=%u fault=%u next=%u\n",
+                    first,second,fault,next);
+        assert(next == (fault ? 262u : 163u));
+        assert(r[CLEAN_OBSERVER_ADVANCE] == !fault);
+        if (!fault) {
+            assert(r[CLEAN_OBSERVER_ADVANCE+1u] == second && r[0x102au] == second);
+#if CLEAN_RX_HT_NEXT_STREAM
+            assert((r[0x1004u]&3u) == ((control&3u)|2u));
+#else
+            assert((r[0x1004u]&3u) == (control&3u));
+#endif
+            for (uint32_t word = 0u; word < (first+1u)/2u; ++word)
+                assert(r[CLEAN_OBSERVER_EARLY_SHM+CLEAN_OBSERVER_EARLY_HEADER+word] ==
+                    (uint16_t)(0x3000u+word));
+        }
+        assert(r[0x1782u] == 0x1234u && r[0x1783u] == 0x5678u);
+    }
+    puts("PSM variable advance: 400 emitted-program cases, odd tails, bounded lengths, busy delimiter, exact padded PSDU and GoodFCS gates; NOT RF");
+#endif
 #if CLEAN_RX_HT_COPY_WAIT
     for (uint32_t fault = 1u; fault <= 3u; ++fault) {
         early_snapshot_seed(r,170u);

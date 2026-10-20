@@ -9,6 +9,13 @@ REF_STIMULUS ?= 0
 REF_HANDOFF ?= 0
 REF_GUARD ?= 0
 REF_MONITOR ?= 0
+REF_NEXT_FIELD ?= 0x83u
+REF_ORDERED_FLUSH ?= 0
+REF_PREFIX_RECOVERY ?= 0
+REF_REARM_INJECT ?= 0
+REF_VARIABLE ?= 0
+REF_NEXT_STREAM ?= 0
+REF_VARIABLE_STREAM64 ?= 0
 REF_FLAGS += -DREF_CLEAN_STIMULUS=$(REF_STIMULUS)
 REF_CFLAGS := $(RP2350_CFLAGS) -DLIVE_USB_FIRMWARE -DLIVE_USB_CLEAN \
 	-DWIFI_TRACE_SIZE=5888u -I$(REF_BUILD) -I$(WIFI_ASSET_DIR) $(REF_FLAGS)
@@ -66,7 +73,15 @@ reference-stimulus:
 reference-handoff:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1' reference reference-test
 reference-handoff-copy:
-	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1' reference reference-test
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1 -DCLEAN_RX_HT_NEXT_FIELD=$(REF_NEXT_FIELD) -DCLEAN_RX_HT_VARIABLE=$(REF_VARIABLE) -DCLEAN_RX_HT_NEXT_STREAM=$(REF_NEXT_STREAM) -DCLEAN_RX_HT_VARIABLE_STREAM64=$(REF_VARIABLE_STREAM64)' reference reference-test
+.PHONY: reference-handoff-variable
+reference-handoff-variable:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_NEXT_FIELD=0xc3u REF_VARIABLE=1 reference-handoff-copy
+.PHONY: reference-handoff-next-c3 reference-handoff-defer-next-c3
+reference-handoff-next-c3:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_NEXT_FIELD=0xc3u reference-handoff-copy
+reference-handoff-defer-next-c3:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_NEXT_FIELD=0xc3u reference-handoff-defer
 reference-handoff-monitor:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_MONITOR=1 REF_FLAGS='-DREF_VENDOR_MONITOR=1 -DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1' reference reference-test
 .PHONY: reference-stimulus-monitor reference-stimulus-monitor-poll reference-stimulus-monitor-poll-fast
@@ -77,7 +92,7 @@ reference-stimulus-monitor-poll:
 reference-stimulus-monitor-poll-fast:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_MONITOR=1 REF_FLAGS='-DREF_MONITOR_POLL=2 -DREF_VENDOR_MONITOR=1 -DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1' reference reference-test
 reference-handoff-defer:
-	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1 -DCLEAN_RX_HT_COPY_DEFER_STREAM=1' reference reference-test
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1 -DCLEAN_RX_HT_COPY_DEFER_STREAM=1 -DCLEAN_RX_HT_NEXT_FIELD=$(REF_NEXT_FIELD)' reference reference-test
 reference-handoff-stream-hold:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_HANDOFF=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1 -DCLEAN_RX_HT_COPY_DEFER_STREAM=1 -DCLEAN_RX_HT_COPY_STREAM_PHASE=1' reference reference-test
 reference-handoff-stream-resume:
@@ -142,6 +157,20 @@ reference-stimulus-fifo:
 .PHONY: reference-early-fifo reference-early-fifo-stop-test reference-early-fifo-reset-test
 reference-early-fifo:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_EARLY=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_EARLY_FIFO=1' reference reference-test
+.PHONY: reference-early-fifo-recovery reference-early-fifo-ordered reference-early-fifo-prefix reference-early-fifo-ordered-retry reference-early-fifo-prefix-retry
+reference-early-fifo-recovery:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_EARLY=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_EARLY_FIFO=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_INJECT=$(REF_REARM_INJECT) -DCLEAN_RX_HT_ORDERED_FLUSH=$(REF_ORDERED_FLUSH) -DCLEAN_RX_HT_PREFIX_RECOVERY=$(REF_PREFIX_RECOVERY)' reference reference-test
+reference-early-fifo-ordered:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_ORDERED_FLUSH=1 reference-early-fifo-recovery
+reference-early-fifo-prefix:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_ORDERED_FLUSH=1 REF_PREFIX_RECOVERY=1 reference-early-fifo-recovery
+reference-early-fifo-ordered-retry:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_ORDERED_FLUSH=2 reference-early-fifo-recovery
+reference-early-fifo-prefix-retry:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_ORDERED_FLUSH=2 REF_PREFIX_RECOVERY=1 reference-early-fifo-recovery
+.PHONY: reference-early-fifo-ordered-retry-test
+reference-early-fifo-ordered-retry-test:
+	$(MAKE) -f $(REF_DIR)/Makefile REF_ORDERED_FLUSH=2 REF_REARM_INJECT=1 reference-early-fifo-recovery
 reference-early-fifo-stop-test:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_EARLY=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_EARLY_FIFO=1 -DREF_OBSERVER_PAUSE=1 -DREF_OBSERVER_STOP_FULL=1' reference reference-test
 reference-early-fifo-reset-test:
@@ -167,7 +196,7 @@ ifeq ($(REF_EARLY),1)
 	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' early-rx-test
 endif
 ifeq ($(REF_STIMULUS),1)
-	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/stimulus-controller EXTRA_CFLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=$(if $(filter 1,$(REF_HANDOFF)),0,1) -DCLEAN_RX_HT_HANDOFF_STIMULUS=$(REF_HANDOFF) -DCLEAN_RX_HT_HANDOFF_GUARD=$(REF_GUARD)' all test
+	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/stimulus-controller EXTRA_CFLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=$(if $(filter 1,$(REF_HANDOFF)),0,1) -DCLEAN_RX_HT_HANDOFF_STIMULUS=$(REF_HANDOFF) -DCLEAN_RX_HT_HANDOFF_GUARD=$(REF_GUARD) -DCLEAN_RX_HT_VARIABLE=$(REF_VARIABLE)' all test
 endif
 
 $(REF_BUILD)/build_id.h: reference-force reference-controller $(WIFI_ASSET_FILES)

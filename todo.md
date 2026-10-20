@@ -155,6 +155,9 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Use a focused copy microscope to retain complete FCS-valid 298-byte continuations; preserve native count/FCS/F2 rejection.
 - [x] Separate quieting from copy replay with matched original-destination controls; isolate replay-dependent count restart and preserve native rejection.
 - [x] Isolate the mid-body replay FCS-state effect with bad-body controls; retain raw copy counts and quarantine mismatched partial FIFO exports.
+- [x] Isolate next-MPDU command semantics: repeat exact streaming 170/298-byte FIFO pairs with native length/GoodFCS; retain reliability and malformed-input gaps.
+- [x] Test bounded ordered-flush and instrumented stuck-prefix diagnostics; preserve event-10 failures and distinguish injected execution from unproven physical recovery.
+- [x] Extend the c3 boundary microscope to variable/odd MPDU lengths through 554-byte continuations; test both roles/orders and isolate the short-first native-stream-state dependency without normalizing counts or hiding losses.
 - [x] Implement gated passive-observer FIFO retention and bounded stop/drain.
 - [x] Implement acknowledged repeated early-MPDU FIFO/F2 delivery and complete packet archives; preserve final RF misses as unqualified.
 - [x] Implement full fixed-source vendor raw archives; identify monitor cutoff/timeouts and exclude them as a qualified RF-loss baseline.
@@ -168,8 +171,9 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [ ] **1. Qualify early-capture reliability:** qualify FIFO-backed delivery
   and resolve persistent RXE busy, pre-prefix and truncated-body losses;
   repeat loss-accounted tests with confirmed multi-body stimulus.
-- [ ] **2. Qualify aggregate handoff:** generalize the bounded streaming-safe
-  SHM reconstruction; validate copy-local count/FCS ownership and full-body FIFO publication;
+- [ ] **2. Qualify aggregate handoff:** generalize the bounded next-MPDU
+  streaming repair, including short-first initial copy-state handling;
+  validate full-body ownership/FIFO publication beyond one-shot variable fixtures;
   complete loss-accounted both-role/order qualification and
   malformed/truncated-frame and abort recovery.
 - [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot

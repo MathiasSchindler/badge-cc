@@ -958,6 +958,8 @@ _Static_assert(CLEAN_RX_STREAM_PREFIX_BYTES > 26u,
     X(DCF_IDLE_FAULT_RETURN, 0x77fu, 0x1780u, 0x1780u, 129u) \
     /* Prefix copy and final RX use the same edge-latched completion event.
      * Terminal RX status, not a stale prefix edge, gates the FCS decision. */ \
+    RX_ORDERED_PROGRAM(X) \
+    RX_PREFIX_RECOVERY_PROGRAM(X) \
     X(RX_PREFIX_EOI, 0x786u, 0x1780u, 0x1780u, RX_PREFIX_RETURN) \
     X(RX_PREFIX_RETURN, 0x77fu, 0x1780u, 0x1780u, 147u) \
     OBSERVER_COMPLETE_INSTRUCTION(X) \
