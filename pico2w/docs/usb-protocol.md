@@ -15,11 +15,15 @@ Standard enumeration requests remain available before configuration.
 | SUBMIT | `40` | `50` | 64 | OUT: request record. |
 | REPORT | `c0` | `51` | 64 | IN: response for the latest successfully committed submission. |
 | BOOTSEL | `40` | `52` | 0 | OUT: request recovery, committed after status ACK. |
+| LORA_SUBMIT | `40` | `54` | 64 | OUT: opt-in non-transmitting SX1262 probe, test ID 2. |
+| LORA_REPORT | `c0` | `55` | 64 | IN: pending/completed LoRa probe response. |
 
 Numeric fields in the table are hexadecimal except lengths. Record integers
 are unsigned little-endian. Obtain the expected build ID from local
 `build/manifest.json`, then verify INFO against it before submitting requests.
 INFO is identification, not authentication.
+The LoRa extension has a separate response layout and submission sequence;
+see [LoRa probe](lora-probe.md). It does not change the test-ID-1 records below.
 
 ## 64-byte records
 
@@ -62,5 +66,6 @@ submission count.
 This protocol and its pure-C state machine have host tests. USB controller
 timing, enumeration/driver binding on Windows, chip-ID matching on a real
 Pico, report transfer, and automatic/explicit recovery still require a
-permission-gated hardware trial. No host collector or automatic driver
-installation is included in the initial standalone subset.
+permission-gated hardware trial. The optional Windows
+[LoRa collector](../tools/lora_probe.py) includes the chip-ID diagnostic as an
+identity check; it does not install drivers or flash/reset the Pico.

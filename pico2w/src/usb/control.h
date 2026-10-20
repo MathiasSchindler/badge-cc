@@ -2,6 +2,7 @@
 #define PICO2W_USB_CONTROL_H
 
 #include "report.h"
+#include "lora/sx1262.h"
 
 /* Lab-only identifiers; not a production allocation. */
 #define USB_VID 0xcafeu
@@ -10,6 +11,8 @@
 #define USB_REPORT 0x51u
 #define USB_BOOTSEL 0x52u
 #define USB_INFO 0x53u
+#define USB_LORA_SUBMIT 0x54u
+#define USB_LORA_REPORT 0x55u
 #define USB_PACKET_SIZE 64u
 
 typedef enum {
@@ -46,9 +49,16 @@ typedef struct {
     uint8_t reboot_requested;
     uint8_t report_pending;
     uint8_t report_valid;
+    uint8_t lora_pending;
+    uint8_t lora_requested;
+    uint8_t lora_running;
+    uint8_t lora_valid;
+    uint8_t out_request;
+    uint32_t lora_sequence;
     uint16_t length;
     uint8_t data[USB_PACKET_SIZE];
     uint8_t report[USB_REPORT_SIZE];
+    uint8_t lora_report[USB_REPORT_SIZE];
     char serial[17];
 } usb_control_t;
 
@@ -58,5 +68,6 @@ void usb_control_reset(usb_control_t *control);
 void usb_control_setup(usb_control_t *control, const uint8_t setup[8]);
 void usb_control_complete(usb_control_t *control, uint8_t in,
                            const uint8_t *data, uint16_t length);
+void usb_control_lora_result(usb_control_t *control, const sx1262_result_t *result);
 
 #endif

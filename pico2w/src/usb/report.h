@@ -29,6 +29,8 @@ void usb_report_request(uint8_t wire[USB_REPORT_SIZE], uint32_t build_id,
                         const uint8_t nonce[USB_NONCE_SIZE]);
 usb_record_result_t usb_report_check_request(const uint8_t *wire, uint32_t length,
                                              uint32_t build_id);
+usb_record_result_t usb_report_check_test(const uint8_t *wire, uint32_t length,
+                                          uint32_t build_id, uint32_t test_id);
 void usb_report_response(uint8_t wire[USB_REPORT_SIZE], uint32_t build_id,
                          const uint8_t nonce[USB_NONCE_SIZE],
                          const uint32_t chip_id[2], uint32_t sequence);

@@ -21,6 +21,8 @@ SOURCES = (
     "src/usb/report.c",
     "src/usb/control.c",
     "src/usb/hardware.c",
+    "src/lora/sx1262.c",
+    "src/lora/rp2350.c",
     "src/main.c",
     "src/rp2350/picobin.S",
 )
@@ -175,6 +177,11 @@ def tests(args):
          "-Isrc/include", "-Isrc", str(ROOT / "tests" / "usb_test.c"),
          str(ROOT / "src" / "usb" / "control.c"),
          str(ROOT / "src" / "usb" / "report.c"), "-o", str(executable)])
+    run([str(executable)])
+    executable = BUILD / ("lora_test.exe" if os.name == "nt" else "lora_test")
+    run([args.host_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
+         "-Isrc/include", "-Isrc", str(ROOT / "tests" / "lora_test.c"),
+         str(ROOT / "src" / "lora" / "sx1262.c"), "-o", str(executable)])
     run([str(executable)])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"])
 

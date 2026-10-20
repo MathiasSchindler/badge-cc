@@ -21,6 +21,7 @@ static void stall(usb_control_t *control) {
     control->configuration_pending = 0u;
     control->reboot_pending = 0u;
     control->report_pending = 0u;
+    control->lora_pending = 0u;
     ++control->rejected;
 }
 
@@ -67,6 +68,10 @@ void usb_control_reset(usb_control_t *control) {
     control->reboot_requested = 0u;
     control->report_pending = 0u;
     control->report_valid = 0u;
+    control->lora_pending = 0u;
+    control->lora_requested = 0u;
+    control->lora_running = 0u;
+    control->lora_valid = 0u;
     control->length = 0u;
 }
 
@@ -76,6 +81,7 @@ void usb_control_init(usb_control_t *control, uint32_t build_id,
     control->build_id = build_id;
     control->requests = 0u;
     control->rejected = 0u;
+    control->lora_sequence = 0u;
     for (uint32_t word = 0u; word < 2u; ++word) {
         control->chip_id[word] = chip_id[word];
         for (uint32_t digit = 0u; digit < 8u; ++digit)
@@ -92,13 +98,16 @@ void usb_control_setup(usb_control_t *control, const uint8_t setup[8]) {
     uint16_t index = read16(setup + 4u);
     uint16_t length = read16(setup + 6u);
     if (control->report_pending) control->report_valid = 0u;
+    if (control->lora_pending) control->lora_valid = 0u;
     control->action = USB_ACTION_NONE;
     control->address_pending = 0u;
     control->configuration_pending = 0u;
     control->reboot_pending = 0u;
     control->report_pending = 0u;
+    control->lora_pending = 0u;
     control->phase = USB_PHASE_IDLE;
 
+    control->out_request = request;
     if (type == 0x80u && request == 6u && length != 0u) {
         uint8_t descriptor = (uint8_t)(value >> 8u);
         uint8_t number = (uint8_t)value;
@@ -156,6 +165,16 @@ void usb_control_setup(usb_control_t *control, const uint8_t setup[8]) {
             uint8_t info[12] = {'P', '2', 'W', 'L', 1u, 0u, 64u, 0u};
             usb_store_u32(info + 8u, control->build_id);
             send(control, info, sizeof(info), length);
+        } else if (type == 0x40u && request == USB_LORA_SUBMIT &&
+                   length == USB_REPORT_SIZE && !control->lora_requested &&
+                   !control->lora_running) {
+            control->lora_valid = 0u;
+            control->length = USB_REPORT_SIZE;
+            control->action = USB_ACTION_OUT;
+            control->phase = USB_PHASE_DATA_OUT;
+        } else if (type == 0xc0u && request == USB_LORA_REPORT &&
+                   length == USB_REPORT_SIZE && control->lora_valid) {
+            send(control, control->lora_report, sizeof(control->lora_report), length);
         } else stall(control);
     } else stall(control);
 }
@@ -180,6 +199,9 @@ void usb_control_complete(usb_control_t *control, uint8_t in,
             control->configured = control->pending_configuration;
             control->configuration_pending = 0u;
             control->report_valid = 0u;
+            control->lora_valid = 0u;
+            control->lora_requested = 0u;
+            control->lora_running = 0u;
         }
         if (control->report_pending) {
             control->report_pending = 0u;
@@ -190,15 +212,42 @@ void usb_control_complete(usb_control_t *control, uint8_t in,
             control->reboot_requested = 1u;
             control->reboot_pending = 0u;
         }
+        if (control->lora_pending) {
+            control->lora_pending = 0u;
+            control->lora_requested = 1u;
+            control->lora_valid = 1u;
+            ++control->lora_sequence;
+            usb_store_u32(control->lora_report + 40u, control->lora_sequence);
+            usb_store_u32(control->lora_report + 60u, usb_crc32(control->lora_report, 60u));
+        }
     } else if (control->phase == USB_PHASE_DATA_OUT && !in && data != 0 &&
                length == USB_REPORT_SIZE) {
-        if (usb_report_check_request(data, length, control->build_id) != USB_RECORD_OK) {
+        uint8_t lora = control->out_request == USB_LORA_SUBMIT;
+        if (usb_report_check_test(data, length, control->build_id,
+                                  lora ? 2u : USB_REPORT_TEST_ID) != USB_RECORD_OK) {
             stall(control);
             return;
         }
-        usb_report_response(control->report, control->build_id, data + 16u,
-                             control->chip_id, control->requests + 1u);
-        control->report_pending = 1u;
+        if (lora) {
+            for (uint32_t i = 0u; i < USB_REPORT_SIZE; ++i)
+                control->lora_report[i] = i < 32u ? data[i] : 0u;
+            usb_store_u32(control->lora_report, USB_RESPONSE_MAGIC);
+            control->lora_pending = 1u;
+        } else {
+            usb_report_response(control->report, control->build_id, data + 16u,
+                                 control->chip_id, control->requests + 1u);
+            control->report_pending = 1u;
+        }
         status_in(control);
     } else stall(control);
+}
+
+void usb_control_lora_result(usb_control_t *control, const sx1262_result_t *result) {
+    if (!control->configured || !control->lora_running) return;
+    usb_store_u32(control->lora_report + 32u, result->error == 0 ? 1u : 2u);
+    usb_store_u32(control->lora_report + 36u, (uint32_t)result->error);
+    for (uint32_t i = 0u; i < sizeof(result->samples); ++i)
+        control->lora_report[44u + i] = result->samples[i];
+    usb_store_u32(control->lora_report + 60u, usb_crc32(control->lora_report, 60u));
+    control->lora_running = 0u;
 }

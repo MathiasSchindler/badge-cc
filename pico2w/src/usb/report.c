@@ -38,13 +38,18 @@ void usb_report_request(uint8_t wire[USB_REPORT_SIZE], uint32_t build_id,
 
 usb_record_result_t usb_report_check_request(const uint8_t *wire, uint32_t length,
                                              uint32_t build_id) {
+    return usb_report_check_test(wire, length, build_id, USB_REPORT_TEST_ID);
+}
+
+usb_record_result_t usb_report_check_test(const uint8_t *wire, uint32_t length,
+                                          uint32_t build_id, uint32_t test_id) {
     if (wire == 0 || length != USB_REPORT_SIZE) return USB_RECORD_LENGTH;
     if (usb_load_u32(wire) != USB_REQUEST_MAGIC) return USB_RECORD_MAGIC;
     if (wire[4] != 1u || wire[5] != 0u) return USB_RECORD_VERSION;
     if (wire[6] != USB_REPORT_SIZE || wire[7] != 0u) return USB_RECORD_LENGTH;
     if (usb_load_u32(wire + 60u) != usb_crc32(wire, 60u)) return USB_RECORD_CRC;
     if (usb_load_u32(wire + 8u) != build_id) return USB_RECORD_BUILD;
-    if (usb_load_u32(wire + 12u) != USB_REPORT_TEST_ID) return USB_RECORD_TEST;
+    if (usb_load_u32(wire + 12u) != test_id) return USB_RECORD_TEST;
     uint8_t any_nonce = 0u;
     for (uint32_t i = 0u; i < USB_NONCE_SIZE; ++i) any_nonce |= wire[16u + i];
     if (any_nonce == 0u) return USB_RECORD_NONCE;

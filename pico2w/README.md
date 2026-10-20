@@ -66,12 +66,13 @@ packaging uses this directory's standard-library Python encoder.
 Owned outputs go to `build/owned/`, without overwriting the LLVM outputs.
 Preprocessed sources, IR and assembly are retained there for diagnosis.
 The manifest identifies the selected pipeline and hashes each owned
-executable; those hashes also participate in the build ID. Native USB tests
+executable; those hashes also participate in the build ID. Native USB and LoRa tests
 still run as host C tests, not as execution of generated Arm code.
 
-Both pipelines were built natively on Windows ARM64: the owned image occupies
-11,720 flash bytes and 212 BSS bytes, compared with LLVM's 3,040 flash bytes
-and 212 BSS bytes. LLVM independently accepts the owned ELF and extracts the
+Both pipelines were built natively on Windows ARM64. With the optional
+SX1262 probe included, the owned image occupies 17,716 flash bytes and
+296 BSS bytes, compared with LLVM's 4,640 flash bytes and 296 BSS bytes.
+LLVM independently accepts the owned ELF and extracts the
 same binary bytes as `elf2bin`. This establishes image structure and
 packaging, **not execution equivalence or working USB on hardware**.
 Independently linking all owned objects with LLVM's linker also produces
@@ -88,8 +89,9 @@ Outputs stay in ignored `build/`:
 
 The build checks the stack/reset vectors, linked boot-block chain, flash
 capacity, UF2 packaging, and absence of unresolved symbols. The native tests
-cover the USB control state machine and report protocol. They do not exercise
-the physical USB controller, ROM calls, clocks, or boot on a Pico.
+cover the USB state machine, report protocol, SX1262 command framing and
+fault handling, and Windows collector protocol logic. They do not exercise
+the physical USB/SPI controllers, ROM calls, clocks, or boot on a Pico.
 
 ## Current application
 
@@ -100,25 +102,36 @@ The application:
 3. Initializes native USB at 48 MHz from the board's 12 MHz crystal.
 4. Serves nonce/build/CRC-checked reports containing chip ID and request count.
 5. Accepts an explicit BOOTSEL request after its USB status stage completes.
+6. Accepts an explicit non-transmitting SX1262 probe, with raw results and
+   errors returned through separate USB requests. No radio pins are touched
+   until the probe submission is acknowledged.
 
 This is an initial diagnostic image, not a persistent production application.
 The requested recovery delay is 8000 ms, but inherited clocks/timer settings
 mean it is **not a qualified eight-second wall-clock guarantee**. Recovery is
-not refreshed by USB traffic. The code leaves the core clock and inherited
+not refreshed by USB traffic. Normal boot leaves the core clock and inherited
 timer configuration unchanged; a stopped timer causes bounded initialization
-failure rather than an infinite polling loop.
+failure rather than an infinite polling loop. An explicitly requested LoRa
+probe configures crystal-derived reference/peripheral clocks and TIMER1.
+Inherited clocks following the reference (possibly the core and recovery
+timing) are affected; see the [probe timing details](docs/lora-probe.md).
 
-There is no display, GPIO probing, battery management, button/sensor driver,
-radio initialization, Wi-Fi, Bluetooth, or onboard LED support. The Pico 2 W
+There is no display, generic GPIO probing, battery management, button/sensor
+driver, RF reception/transmission, LoRaWAN, Wi-Fi, Bluetooth, or onboard LED
+support. The opt-in probe targets the Waveshare Pico-LoRa-SX1262-868M only.
+The Pico 2 W
 LED belongs to its wireless chip; this image deliberately leaves that chip
 alone. No flash writes are made by the running application.
 
 The USB interface is vendor-specific, endpoint-zero only, **not a COM port**.
 See the [protocol](docs/usb-protocol.md). The Windows host needs an appropriate
 USB driver binding, such as WinUSB, before a collector can issue vendor control
-transfers. This initial subset does not install drivers or include a collector;
-the badge's collector is not compatible with the Pico-specific identity and
-report payload. Device communication is a separate hardware-qualification step.
+transfers. No driver is installed automatically. A standard-library-only
+Windows [LoRa collector](tools/lora_probe.py) checks the explicit device's
+identity before requesting a radio probe; see its
+[usage and protocol](docs/lora-probe.md). The badge's collector is not
+compatible with the Pico-specific identity and report payload. Device
+communication is a separate hardware-qualification step.
 
 ## Hardware status and safety
 
@@ -138,6 +151,8 @@ application-requested disconnect/recovery. USB hardware counters are available
 through `usb_hw_stats()`. On initialization failure, the application stops
 serving and relies on the already scheduled recovery. If scheduling itself
 fails, physical BOOTSEL recovery is necessary.
+Radio-probe failures are separate: they remain available in the USB LoRa
+report and `pico2w_lora_error` without stopping normal USB service.
 
 ## Layout and origin
 
@@ -145,16 +160,18 @@ fails, physical BOOTSEL recovery is necessary.
 | --- | --- |
 | [src/rp2350/](src/rp2350/) | Startup, linker layout, Arm Secure image metadata, ROM chip ID/recovery. |
 | [src/usb/](src/usb/) | Minimal endpoint-zero state machine, RP2350 USB driver, report codec. |
+| [src/lora/](src/lora/) | Opt-in, non-transmitting SX1262 probe and RP2350 SPI1/timing backend. |
 | [src/include/](src/include/) | Freestanding integer types. |
 | [src/main.c](src/main.c) | Headless application and error/recovery lifecycle. |
-| [tools/](tools/) | Host-only, standard-library Python build and UF2 generation. |
-| [tests/](tests/) | Native protocol/control tests and Python image-packaging tests. |
+| [tools/](tools/) | Host-only, standard-library Python build, UF2 generation and explicit Windows probe collector. |
+| [tests/](tests/) | Native USB/radio tests and Python packaging/collector tests. |
 | [docs/](docs/) | Pico-specific protocol documentation. |
 
 The starting implementations were the badge project's `src/arch/rp2350/`,
 `src/usb/`, and `src/shared/usb_report.c`. They are local adaptations, not
-symlinks or wrappers around those directories. Radio/application extensions
-and badge GPIO assumptions have been removed. The CRC implementation uses a
+symlinks or wrappers around those directories. Badge radio/application code
+and badge GPIO assumptions have been removed. The SX1262 probe is a separate
+Pico-specific implementation. The CRC implementation uses a
 small bitwise loop instead of carrying the badge's diagnostics/table code.
 Report publication is deferred until the submission's status ACK.
 

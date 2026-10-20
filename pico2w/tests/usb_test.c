@@ -233,11 +233,109 @@ static void recovery_tests(void) {
     assert(control.rejected > 0u);
 }
 
+static void lora_request(uint8_t request[64]) {
+    const uint8_t nonce[16] = {2u};
+    usb_report_request(request, build_id, nonce);
+    usb_store_u32(request + 12u, 2u);
+    repair_crc(request);
+}
+
+static void lora_submit(const uint8_t request[64]) {
+    setup(0x40u, USB_LORA_SUBMIT, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_OUT);
+    usb_control_complete(&control, 0u, request, 64u);
+}
+
+static void lora_tests(void) {
+    uint8_t request[64];
+    usb_control_init(&control, build_id, chip_id);
+    lora_request(request);
+    setup(0x40u, USB_LORA_SUBMIT, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_STALL);
+    configure();
+    setup(0xc0u, USB_LORA_REPORT, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_STALL);
+    for (uint32_t i = 0u; i < 64u; ++i) {
+        request[i] ^= 1u;
+        lora_submit(request);
+        assert(control.action == USB_ACTION_STALL && !control.lora_requested);
+        request[i] ^= 1u;
+    }
+    usb_store_u32(request + 12u, 1u);
+    repair_crc(request);
+    lora_submit(request);
+    assert(control.action == USB_ACTION_STALL);
+    lora_request(request);
+    lora_submit(request);
+    assert(control.lora_pending && !control.lora_requested && !control.lora_valid);
+    setup(0xc0u, USB_INFO, 0u, 0u, 12u);
+    finish_in();
+    assert(!control.lora_pending && !control.lora_requested && !control.lora_valid);
+    lora_submit(request);
+    usb_control_reset(&control);
+    assert(!control.lora_pending && !control.lora_requested);
+    configure();
+    lora_submit(request);
+    usb_control_complete(&control, 1u, NULL, 0u);
+    assert(control.lora_requested && control.lora_valid && control.lora_sequence == 1u);
+    setup(0xc0u, USB_LORA_REPORT, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_IN);
+    assert(memcmp(control.data + 4u, request + 4u, 28u) == 0);
+    assert(usb_load_u32(control.data + 32u) == 0u);
+    assert(usb_load_u32(control.data + 40u) == 1u);
+    assert(usb_load_u32(control.data + 60u) == usb_crc32(control.data, 60u));
+    finish_in();
+    setup(0x40u, USB_LORA_SUBMIT, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_STALL && control.lora_requested);
+    control.lora_requested = 0u;
+    control.lora_running = 1u;
+    setup(0x40u, USB_LORA_SUBMIT, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_STALL && control.lora_running);
+    const sx1262_result_t result = {0, {0x24u, 1u}};
+    usb_control_lora_result(&control, &result);
+    assert(!control.lora_running);
+    setup(0xc0u, USB_LORA_REPORT, 0u, 0u, 64u);
+    assert(usb_load_u32(control.data + 32u) == 1u);
+    assert(usb_load_u32(control.data + 36u) == 0u);
+    assert(memcmp(control.data + 44u, result.samples, 16u) == 0);
+    finish_in();
+    lora_submit(request);
+    usb_control_complete(&control, 1u, NULL, 0u);
+    control.lora_requested = 0u;
+    control.lora_running = 1u;
+    sx1262_result_t failed = {SX1262_BUSY_ERROR, {0}};
+    usb_control_lora_result(&control, &failed);
+    setup(0xc0u, USB_LORA_REPORT, 0u, 0u, 64u);
+    assert(usb_load_u32(control.data + 32u) == 2u);
+    assert(usb_load_u32(control.data + 36u) == (uint32_t)SX1262_BUSY_ERROR);
+    assert(usb_load_u32(control.data + 40u) == 2u);
+    assert(usb_load_u32(control.data + 60u) == usb_crc32(control.data, 60u));
+    finish_in();
+    for (uint16_t length = 0u; length < 64u; ++length) {
+        lora_submit(request);
+        /* A new SETUP aborts the full-length pending submission. */
+        setup(0x40u, USB_LORA_SUBMIT, 0u, 0u, 64u);
+        usb_control_complete(&control, 0u, request, length);
+        assert(control.action == USB_ACTION_STALL && !control.lora_requested);
+    }
+    lora_submit(request);
+    usb_control_complete(&control, 1u, NULL, 0u);
+    control.lora_requested = 0u;
+    control.lora_running = 1u;
+    setup(0u, 9u, 0u, 0u, 0u);
+    usb_control_complete(&control, 1u, NULL, 0u);
+    usb_control_lora_result(&control, &result);
+    assert(!control.lora_running && !control.lora_requested && !control.lora_valid);
+    usb_control_reset(&control);
+    assert(!control.lora_valid);
+}
+
 int main(void) {
     codec_tests();
     descriptor_tests();
     report_tests();
     recovery_tests();
-    puts("PASS: CRC, strict records, descriptors, EP0 sequencing, reports, reset and recovery");
+    lora_tests();
+    puts("PASS: CRC, strict records, descriptors, EP0 sequencing, reports, LoRa, reset and recovery");
     return 0;
 }
