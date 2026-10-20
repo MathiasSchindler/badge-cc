@@ -715,6 +715,180 @@ The [fixed-stimulus campaign](../dev-doc/HT20_IMPLEMENTATION.md#fixed-stimulus-e
 records 24/24 corrected trials with an exact early body, 13/24 passing the
 stricter all-control gate, and continuing natural RXE recovery failures.
 
+### Original-destination quiet/replay discriminator
+
+The default-off matched profiles hold streaming quiet for the committed
+current epoch, without displacing the copy destination:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile \
+  REF_BUILD=build/clean-rx/quiet-control reference-handoff-scope-no-replay
+make -f clean-rx/vendor-burst/Makefile \
+  REF_BUILD=build/clean-rx/replay-control reference-handoff-scope-replay
+CLEAN_RX_REFERENCE_BUILD=build/clean-rx/quiet-control \
+  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128
+```
+
+Use a fresh evidence prefix per run; select the other archived build for
+replay. Argument `128` sends first/continuation bodies of 170/298 bytes;
+`256` reverses them as a short-continuation/no-stall control. Neither
+profile needs credentials or qualifies negotiated HT.
+
+Both use scope 3/rearm 5 and differ by one emitted PSM instruction:
+reissue the existing copy command or jump to the next snapshot.
+`CLEAN_RX_HT_COPY_SCOPE_NO_REPLAY=1` is allowed only for this original-base,
+epoch-held scope. Scope JSON explicitly reports `replay_suppressed` and
+`destination_shift_words`; existing shifted scope profiles are unchanged.
+
+Twelve RF trials show quiet-only retaining 128 canonical continuation
+bytes and ending count 134/watchdog, whereas replay copies the full
+170-byte remaining tail over the original destination, rewinds live
+count to 58 and ends count 176/bad FCS. All four short controls deliver
+exact pairs, but only one receives every ordinary control. No long
+continuation reaches normal F2; native admission is not waived.
+See the [matched evidence and collector correction](../dev-doc/HT20_IMPLEMENTATION.md#quiet-only-versus-copy-replay-at-the-original-destination-2026-10-20).
+
+### Compound replay field and native-length quarantine
+
+These default-off targets isolate the already asserted register bits;
+they are diagnostics, not alternate station profiles:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-no-bit6
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-no-bit7
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-no-bit13
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-no-bit7-shift
+```
+
+Use a separate `REF_BUILD` directory per target and select that archive
+with `CLEAN_RX_REFERENCE_BUILD` when running `run.sh`. Arguments remain
+`TX_SERIAL RX_SERIAL NEW_PREFIX - 128`; `256` reverses body sizes.
+The optional case argument is a **name**, such as `bad-last`, not a number.
+No credentials are used. The source remains the unchanged version-7
+fixture; only the first aggregate carries the selected corruption.
+
+`CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD` defaults to `0x83` and permits
+only `0x82`, `0x81` or `0x03` as omissions of one asserted command bit.
+Modified fields require epoch-held scope 3/rearm 5. Only `0x81` also
+permits shifted rearm 6. Replay suppression and modified fields cannot
+be combined. Initial PLCP/body/MPDU-start commands are unchanged.
+Scope JSON exports `replay_command_field`, `native_length_guard`,
+`replay_suppressed` and `destination_shift_words`.
+
+Omitting bit 6 stalls; omitting bit 13 still restarts count and fails
+FCS. Omitting bit 7 preserves native GoodFCS, while deliberately bad
+second bodies still fail. With the 64-word destination shift, complete
+298-byte bodies have both native GoodFCS and correct software FCS.
+Native count nevertheless remains 176 after replay; it is not rewritten.
+
+The new profiles therefore guard ordinary FIFO admission after the
+immutable snapshot. A matching retained owner/epoch with native success
+but inconsistent complete-body length produces explicit length outcome
+4 and a length-discard increment, not an incorrectly sized F2 packet.
+Snapshot outcome 1/status `0x4100` still records native FCS success.
+Unrelated frames and exact short continuations retain ordinary behavior.
+No normal full-body F2 repair or D2 qualification is claimed. See the
+[field, corruption and guarded RF evidence](../dev-doc/HT20_IMPLEMENTATION.md#compound-replay-command-fcs-state-and-copy-local-length-2026-10-20).
+
+### Fixed-source vendor raw control
+
+To bypass the clean receiver with the unchanged version-6 554-byte source:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-stimulus-monitor
+make -f clean-rx/vendor-burst/Makefile reference-stimulus-monitor-poll
+make -f clean-rx/vendor-burst/Makefile reference-stimulus-monitor-poll-fast
+```
+
+Use separate `REF_BUILD` directories, select one with
+`CLEAN_RX_REFERENCE_BUILD`, and invoke the runner with `- 512`.
+No credentials are needed. The latter two are explicitly gated read-only
+get-monitor servicing discriminators, at 100/10 ms; they are not fixes
+to the vendor driver or the clean firmware.
+
+This monitor retains 32 complete nonce-bound raw packets, with explicit
+overflow/oversize accounting. After stop, phases 5..8 write
+`PREFIX-observer-raw-page-0.bin` through page 3. Each full report has a
+16-byte header at trace 128: magic `0x3141524d` (`MRA1`), zero-based page,
+total retained and page count. Up to eight existing 656-byte packet slots
+follow; unused slots/padding are zero. The ordinary capture still includes
+the first eight packets. Fixed-source success requires all sixteen
+controls and both complete bodies from every aggregate, with exact FCS
+bytes, no duplicates/invalid bodies and no selection loss.
+
+Post-fault pages preserve the original error and cannot turn a failed
+trial into a successful one. The dedicated `monitor_test` executes the
+actual lifecycle/timeout/page path under ASan/UBSan; existing protocol
+tests cover all 0..32 page geometries and corrupted packet/header/padding
+evidence. The older `reference-handoff-monitor` remains eight-slot.
+
+**Not a qualified loss baseline:** eight unpolled RF trials all stop at
+exactly 30 raw packets. Two 100-ms trials extend this to 41/42 but still
+miss expected bodies; a 10-ms test times out. Therefore these captures
+cannot attribute clean pre-prefix misses to RF interference or prove
+absence over the complete source sequence. See the
+[baseline evidence and exclusions](../dev-doc/HT20_IMPLEMENTATION.md#fixed-source-vendor-baseline-and-pre-prefix-discriminator-2026-10-20).
+
+### Repeated early FIFO delivery
+
+For complete first-body delivery without next-body advance:
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-early-fifo
+make -f clean-rx/vendor-burst/Makefile reference-early-fifo-reset-test
+make -f clean-rx/vendor-burst/Makefile reference-early-fifo-stop-test
+```
+
+Use a separate `REF_BUILD` directory per profile and set
+`CLEAN_RX_REFERENCE_BUILD` to that directory when invoking `run.sh`.
+The reset target injects one bounded PHY-reset test; the stop target
+pauses host consumption until stop to exercise full-credit ownership.
+Both are diagnostics, not normal reception qualification.
+
+`CLEAN_RX_HT_EARLY_FIFO` requires early save and the passive observer FIFO,
+and excludes advance. Its 14-word retained header adds native PHY status
+and a publication acknowledgement; the maximum retained body is 996 bytes.
+C3 publishes only after native nonterminal GoodFCS, prefix/HT-SIG/epoch,
+transmitter, geometry and complete software-FCS validation. PSM recycles
+only an acknowledged owner for a different epoch. Exhausted FIFO credit
+preserves the unacknowledged snapshot.
+
+F2 correlation tag `0x4000` distinguishes early packets from existing
+`0x8000` advanced packets. Their channel-6 metadata is `0x46`, derived
+from validated HT-SIG, not the pre-terminal native PHY-status word.
+Native diagnostic words and native rejection gates remain unchanged.
+Trace 5824/5828/5832 stores accepted early count, source bitmap and
+duplicate count. The finite source expects all eight indices
+2/5/8/11/14/17/20/23, all sixteen ordinary controls and no invalids or
+duplicates. Partial reception fails that gate.
+
+After stop, phase 5 writes `PREFIX-observer-early-packets.bin`. At trace
+128 its `ERF1` header has four little-endian 32-bit words: magic
+`0x31465245`, stored count, total tagged packet count and overflow.
+Eight 584-byte slots follow: full packet length, logical F2 ordinal,
+parsed source index, and up to 572 complete SDPCM/BDC/MPDU bytes.
+Unused slots are zero; invalid parsed source uses sentinel 24.
+Validation checks full envelopes, sequence/ordinal, tags, metadata,
+fresh fixture/FCS, uniqueness and receipt accounting. A valid partial
+archive does not mean all eight source bodies arrived.
+
+The focused `early-rx-test` target tests all supported body lengths and
+corrupted admission/sample/archive evidence under ASan/UBSan. Final
+both-role RF tests delivered 46/48 first bodies normally and 14/16 with
+injected reset; only three of six final normal trials also received all
+controls. Four non-stress missing bodies coincide with four absent
+aggregate-prefix observations, not extra observed good candidates lost
+by the FIFO path. This does not identify their RF cause. Both final
+full-credit stop tests preserve queued ownership and drain exactly;
+later RF losses remain expected stress failures.
+
+Historical counter-layout and early PHY-classification failures are
+retained. Collector output keeps `reliability_qualified:false` and
+`ht_station_qualified:false`, including finite fixture passes. The
+sixteen-prefix observer limit and fixed MCS0/554-byte source do not
+qualify sustained/variable aggregate reception. See the
+[complete campaign and audit](../dev-doc/HT20_IMPLEMENTATION.md#repeated-early-mpdu-fifo-delivery-and-complete-packet-archives-2026-10-20).
+
 The screen shows badge role, operation and experimental mode before radio
 start, then stopped/error status, capture count and first-fault RXCTL after
 observer stop. There are no display writes during active observer capture,

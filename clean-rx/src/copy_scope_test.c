@@ -24,7 +24,7 @@ static void run(uint32_t fault) {
     r[CLEAN_COPY_SCOPE_SHM-1u] = r[CLEAN_COPY_SCOPE_SHM+CLEAN_COPY_SCOPE_WORDS] = 0x71c3u;
     for (uint32_t i = 0u; i < 4u; ++i) r[0x1780u+i] = (uint16_t)(0x4300u+i);
     for (uint32_t i = 0u; i < 32u; ++i) r[CLEAN_SHM_FRAME+4u+64u+i] = (uint16_t)(0xa000u+i);
-    uint32_t pc = COPY_SCOPE_EPOCH, steps = 0u;
+    uint32_t pc = COPY_SCOPE_EPOCH, steps = 0u, replays = 0u;
     while (pc != OBSERVER_COPY_REARM_COUNT) {
         assert(steps < 12000u && pc < ACK_PROGRAM_END);
         r[0x1119u] = (uint16_t)((fault == 4u ? 0xfff0u : 100u) +
@@ -41,7 +41,12 @@ static void run(uint32_t fault) {
         else if (op == 0x1c0u) r[d] = (uint16_t)(av+bv);
         else if (op == 0x1d0u) r[d] = (uint16_t)(av-bv);
         else if (op == 0x310u) r[d] = (uint16_t)((bv&~3u)|(av&3u));
-        else if (op == 0x376u) r[d] = (uint16_t)((bv&~0x3fc0u)|((av<<6u)&0x3fc0u));
+        else if (op == 0x376u) {
+            assert(a == (0x1800u|CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD) &&
+                b == 0x1004u && d == 0x1004u);
+            ++replays;
+            r[d] = (uint16_t)((bv&~0x3fc0u)|((av<<6u)&0x3fc0u));
+        }
         else if (op == 0x77fu) pc = d;
         else if (op == 0xd0u) { if (av == bv) pc = d; }
         else if (op == 0xdbu) { if (av >= bv) pc = d; }
@@ -51,9 +56,15 @@ static void run(uint32_t fault) {
     uint16_t *scope = r+CLEAN_COPY_SCOPE_SHM;
     assert(scope[0] == (fault == 1u ? 18u : fault == 2u ? 19u : fault == 3u ? 20u : 17u));
     assert(scope[1] == 9u);
+    assert(replays == (CLEAN_RX_HT_COPY_SCOPE_NO_REPLAY ? 0u : 1u));
+    uint16_t command = CLEAN_RX_HT_COPY_SCOPE_NO_REPLAY ? 0x800u :
+        (uint16_t)(((CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD<<6u)&0x3fc0u) |
+            (CLEAN_RX_HT_COPY_SCOPE == 1 ? 2u : 0u));
+    assert(r[0x1004u] == command);
     for (uint32_t n = 0u; n < 3u; ++n) {
         const uint16_t *s = scope+2u+26u*n;
-        assert(s[1] == 134u && s[5] == (n ? CLEAN_SHM_FRAME+64u : CLEAN_SHM_FRAME));
+        assert(s[1] == 134u &&
+               s[5] == CLEAN_SHM_FRAME+(n && CLEAN_STREAM_DEST_SHIFT ? 64u : 0u));
         assert(s[6] == 298u && s[9] == 0xf020u);
         assert((s[4]&3u) == (n && CLEAN_RX_HT_COPY_SCOPE >= 2 ? 0u : 2u));
         for (uint32_t i = 0u; i < 8u; ++i) {
@@ -122,6 +133,46 @@ static void hold_guard(uint32_t fault) {
 }
 #endif
 
+#if CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD != 0x83u
+static void admission(uint32_t fault) {
+    uint16_t r[0x1800] = {0};
+    r[CLEAN_OBSERVER_ADVANCE] = fault == 6u ? 0u : 1u;
+    r[CLEAN_OBSERVER_EARLY_SHM] = fault == 7u ? 0u : 2u;
+    r[CLEAN_OBSERVER_PENDING] = fault == 8u ? 3u : 2u;
+    r[CLEAN_OBSERVER_EPOCH] = fault == 9u ? 10u : 9u;
+    r[CLEAN_OBSERVER_EARLY_SHM+1u] = fault == 10u ? 10u : 9u;
+    r[CLEAN_OBSERVER_OUTCOME] = fault >= 3u && fault < 6u ? (uint16_t)(fault == 3u ? 2u :
+        fault == 4u ? 5u : 6u) : 1u;
+    r[CLEAN_OBSERVER_EARLY_SHM+13u] = fault == 2u ? 170u : 298u;
+    r[0x100cu] = fault == 1u ? 304u : 176u;
+    r[0x100du] = 0x4100u; r[0x1782u] = 0x71c3u;
+    for (uint32_t i = 0u; i < 162u; ++i)
+        r[CLEAN_OBSERVER_SECOND_SHM+i] = (uint16_t)(0xa100u+i);
+    uint32_t pc = OBSERVER_SECOND_DISPATCH, steps = 0u;
+    while (pc != OBSERVER_TERMINAL && pc != OBSERVER_EXIT_NATIVE) {
+        assert(++steps < 24u);
+        uint64_t w = 0u;
+        for (uint32_t i = 0u; i < 8u; ++i) w |= (uint64_t)psm_ucode_bytes[8u*pc+i] << (8u*i);
+        ++pc;
+        uint32_t op = (uint32_t)(w>>39u), a = (uint32_t)(w>>26u)&0x1fffu;
+        uint32_t b = (uint32_t)(w>>13u)&0x1fffu, d = (uint32_t)w&0x1fffu;
+        uint16_t av = operand(r,a), bv = operand(r,b);
+        if (op == 0xd0u) { if (av == bv) pc = d; }
+        else if (op == 0xd1u) { if (av != bv) pc = d; }
+        else if (op == 0x3f0u) r[d] = av;
+        else if (op == 0x1c0u) r[d] = (uint16_t)(av+bv);
+        else { assert(op == 0x77fu); pc = d; }
+    }
+    assert(pc == (!fault || fault == 4u || fault == 5u ? OBSERVER_EXIT_NATIVE : OBSERVER_TERMINAL));
+    assert(r[CLEAN_OBSERVER_OUTCOME] == (!fault ? 4u : fault == 3u ? 2u :
+        fault == 4u ? 5u : fault == 5u ? 6u : 1u));
+    assert(r[0x100cu] == (fault == 1u ? 304u : 176u));
+    assert(r[0x100du] == 0x4100u && r[0x1782u] == 0x71c3u);
+    for (uint32_t i = 0u; i < 162u; ++i)
+        assert(r[CLEAN_OBSERVER_SECOND_SHM+i] == (uint16_t)(0xa100u+i));
+}
+#endif
+
 static int capture(const char *path) {
     uint8_t report[64u+REF_TRACE_BYTES];
     FILE *file = fopen(path,"rb");
@@ -142,10 +193,13 @@ static int capture(const char *path) {
     int fcs = length >= 44u && length <= CLEAN_OBSERVER_SECOND_MAX &&
         diag_crc32(second+24u,length-4u) == badger_bytes_load_u32(second+24u+length-4u);
     printf("{\"test\":\"copy-scope-capture\",\"file\":\"%s\",\"mode\":%u,"
+           "\"replay_suppressed\":%s,\"replay_command_field\":%u,"
            "\"diagnostic_valid\":%s,\"expected_bytes\":%u,"
            "\"expected_length_fcs_valid\":%s,\"native_count\":%u,"
            "\"native_outcome\":%u,\"delivery_qualified\":false}\n",
-           path,CLEAN_RX_HT_COPY_SCOPE,valid?"true":"false",length,fcs?"true":"false",
+           path,CLEAN_RX_HT_COPY_SCOPE,CLEAN_RX_HT_COPY_SCOPE_NO_REPLAY?"true":"false",
+           CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD,
+           valid?"true":"false",length,fcs?"true":"false",
            ref_u16(second+4u),ref_u16(second+20u));
     if (!valid) fputs("Copy scope capture validation failed\n",stderr);
     return valid ? 0 : 1;
@@ -157,6 +211,9 @@ int main(int argc, char **argv) {
     for (uint32_t fault = 0u; fault < 5u; ++fault) run(fault);
 #if CLEAN_RX_HT_COPY_SCOPE >= 3
     for (uint32_t fault = 0u; fault < 7u; ++fault) hold_guard(fault);
+#endif
+#if CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD != 0x83u
+    for (uint32_t fault = 0u; fault < 11u; ++fault) admission(fault);
 #endif
     puts("Copy scope: emitted PSM normal/EOF/abort/frozen/wrap paths, bounded writes/wait, GPR preservation and readback mutations pass; not RF emulation");
     return 0;

@@ -153,7 +153,11 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Verify bounded destination displacement in both roles: preserve 160 canonical bytes, but retain abort/bad-FCS failures.
 - [x] Exclude remaining-length replay endpoint as a repair: termination changes, but streaming still limits fresh copying to 32 bytes.
 - [x] Use a focused copy microscope to retain complete FCS-valid 298-byte continuations; preserve native count/FCS/F2 rejection.
+- [x] Separate quieting from copy replay with matched original-destination controls; isolate replay-dependent count restart and preserve native rejection.
+- [x] Isolate the mid-body replay FCS-state effect with bad-body controls; retain raw copy counts and quarantine mismatched partial FIFO exports.
 - [x] Implement gated passive-observer FIFO retention and bounded stop/drain.
+- [x] Implement acknowledged repeated early-MPDU FIFO/F2 delivery and complete packet archives; preserve final RF misses as unqualified.
+- [x] Implement full fixed-source vendor raw archives; identify monitor cutoff/timeouts and exclude them as a qualified RF-loss baseline.
 - [x] Reproduce zero-HT reception with actual PSM-state and PHY-control diagnostics.
 - [x] Implement SOF-calibrated receive timelines, decision-latched rearm diagnostics and conditional-event regression tests.
 - [x] Implement gated one-shot RXE/PHY recovery controls, preserved first-fault diagnostics and framebuffer-free badge status.
@@ -165,7 +169,7 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
   and resolve persistent RXE busy, pre-prefix and truncated-body losses;
   repeat loss-accounted tests with confirmed multi-body stimulus.
 - [ ] **2. Qualify aggregate handoff:** generalize the bounded streaming-safe
-  SHM reconstruction; resolve native RXE count/FCS state and FIFO publication;
+  SHM reconstruction; validate copy-local count/FCS ownership and full-body FIFO publication;
   complete loss-accounted both-role/order qualification and
   malformed/truncated-frame and abort recovery.
 - [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot

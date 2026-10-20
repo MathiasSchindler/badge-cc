@@ -23,7 +23,7 @@ $(BUILD)/build_flags: force | $(BUILD)
 	@printf '%s\n' '$(CC)' '$(CFLAGS)' > $@.tmp; \
 	if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
-$(OBJS) $(BUILD)/psm_ucode_test $(BUILD)/mac_test $(BUILD)/copy_scope_test: $(BUILD)/build_flags
+$(OBJS) $(BUILD)/psm_ucode_test $(BUILD)/mac_test $(BUILD)/copy_scope_test $(BUILD)/early_rx_test: $(BUILD)/build_flags
 
 test: $(BUILD)/psm_ucode_test $(BUILD)/mac_test $(BUILD)/block_ack_test
 	$(BUILD)/psm_ucode_test
@@ -53,13 +53,22 @@ $(BUILD)/copy_scope_test: copy_scope_test.c psm_ucode.c $(wildcard *.h ../badge/
 	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
 		copy_scope_test.c psm_ucode.c ../../src/tools/diagnostics_logic.c -o $@
 
+.PHONY: early-rx-test
+early-rx-test: $(BUILD)/early_rx_test
+	$(BUILD)/early_rx_test
+
+$(BUILD)/early_rx_test: early_rx_test.c $(wildcard *.h) ../vendor-burst/protocol.h \
+		mac.c block_ack.c ../../src/tools/diagnostics_logic.c | $(BUILD)
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
+		early_rx_test.c mac.c block_ack.c ../../src/tools/diagnostics_logic.c -o $@
+
 $(BUILD):
 	mkdir -p $@
 
 $(BUILD)/startup.o: startup.S | $(BUILD)
 	$(CC) --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -nostdinc -c $< -o $@
 
-$(BUILD)/%.o: %.c cyw43_hw.h types.h sdio_ring.h psm_ack.h ht_observer.h copy_scope.h observer_dma.h unicast.h mac.h block_ack.h ../../src/shared/stdint.h tx_diag.h phy_rates.h ht20.h sdio_test.h frame_limits.h | $(BUILD)
+$(BUILD)/%.o: %.c cyw43_hw.h types.h sdio_ring.h psm_ack.h ht_observer.h copy_scope.h observer_dma.h early_rx.h unicast.h mac.h block_ack.h ../../src/shared/stdint.h tx_diag.h phy_rates.h ht20.h sdio_test.h frame_limits.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cyw43_rx_fw.elf: $(OBJS) cyw43.ld

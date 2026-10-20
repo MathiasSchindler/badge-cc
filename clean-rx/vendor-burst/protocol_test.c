@@ -184,6 +184,57 @@ static void monitor_encoding(void) {
         assert(ref_monitor_contains(packet, bytes, mpdu, bytes - 4u));
         assert(!ref_monitor_contains(packet, bytes, mpdu, bytes));
     }
+    memset(trace,0,sizeof(trace));
+    uint8_t archive[REF_MONITOR_FIXED_SLOTS*REF_MONITOR_SLOT_BYTES+2u] = {0};
+    archive[0] = 0xa5u; archive[sizeof(archive)-1u] = 0x5au;
+    length = wifi_data_frame(packet,0u,0u,nonce,sizeof(nonce));
+    for (uint32_t i = 0u; i <= REF_MONITOR_FIXED_SLOTS; ++i)
+        ref_monitor_capture(trace,nonce,packet,length,i,archive+1u,REF_MONITOR_FIXED_SLOTS);
+    assert(badger_bytes_load_u32(trace+76u) == REF_MONITOR_FIXED_SLOTS);
+    assert(badger_bytes_load_u32(trace+80u) == 1u);
+    assert(archive[0] == 0xa5u && archive[sizeof(archive)-1u] == 0x5au);
+    uint8_t page[REF_MONITOR_PAGE_BYTES];
+    for (uint32_t total = 0u; total <= REF_MONITOR_FIXED_SLOTS; ++total)
+        for (uint32_t p = 0u; p < REF_MONITOR_PAGES; ++p) {
+            memset(page,0,sizeof(page));
+            badger_bytes_store_u32(page,REF_MONITOR_PAGE_MAGIC);
+            badger_bytes_store_u32(page+4u,p);
+            badger_bytes_store_u32(page+8u,total);
+            uint32_t first = p*REF_MONITOR_SLOTS, count = total > first ? total-first : 0u;
+            if (count > REF_MONITOR_SLOTS) count = REF_MONITOR_SLOTS;
+            badger_bytes_store_u32(page+12u,count);
+            memcpy(page+REF_MONITOR_PAGE_HEADER,archive+1u+first*REF_MONITOR_SLOT_BYTES,
+                   count*REF_MONITOR_SLOT_BYTES);
+            assert(ref_monitor_page_valid(page,p,total));
+            assert(!ref_monitor_page_valid(page,REF_MONITOR_PAGES,total));
+            assert(!ref_monitor_page_valid(page,p,REF_MONITOR_FIXED_SLOTS+1u));
+            for (uint32_t word = 0u; word < 4u; ++word) {
+                page[4u*word] ^= 1u;
+                assert(!ref_monitor_page_valid(page,p,total));
+                page[4u*word] ^= 1u;
+            }
+            page[sizeof(page)-1u] ^= 1u;
+            assert(!ref_monitor_page_valid(page,p,total));
+            page[sizeof(page)-1u] ^= 1u;
+            if (count) {
+                page[REF_MONITOR_PAGE_HEADER+16u+length-1u] ^= 1u;
+                assert(!ref_monitor_page_valid(page,p,total));
+            }
+        }
+    uint32_t all[4] = {0u};
+    for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i) {
+        all[i%3u] |= 1u<<i;
+        if (i%3u == 2u) all[3] |= 1u<<i;
+    }
+    assert(ref_monitor_fixed_qualified(all,0u,0u));
+    assert(!ref_monitor_fixed_qualified(all,1u,0u));
+    assert(!ref_monitor_fixed_qualified(all,0u,1u));
+    for (uint32_t kind = 0u; kind < 4u; ++kind)
+        for (uint32_t bit = 0u; bit < 24u; ++bit) {
+            all[kind] ^= 1u<<bit;
+            assert(!ref_monitor_fixed_qualified(all,0u,0u));
+            all[kind] ^= 1u<<bit;
+        }
 }
 
 static void window_encoding(void) {
@@ -972,7 +1023,8 @@ int main(void) {
     reason_early[0] = 1u;
     reason_early[20] = 2u;
     assert(!strcmp(ref_early_reason(reason_record,reason_early,1u),"retained_multi_candidate"));
-    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"prior_multi_already_retained"));
+    assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),
+        CLEAN_RX_HT_EARLY_FIFO ? "fifo_candidate_not_in_final_snapshot" : "prior_multi_already_retained"));
     reason_record[92] = (CLEAN_OBSERVER_EARLY_MAX+7u)&255u;
     reason_record[93] = (CLEAN_OBSERVER_EARLY_MAX+7u)>>8u;
     assert(!strcmp(ref_early_reason(reason_record,reason_early,2u),"early_storage_limit"));

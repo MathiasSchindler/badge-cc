@@ -9,6 +9,7 @@
 #include "../../src/host/tools/usb_live_transport.h"
 
 static uint32_t clock_ticks[2], clock_frames[2];
+static uint8_t monitor_archive[REF_MONITOR_FIXED_SLOTS*REF_MONITOR_SLOT_BYTES];
 static int summarize_window(const uint8_t trace[REF_TRACE_BYTES]);
 
 static void deadline(int signal_number) {
@@ -161,13 +162,19 @@ static int stage(libusb_device_handle *device, uint8_t nonce[16], uint8_t phase,
                usb_report_u32(copy+76u)-usb_report_u32(copy+72u));
     }
 #endif
-    if (usb_report_u32(report+32u) != phase || usb_report_u32(report+36u) ||
+    int diagnostic_fault = REF_VENDOR_MONITOR && !REF_CLEAN_HANDOFF &&
+        phase >= 5u && phase < 5u+REF_MONITOR_PAGES && trace &&
+        usb_report_u32(report+36u) == usb_report_u32(trace+8u);
+    if (usb_report_u32(report+32u) != phase || (usb_report_u32(report+36u) && !diagnostic_fault) ||
         (trace && (usb_report_u32(trace) != REF_MAGIC ||
         usb_report_u32(trace+12u) != role || usb_report_u32(trace+4u) != phase ||
-        usb_report_u32(trace+8u)))) {
+        (usb_report_u32(trace+8u) && !diagnostic_fault)))) {
         fputs("Reference device did not complete the requested phase; raw evidence saved\n",stderr);
         return 0;
     }
+    if (diagnostic_fault && usb_report_u32(report+36u))
+        fprintf(stderr,"Preserved monitor error %u while exporting diagnostic page %u\n",
+                usb_report_u32(report+36u),phase-5u);
     return 1;
 }
 
@@ -280,7 +287,8 @@ static int summarize_monitor(const uint8_t source[REF_TRACE_BYTES],
     uint32_t packets = usb_report_u32(monitor + 72u), matched = usb_report_u32(monitor + 92u);
     if (usb_report_u32(source + 24u) != 6u || memcmp(source + 32u, mac, 6u) ||
         memcmp(monitor + 32u, mac, 6u) || usb_report_u32(monitor + 64u) != REF_MONITOR_MAGIC ||
-        usb_report_u32(monitor + 68u) != 1u || saved > REF_MONITOR_SLOTS ||
+        usb_report_u32(monitor + 68u) != 1u ||
+        saved > (REF_CLEAN_HANDOFF ? REF_MONITOR_SLOTS : REF_MONITOR_FIXED_SLOTS) ||
         (uint64_t)saved + usb_report_u32(monitor + 80u) + usb_report_u32(monitor + 84u) != matched ||
         (uint64_t)matched + usb_report_u32(monitor + 88u) != packets ||
         usb_report_u32(monitor + 96u) != 9u || usb_report_u32(monitor + 108u) != 1u ||
@@ -310,43 +318,71 @@ static int summarize_monitor(const uint8_t source[REF_TRACE_BYTES],
         }
     }
     if (!summarize_source(source, bound)) return 0;
-    uint32_t masks[4] = {0}, fcs_masks[4] = {0};
+    if (!REF_CLEAN_HANDOFF) {
+        uint32_t attempts = usb_report_u32(monitor+192u), completed = usb_report_u32(monitor+196u);
+        int polling_ok = !usb_report_u32(monitor+200u) && (REF_MONITOR_POLL ?
+            attempts && attempts == completed && usb_report_u32(monitor+204u) == 1u &&
+                usb_report_u32(monitor+220u) > 0u : !attempts && !completed);
+        printf("{\"test\":\"independent-monitor-control-poll\",\"enabled\":%s,"
+               "\"interval_ms\":%u,\"attempts\":%u,\"completed\":%u,\"valid\":%s}\n",
+               REF_MONITOR_POLL?"true":"false",REF_MONITOR_POLL ? REF_MONITOR_POLL_MS : 0u,
+               attempts,completed,polling_ok?"true":"false");
+        if (!polling_ok) {
+            fputs("Invalid fixed-source monitor control-poll evidence\n",stderr);
+            return 0;
+        }
+    }
+    uint32_t masks[4] = {0}, fcs_masks[4] = {0}, duplicates = 0u, invalid = 0u;
     for (uint32_t s = 0u; s < saved; ++s) {
-        const uint8_t *slot = monitor + REF_MONITOR_PACKETS + s*REF_MONITOR_SLOT_BYTES;
+        const uint8_t *slot = REF_CLEAN_HANDOFF ?
+            monitor + REF_MONITOR_PACKETS + s*REF_MONITOR_SLOT_BYTES :
+            monitor_archive + s*REF_MONITOR_SLOT_BYTES;
         if (!ref_monitor_slot_valid(slot)) {
             fprintf(stderr, "Invalid independent monitor raw packet %u\n", s);
             return 0;
         }
         uint32_t length = usb_report_u32(slot);
+        uint32_t matched_bodies = 0u;
         for (uint32_t i = 0u; i < CLEAN_HT_STIMULUS_COUNT; ++i) {
             (void)ref_source_frame(expected, bound, i);
             for (uint32_t body = 0u; body < (i%3u == 2u ? 2u : 1u); ++body) {
-                uint32_t bytes = clean_ht_handoff_length(bound, body);
+                uint32_t bytes = REF_CLEAN_HANDOFF ? clean_ht_handoff_length(bound, body) :
+                    CLEAN_HT_STIMULUS_MPDU;
                 uint32_t offset = CLEAN_HT_DATA_HEADER + 6u + (i%3u == 2u ? 4u : 0u);
-                if (body) offset += 4u + ((clean_ht_handoff_length(bound, 0u) + 3u) & ~3u);
+                if (body) offset += 4u + ((ref_source_control_length(bound) + 3u) & ~3u);
                 uint32_t kind = i%3u == 2u ? 2u + body : i%3u;
                 if (!ref_monitor_contains(slot + 16u, length, expected + offset, bytes - 4u)) continue;
                 int fcs = ref_monitor_contains(slot + 16u, length, expected + offset, bytes);
+                ++matched_bodies;
                 masks[kind] |= 1u << i;
-                if (fcs) fcs_masks[kind] |= 1u << i;
+                if (fcs) {
+                    if (fcs_masks[kind] & (1u<<i)) ++duplicates;
+                    fcs_masks[kind] |= 1u << i;
+                } else ++invalid;
                 printf("{\"test\":\"independent-raw-body\",\"slot\":%u,\"index\":%u,"
                        "\"kind\":%u,\"body\":%u,\"mpdu_bytes\":%u,\"sdpcm_channel\":%u,"
                        "\"exact_mac_payload\":true,\"exact_fcs_bytes_present\":%s}\n",
                        s,i,i%3u,body,bytes,usb_report_u32(slot + 8u),fcs ? "true" : "false");
             }
         }
+        if (!matched_bodies) ++invalid;
     }
     int pair = (masks[2] & masks[3]) != 0u, proven = ref_monitor_qualified(fcs_masks);
+    if (!REF_CLEAN_HANDOFF)
+        proven = ref_monitor_fixed_qualified(fcs_masks,duplicates,invalid) &&
+            !usb_report_u32(monitor+80u) && !usb_report_u32(monitor+84u);
     printf("{\"test\":\"independent-monitor-result\",\"sdpcm_packets\":%u,"
            "\"saved_nonce_packets\":%u,\"matched_packets\":%u,\"selection_full\":%u,"
            "\"oversized_nonce_packets\":%u,\"legacy_mask\":%u,\"single_ht_mask\":%u,"
            "\"aggregate_first_mask\":%u,\"aggregate_second_mask\":%u,"
            "\"pair_payload_bytes_confirmed\":%s,\"pair_fcs_bytes_confirmed\":%s,"
-           "\"raw_receive_proven\":%s,\"vendor_internal_drops_known\":false,"
+           "\"raw_receive_proven\":%s,\"duplicates\":%u,\"invalid_bodies\":%u,"
+           "\"all_32_fixed_bodies_received\":%s,\"vendor_internal_drops_known\":false,"
            "\"ht_interoperability_qualified\":false}\n",
            packets,saved,matched,usb_report_u32(monitor + 80u),usb_report_u32(monitor + 84u),
            masks[0],masks[1],masks[2],masks[3],pair ? "true" : "false",
-           (fcs_masks[2] & fcs_masks[3]) ? "true" : "false",proven ? "true" : "false");
+           (fcs_masks[2] & fcs_masks[3]) ? "true" : "false",proven ? "true" : "false",
+           duplicates,invalid,!REF_CLEAN_HANDOFF && proven ? "true" : "false");
     if (!proven) fputs("Independent monitor requires complete exact first/second bodies and both controls, including FCS; raw failures retained\n", stderr);
     return proven;
 }
@@ -528,6 +564,8 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         (samples || !ref_dma_probe_valid(observer+REF_SAMPLE_BASE,observer+REF_EARLY_BASE))) {
         fputs("Invalid completed DMA diagnostic\n",stderr); return 0;
     }
+    const uint8_t *early = observer+REF_EARLY_BASE;
+    int early_delivered = 0;
     for (uint32_t i = 0u; i < samples; ++i) {
         const uint8_t *sample = observer+REF_SAMPLE_BASE+i*REF_SAMPLE_BYTES;
         uint32_t length = usb_report_u32(sample);
@@ -538,7 +576,11 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
             if (length == usb_report_u32(observer+REF_SAMPLE_BASE+j*REF_SAMPLE_BYTES)) {
                 fputs("Duplicate observer sample size\n",stderr); return 0;
             }
-        int linked = ref_sample_correlated(log,sample,mac);
+        int retained_early = (usb_report_u32(sample+8u)&REF_EARLY_SAMPLE) != 0u;
+        int linked = retained_early ?
+            ref_early_f2_correlated(log,early,sample,mac,usb_report_u32(observer+24u)) :
+            ref_sample_correlated(log,sample,mac);
+        if (retained_early && linked) early_delivered = 1;
         if (linked) {
             ++correlated;
             uint32_t id = usb_report_u32(sample+4u);
@@ -552,7 +594,6 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                diag_crc32(sample+16u,length-4u) == usb_report_u32(sample+16u+length-4u)?"true":"false",
                linked?"true":"false");
     }
-    const uint8_t *early = observer+REF_EARLY_BASE;
     uint32_t early_rxe = ref_u16(early+4u), early_length = early_rxe >= 6u ? early_rxe-6u : 0u;
     int early_linked = ref_early_correlated(log,early,mac);
     int stream_control_proven = !CLEAN_RX_HT_COPY_DEFER_STREAM;
@@ -660,10 +701,16 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
     if (CLEAN_RX_HT_COPY_SCOPE) {
         uint32_t commit = ref_u16(scope);
         printf("{\"test\":\"copy-scope\",\"mode\":%u,\"diagnostic_valid\":%s,"
-               "\"commit\":%u,\"epoch\":%u,\"executed\":%s}\n",
+               "\"commit\":%u,\"epoch\":%u,\"executed\":%s,"
+               "\"replay_suppressed\":%s,\"replay_command_field\":%u,\"native_length_guard\":%s,"
+               "\"destination_shift_words\":%u}\n",
                CLEAN_RX_HT_COPY_SCOPE,
                ref_copy_scope_valid(scope,copy,early,CLEAN_RX_HT_COPY_SCOPE)?"true":"false",
-               commit,ref_u16(scope+2u),commit?"true":"false");
+               commit,ref_u16(scope+2u),commit?"true":"false",
+               CLEAN_RX_HT_COPY_SCOPE_NO_REPLAY?"true":"false",
+               CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD,
+               CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD != 0x83u?"true":"false",
+               CLEAN_STREAM_DEST_SHIFT ? CLEAN_STREAM_DEST_WORDS : 0u);
         for (uint32_t n = 0u; commit && n < 3u; ++n) {
             const uint8_t *s = scope+4u+52u*n;
             printf("{\"test\":\"copy-scope-record\",\"index\":%u,\"tsf_low\":%u,"
@@ -856,7 +903,7 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                     negative_length = ref_u16(record+28u);
                 }
             }
-            if (exact_first && early_index == 2u) {
+            if (exact_first && (!mode || early_index == 2u)) {
                 negative_id = ref_u16(early);
                 const uint8_t *record = log+2u*CLEAN_OBSERVER_HEADER_WORDS+
                     (negative_id-1u)*2u*CLEAN_OBSERVER_RECORD_WORDS;
@@ -961,6 +1008,22 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                usb_report_u32(observer+REF_STIMULUS_RX_INVALID),legacy_proof?"true":"false",
                controls?"true":"false",prefix_mask,ht_mask&~prefix_mask,
                prefix_mask&~rx_mask,overflow?"false":"true");
+        if (CLEAN_RX_HT_EARLY_FIFO) {
+            uint32_t delivered = usb_report_u32(observer+REF_EARLY_RX_COUNT);
+            uint32_t mask = usb_report_u32(observer+REF_EARLY_RX_MASK), expected_mask = 0u;
+            uint32_t duplicates = usb_report_u32(observer+REF_EARLY_RX_DUPLICATES);
+            for (uint32_t i = 2u; i < CLEAN_HT_STIMULUS_COUNT; i += 3u) expected_mask |= 1u<<i;
+            printf("{\"test\":\"early-fifo-result\",\"exact_early_body_delivered\":%s,"
+                   "\"early_deliveries\":%u,\"received_early_mask\":%u,"
+                   "\"expected_early_mask\":%u,\"early_duplicates\":%u,\"all_controls_received\":%s,"
+                   "\"reliability_qualified\":false,\"ht_station_qualified\":false}\n",
+                   early_delivered?"true":"false",delivered,mask,expected_mask,duplicates,controls?"true":"false");
+            if (!early_delivered || delivered != CLEAN_HT_STIMULUS_COUNT/3u ||
+                mask != expected_mask || duplicates) {
+                fputs("Early FIFO requires all eight fresh FCS-valid first bodies delivered byte-exact through F2 without duplication\n",stderr);
+                return 0;
+            }
+        }
         if (!exact_early || unaccounted || !controls)
             fputs("Fixed stimulus requires an exact 554-byte nonterminal body, all legacy/single-HT controls without duplicate/corrupt delivery and accounted exits; not proven\n",stderr);
         return exact_early && !unaccounted && controls;
@@ -1094,16 +1157,16 @@ int main(int argc, char **argv) {
     }
     if (ok) {
         uint64_t arm_before = 0u, arm_after = 0u, burst_before = 0u, burst_after = 0u;
-        if (CLEAN_RX_HT_WINDOW)
+        if (CLEAN_RX_HT_WINDOW && !REF_VENDOR_MONITOR)
             ok = host_time(&arm_before) &&
                 stage(listener,observer_nonce,3u,0u,argv[3],"observer-armed",NULL) &&
                 host_time(&arm_after);
-        if (ok && CLEAN_RX_HT_WINDOW) ok = host_time(&burst_before);
+        if (ok && CLEAN_RX_HT_WINDOW && !REF_VENDOR_MONITOR) ok = host_time(&burst_before);
         int burst = ok && stage(sender,nonce,2u,1u,argv[3],"vendor-burst",vendor);
-        int timed = !CLEAN_RX_HT_WINDOW || host_time(&burst_after);
+        int timed = !CLEAN_RX_HT_WINDOW || REF_VENDOR_MONITOR || host_time(&burst_after);
         int frozen = stage(listener,observer_nonce,2u,0u,argv[3],"observer-capture",observer);
         int window_ok = 1;
-        if (CLEAN_RX_HT_WINDOW) {
+        if (CLEAN_RX_HT_WINDOW && !REF_VENDOR_MONITOR) {
             uint8_t exported[REF_TRACE_BYTES];
             window_ok = stage(listener,observer_nonce,4u,0u,argv[3],"observer-window",exported);
             if (burst && timed) {
@@ -1117,7 +1180,45 @@ int main(int argc, char **argv) {
                        (unsigned long long)(burst_after-arm_before));
             }
         }
-        ok = burst && timed && frozen && window_ok && summarize(vendor,observer,nonce);
+        int monitor_ok = 1;
+        if (REF_VENDOR_MONITOR && !REF_CLEAN_HANDOFF) {
+            uint32_t total = usb_report_u32(observer+76u);
+            for (uint32_t page = 0u; page < REF_MONITOR_PAGES && monitor_ok; ++page) {
+                uint8_t exported[REF_TRACE_BYTES];
+                char suffix[40];
+                int length = snprintf(suffix,sizeof(suffix),"observer-raw-page-%u",page);
+                monitor_ok = length > 0 && (size_t)length < sizeof(suffix) &&
+                    stage(listener,observer_nonce,(uint8_t)(5u+page),0u,argv[3],suffix,exported) &&
+                    ref_monitor_page_valid(exported+REF_MONITOR_PAGE_BASE,page,total);
+                if (monitor_ok)
+                    memcpy(monitor_archive+page*REF_MONITOR_SLOTS*REF_MONITOR_SLOT_BYTES,
+                           exported+REF_MONITOR_PAGE_BASE+REF_MONITOR_PAGE_HEADER,
+                           REF_MONITOR_SLOTS*REF_MONITOR_SLOT_BYTES);
+            }
+            printf("{\"test\":\"independent-monitor-archive\",\"valid\":%s,"
+                   "\"saved_packets\":%u,\"pages\":%u}\n",
+                   monitor_ok?"true":"false",total,REF_MONITOR_PAGES);
+            if (!monitor_ok) fputs("Invalid or incomplete fixed-source raw packet archive\n",stderr);
+        }
+        int early_ok = 1;
+        if (CLEAN_RX_HT_EARLY_FIFO) {
+            uint8_t exported[REF_TRACE_BYTES], bound_nonce[14];
+            memcpy(bound_nonce,nonce,sizeof(bound_nonce)); bound_nonce[13] = 6u;
+            uint32_t mask = 0u;
+            early_ok = stage(listener,observer_nonce,5u,0u,argv[3],"observer-early-packets",exported);
+            const uint8_t *records = exported+REF_EARLY_EXPORT_BASE;
+            if (early_ok) early_ok = ref_early_export_valid(records,bound_nonce,
+                usb_report_u32(observer+REF_MULTI_DETAIL+8u),&mask) &&
+                usb_report_u32(records+8u) == usb_report_u32(observer+REF_EARLY_RX_COUNT) &&
+                mask == usb_report_u32(observer+REF_EARLY_RX_MASK) &&
+                !usb_report_u32(records+12u);
+            printf("{\"test\":\"early-fifo-raw-export\",\"valid\":%s,"
+                   "\"packet_mask\":%u,\"complete_bodies_preserved\":%s,"
+                   "\"reliability_qualified\":false}\n",early_ok?"true":"false",mask,early_ok?"true":"false");
+            if (!early_ok) fputs("Invalid or incomplete early FIFO packet archive\n",stderr);
+        }
+        ok = burst && timed && frozen && window_ok && early_ok && monitor_ok &&
+            summarize(vendor,observer,nonce);
     }
     if (fflush(stdout)) { perror("Reference JSON flush"); ok = 0; }
     if (listener) {

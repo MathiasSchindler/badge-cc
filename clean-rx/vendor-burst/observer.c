@@ -6,6 +6,9 @@ const char ref_role[] = "CLEAN OBSERVER";
 static clean_loader_t loader;
 static uint8_t active, packet[CLEAN_RX_PACKET_BYTES], session[13];
 static uint32_t idle_polls, rx_summaries;
+#if CLEAN_RX_HT_EARLY_FIFO
+static uint8_t early_packets[REF_EARLY_EXPORT_BYTES];
+#endif
 #if REF_OBSERVER_PAUSE
 static uint32_t pause_started;
 #endif
@@ -128,6 +131,10 @@ void ref_run(const uint8_t nonce[16]) {
     int ok = 0;
     if (nonce[14] == 1u && !active && nonce[13] && nonce[13] <= 14u) {
         badger_bytes_zero(ref_detail, REF_TRACE_BYTES);
+#if CLEAN_RX_HT_EARLY_FIFO
+        badger_bytes_zero(early_packets,sizeof(early_packets));
+        badger_bytes_store_u32(early_packets,REF_EARLY_EXPORT_MAGIC);
+#endif
         idle_polls = rx_summaries = 0u;
         badger_bytes_store_u32(ref_detail, REF_MAGIC);
         badger_bytes_copy(session, nonce, 13u);
@@ -192,6 +199,14 @@ void ref_run(const uint8_t nonce[16]) {
         badger_bytes_zero(ref_detail+REF_WINDOW_BASE,REF_TRACE_BYTES-REF_WINDOW_BASE);
         badger_bytes_copy(ref_detail+REF_WINDOW_BASE,window,sizeof(window));
         badger_bytes_store_u32(ref_detail+4u,4u);
+        ok = 1;
+    }
+#endif
+#if CLEAN_RX_HT_EARLY_FIFO
+    else if (nonce[14] == 5u && !active && badger_bytes_equal(session,nonce,13u)) {
+        badger_bytes_zero(ref_detail+REF_EARLY_EXPORT_BASE,REF_TRACE_BYTES-REF_EARLY_EXPORT_BASE);
+        badger_bytes_copy(ref_detail+REF_EARLY_EXPORT_BASE,early_packets,sizeof(early_packets));
+        badger_bytes_store_u32(ref_detail+4u,5u);
         ok = 1;
     }
 #endif
@@ -319,7 +334,32 @@ void ref_idle(void) {
                 badger_bytes_copy(nonce,session,13u);
                 nonce[13] = (uint8_t)badger_bytes_load_u32(ref_detail+24u);
                 uint32_t index = ref_stimulus_rx_index(packet,size,nonce);
-                if (index < CLEAN_HT_STIMULUS_COUNT) {
+                uint32_t early_index = ref_early_stimulus_rx_index(packet,size,nonce);
+#if CLEAN_RX_HT_EARLY_FIFO
+                if (ref_u16(packet+10u)&CLEAN_OBSERVER_EARLY_TAG) {
+                    uint32_t saved = badger_bytes_load_u32(early_packets+4u);
+                    badger_bytes_store_u32(early_packets+8u,
+                        badger_bytes_load_u32(early_packets+8u)+1u);
+                    if (saved < REF_EARLY_EXPORT_SLOTS && size <= 18u+CLEAN_HT_STIMULUS_MPDU) {
+                        uint8_t *r = early_packets+REF_EARLY_EXPORT_HEADER+saved*REF_EARLY_EXPORT_RECORD;
+                        badger_bytes_store_u32(r,size);
+                        badger_bytes_store_u32(r+4u,badger_bytes_load_u32(ref_detail+60u));
+                        badger_bytes_store_u32(r+8u,early_index);
+                        badger_bytes_copy(r+12u,packet,size);
+                        badger_bytes_store_u32(early_packets+4u,saved+1u);
+                    } else badger_bytes_store_u32(early_packets+12u,
+                        badger_bytes_load_u32(early_packets+12u)+1u);
+                }
+#endif
+                if (early_index < CLEAN_HT_STIMULUS_COUNT) {
+                    uint32_t mask = badger_bytes_load_u32(ref_detail+REF_EARLY_RX_MASK);
+                    if (mask&(1u<<early_index))
+                        badger_bytes_store_u32(ref_detail+REF_EARLY_RX_DUPLICATES,
+                            badger_bytes_load_u32(ref_detail+REF_EARLY_RX_DUPLICATES)+1u);
+                    badger_bytes_store_u32(ref_detail+REF_EARLY_RX_MASK,mask|(1u<<early_index));
+                    badger_bytes_store_u32(ref_detail+REF_EARLY_RX_COUNT,
+                        badger_bytes_load_u32(ref_detail+REF_EARLY_RX_COUNT)+1u);
+                } else if (index < CLEAN_HT_STIMULUS_COUNT) {
 #if REF_OBSERVER_PAUSE
                     if (index == 1u && !badger_bytes_load_u32(ref_detail+REF_FIFO_PAUSE_STATE)) {
                         pause_started = ref_now();
@@ -346,18 +386,19 @@ void ref_idle(void) {
             uint32_t length = size-18u, count = badger_bytes_load_u32(ref_detail+68u);
             uint32_t identity = ref_u16(packet+10u);
             uint32_t advanced = identity & CLEAN_OBSERVER_ADVANCE_TAG;
-            identity &= ~CLEAN_OBSERVER_ADVANCE_TAG;
+            uint32_t early = identity & CLEAN_OBSERVER_EARLY_TAG;
+            identity &= ~(CLEAN_OBSERVER_ADVANCE_TAG|CLEAN_OBSERVER_EARLY_TAG);
             if (length > REF_SAMPLE_MPDU_BYTES) {
                 badger_bytes_store_u32(ref_detail+72u,badger_bytes_load_u32(ref_detail+72u)+1u);
                 return;
             }
-            uint32_t selected = ref_sample_slot(ref_detail+REF_SAMPLE_BASE,count,length,identity,advanced);
+            uint32_t selected = ref_sample_slot(ref_detail+REF_SAMPLE_BASE,count,length,identity,advanced|early);
             if (selected < REF_SAMPLES) {
                 uint8_t *sample = ref_detail+REF_SAMPLE_BASE+selected*REF_SAMPLE_BYTES;
                 badger_bytes_store_u32(sample,length);
                 badger_bytes_store_u32(sample+4u,identity);
                 badger_bytes_store_u32(sample+8u,packet[16] |
-                    (advanced ? REF_ADVANCED_SAMPLE : 0u));
+                    (advanced ? REF_ADVANCED_SAMPLE : 0u) | (early ? REF_EARLY_SAMPLE : 0u));
                 badger_bytes_store_u32(sample+12u,diag_crc32(packet+18u,length-4u));
                 badger_bytes_copy(sample+16u,packet+18u,length);
                 if (selected == count) badger_bytes_store_u32(ref_detail+68u,count+1u);

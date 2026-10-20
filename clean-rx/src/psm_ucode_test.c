@@ -563,8 +563,10 @@ static void stream_stall(void) {
         if (reasons[fault] == 1u)
             assert(copy[44] == CLEAN_STREAM_STALL_COUNT && copy[47] >= CLEAN_STREAM_STALL_US && copy[45]);
         if (reasons[fault] == 5u) assert(copy[45] == 0u);
-        uint16_t expected = reasons[fault] == 1u && CLEAN_RX_HT_COPY_STREAM_REARM >= 4 ?
-            (uint16_t)((0x2802u & ~0x3fc0u) | ((0x83u<<6u)&0x3fc0u)) : 0x2802u;
+        uint16_t expected = reasons[fault] == 1u && CLEAN_RX_HT_COPY_STREAM_REARM >= 4 &&
+            !CLEAN_RX_HT_COPY_SCOPE_NO_REPLAY ?
+            (uint16_t)((0x2802u & ~0x3fc0u) |
+                ((CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD<<6u)&0x3fc0u)) : 0x2802u;
         if (reasons[fault] == 1u && CLEAN_RX_HT_COPY_SCOPE >= 2) expected &= (uint16_t)~3u;
         assert(r[0x1004u] == expected && copy[50] == expected);
         for (uint32_t i = 0u; i < 4u; ++i) assert(r[0x1780u+i] == 0x3500u+i);
@@ -2155,6 +2157,34 @@ static void passive_early_snapshot(void) {
         else assert(!memcmp(before,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(before)));
     }
     puts("PSM early snapshot: every supported length, odd tails, control SHM/register preservation, stale-copy rejection and single-to-multi priority pass");
+#if CLEAN_RX_HT_EARLY_FIFO
+    for (uint32_t fault = 0u; fault < 5u; ++fault) {
+        early_snapshot_seed(r,170u);
+        r[CLEAN_SHM_FRAME+1u] = 0x5e00u;
+        r[CLEAN_SHM_FRAME+2u] = 0x0f03u;
+        events = 1u<<6u;
+        assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u);
+        assert(r[CLEAN_OBSERVER_EARLY_SHM] == 1u &&
+            r[CLEAN_OBSERVER_EARLY_SHM+10u] == 2u);
+        r[CLEAN_OBSERVER_EARLY_SHM+13u] = fault == 1u ? 0u : fault == 3u ? 2u : 1u;
+        uint16_t retained[CLEAN_OBSERVER_EARLY_WORDS];
+        memcpy(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained));
+        r[CLEAN_OBSERVER_PENDING] = fault == 4u ? 0u : 2u;
+        r[CLEAN_OBSERVER_EPOCH] = fault == 2u ? 9u : 10u;
+        r[CLEAN_OBSERVER_PROGRESS] = 0u;
+        r[0x1780u] = 1u;
+        r[CLEAN_SHM_FRAME+4u] = 0x7100u;
+        assert(receive_run(r,&events,RX_COMPLETE,&steps) == 262u);
+        if (!fault) {
+            assert(r[CLEAN_OBSERVER_EARLY_SHM] == 2u &&
+                r[CLEAN_OBSERVER_EARLY_SHM+1u] == 10u &&
+                !r[CLEAN_OBSERVER_EARLY_SHM+13u] &&
+                r[CLEAN_OBSERVER_EARLY_SHM+CLEAN_OBSERVER_EARLY_HEADER] == 0x7100u);
+        } else assert(!memcmp(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained)));
+        assert(r[0x1782u] == 0x1234u && r[0x1783u] == 0x5678u);
+    }
+    puts("PSM early FIFO: acknowledged new epochs recycle; missing/stale ACK, same epoch and absent owner preserve retained bytes");
+#endif
 #if CLEAN_RX_HT_ADVANCE
     for (uint32_t order = 0u; order < 2u; ++order)
     for (uint32_t fault = 0u; fault < 8u; ++fault) {
@@ -2333,7 +2363,18 @@ static void passive_early_snapshot(void) {
         if (fault == 5u) r[CLEAN_OBSERVER_SECOND_SHM] = 7u;
         uint16_t retained[CLEAN_OBSERVER_EARLY_RETAIN_WORDS];
         memcpy(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained));
-        assert(psm_run(r,0,abort ? OBSERVER_EXIT_ABORT : OBSERVER_SECOND) == (abort ? 266u : 198u));
+        int quarantined = CLEAN_RX_HT_COPY_SCOPE_REPLAY_FIELD != 0x83u && fault >= 3u;
+        uint16_t length_rejects = r[0x7a9u];
+        assert(psm_run(r,0,abort ? OBSERVER_EXIT_ABORT : OBSERVER_SECOND) ==
+            (abort || quarantined ? 266u : 198u));
+        if (!abort && quarantined) {
+            if (r[CLEAN_OBSERVER_OUTCOME] != 4u ||
+                r[0x7a9u] != (uint16_t)(length_rejects+1u))
+                fprintf(stderr,"Quarantine fault %u: outcome %u, length rejects %u\n",
+                    fault,r[CLEAN_OBSERVER_OUTCOME],r[0x7a9u]);
+            assert(r[CLEAN_OBSERVER_OUTCOME] == 4u &&
+                r[0x7a9u] == (uint16_t)(length_rejects+1u));
+        }
         assert(r[CLEAN_OBSERVER_SECOND_SHM] == (fault == 5u ? 7u : 0u));
         assert(!memcmp(retained,r+CLEAN_OBSERVER_EARLY_SHM,sizeof(retained)));
         assert(r[0x600u] == 0xa55au);

@@ -7,6 +7,7 @@
 #include "ht20.h"
 #include "ht_observer.h"
 #include "observer_dma.h"
+#include "early_rx.h"
 #include "../../src/shared/bytes.h"
 #ifdef CLEAN_SDIO_SELF_TEST
 #include "sdio_test.h"
@@ -490,6 +491,11 @@ static int sdio_f2_send_frame(const volatile fw_frame_slot_t *slot, uint32_t cha
         if (pkt[17] == CLEAN_HT_AMPDU_PROBE_VERSION)
             pkt[16] = CLEAN_RX_HT20 | CLEAN_RX_UNSUPPORTED_PHY | (uint8_t)channel;
         else if (pkt[17]) pkt[16] |= CLEAN_RX_HT20;
+#if CLEAN_RX_HT_EARLY_FIFO
+        /* Early HT-SIG admission precedes the terminal PHY-status header. */
+        if (correlation&CLEAN_OBSERVER_EARLY_TAG)
+            pkt[16] = CLEAN_RX_UNSUPPORTED_PHY|(uint8_t)channel;
+#endif
 
         if (fragments > 1u) {
             pkt[18] = (uint8_t)mpdu_len;
@@ -910,6 +916,66 @@ static void station_observe_capture(void) {
         }
     }
 }
+
+#if CLEAN_RX_HT_EARLY_FIFO
+static int observer_receive_early(uint32_t rx_start) {
+    uint16_t owner = shm_read16(CLEAN_OBSERVER_EARLY_SHM);
+    if (!owner) return 1;
+    uint16_t header[CLEAN_OBSERVER_EARLY_HEADER];
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_EARLY_HEADER; ++i)
+        header[i] = shm_read16(CLEAN_OBSERVER_EARLY_SHM+i);
+    if (owner != header[0] || owner != shm_read16(CLEAN_OBSERVER_EARLY_SHM))
+        return 1;
+    if (header[13] == owner) return 1;
+    if (header[13]) return fail(0x8fu,CLEAN_OBSERVER_EARLY_SHM+13u,header[13]);
+    int length = clean_observer_early_length(header);
+    if (!length) return 1;
+    if (length < 0 || shm_read16(CLEAN_OBSERVER_SHM) != 1u ||
+        owner > shm_read16(CLEAN_OBSERVER_SHM+1u))
+        return fail(0x8fu,CLEAN_OBSERVER_EARLY_SHM,header[2]);
+    uint32_t total = MULTI->captured_frames;
+    int credit = clean_sdio_credit_available(total,rx_published_frames,FW_MAX_FRAMES);
+    if (credit < 0) return fail(0x8cu,FW_MULTI_ADDR,total-rx_published_frames);
+    if (!credit) return 1;
+    uint16_t prefix[CLEAN_OBSERVER_RECORD_WORDS];
+    for (uint32_t i = 0u; i < CLEAN_OBSERVER_RECORD_WORDS; ++i)
+        prefix[i] = shm_read16(CLEAN_OBSERVER_SHM+CLEAN_OBSERVER_HEADER_WORDS+
+            (owner-1u)*CLEAN_OBSERVER_RECORD_WORDS+i);
+    uint32_t index = total&(FW_MAX_FRAMES-1u);
+    volatile fw_frame_slot_t *slot = &MULTI->frames[index];
+    for (uint32_t i = 0u; i < (uint32_t)length; i += 2u) {
+        uint16_t word = shm_read16(CLEAN_OBSERVER_EARLY_SHM+
+            CLEAN_OBSERVER_EARLY_HEADER+i/2u);
+        slot->raw[8u+i] = (uint8_t)word;
+        if (i+1u < (uint32_t)length) slot->raw[9u+i] = (uint8_t)(word>>8u);
+    }
+    if (owner != shm_read16(CLEAN_OBSERVER_EARLY_SHM) ||
+        header[1] != shm_read16(CLEAN_OBSERVER_EARLY_SHM+1u)) return 1;
+    int decoded = clean_observer_early_decode(header,prefix,slot->raw);
+    if (decoded != length)
+        return fail(decoded == -2 ? 0x8eu : 0x8fu,CLEAN_OBSERVER_EARLY_SHM,header[2]);
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        uint16_t ta = shm_read16(CLEAN_OBSERVER_SHM+3u+i);
+        if (slot->raw[18u+2u*i] != (uint8_t)ta ||
+            slot->raw[19u+2u*i] != (uint8_t)(ta>>8u))
+            return fail(0x8fu,CLEAN_OBSERVER_EARLY_SHM,owner);
+    }
+    for (uint32_t i = 8u+(uint32_t)length; i < CLEAN_RAW_BYTES; ++i) slot->raw[i] = 0u;
+    slot->frame_index = (uint16_t)(total+1u);
+    slot->rxe_len = header[2];
+    slot->rxe_status1 = header[3];
+    slot->rxe_status2 = header[4];
+    slot->phy_status0 = header[12];
+    slot->rx_tick_hi = (uint16_t)((ARM_CYCLE_COUNTER-rx_start)>>16u);
+    slot->dma_rx_len = slot->dma_completed = slot->f2_received = slot->f2_sdpcm_len = 0u;
+    observer_capture_ids[index] = owner|CLEAN_OBSERVER_EARLY_TAG;
+    __asm__ volatile("dsb" ::: "memory");
+    MULTI->captured_frames = total+1u;
+    __asm__ volatile("dsb" ::: "memory");
+    shm_write16(CLEAN_OBSERVER_EARLY_SHM+13u,owner);
+    return 1;
+}
+#endif
 
 static int station_publish_capture(uint32_t channel) {
     uint32_t total = MULTI->captured_frames;
@@ -1927,6 +1993,9 @@ void cyw43_main(void) {
         uint32_t cmd = MBOX->host_cmd;
 #if CLEAN_RX_HT_OBSERVER_FIFO
         if (!station_publish_capture(channel)) break;
+#endif
+#if CLEAN_RX_HT_EARLY_FIFO
+        if (!observer_receive_early(rx_start)) break;
 #endif
 #if CLEAN_RX_AMPDU_DMA
         if (!station_mac && !ampdu_dma_receive(rx_start)) break;

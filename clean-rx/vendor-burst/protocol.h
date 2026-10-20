@@ -17,10 +17,19 @@
 #ifndef REF_VENDOR_MONITOR
 #define REF_VENDOR_MONITOR 0
 #endif
+#ifndef REF_MONITOR_POLL
+#define REF_MONITOR_POLL 0
+#endif
+_Static_assert(REF_MONITOR_POLL >= 0 && REF_MONITOR_POLL <= 2,
+    "Vendor monitor control-poll gate must select off, 100-ms or 10-ms service");
+#define REF_MONITOR_POLL_MS (REF_MONITOR_POLL == 2 ? 10u : 100u)
+_Static_assert(!REF_MONITOR_POLL || (REF_VENDOR_MONITOR && !REF_CLEAN_HANDOFF),
+    "Vendor control polling requires the fixed-source raw monitor");
 _Static_assert(REF_VENDOR_MONITOR == 0 || REF_VENDOR_MONITOR == 1,
     "Vendor monitor gate must be zero or one");
-_Static_assert(!REF_VENDOR_MONITOR || (REF_CLEAN_HANDOFF && !CLEAN_RX_HT_HANDOFF_GUARD),
-    "Vendor monitor requires the unchanged two-body handoff source");
+_Static_assert(!REF_VENDOR_MONITOR || (REF_CLEAN_STIMULUS && !CLEAN_RX_HT_HANDOFF_GUARD &&
+    !CLEAN_RX_HT_EARLY_FIFO),
+    "Vendor monitor requires an unchanged clean source without early FIFO publication");
 _Static_assert(REF_CLEAN_HANDOFF == 0 || REF_CLEAN_HANDOFF == 1,
     "Controlled handoff gate must be zero or one");
 _Static_assert(!REF_CLEAN_HANDOFF ||
@@ -57,6 +66,15 @@ _Static_assert(!REF_CLEAN_STIMULUS ||
 #define REF_STIMULUS_RX_MASK 40u
 #define REF_STIMULUS_RX_DUPLICATES 44u
 #define REF_STIMULUS_RX_INVALID 48u
+#define REF_EARLY_RX_COUNT (REF_COPY_FAULT_BASE+32u)
+#define REF_EARLY_RX_MASK (REF_EARLY_RX_COUNT+4u)
+#define REF_EARLY_RX_DUPLICATES (REF_EARLY_RX_COUNT+8u)
+#define REF_EARLY_EXPORT_BASE 128u
+#define REF_EARLY_EXPORT_MAGIC 0x31465245u
+#define REF_EARLY_EXPORT_HEADER 16u
+#define REF_EARLY_EXPORT_RECORD (12u+18u+CLEAN_HT_STIMULUS_MPDU)
+#define REF_EARLY_EXPORT_SLOTS (CLEAN_HT_STIMULUS_COUNT/3u)
+#define REF_EARLY_EXPORT_BYTES (REF_EARLY_EXPORT_HEADER+REF_EARLY_EXPORT_RECORD*REF_EARLY_EXPORT_SLOTS)
 _Static_assert(REF_STIMULUS_RECORD_BASE+CLEAN_HT_STIMULUS_COUNT*REF_STIMULUS_RECORD_BYTES <=
     REF_STIMULUS_PACKET_BASE &&
     REF_STIMULUS_PACKET_BASE+CLEAN_HT_STIMULUS_STORAGE <= 5888u,
@@ -200,7 +218,8 @@ static inline int ref_copy_scope_valid(const uint8_t *scope, const uint8_t *copy
         ref_u16(copy+2u) != ref_u16(early+2u) ||
         (ref_u16(copy+4u) != 1u && ref_u16(copy+4u) != 3u)) return 0;
     if (!commit) return !ref_u16(scope+2u) && ref_u16(copy+96u) == 2u &&
-        ref_stream_stall_valid(copy,early,6u);
+        ref_stream_stall_valid(copy,early,
+            CLEAN_RX_HT_COPY_SCOPE ? CLEAN_RX_HT_COPY_STREAM_REARM : 6u);
     if (commit < 17u || commit > 20u || ref_u16(scope+2u) != ref_u16(early+2u) ||
         ref_u16(copy+84u) != 1u || ref_u16(copy+86u) != ref_u16(early+2u) ||
         ref_u16(copy+72u) < 128u || !(ref_u16(copy+76u)&2u) ||
@@ -210,7 +229,8 @@ static inline int ref_copy_scope_valid(const uint8_t *scope, const uint8_t *copy
         ref_u16(copy+96u) != 1u) return 0;
     for (uint32_t n = 0u; n < 3u; ++n) {
         const uint8_t *s = scope+4u+52u*n;
-        if (ref_u16(s+10u) != CLEAN_SHM_FRAME+(n ? 64u : 0u) ||
+        if (ref_u16(s+10u) != CLEAN_SHM_FRAME+
+                (n && !(CLEAN_RX_HT_COPY_SCOPE && CLEAN_RX_HT_COPY_STREAM_REARM == 5) ? 64u : 0u) ||
             ref_u16(s+12u) != ref_u16(early+26u) ||
             (ref_u16(s+8u)&3u) != (n && mode >= 2u ? 0u : 2u)) return 0;
     }
@@ -268,6 +288,52 @@ static inline uint32_t ref_stimulus_rx_index(const uint8_t *packet, uint32_t siz
                            length)) return CLEAN_HT_STIMULUS_COUNT;
     return index;
 }
+static inline uint32_t ref_early_stimulus_rx_index(const uint8_t *packet, uint32_t size,
+                                                   const uint8_t nonce[14]) {
+    if (!CLEAN_RX_HT_EARLY_FIFO || !REF_CLEAN_STIMULUS || REF_CLEAN_HANDOFF ||
+        size != 18u+CLEAN_HT_STIMULUS_MPDU) return CLEAN_HT_STIMULUS_COUNT;
+    uint32_t identity = ref_u16(packet+10u);
+    uint32_t owner = identity&~CLEAN_OBSERVER_EARLY_TAG;
+    uint32_t sequence = ref_u16(packet+18u+22u)>>4u, index = sequence/2u;
+    uint8_t expected[CLEAN_HT_STIMULUS_STORAGE];
+    if (!(identity&CLEAN_OBSERVER_EARLY_TAG) || !owner || owner > CLEAN_OBSERVER_RECORDS ||
+        (sequence&1u) || index%3u != 2u || packet[15] || packet[17] ||
+        packet[16] != (CLEAN_RX_UNSUPPORTED_PHY|nonce[13]) ||
+        !clean_ht_stimulus_frame(expected,nonce,index) ||
+        !badger_bytes_equal(packet+18u,expected+CLEAN_HT_DATA_HEADER+10u,
+                           CLEAN_HT_STIMULUS_MPDU)) return CLEAN_HT_STIMULUS_COUNT;
+    return index;
+}
+static inline int ref_early_export_valid(const uint8_t *exported, const uint8_t nonce[14],
+                                         uint32_t captured, uint32_t *mask) {
+    uint32_t saved = badger_bytes_load_u32(exported+4u);
+    uint32_t total = badger_bytes_load_u32(exported+8u);
+    if (badger_bytes_load_u32(exported) != REF_EARLY_EXPORT_MAGIC ||
+        saved > REF_EARLY_EXPORT_SLOTS || total < saved ||
+        total-saved != badger_bytes_load_u32(exported+12u)) return 0;
+    uint32_t previous = 0u, seen = 0u;
+    for (uint32_t i = 0u; i < saved; ++i) {
+        const uint8_t *r = exported+REF_EARLY_EXPORT_HEADER+i*REF_EARLY_EXPORT_RECORD;
+        uint32_t size = badger_bytes_load_u32(r), ordinal = badger_bytes_load_u32(r+4u);
+        if (size != 18u+CLEAN_HT_STIMULUS_MPDU || ordinal <= previous ||
+            ordinal > captured) return 0;
+        const uint8_t *packet = r+12u;
+        if (ref_u16(packet) != size || ref_u16(packet+2u) != (uint16_t)~size ||
+            packet[4] != (uint8_t)(ordinal-1u) || packet[5] != 2u ||
+            packet[7] != 14u || packet[14] != 0x20u ||
+            ref_u16(packet+12u) != CLEAN_RX_PHASE_MAGIC) return 0;
+        uint32_t index = ref_early_stimulus_rx_index(r+12u,size,nonce);
+        if (index == CLEAN_HT_STIMULUS_COUNT ||
+            index != badger_bytes_load_u32(r+8u) || (seen&(1u<<index))) return 0;
+        seen |= 1u<<index; previous = ordinal;
+    }
+    for (uint32_t i = REF_EARLY_EXPORT_HEADER+saved*REF_EARLY_EXPORT_RECORD;
+         i < REF_EARLY_EXPORT_BYTES; ++i)
+        if (exported[i]) return 0;
+    *mask = seen;
+    return 1;
+}
+
 static inline uint32_t ref_handoff_rx_index(const uint8_t *packet, uint32_t size,
                                            const uint8_t nonce[14]) {
     if (!REF_CLEAN_HANDOFF || size < 18u+44u) return CLEAN_HT_STIMULUS_COUNT;
@@ -435,7 +501,12 @@ _Static_assert(REF_COPY_BASE+2u*CLEAN_OBSERVER_COPY_WORDS <= REF_COPY_FAULT_BASE
     "Receive-copy probe must not overlap controller-fault evidence");
 _Static_assert(REF_COPY_FAULT_BASE+32u <= REF_TRACE_BYTES,
     "Copy fault evidence must fit beyond the complete early SHM export");
+_Static_assert(REF_EARLY_RX_DUPLICATES+4u <= REF_TRACE_BYTES,
+    "Early delivery accounting must fit beyond all snapshot and fault records");
+_Static_assert(REF_EARLY_EXPORT_BASE+REF_EARLY_EXPORT_BYTES <= REF_TRACE_BYTES,
+    "Separate early-packet export must fit one full report");
 #define REF_ADVANCED_SAMPLE 0x100u
+#define REF_EARLY_SAMPLE 0x200u
 static inline int ref_copy_probe_valid(const uint8_t *copy, const uint8_t *early,
                                        const uint8_t *second) {
     uint32_t owner = ref_u16(copy), phase = ref_u16(copy+4u);
@@ -460,6 +531,9 @@ static inline uint32_t ref_sample_slot(const uint8_t *samples, uint32_t count,
     for (uint32_t i = 0u; i < count; ++i) {
         const uint8_t *saved = samples+i*REF_SAMPLE_BYTES;
         if (badger_bytes_load_u32(saved) != length) continue;
+        if (badger_bytes_load_u32(saved+8u)&REF_EARLY_SAMPLE)
+            return (advanced&CLEAN_OBSERVER_EARLY_TAG) &&
+                identity > badger_bytes_load_u32(saved+4u) ? i : REF_SAMPLES;
         if ((badger_bytes_load_u32(saved+8u)&REF_ADVANCED_SAMPLE) || !identity)
             return REF_SAMPLES;
         return i;
@@ -589,6 +663,8 @@ static inline const char *ref_early_reason(const uint8_t *record, const uint8_t 
     if (psdu < hint-2u) return "inconsistent_body_geometry";
     if (psdu <= ((hint+1u)&~3u)) return "single_body_good_hint";
     if (ref_u16(early) == id) return "retained_multi_candidate";
+    if (CLEAN_RX_HT_EARLY_FIFO && ref_u16(early) && ref_u16(early+20u) == 2u)
+        return "fifo_candidate_not_in_final_snapshot";
     if (ref_u16(early) && ref_u16(early) < id && ref_u16(early+20u) == 2u)
         return "prior_multi_already_retained";
     return "eligible_not_retained";
@@ -646,6 +722,26 @@ static inline int ref_early_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u
         badger_bytes_equal(early+14u,record+12u,6u) &&
         badger_bytes_equal(mpdu+10u,mac,6u) && (mpdu[0]&12u) == 8u &&
         diag_crc32(mpdu,length-4u) == badger_bytes_load_u32(mpdu+length-4u);
+}
+
+static inline int ref_early_f2_correlated(const uint8_t *log, const uint8_t *early,
+                                         const uint8_t *sample, const uint8_t mac[6],
+                                         uint32_t channel) {
+#if CLEAN_RX_HT_EARLY_FIFO
+    uint32_t length = badger_bytes_load_u32(sample);
+    if (!ref_early_correlated(log,early,mac) || ref_u16(early+20u) != 2u ||
+        ref_u16(early+26u) != ref_u16(early) ||
+        length != ref_u16(early+4u)-6u ||
+        badger_bytes_load_u32(sample+4u) != ref_u16(early) ||
+        badger_bytes_load_u32(sample+8u) != (REF_EARLY_SAMPLE|CLEAN_RX_UNSUPPORTED_PHY|channel))
+        return 0;
+    const uint8_t *body = early+2u*CLEAN_OBSERVER_EARLY_HEADER;
+    return badger_bytes_equal(sample+16u,body,length) &&
+        diag_crc32(body,length-4u) == badger_bytes_load_u32(sample+12u);
+#else
+    (void)log; (void)early; (void)sample; (void)mac; (void)channel;
+    return 0;
+#endif
 }
 
 static inline int ref_pair_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u],
