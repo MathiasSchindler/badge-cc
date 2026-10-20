@@ -6,6 +6,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 
 typedef struct {
     uint32_t state[8];
@@ -88,7 +91,11 @@ static void update(sha256 *hash, const unsigned char *bytes, size_t length) {
 }
 
 static int hash_file(const char *path) {
+#ifdef _WIN32
+    int fd = open(path, O_RDONLY | O_BINARY);
+#else
     int fd = open(path, O_RDONLY | O_NONBLOCK);
+#endif
     if (fd < 0) {
         fprintf(stderr, "badge-sha256: cannot open %s: %s\n", path, strerror(errno));
         return 0;

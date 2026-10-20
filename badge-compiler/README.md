@@ -103,6 +103,51 @@ new provenance appear identical.
 Physical comparison tools replace both selected badge applications; they are
 separate from the offline build and test commands above.
 
+### Native Windows host build
+
+The owned tools can also be built with Python 3.9+ (standard library only)
+and a native Clang/GCC-compatible C compiler, without Make, Bash, WSL,
+the Pico SDK, or LLVM target utilities:
+
+```powershell
+python badge-compiler\scripts\build.py
+python -m unittest discover -s badge-compiler\tests -p test_native_tools.py -v
+python pico2w\tools\build.py all --toolchain owned --owned-tools badge-compiler\build
+```
+
+Run these from the repository root. `--cc` selects the native host compiler
+for the first command; the test runner uses `CC` or `cc`.
+The Python builder produces all 13 normal tools and a `native-tools.json`
+manifest under `badge-compiler/build/`. On Windows, the tools have `.exe`
+suffixes. The existing POSIX Make/shell workflows remain available; this
+entry point does not port the full shell/oracle test suite to Windows.
+
+The host portability layer uses Win32 file identities instead of the CRT's
+zero inode values, handles both path separators, retains output-alias
+protection, and replaces completed temporary outputs without deleting the
+old destination first. Binary I/O preserves CR/LF and Ctrl-Z bytes.
+Object manifest serialization uses a checked temporary stream on Windows
+where `open_memstream` is unavailable. The POSIX implementations are retained.
+Windows paths currently use the ANSI Win32 APIs and the existing `PATH_MAX`
+bound; arbitrary Unicode/long-path support is not qualified.
+
+Portable regressions cover nested/include-once headers and hard links,
+repeated output replacement, binary SHA-256, object manifest round trips,
+assembler/linker/extractor alias rejection, the C-to-object pipeline, and
+existing IR-pipeline, cost-model and ELF-reader C tests. A symlink test reports
+an explicit skip if Windows does not grant symlink creation.
+
+The complete headless Pico 2 W target builds through all owned target stages
+and produces a structurally checked Arm Secure UF2. The target has no libc,
+runtime libraries, SDK or external firmware dependencies; only the native
+compiler tools use the host C library. LLVM is used independently to inspect
+the owned ELF and compare extracted binary bytes, not as a hidden pipeline
+stage. Physical Pico boot/USB behavior and generated-code execution still
+require separate qualification. See the
+[standalone Pico guide](../pico2w/README.md#owned-compiler).
+Independent LLVM linking of the owned Pico objects produces a byte-identical
+firmware binary, in addition to the ELF-extraction comparison.
+
 The [maze compiler comparison](../docs/tilt-maze.md#compiler-comparison)
 records the separate playable two-badge experiment, output-size findings,
 opt-in deterministic benchmark and physical drawing timings.

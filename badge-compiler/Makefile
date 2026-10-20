@@ -55,6 +55,8 @@ test-datasheet-qualification: build/compiler_collector_test
 	node --test tests/datasheet_qualification_test.mjs tests/compiler-compare.test.mjs
 all: build/elf2bin build/badge-elf-info build/badge-cpp build/badge-parse build/badge-sema build/badge-ir build/badge-opt build/badge-ir-metrics build/badge-codegen build/badge-object build/badge-asm build/badge-link build/badge-sha256
 
+$(TEST_BINS) build/elf2bin build/badge-cpp build/badge-parse build/badge-sema build/badge-ir build/badge-opt build/badge-ir-metrics build/badge-codegen build/badge-object build/badge-asm build/badge-link: src/host_platform.h
+
 test-pipeline-stages:
 	node --test tests/pipeline-stages.test.mjs
 

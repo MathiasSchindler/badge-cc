@@ -97,8 +97,17 @@ static void lk_alias(linker_t *l,const char *input,const char *output) {
 static const char *lk_destination(linker_t *l,const char *path) {
     size_t length=strlen(path); if(length>4096) lk_error(l,"output path exceeds limit");
     char *work=lk_allocate(l,length+1); memcpy(work,path,length+1);
-    char *slash=strrchr(work,'/'); const char *base=work,*parent=".";
+    char *slash=(char *)host_last_separator(work); const char *base=work,*parent=".";
     if(slash!=NULL) { *slash=0; base=slash+1; parent=slash==work?"/":work; }
+#ifdef _WIN32
+    char drive_root[4];
+    if(length>=3 && slash==work+2 && work[1]==':') {
+        drive_root[0]=work[0]; drive_root[1]=':'; drive_root[2]='/'; drive_root[3]=0;
+        parent=drive_root;
+    }
+    if(*base && (base[strlen(base)-1]=='.' || base[strlen(base)-1]==' '))
+        lk_error(l,"ambiguous Windows output filename");
+#endif
     if(!*base || strcmp(base,".")==0 || strcmp(base,"..")==0) lk_error(l,"invalid output filename");
     l->temporary=(unsigned char *)realpath(parent,NULL);
     if(l->temporary==NULL) lk_error(l,"cannot resolve output directory: %s",strerror(errno));
@@ -845,7 +854,7 @@ int main(int argc,char **argv) {
     }
     if(l->map!=NULL) {
         const char *a_path=lk_destination(l,l->output),*b_path=lk_destination(l,l->map);
-        if(strcmp(a_path,b_path)==0) lk_error(l,"ELF/map output alias");
+        if(host_path_equal(a_path,b_path)) lk_error(l,"ELF/map output alias");
         struct stat a,b;
         if(stat(l->output,&a)==0 && stat(l->map,&b)==0 && a.st_dev==b.st_dev && a.st_ino==b.st_ino) lk_error(l,"ELF/map output alias");
     }

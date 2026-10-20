@@ -7,6 +7,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "host_platform.h"
+#ifdef _WIN32
+#include <fcntl.h>
+#endif
 
 static int host_write_file(const char *tool, const char *path,
                            const unsigned char *bytes, size_t length) {
@@ -34,6 +38,16 @@ static int host_write_file(const char *tool, const char *path,
         free(temporary);
         return 0;
     }
+#ifdef _WIN32
+    if (_setmode(fd, _O_BINARY) == -1) {
+        fprintf(stderr, "%s: cannot set binary output mode: %s\n", tool, strerror(errno));
+        close(fd);
+        if (unlink(temporary) != 0)
+            fprintf(stderr, "%s: cannot remove temporary output: %s\n", tool, strerror(errno));
+        free(temporary);
+        return 0;
+    }
+#endif
     FILE *file = fdopen(fd, "wb");
     int ok = 0;
     if (file == NULL) {
@@ -44,7 +58,16 @@ static int host_write_file(const char *tool, const char *path,
         if (fclose(file) != 0) ok = 0;
         if (!ok) fprintf(stderr, "%s: failed to write or close output\n", tool);
     }
-    if (ok && rename(temporary, path) != 0) {
+    int replaced = 1;
+    if (ok) {
+#ifdef _WIN32
+        replaced = MoveFileExA(temporary, path, MOVEFILE_REPLACE_EXISTING) != 0;
+        if (!replaced) host_windows_error();
+#else
+        replaced = rename(temporary, path) == 0;
+#endif
+    }
+    if (!replaced) {
         fprintf(stderr, "%s: cannot replace output %s: %s\n", tool, path, strerror(errno));
         ok = 0;
     }

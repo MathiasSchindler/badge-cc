@@ -17,6 +17,7 @@ Optional SDK-based applications explore Bluetooth and Wi-Fi.
 | [src/](src/) | Badge firmware, shared utilities, hardware drivers, games, radio experiments and host tools. |
 | [docs/](docs/) | Hardware specifications, application guides, protocols and physical test results. |
 | [tests/](tests/) | Additional host-side firmware tests. |
+| [pico2w/](pico2w/) | Standalone, no-SDK/no-libc Pico 2 W runtime and headless USB-report target, with its own build, tests and documentation. |
 | [clean-rx/](clean-rx/badge/README.md) | Alternative source-built CYW43439 firmware and an opt-in, no-libc badge host; cold beacon reception and Function-2 delivery tested on hardware. |
 
 ## Highlights

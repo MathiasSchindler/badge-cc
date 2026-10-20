@@ -624,7 +624,12 @@ static int bo_emit_manifest(const bo_object_t *o, unsigned char **bytes, size_t 
     for(size_t k=0;k<o->symbol_count;++k) estimate+=strlen(o->symbols[k].name)*2+128;
     estimate+=o->relocation_count*64;
     if(estimate>BO_MAX_FILE) return bo_error("manifest exceeds file limit");
-    char *text=NULL; size_t size=0; FILE *f=open_memstream(&text,&size);
+    char *text=NULL; size_t size=0;
+#ifdef _WIN32
+    FILE *f=tmpfile();
+#else
+    FILE *f=open_memstream(&text,&size);
+#endif
     if(f==NULL) return bo_error("cannot allocate manifest output stream");
     int ok=fputs("badge-object-v1\n",f)>=0;
     for(size_t k=0;ok && k<o->section_count;++k) {
@@ -647,6 +652,19 @@ static int bo_emit_manifest(const bo_object_t *o, unsigned char **bytes, size_t 
         ok=fprintf(f,"reloc %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 "\n",
             r->section,r->offset,r->type,r->symbol)>=0;
     }
+#ifdef _WIN32
+    long end=ok && !fflush(f)?ftell(f):-1;
+    if(end<0 || (unsigned long)end>BO_MAX_FILE || fseek(f,0,SEEK_SET)!=0) ok=0;
+    if(ok) {
+        size=(size_t)end;
+        text=malloc(size+1);
+        if(text==NULL) ok=0;
+        else {
+            ok=fread(text,1,size,f)==size;
+            text[size]='\0';
+        }
+    }
+#endif
     if(fclose(f)!=0) ok=0;
     if(!ok) { free(text); return bo_error("failed to serialize manifest"); }
     *bytes=(unsigned char *)text; *length=size; return 1;
