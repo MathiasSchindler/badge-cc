@@ -6,6 +6,107 @@
 #include "../src/ht20.h"
 #include "../../src/platform/badger/graphics.h"
 
+static void completed_dma_probe(void) {
+    uint32_t trace[CLEAN_OBSERVER_DMA_BYTES/4u];
+    uint8_t buffer[CLEAN_D11_BUFFER_BYTES] = {0};
+    uint8_t nonce[14];
+    for (uint32_t i = 0u; i < sizeof(nonce); ++i) nonce[i] = (uint8_t)(i+1u);
+    nonce[11] = 1u;
+    const uint32_t context[7] = {3u,4u,5u,
+        (CLEAN_D11_RING_ADDR+5u*16u)&0x1fffu,7u,0x10008u,14u};
+    uint8_t early[4] = {8u,0u,1u,0u};
+    clean_observer_dma_init(trace);
+    assert(trace[0] == CLEAN_OBSERVER_DMA_MAGIC && trace[1] == 5u);
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(!trace[2] && !trace[3]);
+    memcpy(buffer+sizeof(buffer)-13u,nonce,13u);
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(!trace[2] && !trace[3]);
+    for (uint32_t slot = 0u; slot < CLEAN_OBSERVER_DMA_SLOTS; ++slot) {
+        memset(buffer,0,sizeof(buffer));
+        uint32_t offset = slot ? sizeof(buffer)-sizeof(nonce) : 0u;
+        memcpy(buffer+offset,nonce,sizeof(nonce));
+        clean_observer_dma_record(trace,buffer,nonce,context);
+        assert(trace[2] == slot+1u && trace[3] == slot+1u);
+        const uint8_t *record = (const uint8_t *)trace+CLEAN_OBSERVER_DMA_HEADER+
+            slot*CLEAN_OBSERVER_DMA_RECORD;
+        assert(!memcmp(record,context,sizeof(context)));
+        uint32_t start = badger_bytes_load_u32(record+28u)>>16u;
+        assert(start == (slot ? sizeof(buffer)-CLEAN_OBSERVER_DMA_PREFIX : 0u));
+        assert(ref_u16(record+28u) == ref_u16(buffer));
+        assert(!memcmp(record+32u,buffer+start,CLEAN_OBSERVER_DMA_PREFIX));
+    }
+    uint32_t saved[sizeof(trace)/sizeof(trace[0])];
+    memcpy(saved,trace,sizeof(trace));
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(trace[2] == CLEAN_OBSERVER_DMA_SLOTS && trace[3] == CLEAN_OBSERVER_DMA_SLOTS+1u);
+    assert(!memcmp((const uint8_t *)saved+CLEAN_OBSERVER_DMA_HEADER,
+        (const uint8_t *)trace+CLEAN_OBSERVER_DMA_HEADER,sizeof(trace)-CLEAN_OBSERVER_DMA_HEADER));
+    assert(ref_dma_probe_valid((const uint8_t *)trace,early));
+    for (uint32_t fault = 0u; fault < 16u; ++fault) {
+        uint32_t broken[sizeof(trace)/sizeof(trace[0])];
+        memcpy(broken,trace,sizeof(trace));
+        if (fault == 0u) broken[0] ^= 1u;
+        uint32_t *r = broken+CLEAN_OBSERVER_DMA_HEADER/4u;
+        if (fault == 1u) broken[1] = 1u;
+        if (fault == 2u) broken[2] = 3u;
+        if (fault == 3u) broken[3] = 0u;
+        if (fault == 4u) r[1] = 32u;
+        if (fault == 5u) r[2] = 32u;
+        if (fault == 6u) r[3] ^= 1u;
+        if (fault == 7u) r[3] = (CLEAN_D11_RING_ADDR+4u*16u)&0x1fffu;
+        if (fault == 8u) r[5] ^= 1u;
+        if (fault == 9u) r[5] ^= 0x10000u;
+        if (fault == 10u) r[6] = 0u;
+        if (fault == 11u) r[7] = (CLEAN_D11_BUFFER_BYTES-CLEAN_OBSERVER_DMA_PREFIX+1u)<<16u;
+        if (fault == 12u) ++broken[19];
+        if (fault == 13u) broken[28] = broken[26]+1u;
+        if (fault == 14u) broken[29] = broken[27]+1u;
+        if (fault == 15u) r[6] |= 0x10000u;
+        assert(!ref_dma_probe_valid((const uint8_t *)broken,early));
+    }
+    trace[30] = 0x10000000u;
+    assert(!ref_dma_probe_valid((const uint8_t *)trace,early));
+    trace[30] = 0u; trace[31] = 1u;
+    assert(!ref_dma_probe_valid((const uint8_t *)trace,early));
+    trace[31] = 0u;
+    uint32_t *frozen = trace+CLEAN_OBSERVER_DMA_HEADER/4u;
+    frozen[3] = (CLEAN_D11_RING_ADDR+4u*16u)&0x1fffu;
+    frozen[6] = 0x80000003u;
+    assert(ref_dma_probe_valid((const uint8_t *)trace,early));
+    memset(buffer,0,sizeof(buffer));
+    buffer[6u] = 0x88u;
+    memcpy(buffer+32u,nonce,sizeof(nonce));
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(trace[2] == 2u && trace[19] == 1u);
+    uint32_t *priority = trace+(CLEAN_OBSERVER_DMA_HEADER+CLEAN_OBSERVER_DMA_RECORD)/4u;
+    assert(priority[6]&0x40000000u);
+    assert(ref_dma_probe_valid((const uint8_t *)trace,early));
+    uint32_t retained[CLEAN_OBSERVER_DMA_RECORD/4u];
+    memcpy(retained,priority,sizeof(retained));
+    buffer[6u] = 8u;
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(!memcmp(retained,priority,sizeof(retained)));
+    buffer[6u] = 0x88u;
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(trace[19] == 2u && !memcmp(retained,priority,sizeof(retained)));
+    badger_bytes_store_u32(buffer+6u+166u,clean_mac_fcs(buffer+6u,166u));
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(trace[26] == 3u && trace[28] == 1u && !trace[27] && !trace[29]);
+    buffer[28u] = 0x10u;
+    badger_bytes_store_u32(buffer+6u+294u,clean_mac_fcs(buffer+6u,294u));
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(trace[27] == 1u && trace[29] == 1u && (priority[6]&0x20000000u));
+    assert(ref_dma_probe_valid((const uint8_t *)trace,early));
+    memcpy(retained,priority,sizeof(retained));
+    buffer[6u+297u] ^= 1u;
+    clean_observer_dma_record(trace,buffer,nonce,context);
+    assert(trace[27] == 2u && trace[29] == 1u && !memcmp(retained,priority,sizeof(retained)));
+    clean_observer_dma_init(trace);
+    assert(!trace[2] && !trace[3]);
+    for (uint32_t i = 4u; i < sizeof(trace)/sizeof(trace[0]); ++i) assert(!trace[i]);
+}
+
 static void monitor_encoding(void) {
     uint32_t fcs_masks[4] = {1u, 2u, 4u, 4u};
     assert(ref_monitor_qualified(fcs_masks));
@@ -87,6 +188,223 @@ static void monitor_encoding(void) {
 
 static void window_encoding(void) {
     monitor_encoding();
+    uint8_t handoff[2u*CLEAN_OBSERVER_HANDOFF_HEADER+
+        2u*CLEAN_OBSERVER_HANDOFF_RECORDS*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS] = {0};
+    uint8_t early[32] = {0};
+    assert(!ref_stream_defer_verified(handoff,early));
+    handoff[0] = early[0] = 1u; handoff[2] = early[2] = 9u; handoff[4] = 7u;
+    assert(ref_stream_defer_verified(handoff,early));
+    uint8_t phase_copy[2u*CLEAN_OBSERVER_COPY_WORDS] = {1u,0u,9u,0u,3u,0u,3u};
+    assert(ref_stream_phase_verified(handoff,early,phase_copy,1u));
+    assert(!ref_stream_phase_verified(handoff,early,phase_copy,0u));
+    assert(!ref_stream_phase_verified(handoff,early,phase_copy,2u));
+    assert(!ref_stream_phase_verified(handoff,early,phase_copy,3u));
+    assert(!ref_stream_phase_verified(handoff,early,phase_copy,4u));
+    phase_copy[20u] = 176u;
+    assert(ref_stream_phase_verified(handoff,early,phase_copy,3u));
+    phase_copy[26u] = 2u;
+    phase_copy[72u] = 128u; phase_copy[76u] = 2u;
+    phase_copy[84u] = 1u; phase_copy[86u] = 9u;
+    assert(ref_stream_phase_verified(handoff,early,phase_copy,2u));
+    assert(!ref_stream_phase_verified(handoff,early,phase_copy,1u));
+    for (uint32_t fault = 0u; fault < 10u; ++fault) {
+        uint8_t changed[sizeof(phase_copy)];
+        memcpy(changed,phase_copy,sizeof(changed));
+        if (fault == 0u) changed[0] = 2u;
+        if (fault == 1u) changed[2] = 10u;
+        if (fault == 2u) changed[4] = 0u;
+        if (fault == 3u) changed[6] = 2u;
+        if (fault == 4u) handoff[66u] = 2u;
+        if (fault == 5u) handoff[18u] = 2u;
+        if (fault == 6u) changed[72u] = 127u;
+        if (fault == 7u) changed[76u] = 0u;
+        if (fault == 8u) changed[84u] = 0u;
+        if (fault == 9u) changed[86u] = 10u;
+        assert(!ref_stream_phase_verified(handoff,early,changed,2u));
+        handoff[66u] = handoff[18u] = 0u;
+    }
+    assert(!ref_stream_phase_verified(handoff,early,phase_copy,3u));
+    phase_copy[20u] = 48u; phase_copy[21u] = 1u;
+    phase_copy[72u] = 0u; phase_copy[73u] = 1u;
+    assert(ref_stream_phase_verified(handoff,early,phase_copy,3u));
+    phase_copy[72u] = 255u; phase_copy[73u] = 0u;
+    assert(!ref_stream_phase_verified(handoff,early,phase_copy,3u));
+    uint8_t rearm_copy[108] = {1u,0u,9u,0u,3u,0u,4u};
+    rearm_copy[20u] = 176u;
+    rearm_copy[26u] = rearm_copy[76u] = rearm_copy[100u] = 2u;
+    rearm_copy[72u] = 128u; rearm_copy[98u] = 130u;
+    rearm_copy[84u] = 1u; rearm_copy[86u] = 9u;
+    rearm_copy[90u] = rearm_copy[102u] = (uint8_t)CLEAN_SHM_FRAME;
+    rearm_copy[91u] = rearm_copy[103u] = CLEAN_SHM_FRAME>>8u;
+    early[26u] = rearm_copy[92u] = rearm_copy[104u] = 42u;
+    early[27u] = rearm_copy[93u] = rearm_copy[105u] = 1u;
+    assert(ref_stream_phase_verified(handoff,early,rearm_copy,2u));
+    assert(ref_stream_rearm_verified(rearm_copy,early,1u));
+    assert(ref_stream_rearm_verified(rearm_copy,early,2u));
+    assert(!ref_stream_rearm_verified(rearm_copy,early,0u));
+    assert(!ref_stream_rearm_verified(rearm_copy,early,3u));
+    for (uint32_t fault = 0u; fault < 15u; ++fault) {
+        uint8_t changed[sizeof(rearm_copy)];
+        memcpy(changed,rearm_copy,sizeof(changed));
+        if (fault == 0u) changed[0u] = 2u;
+        if (fault == 1u) changed[2u] = 10u;
+        if (fault == 2u) changed[4u] = 0u;
+        if (fault == 3u) changed[6u] = 3u;
+        if (fault == 4u) changed[84u] = 0u;
+        if (fault == 5u) changed[86u] = 10u;
+        if (fault == 6u) changed[88u] = 2u;
+        if (fault == 7u) changed[76u] = 0u;
+        if (fault == 8u) changed[100u] = 0u;
+        if (fault == 9u) changed[90u] ^= 1u;
+        if (fault == 10u) changed[102u] ^= 1u;
+        if (fault == 11u) changed[92u] ^= 1u;
+        if (fault == 12u) changed[104u] ^= 1u;
+        if (fault == 13u) changed[99u] = 255u;
+        if (fault == 14u) changed[72u] = 127u;
+        assert(!ref_stream_rearm_verified(changed,early,1u));
+        assert(!ref_stream_rearm_verified(changed,early,2u));
+    }
+    uint8_t stall_copy[108];
+    memcpy(stall_copy,rearm_copy,sizeof(stall_copy));
+    stall_copy[6u] = 5u;
+    stall_copy[88u] = CLEAN_STREAM_STALL_COUNT;
+    stall_copy[90u] = 100u; stall_copy[91u] = 0u;
+    stall_copy[92u] = 200u; stall_copy[93u] = 0u;
+    stall_copy[94u] = CLEAN_STREAM_STALL_US; stall_copy[95u] = 0u;
+    stall_copy[96u] = 1u; stall_copy[97u] = 0u;
+    assert(ref_stream_phase_verified(handoff,early,stall_copy,2u));
+    stall_copy[20u] = 62u;
+    assert(ref_stream_phase_verified(handoff,early,stall_copy,2u));
+    stall_copy[20u] = 68u;
+    assert(ref_stream_phase_verified(handoff,early,stall_copy,2u));
+    stall_copy[20u] = 49u;
+    assert(!ref_stream_phase_verified(handoff,early,stall_copy,2u));
+    stall_copy[20u] = 176u;
+    assert(ref_stream_stall_valid(stall_copy,early,3u));
+    assert(ref_stream_stall_valid(stall_copy,early,4u));
+    assert(!ref_stream_stall_valid(stall_copy,early,2u));
+    assert(!ref_stream_stall_valid(stall_copy,early,5u));
+    for (uint32_t fault = 0u; fault < 16u; ++fault) {
+        uint8_t changed[sizeof(stall_copy)];
+        memcpy(changed,stall_copy,sizeof(changed));
+        if (fault == 0u) changed[0u] = 2u;
+        if (fault == 1u) changed[2u] = 10u;
+        if (fault == 2u) changed[4u] = 0u;
+        if (fault == 3u) changed[6u] = 4u;
+        if (fault == 4u) changed[84u] = 0u;
+        if (fault == 5u) changed[86u] = 10u;
+        if (fault == 6u) changed[88u] = 130u;
+        if (fault == 7u) changed[90u] = 0u;
+        if (fault == 8u) changed[94u] = CLEAN_STREAM_STALL_US-1u;
+        if (fault == 9u) changed[96u] = 0u;
+        if (fault == 10u) changed[100u] = 0u;
+        if (fault == 11u) changed[102u] ^= 1u;
+        if (fault == 12u) changed[104u] ^= 1u;
+        if (fault == 13u) changed[99u] = 255u;
+        if (fault == 14u) changed[91u] = 255u;
+        if (fault == 15u) changed[95u] = 4u;
+        assert(!ref_stream_stall_valid(changed,early,3u));
+        assert(!ref_stream_stall_valid(changed,early,4u));
+    }
+    for (uint32_t reason = 2u; reason <= 5u; ++reason) {
+        stall_copy[96u] = (uint8_t)reason;
+        stall_copy[90u] = reason == 5u ? 0u : 100u;
+        assert(ref_stream_stall_valid(stall_copy,early,3u));
+        assert(ref_stream_stall_valid(stall_copy,early,4u));
+        stall_copy[100u] = 0xc2u;
+        assert(!ref_stream_stall_valid(stall_copy,early,4u));
+        stall_copy[100u] = 2u;
+    }
+    stall_copy[90u] = 100u;
+    assert(!ref_stream_stall_valid(stall_copy,early,4u));
+    uint8_t destination_copy[108];
+    memcpy(destination_copy,stall_copy,sizeof(destination_copy));
+    destination_copy[6u] = 6u; destination_copy[96u] = 1u;
+    destination_copy[100u] = 0xc2u; destination_copy[101u] = 8u;
+    destination_copy[20u] = 62u;
+    assert(ref_stream_phase_verified(handoff,early,destination_copy,2u));
+    assert(ref_stream_stall_valid(destination_copy,early,5u));
+    assert(!ref_stream_stall_valid(destination_copy,early,6u));
+    assert(!ref_stream_stall_valid(destination_copy,early,4u));
+    destination_copy[102u] = (uint8_t)(CLEAN_SHM_FRAME+CLEAN_STREAM_DEST_WORDS);
+    assert(ref_stream_stall_valid(destination_copy,early,6u));
+    assert(!ref_stream_stall_valid(destination_copy,early,5u));
+    destination_copy[6u] = 5u;
+    assert(!ref_stream_stall_valid(destination_copy,early,6u));
+    destination_copy[6u] = 6u;
+    destination_copy[102u] ^= 1u;
+    assert(!ref_stream_stall_valid(destination_copy,early,6u));
+    destination_copy[102u] = (uint8_t)CLEAN_SHM_FRAME;
+    destination_copy[96u] = 2u; destination_copy[100u] = 2u;
+    assert(ref_stream_stall_valid(destination_copy,early,5u));
+    assert(ref_stream_stall_valid(destination_copy,early,6u));
+    destination_copy[102u] = (uint8_t)(CLEAN_SHM_FRAME+CLEAN_STREAM_DEST_WORDS);
+    assert(!ref_stream_stall_valid(destination_copy,early,6u));
+    uint8_t endpoint_copy[108];
+    memcpy(endpoint_copy,destination_copy,sizeof(endpoint_copy));
+    endpoint_copy[6u] = 7u; endpoint_copy[96u] = 1u;
+    assert(ref_stream_phase_verified(handoff,early,endpoint_copy,2u));
+    assert(ref_stream_stall_valid(endpoint_copy,early,7u));
+    assert(!ref_stream_stall_valid(endpoint_copy,early,8u));
+    assert(!ref_stream_stall_valid(endpoint_copy,early,6u));
+    endpoint_copy[104u] = 170u; endpoint_copy[105u] = 0u;
+    assert(ref_stream_stall_valid(endpoint_copy,early,8u));
+    assert(!ref_stream_stall_valid(endpoint_copy,early,7u));
+    endpoint_copy[104u] ^= 1u;
+    assert(!ref_stream_stall_valid(endpoint_copy,early,8u));
+    endpoint_copy[104u] ^= 1u;
+    endpoint_copy[6u] = 6u;
+    assert(!ref_stream_stall_valid(endpoint_copy,early,8u));
+    endpoint_copy[6u] = 7u;
+    endpoint_copy[96u] = 2u; endpoint_copy[102u] = (uint8_t)CLEAN_SHM_FRAME;
+    assert(!ref_stream_stall_valid(endpoint_copy,early,8u));
+    endpoint_copy[104u] = early[26u]; endpoint_copy[105u] = early[27u];
+    assert(ref_stream_stall_valid(endpoint_copy,early,7u));
+    assert(ref_stream_stall_valid(endpoint_copy,early,8u));
+    endpoint_copy[96u] = 6u;
+    assert(!ref_stream_stall_valid(endpoint_copy,early,8u));
+    static const uint16_t invalid_ends[] = {128u,301u,65535u};
+    for (uint32_t i = 0u; i < sizeof(invalid_ends)/sizeof(invalid_ends[0]); ++i) {
+        uint32_t invalid_end = invalid_ends[i];
+        early[26u] = endpoint_copy[104u] = (uint8_t)invalid_end;
+        early[27u] = endpoint_copy[105u] = (uint8_t)(invalid_end>>8u);
+        assert(ref_stream_stall_valid(endpoint_copy,early,7u));
+        assert(ref_stream_stall_valid(endpoint_copy,early,8u));
+        endpoint_copy[94u] = 31u;
+        assert(!ref_stream_stall_valid(endpoint_copy,early,8u));
+        endpoint_copy[94u] = 32u;
+        endpoint_copy[96u] = 1u;
+        endpoint_copy[102u] = (uint8_t)(CLEAN_SHM_FRAME+CLEAN_STREAM_DEST_WORDS);
+        assert(!ref_stream_stall_valid(endpoint_copy,early,7u));
+        endpoint_copy[102u] = (uint8_t)CLEAN_SHM_FRAME;
+        endpoint_copy[96u] = 6u;
+    }
+    static const uint16_t valid_ends[] = {129u,300u};
+    endpoint_copy[96u] = 1u;
+    endpoint_copy[102u] = (uint8_t)(CLEAN_SHM_FRAME+CLEAN_STREAM_DEST_WORDS);
+    for (uint32_t i = 0u; i < sizeof(valid_ends)/sizeof(valid_ends[0]); ++i) {
+        uint32_t end = valid_ends[i];
+        early[26u] = endpoint_copy[104u] = (uint8_t)end;
+        early[27u] = endpoint_copy[105u] = (uint8_t)(end>>8u);
+        assert(ref_stream_stall_valid(endpoint_copy,early,7u));
+        endpoint_copy[104u] = (uint8_t)(end-CLEAN_STREAM_END_BYTES);
+        endpoint_copy[105u] = (uint8_t)((end-CLEAN_STREAM_END_BYTES)>>8u);
+        assert(ref_stream_stall_valid(endpoint_copy,early,8u));
+    }
+    early[26u] = 42u; early[27u] = 1u;
+    for (uint32_t phase = 0u; phase < 2u; ++phase) {
+        uint8_t *control = handoff+2u*CLEAN_OBSERVER_HANDOFF_HEADER+
+            phase*2u*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS+10u;
+        control[0] = 2u;
+        assert(!ref_stream_defer_verified(handoff,early));
+        control[0] = 0u;
+    }
+    early[0] = 2u; assert(!ref_stream_defer_verified(handoff,early)); early[0] = 1u;
+    early[2] = 10u; assert(!ref_stream_defer_verified(handoff,early)); early[2] = 9u;
+    handoff[4] = 3u; assert(!ref_stream_defer_verified(handoff,early)); handoff[4] = 7u;
+    handoff[6] = 1u; assert(!ref_stream_defer_verified(handoff,early)); handoff[6] = 0u;
+    handoff[0] = early[0] = CLEAN_OBSERVER_RECORDS+1u;
+    assert(!ref_stream_defer_verified(handoff,early));
     assert(ref_timer_calibration_valid(16000u,32u));
     assert(!ref_timer_calibration_valid(0u,32u));
     assert(!ref_timer_calibration_valid(100001u,32u));
@@ -553,6 +871,7 @@ static void handoff_stimulus(void) {
 }
 
 int main(void) {
+    completed_dma_probe();
     handoff_stimulus();
     assert(badger_gfx_glyph_row('A',0u) == 14u);
     assert(badger_gfx_glyph_row('0',0u) == 14u);

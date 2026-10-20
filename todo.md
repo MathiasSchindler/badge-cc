@@ -145,6 +145,14 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Instrument bounded second-body overwrite and preserve stopped controller-fault evidence.
 - [x] Implement guard-body/copy-end/stream-boundary controls and retain abort continuation snapshots.
 - [x] Independently decode complete controlled aggregate bodies/FCS with vendor RX in both roles/orders.
+- [x] Implement a causal bounded streaming/handoff repair; repeat exact pairs and bad-first/last recovery in both roles/orders.
+- [x] Trace completed/stopped DMA bytes: confirm first-body streaming and narrow continuation loss to the upstream handoff.
+- [x] Separate continuation streaming: reproduce threshold-dependent copy truncation in both roles, with fresh-count/epoch proof.
+- [x] Verify copy base/end and command readbacks; exclude immediate copy retrigger as a streaming-stall repair in both roles.
+- [x] Prove post-stall replay overwrites the SHM prefix with offset-128 source bytes in both roles; retain abort/recovery losses.
+- [x] Verify bounded destination displacement in both roles: preserve 160 canonical bytes, but retain abort/bad-FCS failures.
+- [x] Exclude remaining-length replay endpoint as a repair: termination changes, but streaming still limits fresh copying to 32 bytes.
+- [x] Use a focused copy microscope to retain complete FCS-valid 298-byte continuations; preserve native count/FCS/F2 rejection.
 - [x] Implement gated passive-observer FIFO retention and bounded stop/drain.
 - [x] Reproduce zero-HT reception with actual PSM-state and PHY-control diagnostics.
 - [x] Implement SOF-calibrated receive timelines, decision-latched rearm diagnostics and conditional-event regression tests.
@@ -156,9 +164,10 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [ ] **1. Qualify early-capture reliability:** qualify FIFO-backed delivery
   and resolve persistent RXE busy, pre-prefix and truncated-body losses;
   repeat loss-accounted tests with confirmed multi-body stimulus.
-- [ ] **2. Qualify aggregate handoff:** resolve clean-receiver second-body
-  byte/FCS failures; repeat clean complete pairs in both roles/orders and
-  verify bad-frame/abort recovery.
+- [ ] **2. Qualify aggregate handoff:** generalize the bounded streaming-safe
+  SHM reconstruction; resolve native RXE count/FCS state and FIFO publication;
+  complete loss-accounted both-role/order qualification and
+  malformed/truncated-frame and abort recovery.
 - [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot
   assumptions and qualify bounded buffering, transport backpressure,
   malformed/truncated input and recovery across successive PPDUs.

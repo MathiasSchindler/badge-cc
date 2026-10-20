@@ -6,6 +6,7 @@
 #include "mac.h"
 #include "ht20.h"
 #include "ht_observer.h"
+#include "observer_dma.h"
 #include "../../src/shared/bytes.h"
 #ifdef CLEAN_SDIO_SELF_TEST
 #include "sdio_test.h"
@@ -253,6 +254,28 @@ static void d11_configure_mac_and_rxe(uint32_t flags, uint16_t rc_lpf) {
     }
 }
 
+#if CLEAN_RX_HT_COPY_DMA_PROBE
+static void observer_dma_sample(const volatile uint8_t *buf, uint32_t index,
+    uint32_t status0, uint32_t status1, uint32_t frozen) {
+    uint16_t owner = shm_read16(CLEAN_OBSERVER_COPY_SHM);
+    uint16_t epoch = shm_read16(CLEAN_OBSERVER_COPY_SHM+1u);
+    if (!owner || owner != shm_read16(CLEAN_OBSERVER_EARLY_SHM) ||
+        epoch != shm_read16(CLEAN_OBSERVER_EARLY_SHM+1u) ||
+        shm_read16(CLEAN_OBSERVER_COPY_SHM+2u) != 3u) return;
+    uint8_t nonce[14];
+    for (uint32_t i = 0u; i < 14u; i += 2u) {
+        uint16_t word = shm_read16(CLEAN_OBSERVER_EARLY_SHM+
+            CLEAN_OBSERVER_EARLY_HEADER+13u+i/2u);
+        nonce[i] = (uint8_t)word;
+        nonce[i+1u] = (uint8_t)(word>>8u);
+    }
+    const uint32_t context[7] = {MULTI->dma_frames,index,dma_producer,status0,status1,
+        (uint32_t)owner | ((uint32_t)epoch<<16u),shm_read16(0x601u) | frozen};
+    clean_observer_dma_record((volatile uint32_t *)CLEAN_OBSERVER_DMA_ADDR,
+        buf,nonce,context);
+}
+#endif
+
 /* D11 RX DMA ring management (0x18001220..0x18001234) */
 static void rx_dma_init(void) {
     mmio_write32(D11_RX_DMA_CTL, 0u);
@@ -277,6 +300,9 @@ static void rx_dma_init(void) {
 
     dma_consumer = 0u;
     dma_producer = 31u;
+#if CLEAN_RX_HT_COPY_DMA_PROBE
+    clean_observer_dma_init((volatile uint32_t *)CLEAN_OBSERVER_DMA_ADDR);
+#endif
     mmio_write32(D11_RX_DMA_ADDRLOW, FW_D11_DMA_RING_ADDR);
     mmio_write32(D11_RX_DMA_ADDRHIGH, 0u);
     mmio_write32(D11_RX_DMA_PTR, FW_D11_DMA_RING_ADDR);
@@ -305,6 +331,11 @@ static int rx_dma_poll_and_reclaim(volatile fw_frame_slot_t *slot) {
     __asm__ volatile("dsb" ::: "memory");
 
     uint16_t dma_len = (uint16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8u));
+#if CLEAN_RX_HT_COPY_DMA_PROBE
+    _Static_assert(CLEAN_OBSERVER_DMA_PREFIX <= FW_D11_DMA_BUF_BYTES,
+        "Completed DMA prefix must fit a descriptor buffer");
+    observer_dma_sample(buf,idx,st0,st1,0u);
+#endif
     if (slot) {
         slot->dma_rx_len = dma_len;
         slot->dma_completed = 1u;
@@ -2611,6 +2642,22 @@ void cyw43_main(void) {
     MULTI->dma_status1 = mmio_read32(D11_RX_DMA_STATUS1);
     (void)delay_ticks(20000u);
     rx_dma_stop();
+#if CLEAN_RX_HT_COPY_DMA_PROBE
+    volatile uint32_t *dma_trace = (volatile uint32_t *)CLEAN_OBSERVER_DMA_ADDR;
+    uint32_t stopped_status = mmio_read32(D11_RX_DMA_STATUS0);
+    uint32_t stopped_control = mmio_read32(D11_RX_DMA_CTL);
+    dma_trace[30] = stopped_status;
+    dma_trace[31] = stopped_control;
+    if ((stopped_status>>28u) || stopped_control) {
+        fail(0x8du,D11_RX_DMA_STATUS0,stopped_status);
+    } else {
+        __asm__ volatile("dsb" ::: "memory");
+        uint32_t stopped_status1 = mmio_read32(D11_RX_DMA_STATUS1);
+        for (uint32_t i = 0u; i < 32u; ++i)
+            observer_dma_sample((const volatile uint8_t *)(FW_D11_DMA_BUF_ADDR+
+                i*FW_D11_DMA_BUF_BYTES),i,stopped_status,stopped_status1,0x80000000u);
+    }
+#endif
 
     if (station_hw) snapshot_dcf_trace();
 #if CLEAN_RX_AMPDU_PROBE

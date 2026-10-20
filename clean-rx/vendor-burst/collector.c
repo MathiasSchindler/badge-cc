@@ -524,6 +524,10 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
     }
     uint32_t samples = usb_report_u32(observer+68u), correlated = 0u, correlated_aggregate = 0u;
     if (samples > REF_SAMPLES) { fputs("Invalid observer sample count\n",stderr); return 0; }
+    if (CLEAN_RX_HT_COPY_DMA_PROBE &&
+        (samples || !ref_dma_probe_valid(observer+REF_SAMPLE_BASE,observer+REF_EARLY_BASE))) {
+        fputs("Invalid completed DMA diagnostic\n",stderr); return 0;
+    }
     for (uint32_t i = 0u; i < samples; ++i) {
         const uint8_t *sample = observer+REF_SAMPLE_BASE+i*REF_SAMPLE_BYTES;
         uint32_t length = usb_report_u32(sample);
@@ -551,6 +555,8 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
     const uint8_t *early = observer+REF_EARLY_BASE;
     uint32_t early_rxe = ref_u16(early+4u), early_length = early_rxe >= 6u ? early_rxe-6u : 0u;
     int early_linked = ref_early_correlated(log,early,mac);
+    int stream_control_proven = !CLEAN_RX_HT_COPY_DEFER_STREAM;
+    int stream_phase_proven = !CLEAN_RX_HT_COPY_STREAM_PHASE;
 #if CLEAN_RX_HT_ADVANCE
     const uint8_t *handoff = observer+REF_HANDOFF_BASE;
     uint32_t handoff_id = ref_u16(handoff), phases = ref_u16(handoff+4u);
@@ -561,6 +567,8 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
     }
     static const char *const phase_names[] = {
         "before-retain","before-eoi","after-arm"};
+    if (CLEAN_RX_HT_COPY_DEFER_STREAM)
+        stream_control_proven = ref_stream_defer_verified(handoff,early);
     for (uint32_t i = 0u; i < CLEAN_OBSERVER_HANDOFF_RECORDS; ++i) {
         if (!(phases & (1u<<i))) continue;
         const uint8_t *r = handoff+2u*CLEAN_OBSERVER_HANDOFF_HEADER+
@@ -584,6 +592,20 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         fputs("Invalid receive-copy probe ownership, phase or seed readback\n",stderr);
         return 0;
     }
+    const uint8_t *scope = early+2u*(CLEAN_COPY_SCOPE_SHM-CLEAN_OBSERVER_EARLY_SHM);
+    if (CLEAN_RX_HT_COPY_SCOPE)
+        stream_phase_proven = ref_copy_scope_valid(scope,copy,early,CLEAN_RX_HT_COPY_SCOPE) &&
+            ref_u16(scope) != 20u;
+    else if (CLEAN_RX_HT_COPY_STREAM_PHASE)
+        stream_phase_proven = ref_stream_phase_verified(handoff,early,copy,
+            CLEAN_RX_HT_COPY_STREAM_PHASE);
+    if (CLEAN_RX_HT_COPY_STREAM_REARM && !CLEAN_RX_HT_COPY_STREAM_STALL)
+        stream_phase_proven = stream_phase_proven &&
+            ref_stream_rearm_verified(copy,early,CLEAN_RX_HT_COPY_STREAM_REARM);
+    if (CLEAN_RX_HT_COPY_STREAM_STALL && !CLEAN_RX_HT_COPY_SCOPE)
+        stream_phase_proven = stream_phase_proven &&
+            ref_stream_stall_valid(copy,early,CLEAN_RX_HT_COPY_STREAM_REARM) &&
+            ref_u16(copy+96u) != 5u && ref_u16(copy+96u) != 6u;
     uint32_t retained = 0u;
     if (ref_u16(copy+4u) == 3u)
         for (uint32_t i = 0u; i < 4u; ++i)
@@ -603,15 +625,80 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
            ref_u16(copy)?"true":"false",retained,
            ref_u16(copy+4u) == 3u?"true":"false",CLEAN_RX_HT_COPY_END_PLUS6?"true":"false",
            CLEAN_RX_HT_COPY_QUIET?"true":"false",
-           ref_u16(copy+84u),ref_u16(copy+86u),
+           CLEAN_RX_HT_COPY_QUIET ? ref_u16(copy+84u) : 0u,
+           CLEAN_RX_HT_COPY_QUIET ? ref_u16(copy+86u) : 0u,
            ref_u16(copy+20u),
            ref_u16(copy+22u),ref_u16(copy+24u),ref_u16(copy+26u),
            ref_u16(copy+28u),ref_u16(copy+30u),ref_u16(copy+32u),
            ref_u16(copy+34u),ref_u16(copy+36u),ref_u16(copy+38u),
            ref_u16(copy+4u) == 3u && !memcmp(copy+48u,second+24u,24u)?"true":"false",
            ref_u16(copy+40u),ref_u16(copy+42u),ref_u16(copy+44u),ref_u16(copy+46u),
-           CLEAN_RX_HT_COPY_WAIT?"true":"false",usb_report_u32(copy+72u),
-           usb_report_u32(copy+76u),ref_u16(copy+80u),ref_u16(copy+82u));
+           CLEAN_RX_HT_COPY_WAIT?"true":"false",
+           CLEAN_RX_HT_COPY_WAIT ? usb_report_u32(copy+72u) : 0u,
+           CLEAN_RX_HT_COPY_WAIT ? usb_report_u32(copy+76u) : 0u,
+           CLEAN_RX_HT_COPY_WAIT ? ref_u16(copy+80u) : 0u,
+           CLEAN_RX_HT_COPY_WAIT ? ref_u16(copy+82u) : 0u);
+    if (CLEAN_RX_HT_COPY_STREAM_PHASE)
+        printf("{\"test\":\"handoff-stream-activation\",\"committed\":%s,"
+               "\"epoch\":%u,\"matches_early_epoch\":%s,\"rxe_before\":%u,"
+               "\"rxe_after\":%u,\"control_readback\":%u,\"status1\":%u,\"tsf\":%u}\n",
+               ref_u16(copy+84u) == 1u?"true":"false",ref_u16(copy+86u),
+               ref_u16(copy+84u) == 1u && ref_u16(copy+86u) == ref_u16(early+2u)?"true":"false",
+               ref_u16(copy+72u),ref_u16(copy+74u),ref_u16(copy+76u),ref_u16(copy+78u),
+               usb_report_u32(copy+80u));
+    if (CLEAN_RX_HT_COPY_STREAM_REARM && !CLEAN_RX_HT_COPY_STREAM_STALL)
+        printf("{\"test\":\"handoff-stream-rearm\",\"mode\":%u,\"readback_verified\":%s,"
+               "\"control_before_stream\":%u,\"base_before\":%u,\"end_before\":%u,"
+               "\"next_before\":%u,\"context_before\":%u,\"count_after\":%u,"
+               "\"control_after\":%u,\"base_after\":%u,\"end_after\":%u,"
+               "\"context_after\":%u}\n",
+               CLEAN_RX_HT_COPY_STREAM_REARM,
+               ref_stream_rearm_verified(copy,early,CLEAN_RX_HT_COPY_STREAM_REARM)?"true":"false",
+               ref_u16(copy+88u),ref_u16(copy+90u),ref_u16(copy+92u),ref_u16(copy+94u),
+               ref_u16(copy+96u),ref_u16(copy+98u),ref_u16(copy+100u),ref_u16(copy+102u),
+               ref_u16(copy+104u),ref_u16(copy+106u));
+    if (CLEAN_RX_HT_COPY_SCOPE) {
+        uint32_t commit = ref_u16(scope);
+        printf("{\"test\":\"copy-scope\",\"mode\":%u,\"diagnostic_valid\":%s,"
+               "\"commit\":%u,\"epoch\":%u,\"executed\":%s}\n",
+               CLEAN_RX_HT_COPY_SCOPE,
+               ref_copy_scope_valid(scope,copy,early,CLEAN_RX_HT_COPY_SCOPE)?"true":"false",
+               commit,ref_u16(scope+2u),commit?"true":"false");
+        for (uint32_t n = 0u; commit && n < 3u; ++n) {
+            const uint8_t *s = scope+4u+52u*n;
+            printf("{\"test\":\"copy-scope-record\",\"index\":%u,\"tsf_low\":%u,"
+                   "\"count\":%u,\"status1\":%u,\"status2\":%u,\"control\":%u,"
+                   "\"base\":%u,\"end\":%u,\"next\":%u,\"fifo\":%u,\"context\":%u,"
+                   "\"source128_window\":\"",
+                   n,ref_u16(s),ref_u16(s+2u),ref_u16(s+4u),ref_u16(s+6u),
+                   ref_u16(s+8u),ref_u16(s+10u),ref_u16(s+12u),ref_u16(s+14u),
+                   ref_u16(s+16u),ref_u16(s+18u));
+            for (uint32_t i = 20u; i < 36u; ++i) printf("%02x",s[i]);
+            fputs("\",\"source160_window\":\"",stdout);
+            for (uint32_t i = 36u; i < 52u; ++i) printf("%02x",s[i]);
+            fputs("\"}\n",stdout);
+        }
+    }
+    if (CLEAN_RX_HT_COPY_STREAM_STALL && !CLEAN_RX_HT_COPY_SCOPE) {
+        int valid = ref_stream_stall_valid(copy,early,CLEAN_RX_HT_COPY_STREAM_REARM);
+        printf("{\"test\":\"handoff-post-stall\",\"mode\":%u,\"readback_valid\":%s,"
+               "\"reason\":%u,\"stable_interval_verified\":%s,\"command_issued\":%s,"
+               "\"observed_count\":%u,\"budget_remaining\":%u,\"start_tsf_low\":%u,"
+               "\"stable_us\":%u,\"count_after\":%u,\"control_after\":%u,"
+               "\"base_after\":%u,\"end_after\":%u,\"context_after\":%u,"
+               "\"destination_probe\":%s,\"base_shift_words\":%u,"
+               "\"endpoint_probe\":%s,\"endpoint_subtract\":%u}\n",
+               CLEAN_RX_HT_COPY_STREAM_REARM,valid?"true":"false",ref_u16(copy+96u),
+               valid && ref_u16(copy+96u) == 1u?"true":"false",
+               valid && ref_u16(copy+96u) == 1u && CLEAN_RX_HT_COPY_STREAM_REARM >= 4?"true":"false",
+               ref_u16(copy+88u),ref_u16(copy+90u),ref_u16(copy+92u),ref_u16(copy+94u),
+               ref_u16(copy+98u),ref_u16(copy+100u),ref_u16(copy+102u),
+               ref_u16(copy+104u),ref_u16(copy+106u),CLEAN_STREAM_DEST_PROBE?"true":"false",
+               valid && ref_u16(copy+96u) == 1u && CLEAN_STREAM_DEST_SHIFT ?
+                   CLEAN_STREAM_DEST_WORDS : 0u,CLEAN_STREAM_END_PROBE?"true":"false",
+               valid && ref_u16(copy+96u) == 1u && CLEAN_RX_HT_COPY_STREAM_REARM == 8 ?
+                   CLEAN_STREAM_END_BYTES : 0u);
+    }
 #endif
     uint32_t second_rxe = ref_u16(second+4u);
     uint32_t second_length = second_rxe >= 6u ? second_rxe-6u : 0u;
@@ -690,6 +777,57 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
         (void)ref_source_frame(expected,bound_nonce,CLEAN_HT_STIMULUS_COUNT-1u);
         if (REF_CLEAN_HANDOFF) {
             uint32_t first = clean_ht_handoff_length(bound_nonce,0u);
+            if (CLEAN_RX_HT_COPY_DMA_PROBE) {
+                const uint8_t *dma = observer+REF_SAMPLE_BASE;
+                uint32_t saved = usb_report_u32(dma+8u);
+                printf("{\"test\":\"completed-dma-probe\",\"saved\":%u,\"matched\":%u,"
+                       "\"inspected\":%u,\"max_nonzero_bytes\":%u,\"max_dma_header_length\":%u,"
+                       "\"unmatched\":%u,\"qos_nonce_prefixes\":%u,\"nonce_readback_matches\":%s,"
+                       "\"qos_first_prefixes\":%u,\"qos_second_prefixes\":%u,"
+                       "\"qos_first_valid_fcs\":%u,\"qos_second_valid_fcs\":%u,"
+                       "\"stopped_dma_status\":%u,\"stopped_dma_control\":%u,\"first_dma_header\":\"",
+                       saved,usb_report_u32(dma+12u),usb_report_u32(dma+16u),
+                       usb_report_u32(dma+20u),usb_report_u32(dma+24u),
+                       usb_report_u32(dma+28u),usb_report_u32(dma+76u),usb_report_u32(dma+16u) &&
+                           !memcmp(dma+32u,bound_nonce,14u)?"true":"false",
+                       usb_report_u32(dma+104u),usb_report_u32(dma+108u),
+                       usb_report_u32(dma+112u),usb_report_u32(dma+116u),
+                       usb_report_u32(dma+120u),usb_report_u32(dma+124u));
+                for (uint32_t i = 0u; i < 24u; ++i) printf("%02x",dma[80u+i]);
+                printf("\","
+                       "\"diagnostic_only\":true,\"unrelated_dma_owner_not_assumed\":true}\n");
+                for (uint32_t slot = 0u; slot < saved; ++slot) {
+                    const uint8_t *r = dma+CLEAN_OBSERVER_DMA_HEADER+slot*CLEAN_OBSERVER_DMA_RECORD;
+                    const uint8_t *bytes = r+32u;
+                    printf("{\"test\":\"completed-dma-buffer\",\"slot\":%u,"
+                           "\"dma_completions_at_sample\":%u,\"consumer\":%u,\"producer\":%u,"
+                           "\"status0\":%u,\"status1\":%u,\"handoff_context\":%u,"
+                           "\"held_state\":%u,\"record_flags\":%u,\"frozen_ring_slot\":%s,\"window_start\":%u,"
+                           "\"prefix_bytes\":%u,\"dma_header_length\":%u}\n",
+                           slot,usb_report_u32(r),usb_report_u32(r+4u),usb_report_u32(r+8u),
+                           usb_report_u32(r+12u),usb_report_u32(r+16u),usb_report_u32(r+20u),
+                           ref_u16(r+24u),usb_report_u32(r+24u)&0xe0000000u,
+                           usb_report_u32(r+24u)&0x80000000u?"true":"false",
+                           usb_report_u32(r+28u)>>16u,CLEAN_OBSERVER_DMA_PREFIX,ref_u16(r+28u));
+                    for (uint32_t index = 0u; index < CLEAN_HT_STIMULUS_COUNT; ++index) {
+                        (void)clean_ht_handoff_frame(expected,bound_nonce,index);
+                        for (uint32_t part = 0u; part < (index%3u == 2u ? 2u : 1u); ++part) {
+                            uint32_t length = clean_ht_handoff_length(bound_nonce,part);
+                            uint32_t offset = part ? 18u+4u+((first+3u)&~3u) :
+                                index%3u == 2u ? 18u : 14u;
+                            for (uint32_t at = 0u; at+length <= CLEAN_OBSERVER_DMA_PREFIX; ++at) {
+                                if (memcmp(bytes+at,expected+offset,length)) continue;
+                                printf("{\"test\":\"completed-dma-exact-body\",\"slot\":%u,"
+                                       "\"source_index\":%u,\"kind\":%u,\"body\":%u,\"offset\":%u,"
+                                       "\"bytes\":%u,\"fcs_valid\":%s}\n",slot,index,index%3u,part,
+                                       at+(usb_report_u32(r+28u)>>16u),length,
+                                       diag_crc32(bytes+at,length-4u) ==
+                                           usb_report_u32(bytes+at+length-4u)?"true":"false");
+                            }
+                        }
+                    }
+                }
+            }
             uint32_t mode = bound_nonce[10], early_index = CLEAN_HT_STIMULUS_COUNT;
             int exact_first = 0, exact_pair = 0;
             if (early_linked && early_length == first && ref_u16(early+15u) == CLEAN_HT_HANDOFF_PSDU) {
@@ -739,6 +877,11 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                     exact_bad_second && negative_outcome == 2u : 0;
             printf("{\"test\":\"controlled-handoff-result\",\"case\":%u,\"first_bytes\":%u,"
                    "\"second_bytes\":%u,\"guard_body\":%s,\"psdu_bytes\":%u,"
+                   "\"stream_prefix_threshold\":%u,\"stream_defer_enabled\":%s,"
+                   "\"stream_defer_readback_verified\":%s,"
+                   "\"stream_phase\":%u,\"continuation_stream_threshold\":%u,"
+                   "\"stream_phase_readback_verified\":%s,"
+                   "\"stream_rearm_mode\":%u,\"diagnostic_only\":%s,"
                    "\"transmissions\":24,\"exact_first\":%s,"
                    "\"exact_pair\":%s,\"early_source_index\":%u,\"advance\":%u,"
                    "\"case_prefix_id\":%u,\"case_terminal_outcome\":%u,\"case_terminal_length\":%u,"
@@ -749,12 +892,21 @@ static int summarize(const uint8_t vendor[REF_TRACE_BYTES], const uint8_t observ
                    "\"ht_station_qualified\":false}\n",
                    mode,first,clean_ht_handoff_length(bound_nonce,1u),
                    CLEAN_RX_HT_HANDOFF_GUARD?"true":"false",CLEAN_HT_HANDOFF_PSDU,
+                   CLEAN_RX_STREAM_PREFIX_BYTES,CLEAN_RX_HT_COPY_DEFER_STREAM?"true":"false",
+                   CLEAN_RX_HT_COPY_DEFER_STREAM && stream_control_proven?"true":"false",
+                   CLEAN_RX_HT_COPY_STREAM_PHASE,CLEAN_RX_CONTINUATION_STREAM_BYTES,
+                   CLEAN_RX_HT_COPY_STREAM_PHASE && stream_phase_proven?"true":"false",
+                   CLEAN_RX_HT_COPY_STREAM_REARM,
+                   CLEAN_STREAM_DEST_PROBE?"true":"false",
                    exact_first?"true":"false",exact_pair?"true":"false",early_index,
                    ref_u16(early+24u),negative_id,negative_outcome,negative_length,
                    exact_bad_second?"true":"false",
                    recovered?"true":"false",negative && recovered && clean?"true":"false",
                    mask,required,mask == required?"true":"false",clean?"true":"false");
-            int passed = clean && (mode ? negative && recovered : exact_pair && mask == required);
+            int passed = !CLEAN_RX_HT_COPY_DMA_PROBE && !CLEAN_STREAM_DEST_PROBE &&
+                clean && stream_control_proven &&
+                stream_phase_proven &&
+                (mode ? negative && recovered : exact_pair && mask == required);
             if (!passed) fputs("Controlled handoff qualification not proven; raw failed trial retained\n",stderr);
             return passed;
         }

@@ -7,7 +7,7 @@ if [[ $# -lt 3 || $# -gt 6 || ! $1 =~ ^[0-9A-F]{16}$ ||
 fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-build=build/clean-rx/vendor-burst
+build=${CLEAN_RX_REFERENCE_BUILD:-build/clean-rx/vendor-burst}
 picotool=build/picotool-usb/picotool
 prefix=$3
 credentials=${4:-ssid-data/ssid.txt}

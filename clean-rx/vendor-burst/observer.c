@@ -217,6 +217,10 @@ void ref_run(const uint8_t nonce[16]) {
             loader.error = CLEAN_READBACK; ok = 0;
         }
         if (ok) ok = hardware_snapshot(1u) && stopped_psm_snapshot() &&
+#if CLEAN_RX_HT_COPY_DMA_PROBE
+            clean_block(&loader,CLEAN_OBSERVER_DMA_ADDR,ref_detail+REF_SAMPLE_BASE,
+                        CLEAN_OBSERVER_DMA_BYTES,0u) &&
+#endif
 #if CLEAN_RX_HT_PHY_SNAPSHOT
             clean_block(&loader,CLEAN_OBSERVER_PHY_ADDR,ref_detail+REF_PHY_SNAPSHOT,
                         CLEAN_OBSERVER_PHY_BYTES,0u) &&
@@ -338,6 +342,7 @@ void ref_idle(void) {
                         badger_bytes_load_u32(ref_detail+REF_STIMULUS_RX_INVALID)+1u);
                 if (REF_CLEAN_HANDOFF && index < CLEAN_HT_STIMULUS_COUNT) return;
             }
+            if (CLEAN_RX_HT_COPY_DMA_PROBE) return;
             uint32_t length = size-18u, count = badger_bytes_load_u32(ref_detail+68u);
             uint32_t identity = ref_u16(packet+10u);
             uint32_t advanced = identity & CLEAN_OBSERVER_ADVANCE_TAG;

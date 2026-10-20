@@ -103,9 +103,14 @@ static void capture_layout(uint8_t original[2360]) {
     restore(original, 191u, WORD(0x77fu,0x1780u,0x1780u,309u),
             WORD(0x606u,0x1780u,0x1780u,194u));
     assert(instruction(309u) == WORD(0x501u,0x1004u,0x1800u,312u));
+#if CLEAN_RX_HT_COPY_STREAM_PHASE
+    assert(instruction(310u) == WORD(0x77fu,0x1780u,0x1780u,OBSERVER_STREAM_PHASE_CHECK));
+    assert(instruction(311u) == WORD(0x77fu,0x1780u,0x1780u,OBSERVER_STREAM_PHASE_WRITE));
+#else
     assert(instruction(310u) ==
            WORD(0xdau,0x100cu,0x1800u | CLEAN_RX_STREAM_PREFIX_BYTES,312u));
     assert(instruction(311u) == WORD(0x310u,0x1802u,0x1004u,0x1004u));
+#endif
     assert(instruction(312u) == WORD(0x77fu,0x1780u,0x1780u,RX_COMPLETE));
     assert(instruction(313u) == WORD(0x77fu,0x1780u,0x1780u,192u));
     const uint32_t fault_regs[] = {0x100cu,0x102bu,0x100du,0x1002u,
@@ -289,15 +294,24 @@ static int rearm_flush(uint32_t busy_polls, uint16_t busy_bits, uint32_t events,
 }
 #endif
 
-static uint16_t stream_prefix(uint16_t rxctl, uint16_t count,
+static uint16_t stream_prefix(uint16_t rxctl, uint16_t count, uint16_t advance, uint16_t marker,
                               uint32_t *writes, uint32_t *next) {
     uint32_t pc = 191u;
+#if CLEAN_RX_HT_COPY_SCOPE >= 3
+    uint16_t r3 = 0u, saved_r3 = 0u;
+#endif
     *writes = 0u;
-    for (uint32_t step = 0u; step < 8u; ++step) {
+    for (uint32_t step = 0u; step < (CLEAN_RX_HT_COPY_STREAM_REARM ? 48u : 32u); ++step) {
         if (pc == RX_COMPLETE) {
             *next = pc;
             return rxctl;
         }
+#if CLEAN_RX_HT_COPY_STREAM_STALL
+        if (pc == OBSERVER_COPY_STALL_INIT) {
+            *next = pc;
+            return rxctl;
+        }
+#endif
         uint64_t w = instruction(pc);
         uint32_t op = (uint32_t)(w >> 39u);
         uint32_t a = (uint32_t)(w >> 26u) & 0x1fffu;
@@ -309,8 +323,40 @@ static uint16_t stream_prefix(uint16_t rxctl, uint16_t count,
             assert(a == 0x1004u && b == 0x1800u);
             if ((rxctl & 2u) != 0u) pc = d;
         } else if (op == 0xdau) {
+#if CLEAN_RX_HT_COPY_SCOPE >= 3
+            if (a == CLEAN_COPY_SCOPE_SHM) { pc = d; continue; }
+#endif
             assert(a == 0x100cu);
             if (count < immediate(b)) pc = d;
+        } else if (op == 0xd1u) {
+            if (a == CLEAN_OBSERVER_ADVANCE) {
+                assert(b == 0x1801u);
+                if (advance != 1u) pc = d;
+            }
+#if CLEAN_RX_HT_COPY_SCOPE >= 3
+            else if (a == 0x1783u) {
+                assert(b == CLEAN_OBSERVER_EPOCH);
+                if (r3) pc = d;
+            }
+#endif
+            else {
+                assert(a == CLEAN_OBSERVER_COPY_SHM+42u && b == 0x1800u);
+                if (marker) pc = d;
+            }
+        } else if (op == 0x3f0u) {
+#if CLEAN_RX_HT_COPY_SCOPE >= 3
+            if (d == CLEAN_OBSERVER_SAVE_R3) { saved_r3 = r3; continue; }
+            if (d == 0x1783u) {
+                r3 = a == CLEAN_OBSERVER_SAVE_R3 ? saved_r3 : 0u; continue;
+            }
+#endif
+            assert(d >= CLEAN_OBSERVER_COPY_SHM+36u &&
+                   d < CLEAN_OBSERVER_COPY_SHM+CLEAN_OBSERVER_COPY_WORDS);
+            if (d == CLEAN_OBSERVER_COPY_SHM+42u) marker = immediate(a);
+        } else if (op == 0x376u) {
+            assert(CLEAN_RX_HT_COPY_STREAM_REARM == 2 &&
+                   a == 0x1883u && b == 0x1004u && d == 0x1004u);
+            rxctl = (uint16_t)((rxctl & ~0x3fc0u) | ((immediate(a)<<6u)&0x3fc0u));
         } else if (op == 0x310u) {
             assert(b == 0x1004u && d == 0x1004u);
             rxctl = (uint16_t)((rxctl & ~3u) | (immediate(a) & 3u));
@@ -322,17 +368,38 @@ static uint16_t stream_prefix(uint16_t rxctl, uint16_t count,
 }
 
 static void streaming(void) {
+    static const uint16_t phases[] = {0u,1u,2u,0xffffu};
+    for (uint32_t phase = 0u; phase < (CLEAN_RX_HT_COPY_STREAM_PHASE ? 4u : 1u); ++phase) {
+        uint32_t threshold = phases[phase] == 1u ?
+            CLEAN_RX_CONTINUATION_STREAM_BYTES : CLEAN_RX_STREAM_PREFIX_BYTES;
+        for (uint32_t count = 0u; count <= CLEAN_RXE_BYTES; ++count) {
+            for (uint32_t state = 0u; state < 256u; ++state) {
+                uint16_t before = (uint16_t)(0x2800u | state);
+                int enable = (before & 2u) == 0u && count >= threshold;
+                uint32_t writes, next, expected_next = RX_COMPLETE;
+                uint16_t after = stream_prefix(before, (uint16_t)count, phases[phase], 0u, &writes, &next);
+                uint16_t expected = enable ? (uint16_t)((before & ~3u) | 2u) : before;
+                if (enable && phases[phase] == 1u && CLEAN_RX_HT_COPY_STREAM_REARM == 2)
+                    expected = (uint16_t)((expected & ~0x3fc0u) | ((0x83u<<6u)&0x3fc0u));
+#if CLEAN_RX_HT_COPY_STREAM_STALL
+                if (enable && phases[phase] == 1u) expected_next = OBSERVER_COPY_STALL_INIT;
+#endif
+                assert(after == expected);
+                assert(writes == (uint32_t)enable && next == expected_next);
+                uint32_t again;
+                assert(stream_prefix(after, (uint16_t)count, phases[phase], 1u, &again, &next) == after);
+                assert(again == 0u && next == RX_COMPLETE);
+            }
+        }
+    }
     for (uint32_t count = 0u; count <= CLEAN_RXE_BYTES; ++count) {
-        for (uint32_t state = 0u; state < 256u; ++state) {
-            uint16_t before = (uint16_t)(0x2800u | state);
-            int enable = (before & 2u) == 0u && count >= CLEAN_RX_STREAM_PREFIX_BYTES;
+        for (uint32_t marker = 1u; marker <= 2u; ++marker) {
             uint32_t writes, next;
-            uint16_t after = stream_prefix(before, (uint16_t)count, &writes, &next);
-            assert(after == (enable ? (uint16_t)((before & ~3u) | 2u) : before));
+            uint16_t after = stream_prefix(0x2800u,(uint16_t)count,1u,
+                marker == 1u ? 1u : 0xffffu,&writes,&next);
+            int enable = count >= CLEAN_RX_CONTINUATION_STREAM_BYTES;
+            assert(after == (enable ? 0x2802u : 0x2800u));
             assert(writes == (uint32_t)enable && next == RX_COMPLETE);
-            uint32_t again;
-            assert(stream_prefix(after, (uint16_t)count, &again, &next) == after);
-            assert(again == 0u);
         }
     }
 }
@@ -351,10 +418,37 @@ static uint32_t handoff_state_after_arm;
 #if CLEAN_RX_HT_COPY_WAIT
 static uint32_t handoff_wait_fault;
 #endif
+#if CLEAN_RX_HT_COPY_STREAM_STALL
+static uint32_t stream_stall_model;
+#endif
 static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
                             uint32_t pc, uint32_t *steps) {
     int body = pc == RX_COMPLETE;
     for (*steps = 0u; *steps < 1000000u; ++*steps) {
+#if CLEAN_RX_HT_COPY_STREAM_STALL
+        if (stream_stall_model) {
+            if (pc == RX_COMPLETE) return pc;
+            uint32_t fault = stream_stall_model-1u;
+            r[0x1119u] = (uint16_t)((fault == 7u ? 0xfff0u : 100u) +
+                (fault == 6u ? 0u : *steps/4u));
+            if (pc == OBSERVER_STREAM_STALL_FIRST && fault != 1u)
+                r[0x100cu] = fault == 2u ? 138u : CLEAN_STREAM_STALL_COUNT;
+            if (pc == OBSERVER_STREAM_STALL_STABLE &&
+                (uint16_t)(r[0x1119u]-r[CLEAN_OBSERVER_COPY_SHM+46u]) >= 8u) {
+                if (fault == 3u) r[0x100cu] = 138u;
+                if (fault == 4u) r[0x100du] |= 0x4000u;
+                if (fault == 5u) r[0x100du] |= 0x8000u;
+                if (fault == 8u) r[0x100cu] = 130u;
+            }
+            if (pc == OBSERVER_STREAM_STALL_FINAL_ABORT) {
+                if (fault == 9u) r[0x100du] |= 0x4000u;
+                if (fault == 10u) r[0x100du] |= 0x8000u;
+                if (fault == 11u) r[0x100cu] = 138u;
+            }
+            if (pc == OBSERVER_STREAM_STALL_FINAL_BUDGET && fault == 12u)
+                r[CLEAN_OBSERVER_COPY_SHM+45u] = 0u;
+        }
+#endif
 #if CLEAN_RX_HT_COPY_WAIT
         if (pc == 290u) return pc;
         if (pc == OBSERVER_COPY_WAIT_EOF && r[0x1780u] == 65534u) {
@@ -433,6 +527,52 @@ static uint32_t receive_run(uint16_t r[0x1800], uint32_t *events,
     return 0u;
 }
 
+static void stream_stall(void) {
+#if CLEAN_RX_HT_COPY_STREAM_STALL
+    static const uint16_t reasons[] = {1u,5u,2u,2u,3u,4u,5u,1u,2u,3u,4u,2u,5u
+#if CLEAN_STREAM_END_PROBE
+        ,6u,6u,1u,1u,6u
+#endif
+    };
+    for (uint32_t fault = 0u; fault < sizeof(reasons)/sizeof(reasons[0]); ++fault) {
+        uint16_t r[0x1800] = {0};
+        uint32_t events = 0u, steps;
+        r[CLEAN_OBSERVER_ADVANCE] = 1u; r[CLEAN_OBSERVER_EPOCH] = 9u;
+        r[0x1004u] = 0x2800u; r[0x100cu] = 130u; r[0x100du] = 0x1922u;
+        r[0x1001u] = CLEAN_SHM_FRAME; r[0x102au] = 298u; r[0x1078u] = 0xf020u;
+        if (fault == 13u) r[0x102au] = 128u;
+        if (fault == 14u) r[0x102au] = 301u;
+        if (fault == 15u) r[0x102au] = 129u;
+        if (fault == 16u) r[0x102au] = 300u;
+        if (fault == 17u) r[0x102au] = 65535u;
+        uint32_t original_end = r[0x102au];
+        for (uint32_t i = 0u; i < 4u; ++i) r[0x1780u+i] = (uint16_t)(0x3500u+i);
+        stream_stall_model = fault+1u;
+        assert(receive_run(r,&events,OBSERVER_STREAM_PHASE_WRITE,&steps) == RX_COMPLETE);
+        stream_stall_model = 0u;
+        uint16_t *copy = r+CLEAN_OBSERVER_COPY_SHM;
+        assert(steps < 20000u && copy[48] == reasons[fault]);
+        assert(copy[42] == 1u && copy[43] == 9u);
+        assert(copy[45] <= CLEAN_STREAM_STALL_BUDGET);
+        uint32_t base = CLEAN_SHM_FRAME +
+            (reasons[fault] == 1u && CLEAN_STREAM_DEST_SHIFT ? CLEAN_STREAM_DEST_WORDS : 0u);
+        uint32_t end = original_end -
+            (reasons[fault] == 1u && CLEAN_RX_HT_COPY_STREAM_REARM == 8 ? CLEAN_STREAM_END_BYTES : 0u);
+        assert(copy[51] == base && r[0x1001u] == base &&
+               copy[52] == end && r[0x102au] == end && copy[53] == 0xf020u);
+        if (reasons[fault] == 1u)
+            assert(copy[44] == CLEAN_STREAM_STALL_COUNT && copy[47] >= CLEAN_STREAM_STALL_US && copy[45]);
+        if (reasons[fault] == 5u) assert(copy[45] == 0u);
+        uint16_t expected = reasons[fault] == 1u && CLEAN_RX_HT_COPY_STREAM_REARM >= 4 ?
+            (uint16_t)((0x2802u & ~0x3fc0u) | ((0x83u<<6u)&0x3fc0u)) : 0x2802u;
+        if (reasons[fault] == 1u && CLEAN_RX_HT_COPY_SCOPE >= 2) expected &= (uint16_t)~3u;
+        assert(r[0x1004u] == expected && copy[50] == expected);
+        for (uint32_t i = 0u; i < 4u; ++i) assert(r[0x1780u+i] == 0x3500u+i);
+    }
+    puts("PSM post-stall: measured interval/wrap, progressing/decreasing count, EOF/abort, poll and frozen-timer bounds; no GPR clobber");
+#endif
+}
+
 static void receive_completion(void) {
     uint16_t r[0x1800];
     for (uint32_t event = 0u; event < 4u; ++event) {
@@ -470,7 +610,8 @@ static void receive_completion(void) {
             int complete = (flags & 5u) == 5u;
             assert(next == (!complete ? 262u : count < 14u ? 263u :
                             flags & 2u ? 197u : 262u));
-            assert(steps < (CLEAN_RX_HT_OBSERVER ? 20u : 10u));
+            assert(steps < (CLEAN_RX_HT_COPY_STREAM_REARM ? 48u :
+                CLEAN_RX_HT_COPY_STREAM_PHASE ? 32u : CLEAN_RX_HT_OBSERVER ? 20u : 10u));
             assert(r[0x1780u] == (complete ? 1u : 0u));
         }
     }
@@ -2140,12 +2281,13 @@ static void passive_early_snapshot(void) {
         assert(!r[CLEAN_OBSERVER_PENDING] && r[CLEAN_OBSERVER_HELD] == (outcome == 0u));
         assert(r[record+14u] == 304u && r[record+38u] == 9u && r[record+39u] == 1u);
         if (outcome < 2u) assert(r[record+18u] == 0x4000u);
-        int snapshot = outcome < 2u || (CLEAN_RX_HT_COPY_PROBE && outcome == 2u);
+        int snapshot = outcome < 2u || (CLEAN_RX_HT_COPY_PROBE && outcome == 2u) ||
+            (CLEAN_RX_HT_COPY_STREAM_PHASE && outcome == 3u);
         if (snapshot) {
             assert(r[CLEAN_OBSERVER_SECOND_SHM] == 1u &&
                    r[CLEAN_OBSERVER_SECOND_SHM+1u] == 9u &&
                    r[CLEAN_OBSERVER_SECOND_SHM+2u] == 304u &&
-                   r[CLEAN_OBSERVER_SECOND_SHM+10u] == (outcome == 2u ? 5u : outcome+1u));
+                   r[CLEAN_OBSERVER_SECOND_SHM+10u] == (outcome >= 2u ? outcome+3u : outcome+1u));
             assert(r[CLEAN_OBSERVER_SECOND_SHM+CLEAN_OBSERVER_SECOND_HEADER] == 0x4000u);
             for (uint32_t i = 0u; i < CLEAN_OBSERVER_SECOND_MAX/2u; ++i)
                 assert(r[CLEAN_OBSERVER_SECOND_SHM+CLEAN_OBSERVER_SECOND_HEADER+i] ==
@@ -2253,6 +2395,7 @@ int main(void) {
     capture_layout(original);
     assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
     streaming();
+    stream_stall();
     receive_completion();
     receive_trace();
     ht_receive_trace();

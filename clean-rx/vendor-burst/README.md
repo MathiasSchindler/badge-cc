@@ -102,9 +102,11 @@ Negative qualification also requires later controls and clean delivery
 accounting. Delimiter/truncation cases remain diagnostic-only and cannot
 return a successful negative qualification.
 
-Current trials reproduce a bad/abort continuation after a fresh second
-eight-byte prefix in both roles/orders, not a complete pair. Nonzero runner
-exit and retained failed reports are expected until that blocker is fixed.
+The ordinary 128-byte-streaming baseline reproduces a bad/abort continuation
+after a fresh second eight-byte prefix in both roles/orders, not a complete
+pair. The separate [deferred-streaming repair](#deferred-streaming-handoff-repair)
+now restores exact bounded pairs. Baseline failures and trials missing
+required controls still return nonzero and retain their reports.
 See the [controlled handoff evidence](../dev-doc/HT20_IMPLEMENTATION.md#controlled-handoff-stimulus-and-reproducible-continuation-failure).
 Do not reuse an evidence prefix or rebuild the shared images during a run.
 Save full badge originals before flashing; restore and independently
@@ -162,6 +164,313 @@ defect to clean receive/configuration; it does not identify a particular
 RXE register or qualify general aggregation, loss rates, BA or HT negotiation.
 Vendor-internal drops remain unknown. See the
 [full evidence and restoration record](../dev-doc/HT20_IMPLEMENTATION.md#independent-vendor-raw-receiver-2026-10-20).
+
+### Deferred-streaming handoff repair
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-defer
+bash clean-rx/vendor-burst/run.sh CLEAN_TX_SERIAL CLEAN_RX_SERIAL NEW_PREFIX - 128 good
+```
+
+Use `256` for the reverse body order. The default-disabled
+`CLEAN_RX_HT_COPY_DEFER_STREAM=1` control raises the ordinary streaming
+threshold from 128 to 384 bytes, without changing the source, copy end,
+EOI, cleanup or stream-field masks. This keeps the 170/298-byte handoff
+below the streaming threshold while retaining the existing less-than-506
+staging-overflow guard for larger frames. It requires the ordinary copy
+probe and excludes wait, end-bias, stream-clear and guard-body controls.
+It is not a general receive-size or production DMA fix.
+
+The collector reports `stream_prefix_threshold`, `stream_defer_enabled`
+and `stream_defer_readback_verified`. Qualification additionally requires
+the matching owner/epoch, complete handoff phases and streaming bit clear
+in both pre-retention and pre-EOI hardware samples. No advance means this
+readback condition is unproven, not that streaming was measured enabled.
+
+Eight good-fixture trials capture exact complete/FCS-valid pairs, twice
+per role/order. All four matched ordinary-threshold trials fail after the
+correct first eight second-body bytes. Their receiver controllers differ
+by one encoded threshold bit; all source controller bytes remain identical.
+Only four good trials pass the full control-receipt gate; the other four
+miss controls and stay failed trials despite their valid pair.
+
+Bad-first and bad-last each pass existing exact-byte/rejection/recovery
+criteria in all four role/order cells. Bad-last qualification requires the
+complete deliberately corrupted second body, not a generic bad-FCS exit.
+Malformed-delimiter and overlong-body cases remain diagnostic-only, with
+all failures and later-control losses retained. D2 and HT association
+remain open. See the
+[complete causal campaign](../dev-doc/HT20_IMPLEMENTATION.md#deferred-pre-handoff-streaming-repair-2026-10-20).
+
+For matched A/B runs, `CLEAN_RX_REFERENCE_BUILD=ARCHIVED_IMAGE_DIRECTORY`
+selects the archived matching `vendor.uf2`, `observer.uf2` and collector.
+The default remains `build/clean-rx/vendor-burst`. Always use a new evidence
+prefix; a build override does not waive preservation/restoration requirements.
+
+### DMA byte-destination diagnostic
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-dma
+# Archive the matching images/collector, then build the matched control:
+make -f clean-rx/vendor-burst/Makefile reference-handoff-defer-dma
+```
+
+Both profiles set default-off `CLEAN_RX_HT_COPY_DMA_PROBE=1`, which requires
+the FIFO-backed copy probe. The second additionally defers streaming to
+384 bytes. No PSM instruction or source-controller change is introduced by
+DMA inspection; the ordinary programmed DMA ring and shutdown remain.
+
+Before clearing/reposting a completed descriptor, the controller examines
+its whole buffer for the fresh retained 14-byte challenge. After the existing
+radio/DMA shutdown it verifies disabled control and stopped status, then
+examines all 32 buffers, including unfinished ones. Failed shutdown readback
+is a controller error, not a successful empty scan. A stopped-buffer match
+is explicitly marked and is not a DMA-completion claim.
+
+Observer ABI 22 replaces the ordinary complete-MPDU sample area at trace
+2560 with a 1,728-byte `DMO1` version-5 diagnostic. Normal sample count is
+zero. The 128-byte header records saved/matched/inspected/unmatched counts,
+the challenge readback, first inspection context and 24-byte DMA header,
+separate first/second QoS-prefix and valid-FCS counters, and shutdown
+status/control. Two 800-byte records retain 32-byte contexts plus 768-byte
+windows around a matching challenge. The packed final context word carries
+the original DMA-header length and window start; record flags distinguish
+frozen inspection, aggregate prefix and second body. The second saved slot
+prefers an aggregate over ordinary traffic and a second body over a first;
+counters run before this selection limit. Payload windows are retained only
+when the full fresh challenge is present.
+
+The collector checks ownership context, descriptor bounds, completed versus
+frozen status, window bounds and counter conservation, then compares retained
+windows with every exact transmitted legacy/single-HT/aggregate fixture.
+Current handoff ownership describes inspection context, not DMA packet
+ownership; only exact challenge-bound bytes/FCS prove a source match.
+All trials are deliberately diagnostic-only and exit nonzero: replacing the
+F2 proof samples means `exact_pair` cannot qualify, even with an exact pair
+in the independent retained SHM snapshots.
+
+The final eight role/order/control cells find 14 valid later aggregate first
+bodies in inspected DMA buffers and no second-body prefixes. All four
+deferred controls retain exact valid second bodies in SHM. Early controls
+and abort/recovery losses remain visible, and ordinary/default firmware is
+unchanged. See the
+[complete investigation and limits](../dev-doc/HT20_IMPLEMENTATION.md#streaming-byte-destination-and-dma-discriminator-2026-10-20).
+
+### Matched continuation-streaming controls
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-stream-hold
+make -f clean-rx/vendor-burst/Makefile reference-handoff-stream-resume
+make -f clean-rx/vendor-burst/Makefile reference-handoff-stream-late
+```
+
+Archive each matching image/collector set separately. All three require
+the deferred non-wait copy probe and use 384 for the first body.
+Default-off `CLEAN_RX_HT_COPY_STREAM_PHASE` selects 1 (hold384),
+2 (resume128), or 3 (resume256). After the existing one-shot advance
+becomes exactly 1, that threshold applies to the continuation **and
+subsequent traffic**, not just a single body. Matched receiver C3 images
+differ only in the encoded threshold immediate; source bytes are unchanged.
+
+Phase profiles use copy-probe version 3 with first-activation count
+before/after, RX-control/status readbacks, TSF, commit marker and epoch.
+The collector emits `handoff-stream-activation`; only a committed event
+matching the retained continuation's epoch proves that body streamed.
+Later unrelated events in hold/short-body trials are labeled explicitly.
+An eligible watchdog also retains bounded SHM bytes but keeps outcome 6,
+normal cleanup and rejection. Abort keeps outcome 5. Normal F2 proof
+samples remain available; no success condition is replaced by activation
+proof.
+
+Across both badge roles, a 298-byte continuation activated at count 130
+under resume128 stops at 134, with the first 128 bytes canonical.
+Resume256 activates at 258 and moves the canonical-byte cutoff to 252.
+The hold384 control retains all ten tested pairs. A 170-byte continuation
+can stream at 128 and still complete exactly. This excludes stale
+first-body count as the cause of the observed activations, without
+identifying the undocumented internal RXE/FIFO mechanism.
+
+Twenty-six RF trials retain sixteen exact pairs; twelve also pass every
+control-receipt gate. Control losses, watchdogs and an explicit abort stay
+failed trials. These controls do not generalize streaming-safe delivery
+to larger bodies or qualify HT association. See the
+[phase/copy-boundary evidence](../dev-doc/HT20_IMPLEMENTATION.md#continuation-streaming-and-moving-copy-boundary-2026-10-20).
+
+### Streaming copy-state and immediate retrigger control
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-stream-rearm-control
+make -f clean-rx/vendor-burst/Makefile reference-handoff-stream-rearm
+```
+
+Default-off `CLEAN_RX_HT_COPY_STREAM_REARM` requires resume128 phase 2.
+Mode 1 records state with a no-op; mode 2 executes the existing
+continuation-copy instruction once immediately after streaming starts.
+Both have the same instruction count and all other C3 bytes; only the
+action instruction differs. No new register mask, reset, copy geometry
+or transmitted bytes are introduced.
+
+Copy-probe version 4 extends the record to 54 words, ending at SHM
+0x600 and immediately before controller-fault report storage. Words
+44..48 retain control/base/end/raw-next/raw-context before streaming;
+49..53 retain count/control/base/end/context after the action.
+`handoff-stream-rearm` reports and checks the readbacks; matching
+ownership/epoch/commit and original exact-body/FCS/F2/control gates
+remain mandatory. A committed first activation suppresses subsequent
+command replay even when later packets clear their streaming bit.
+
+Twelve RF trials show command bits latch (`0x0802` becomes `0x08c2`)
+but no improvement in the 298-byte continuation: all eight command/
+control long-body trials watchdog at count 134 with exactly 128
+canonical bytes. Programmed base/end and sampled context stay correct.
+All four short-body trials retain exact pairs; only one receives every
+required control. This is a failed immediate-retrigger discriminator,
+not a recovery repair or a test of later post-stall rearm.
+See the [copy-state evidence and limits](../dev-doc/HT20_IMPLEMENTATION.md#streaming-copy-state-and-immediate-retrigger-discriminator-2026-10-20).
+
+### Measured post-stall replay
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-stall-control
+make -f clean-rx/vendor-burst/Makefile reference-handoff-stall-rearm
+```
+
+`CLEAN_RX_HT_COPY_STREAM_REARM` modes 3/4 extend the preceding gate with
+a measured wait: require count 134 unchanged for 32 TSF microseconds,
+then no-op or issue the existing copy command once. A shared 1,023-poll
+budget also bounds a frozen timer. Progress, EOF, abort or exhaustion
+skip the action; final checks run immediately before command issue.
+Other/default modes remain unchanged.
+
+Copy-probe version 5 keeps 54 words but reinterprets words 44..53 as
+observed count, remaining budget, TSF low/start elapsed time, decision,
+and post-action count/control/base/end/context. Decision values are
+1 stable, 2 progress/change, 3 EOF, 4 abort, 5 exhausted.
+`handoff-post-stall` labels valid diagnostics, stable proof and command
+issue separately. Normal F2/byte/FCS and control gates still apply.
+
+Twelve RF trials show a distinct delayed-replay failure in both roles:
+after the verified 32-us plateau, MPDU bytes 0..31 at the unchanged SHM
+start are replaced by exactly transmitted bytes 128..159, then RX
+aborts. Matched no-ops instead retain the original 128-byte prefix and
+watchdog at 134. None of these eight long-body trials qualifies.
+Four short-body trials detect progress, skip the command, and pass
+complete-body/FCS/F2/control checks; they do not prove stall recovery.
+
+The count retreat after delayed replay required a version-5 activation
+validator correction. Original failed JSON reports are preserved;
+raw-report rechecks and independent byte mapping verify activation
+without converting any aborted body to success. This demonstrates
+separate source/read progress and SHM write placement, not a safe
+destination adjustment or segmented receive repair. See the
+[post-stall evidence](../dev-doc/HT20_IMPLEMENTATION.md#measured-post-stall-replay-and-suffix-overwrite-2026-10-20).
+
+### Bounded copy-destination placement
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-destination-control
+make -f clean-rx/vendor-burst/Makefile reference-handoff-destination-shift
+```
+
+Modes 5/6 of `CLEAN_RX_HT_COPY_STREAM_REARM` use the same measured
+count-134/32-us stall and existing copy replay as above. Immediately
+before replay, both write SPR `0x001`: add zero or add 64. Only the
+immediate differs between matched receiver images. Progress, EOF,
+abort or budget exhaustion skips both the destination write and command.
+The endpoint remains unchanged; no GPR or reset is added.
+
+Copy-probe version 6 retains the 54-word version-5 layout. Validators
+require base `0x840` only for a confirmed mode-6 action, otherwise
+`0x800`; wrong versions, offsets and shifted skip paths are rejected.
+`handoff-post-stall` adds `destination_probe` and `base_shift_words`.
+Both profiles report `diagnostic_only:true` and **always remain
+nonqualifying**, so the runner returns 1 even for an exact short-body
+pair. This is not a new production receive mode.
+
+Twelve RF trials establish the placement effect in both badge roles:
+adding 64 moves the newly read source bytes 128..159 to SHM offsets
+128..159 and preserves the preceding 128 bytes. All four shifted long
+bodies therefore retain 160 canonical bytes, but still fail FCS.
+Zero-offset controls overwrite the start. Across eight long-body trials,
+five abort and three reach a bad-FCS terminal; none delivers an exact
+pair. All four short-body controls skip the action and retain exact
+pairs, two with all required controls.
+
+This verifies the tested destination displacement, not endpoint/count
+units, safe segmented recovery or D2 completion. Adding zero is itself a
+register write, not a hardware no-op. See the
+[placement evidence](../dev-doc/HT20_IMPLEMENTATION.md#bounded-copy-destination-placement-2026-10-20).
+
+### Replay endpoint and remaining-byte control
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-remaining-control
+make -f clean-rx/vendor-burst/Makefile reference-handoff-remaining
+```
+
+Modes 7/8 keep the verified +64 destination displacement and identical
+stall/replay path, then write endpoint SPR `0x02a` by subtracting zero
+or 128. The specific hypothesis is endpoint 298 versus remaining 170.
+Both writes have the same instruction footprint. Endpoints outside
+129..300 produce decision 6 and skip all geometry writes and replay.
+Progress/EOF/abort/budget skips remain unchanged.
+
+Copy-probe version 7 retains the 54-word layout and adds no report
+storage. Validators require the exact action-dependent base/endpoint;
+`handoff-post-stall` reports `endpoint_probe` and `endpoint_subtract`.
+Both profiles remain diagnostic-only: runner exit 1 is intentional
+even for correct short-body controls.
+
+Twelve RF trials show that endpoint 170 changes termination, but all
+eight long-body cases still retain exactly 160 canonical bytes.
+Unchanged-endpoint controls finish near count 304 with bad FCS;
+remaining-endpoint A trials finish at 178 with bad FCS, and B aborts
+at 68/69. All four short controls skip the action and deliver exact
+pairs with all required controls. This remaining-length adjustment is
+not a repair; the 32-byte fresh-copy limit remains unexplained. See the
+[endpoint evidence](../dev-doc/HT20_IMPLEMENTATION.md#replay-endpoint-versus-remaining-bytes-2026-10-20).
+
+### Focused copy microscope
+
+```sh
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-on
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-off
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-hold
+make -f clean-rx/vendor-burst/Makefile reference-handoff-scope-resume
+```
+
+`CLEAN_RX_HT_COPY_SCOPE` modes 1/2 compare stream field 2/0 before the
+same mode-6 replay. A small PSM program records registers and SHM windows
+at body offsets 128/160 before replay, just after it and after a bounded
+32-us observation. Modes 3/4 then compare holding the stream off for
+the committed current epoch versus re-enabling it. Each matched pair
+differs in exactly one receiver-image byte.
+
+The 80-word scope uses only SHM `0x4b0..0x4ff`; these profiles cap early
+retention at 320 bytes. Static assertions and focused tests enforce the
+separate first-body/continuation storage. EOF/abort exits and a 1,023-poll
+fallback bound the wait. Commit values are 17 timer, 18 EOF, 19 abort,
+20 exhausted. Stale/pending/invalid scope epochs cannot suppress normal
+streaming; borrowed R3 is restored on every guard path.
+
+The small `controller/copy_scope_test` executable runs the dedicated
+emitted-instruction tests without arguments. Given one recorded
+observer-capture filename, it validates the actual probe and reports
+expected-body FCS separately from native receive count/outcome. It never
+qualifies delivery. The standalone Make target is `copy-scope-test`.
+
+Twenty-four RF trials establish canonical-prefix lengths of 160 bytes
+with streaming on, 256 after a temporary pause/re-enable, and a complete
+**298-byte, FCS-valid SHM continuation** when held quiet, repeated in both
+roles. The native path still rejects all four complete held bodies with
+count 176; none reaches normal advanced F2 delivery. All eight short
+controls skip the probe and retain exact pairs, six with all controls.
+These remain diagnostic-only profiles with runner exit 1.
+
+This is a causal streaming-ownership result, not a fixed 32-byte copy
+capacity or D2 completion. Native count/FCS lifecycle and safe FIFO
+publication remain unresolved. See the
+[focused microscope evidence](../dev-doc/HT20_IMPLEMENTATION.md#focused-copy-microscope-and-current-epoch-stream-ownership-2026-10-20).
 
 ### Nonterminal guard-body and copy-end controls
 

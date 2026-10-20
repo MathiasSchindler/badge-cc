@@ -4,6 +4,7 @@
 #include "../../src/tools/diagnostics_logic.h"
 #include "../src/frame_limits.h"
 #include "../src/ht_observer.h"
+#include "../src/observer_dma.h"
 #include "../src/sdio_ring.h"
 #include "../src/ht20.h"
 
@@ -81,9 +82,144 @@ _Static_assert(REF_STIMULUS_RECORD_BASE+CLEAN_HT_STIMULUS_COUNT*REF_STIMULUS_REC
 #define REF_DUMP_BYTES 384u
 #define REF_OBSERVER_DETAIL 1024u
 #define REF_DIGEST_INITIAL 0x811c9dc5u
-#define REF_OBSERVER_ABI 21u
+#define REF_OBSERVER_ABI (CLEAN_RX_HT_COPY_DMA_PROBE ? 22u : 21u)
 static inline uint16_t ref_u16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8u));
+}
+
+static inline int ref_dma_probe_valid(const uint8_t *trace, const uint8_t *early) {
+    uint32_t count = badger_bytes_load_u32(trace+8u);
+    if (badger_bytes_load_u32(trace) != CLEAN_OBSERVER_DMA_MAGIC ||
+        badger_bytes_load_u32(trace+4u) != 5u || count > CLEAN_OBSERVER_DMA_SLOTS ||
+        badger_bytes_load_u32(trace+12u) < count ||
+        badger_bytes_load_u32(trace+76u) > badger_bytes_load_u32(trace+12u) ||
+        badger_bytes_load_u32(trace+76u) !=
+            badger_bytes_load_u32(trace+104u)+badger_bytes_load_u32(trace+108u) ||
+        badger_bytes_load_u32(trace+112u) > badger_bytes_load_u32(trace+104u) ||
+        badger_bytes_load_u32(trace+116u) > badger_bytes_load_u32(trace+108u) ||
+        badger_bytes_load_u32(trace+20u) > CLEAN_D11_BUFFER_BYTES ||
+        (badger_bytes_load_u32(trace+120u)>>28u) || badger_bytes_load_u32(trace+124u) ||
+        badger_bytes_load_u32(trace+16u) !=
+            badger_bytes_load_u32(trace+12u)+badger_bytes_load_u32(trace+28u)) return 0;
+    for (uint32_t i = 0u; i < count; ++i) {
+        const uint8_t *r = trace+CLEAN_OBSERVER_DMA_HEADER+i*CLEAN_OBSERVER_DMA_RECORD;
+        uint32_t consumer = badger_bytes_load_u32(r+4u);
+        uint32_t pointer = (badger_bytes_load_u32(r+12u)&0x1fffu) -
+            (CLEAN_D11_RING_ADDR&0x1fffu);
+        uint32_t frozen = badger_bytes_load_u32(r+24u)&0x80000000u;
+        if (consumer >= 32u || badger_bytes_load_u32(r+8u) >= 32u ||
+            (!frozen && (pointer%16u || pointer/16u >= 32u || pointer/16u == consumer)) ||
+            !ref_u16(r+20u) || ref_u16(r+20u) != ref_u16(early) ||
+            ref_u16(r+22u) != ref_u16(early+2u) ||
+            (badger_bytes_load_u32(r+24u)&0x1fff0000u) ||
+            (!frozen && ref_u16(r+24u) != 14u) ||
+            (badger_bytes_load_u32(r+28u)>>16u)+CLEAN_OBSERVER_DMA_PREFIX >
+                CLEAN_D11_BUFFER_BYTES) return 0;
+    }
+    return 1;
+}
+static inline int ref_stream_defer_verified(const uint8_t *handoff, const uint8_t *early) {
+    const uint8_t *before = handoff+2u*CLEAN_OBSERVER_HANDOFF_HEADER;
+    uint32_t owner = ref_u16(handoff);
+    return owner && owner <= CLEAN_OBSERVER_RECORDS && owner == ref_u16(early) &&
+        ref_u16(handoff+2u) == ref_u16(early+2u) &&
+        ref_u16(handoff+4u) == 7u && !ref_u16(handoff+6u) &&
+        !(ref_u16(before+10u)&2u) &&
+        !(ref_u16(before+2u*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS+10u)&2u);
+}
+static inline int ref_stream_phase_verified(const uint8_t *handoff, const uint8_t *early,
+                                            const uint8_t *copy, uint32_t phase) {
+    if ((phase < 1u || phase > 3u) || !ref_stream_defer_verified(handoff,early) ||
+        (ref_u16(handoff+2u*CLEAN_OBSERVER_HANDOFF_HEADER+
+            4u*CLEAN_OBSERVER_HANDOFF_RECORD_WORDS+10u)&2u) ||
+        ref_u16(copy) != ref_u16(early) || ref_u16(copy+2u) != ref_u16(early+2u) ||
+        (ref_u16(copy+4u) != 1u && ref_u16(copy+4u) != 3u) ||
+        (ref_u16(copy+6u) != 3u && ref_u16(copy+6u) != 4u &&
+         ref_u16(copy+6u) != 5u && ref_u16(copy+6u) != 6u && ref_u16(copy+6u) != 7u)) return 0;
+    if (phase == 1u) return ref_u16(copy+4u) == 3u && !(ref_u16(copy+26u)&2u);
+    uint32_t threshold = phase == 3u ? 256u : 128u;
+    int activated = ref_u16(copy+84u) == 1u && ref_u16(copy+86u) == ref_u16(early+2u) &&
+        ref_u16(copy+72u) >= threshold && (ref_u16(copy+76u)&2u);
+    if (ref_u16(copy+4u) == 3u && ref_u16(copy+20u) < threshold) {
+        /* Post-stall replay can rewind the count after committed activation. */
+        if (phase == 2u && ref_u16(copy+6u) >= 5u && activated)
+            return ref_u16(copy+20u) >= 50u && (ref_u16(copy+26u)&2u);
+        return ref_u16(copy+20u) >= 50u && !(ref_u16(copy+26u)&2u) &&
+            !(ref_u16(copy+84u) == 1u && ref_u16(copy+86u) == ref_u16(early+2u));
+    }
+    return activated && (ref_u16(copy+4u) != 3u || (ref_u16(copy+26u)&2u));
+}
+static inline int ref_stream_rearm_verified(const uint8_t *copy, const uint8_t *early,
+                                            uint32_t mode) {
+    return (mode == 1u || mode == 2u) && ref_u16(copy+6u) == 4u &&
+        ref_u16(copy) && ref_u16(copy) == ref_u16(early) &&
+        ref_u16(copy+2u) == ref_u16(early+2u) &&
+        (ref_u16(copy+4u) == 1u || ref_u16(copy+4u) == 3u) &&
+        ref_u16(copy+84u) == 1u && ref_u16(copy+86u) == ref_u16(early+2u) &&
+        !(ref_u16(copy+88u)&2u) && (ref_u16(copy+76u)&2u) &&
+        (ref_u16(copy+100u)&2u) && ref_u16(copy+72u) >= 128u &&
+        ref_u16(copy+98u) <= CLEAN_RXE_BYTES &&
+        ref_u16(copy+90u) == CLEAN_SHM_FRAME && ref_u16(copy+102u) == CLEAN_SHM_FRAME &&
+        ref_u16(copy+92u) == ref_u16(early+26u) &&
+        ref_u16(copy+104u) == ref_u16(early+26u);
+}
+static inline int ref_stream_stall_valid(const uint8_t *copy, const uint8_t *early,
+                                        uint32_t mode) {
+    uint32_t reason = ref_u16(copy+96u), budget = ref_u16(copy+90u);
+    uint32_t base = CLEAN_SHM_FRAME +
+        (mode >= 6u && reason == 1u ? CLEAN_STREAM_DEST_WORDS : 0u);
+    uint32_t end = ref_u16(early+26u) -
+        (mode == 8u && reason == 1u ? CLEAN_STREAM_END_BYTES : 0u);
+    if (mode < 3u || mode > 8u || ref_u16(copy+6u) != (mode >= 7u ? 7u : mode >= 5u ? 6u : 5u) ||
+        !ref_u16(copy) || ref_u16(copy) != ref_u16(early) ||
+        ref_u16(copy+2u) != ref_u16(early+2u) ||
+        (ref_u16(copy+4u) != 1u && ref_u16(copy+4u) != 3u) ||
+        ref_u16(copy+84u) != 1u || ref_u16(copy+86u) != ref_u16(early+2u) ||
+        !(ref_u16(copy+76u)&2u) || !(ref_u16(copy+100u)&2u) ||
+        ref_u16(copy+72u) < 128u || ref_u16(copy+88u) < 128u ||
+        ref_u16(copy+88u) > CLEAN_RXE_BYTES || ref_u16(copy+98u) > CLEAN_RXE_BYTES ||
+        ref_u16(copy+102u) != base ||
+        ref_u16(copy+104u) != end ||
+        budget > CLEAN_STREAM_STALL_BUDGET || reason < 1u || reason > (mode >= 7u ? 6u : 5u)) return 0;
+    if (mode >= 7u && reason == 1u &&
+        (ref_u16(early+26u) <= CLEAN_STREAM_END_BYTES ||
+         ref_u16(early+26u) > CLEAN_OBSERVER_SECOND_MAX)) return 0;
+    if (reason == 6u && ref_u16(early+26u) > CLEAN_STREAM_END_BYTES &&
+        ref_u16(early+26u) <= CLEAN_OBSERVER_SECOND_MAX) return 0;
+    int stable = ref_u16(copy+88u) == CLEAN_STREAM_STALL_COUNT && budget &&
+        ref_u16(copy+94u) >= CLEAN_STREAM_STALL_US && ref_u16(copy+94u) <= 1000u;
+    if (reason == 1u) return stable;
+    if (reason == 6u && !stable) return 0;
+    return !(ref_u16(copy+100u)&0xc0u) && (reason != 5u || !budget);
+}
+static inline int ref_copy_scope_valid(const uint8_t *scope, const uint8_t *copy,
+                                       const uint8_t *early, uint32_t mode) {
+    uint32_t commit = ref_u16(scope);
+    if (mode < 1u || mode > 4u || ref_u16(copy+6u) != 6u ||
+        !ref_u16(copy) || ref_u16(copy) != ref_u16(early) ||
+        ref_u16(copy+2u) != ref_u16(early+2u) ||
+        (ref_u16(copy+4u) != 1u && ref_u16(copy+4u) != 3u)) return 0;
+    if (!commit) return !ref_u16(scope+2u) && ref_u16(copy+96u) == 2u &&
+        ref_stream_stall_valid(copy,early,6u);
+    if (commit < 17u || commit > 20u || ref_u16(scope+2u) != ref_u16(early+2u) ||
+        ref_u16(copy+84u) != 1u || ref_u16(copy+86u) != ref_u16(early+2u) ||
+        ref_u16(copy+72u) < 128u || !(ref_u16(copy+76u)&2u) ||
+        ref_u16(copy+88u) != 134u || !ref_u16(copy+90u) ||
+        ref_u16(copy+90u) > CLEAN_STREAM_STALL_BUDGET ||
+        ref_u16(copy+94u) < 32u || ref_u16(copy+94u) > 1000u ||
+        ref_u16(copy+96u) != 1u) return 0;
+    for (uint32_t n = 0u; n < 3u; ++n) {
+        const uint8_t *s = scope+4u+52u*n;
+        if (ref_u16(s+10u) != CLEAN_SHM_FRAME+(n ? 64u : 0u) ||
+            ref_u16(s+12u) != ref_u16(early+26u) ||
+            (ref_u16(s+8u)&3u) != (n && mode >= 2u ? 0u : 2u)) return 0;
+    }
+    if (ref_u16(scope+6u) != 134u || (ref_u16(scope+8u)&0xc000u)) return 0;
+    uint32_t elapsed = (uint16_t)(ref_u16(scope+108u)-ref_u16(scope+56u));
+    if (commit == 17u && (elapsed < 32u || elapsed > 1000u)) return 0;
+    if (commit == 18u && !(ref_u16(scope+112u)&0x4000u)) return 0;
+    if (commit == 19u && !(ref_u16(scope+112u)&0x8000u)) return 0;
+    return 1;
 }
 static inline uint32_t ref_source_frame(uint8_t packet[CLEAN_HT_STIMULUS_STORAGE],
                                        const uint8_t nonce[14], uint32_t index) {
@@ -295,6 +431,8 @@ static inline int ref_rx_summary(uint8_t summary[REF_RX_SUMMARY_BYTES],
 #define REF_COPY_FAULT_MAGIC 0x31504346u
 _Static_assert(REF_COPY_BASE+2u*CLEAN_OBSERVER_COPY_WORDS <= REF_TRACE_BYTES,
     "Receive-copy probe must fit the existing early SHM export");
+_Static_assert(REF_COPY_BASE+2u*CLEAN_OBSERVER_COPY_WORDS <= REF_COPY_FAULT_BASE,
+    "Receive-copy probe must not overlap controller-fault evidence");
 _Static_assert(REF_COPY_FAULT_BASE+32u <= REF_TRACE_BYTES,
     "Copy fault evidence must fit beyond the complete early SHM export");
 #define REF_ADVANCED_SAMPLE 0x100u
@@ -337,6 +475,8 @@ static inline uint32_t ref_sample_slot(const uint8_t *samples, uint32_t count,
 
 _Static_assert(REF_OBSERVER_DETAIL+CLEAN_OBSERVER_WORDS*2u <= REF_SAMPLE_BASE,
                "Observer records must not overlap complete MPDU samples");
+_Static_assert(REF_SAMPLE_BASE+CLEAN_OBSERVER_DMA_BYTES <= REF_EARLY_BASE,
+               "DMA diagnostic must fit the replaced MPDU sample area");
 _Static_assert(REF_EARLY_BASE+CLEAN_OBSERVER_EARLY_WORDS*2u <= REF_TRACE_BYTES,
                "Complete MPDU samples and early snapshot must fit the trace transport");
 
