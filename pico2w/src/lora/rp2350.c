@@ -8,7 +8,8 @@
 #define CS (1u << 3u)
 #define RESET (1u << 15u)
 #define OUTPUTS (CS | RESET)
-#define RESETS ((1u << 19u) | (1u << 24u))
+#define SPI1_RESET (1u << 19u)
+#define TIMER1_RESET (1u << 24u)
 #define GPIO_RESETS ((1u << 6u) | (1u << 9u))
 
 static uint8_t pins_ready;
@@ -29,12 +30,30 @@ uint32_t sx1262_hw_time_us(void) {
     return REG(0x400b8028u);
 }
 
-int32_t sx1262_hw_init(void) {
-    pins_ready = 0u;
-    if ((REG(0x40048004u) & 0x80001000u) != 0x80001000u)
+static int clock_ready(void) {
+    /* clk_ref on XOSC /1, clk_peri on XOSC and running, TIMER1 out of reset
+       with its 12-cycle tick enabled and running from the tick source. */
+    return (REG(0x40048004u) & 0x80001000u) == 0x80001000u &&
+           (CLOCK(0x30u) & 3u) == 2u && (CLOCK(0x38u) & 15u) == 4u &&
+           CLOCK(0x34u) == (1u << 16u) &&
+           CLOCK(0x48u) == ((4u << 5u) | (1u << 11u) | (1u << 28u)) &&
+           CLOCK(0x4cu) == (1u << 16u) &&
+           (REG(0x40020008u) & (1u << 24u)) != 0u &&
+           (REG(0x40108024u) & 3u) == 3u && REG(0x40108028u) == 12u &&
+           REG(0x400b8038u) == 0u && REG(0x400b8030u) == 0u;
+}
+
+int32_t sx1262_hw_clock_init(void) {
+    if (clock_ready()) return 0;
+    /* Same XOSC enable as usb_hw_init, so either may run first. */
+    if ((REG(0x40048004u) & (1u << 12u)) == 0u) {
+        REG(0x4004800cu) = 196u;
+        REG(0x40048000u) = 0x00fabaa0u;
+    }
+    if (!wait_mask(&REG(0x40048004u), 1u << 31u, 1u << 31u))
         return SX1262_INIT_ERROR;
 
-    /* Probe-only clock setup; USB has its own PLL and clock slice. */
+    /* USB keeps its own PLL and clock slice; TIMER0 and clk_sys are untouched. */
     CLOCK(0x30u) = (CLOCK(0x30u) & ~3u) | 2u;
     if (!wait_mask(&CLOCK(0x38u), 15u, 4u)) return SX1262_INIT_ERROR;
     CLOCK(0x34u) = 1u << 16u;
@@ -45,9 +64,9 @@ int32_t sx1262_hw_init(void) {
     if (!wait_mask(&CLOCK(0x48u), 1u << 28u, 1u << 28u))
         return SX1262_INIT_ERROR;
 
-    REG(0x40022000u) = RESETS;
-    REG(0x40023000u) = RESETS | GPIO_RESETS;
-    if (!wait_mask(&REG(0x40020008u), RESETS | GPIO_RESETS, RESETS | GPIO_RESETS))
+    REG(0x40022000u) = TIMER1_RESET;
+    REG(0x40023000u) = TIMER1_RESET;
+    if (!wait_mask(&REG(0x40020008u), TIMER1_RESET, TIMER1_RESET))
         return SX1262_INIT_ERROR;
     REG(0x40108024u) = 0u;
     REG(0x40108028u) = 12u;
@@ -60,6 +79,19 @@ int32_t sx1262_hw_init(void) {
     for (loops = 0u; loops < 100000u; ++loops)
         if (sx1262_hw_time_us() - start >= 10u) break;
     if (loops == 100000u) return SX1262_TIMER_ERROR;
+    return 0;
+}
+
+int32_t sx1262_hw_init(void) {
+    pins_ready = 0u;
+    int32_t error = sx1262_hw_clock_init();
+    if (error != 0) return error;
+
+    /* Reset SPI1 only; IO/pad banks are released from reset, never asserted. */
+    REG(0x40022000u) = SPI1_RESET;
+    REG(0x40023000u) = SPI1_RESET | GPIO_RESETS;
+    if (!wait_mask(&REG(0x40020008u), SPI1_RESET | GPIO_RESETS, SPI1_RESET | GPIO_RESETS))
+        return SX1262_INIT_ERROR;
 
     SPI(0x04u) = 0u;
     SPI(0x10u) = 12u;

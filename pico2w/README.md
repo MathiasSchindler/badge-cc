@@ -9,12 +9,19 @@ the firmware sources remain entirely local.
 
 ## Dependencies
 
-**Firmware:** none. The target uses project-owned C and a small assembly boot
+**Default probe firmware:** none. The target uses project-owned C and a small assembly boot
 metadata file, without libc, libgcc/compiler-rt, the Pico SDK, TinyUSB, an OS,
 an allocator, or vendor radio binaries. Its integer types come from compiler
 built-ins, not standard-library headers. LLVM compilation uses `-nostdinc`
 and links with `ld.lld` directly. The owned compiler uses its own preprocessor
 and linker. Neither pipeline links startup files or libraries.
+
+**Optional HTTP monitor:** the RP2350 code has the same no-SDK/no-libc
+contract, including its project-owned TCP/HTTP stack. The separate CYW43439
+Wi-Fi processor needs an explicitly authorized vendor firmware/configuration
+data exception. Credentials are supplied at build time, not in source.
+The resulting private firmware embeds those credentials in plaintext and
+must not be published. See the [monitor guide](docs/monitor.md).
 
 **Development host:** Python 3.9+ (standard library only), LLVM `clang`,
 `ld.lld`, `llvm-objcopy`, and `llvm-nm`. Native C tests additionally need
@@ -45,6 +52,25 @@ Tool paths can be supplied with `--cc`, `--ld`, `--objcopy`, `--nm`, and
 The build script resolves its own directory, independently of the working
 directory. It also works on POSIX hosts with the corresponding path syntax.
 
+The default `--app probe` retains the short-lived, opt-in radio diagnostic.
+The separate `--app monitor` builds a persistent Wi-Fi HTTP dashboard and
+receive-only LoRaWAN uplink monitor; it requires explicit private inputs and
+board confirmation. Follow the [monitor build instructions](docs/monitor.md).
+Tests never connect to an AP or open USB/SPI hardware.
+
+### Native Windows control and deployment
+
+The project-owned [picoctl C host tool](docs/picoctl.md) discovers USB devices,
+validates monitor status, requests BOOTSEL and coordinates verified flashing
+through an explicitly selected picotool executable. It uses Windows system
+libraries and the host C runtime, not Python at runtime. Build it with
+`.\pico2w\tools\build-host.ps1 -Test` from the repository root, or use the
+direct C compiler command in its guide. This does not change target firmware
+dependencies. Firmware now advertises Windows' built-in WinUSB binding.
+The [hardware qualification record](docs/picoctl.md#physical-qualification-2026-10-20)
+documents verified deployment/recovery, Wi-Fi/DHCP/HTTP and SX1262 RX-mode
+startup. Over-the-air LoRa reception still needs a known matching signal.
+
 ### Owned compiler
 
 From the repository root, build the host tools and then the same firmware
@@ -69,14 +95,16 @@ The manifest identifies the selected pipeline and hashes each owned
 executable; those hashes also participate in the build ID. Native USB and LoRa tests
 still run as host C tests, not as execution of generated Arm code.
 
-Both pipelines were built natively on Windows ARM64. With the optional
-SX1262 probe included, the owned image occupies 17,716 flash bytes and
-296 BSS bytes, compared with LLVM's 4,640 flash bytes and 296 BSS bytes.
+Both pipelines were built natively on Windows ARM64. Current flash sizes
+and UF2 block counts are recorded in each build's manifest rather than
+being a fixed property of this evolving application.
 LLVM independently accepts the owned ELF and extracts the
 same binary bytes as `elf2bin`. This establishes image structure and
-packaging, **not execution equivalence or working USB on hardware**.
+packaging, **not execution equivalence**. Later LLVM USB hardware qualification is
+recorded separately in the [control-tool guide](docs/picoctl.md#physical-qualification-2026-10-20).
 Independently linking all owned objects with LLVM's linker also produces
-the same complete binary. An isolated copy of this directory, outside the
+the same complete binary. The original probe baseline was also tested in
+an isolated copy of this directory, outside the
 repository and under a path containing spaces, produces an identical owned
 UF2 with all LLVM target-tool options deliberately set to unavailable names.
 
@@ -86,6 +114,9 @@ Outputs stay in ignored `build/`:
 - `build_id.h` and `manifest.json`, recording the source fingerprint, compiler,
   image hashes, image size, UF2 family, and unresolved-symbol check.
 - Native test executable and intermediate objects.
+- Monitor builds use `build/monitor/` (LLVM) or `build/monitor/owned/`,
+  separate from probe outputs. Their generated credential headers and
+  images are private, not release artifacts.
 
 The build checks the stack/reset vectors, linked boot-block chain, flash
 capacity, UF2 packaging, and absence of unresolved symbols. The native tests
@@ -95,11 +126,12 @@ the physical USB/SPI controllers, ROM calls, clocks, or boot on a Pico.
 
 ## Current application
 
-The application:
+The default probe application:
 
 1. Schedules a bounded-lifetime ROM reboot to BOOTSEL before touching USB.
 2. Reads the chip ID and uses it as the USB serial.
-3. Initializes native USB at 48 MHz from the board's 12 MHz crystal.
+3. Configures clk_sys at 120 MHz to satisfy RP2350-E12, then native USB at
+   48 MHz from the board's 12 MHz crystal.
 4. Serves nonce/build/CRC-checked reports containing chip ID and request count.
 5. Accepts an explicit BOOTSEL request after its USB status stage completes.
 6. Accepts an explicit non-transmitting SX1262 probe, with raw results and
@@ -109,8 +141,8 @@ The application:
 This is an initial diagnostic image, not a persistent production application.
 The requested recovery delay is 8000 ms, but inherited clocks/timer settings
 mean it is **not a qualified eight-second wall-clock guarantee**. Recovery is
-not refreshed by USB traffic. Normal boot leaves the core clock and inherited
-timer configuration unchanged; a stopped timer causes bounded initialization
+not refreshed by USB traffic. USB initialization changes the core clock to
+120 MHz; inherited TIMER0 configuration remains unchanged. A stopped timer causes bounded initialization
 failure rather than an infinite polling loop. An explicitly requested LoRa
 probe configures crystal-derived reference/peripheral clocks and TIMER1.
 Inherited clocks following the reference (possibly the core and recovery
@@ -125,25 +157,37 @@ alone. No flash writes are made by the running application.
 
 The USB interface is vendor-specific, endpoint-zero only, **not a COM port**.
 See the [protocol](docs/usb-protocol.md). The Windows host needs an appropriate
-USB driver binding, such as WinUSB, before a collector can issue vendor control
-transfers. No driver is installed automatically. A standard-library-only
+USB driver binding before a collector can issue vendor control transfers.
+Microsoft OS descriptors now request the built-in WinUSB driver automatically,
+without a custom driver installer. A standard-library-only
 Windows [LoRa collector](tools/lora_probe.py) checks the explicit device's
 identity before requesting a radio probe; see its
 [usage and protocol](docs/lora-probe.md). The badge's collector is not
 compatible with the Pico-specific identity and report payload. Device
 communication is a separate hardware-qualification step.
 
+The [persistent monitor](docs/monitor.md) instead joins a WPA2 network,
+obtains an IPv4 address by DHCP and serves a local HTTP dashboard. It
+starts receive-only SX1262 operation with a fixed EU868 profile and accepts
+RAM-only profile changes. No LoRaWAN join, MIC verification, decryption,
+LoRa transmission or Internet service is included. It is not a gateway.
+
 ## Hardware status and safety
 
-Builds and native tests are verified; **this target has not yet been flashed
-or physically qualified on a Pico 2 W**. Building or testing never opens a USB
+LLVM monitor images have been flashed and exercised on Pico
+`7C4918BAB9492C77` (RP2350 A2): USB recovery/status, WPA2 authorization,
+DHCP and HTTP serving work, and the SX1262 enters continuous RX without
+errors. No over-the-air packet has yet been captured. The owned pipeline
+is build/layout-qualified, not hardware execution-qualified.
+Building or testing never opens a USB
 device, changes drivers, resets hardware, or flashes firmware.
 
 Installation would replace the selected device's current application.
 Save any needed firmware/data first, select the actual device explicitly, and
 obtain permission before a hardware trial. For manual recovery, hold BOOTSEL
 while connecting USB and load a suitable RP2350 Arm Secure UF2. This project
-does not provide an automatic flashing command.
+provides explicit selected-device flashing through the native
+[picoctl tool](docs/picoctl.md); building alone never flashes.
 
 Errors are retained in debugger-visible `pico2w_error`; `pico2w_stage` is
 1 for ROM setup, 2 for USB initialization, 3 while serving, and 4 for an
@@ -161,8 +205,12 @@ report and `pico2w_lora_error` without stopping normal USB service.
 | [src/rp2350/](src/rp2350/) | Startup, linker layout, Arm Secure image metadata, ROM chip ID/recovery. |
 | [src/usb/](src/usb/) | Minimal endpoint-zero state machine, RP2350 USB driver, report codec. |
 | [src/lora/](src/lora/) | Opt-in, non-transmitting SX1262 probe and RP2350 SPI1/timing backend. |
+| [src/wifi/](src/wifi/) | Project-owned Pico 2 W gSPI/SDPCM/CDC/BDC Wi-Fi station backend. |
+| [src/net/](src/net/) | Bounded DHCP/ARP/IPv4/ICMP/TCP/HTTP implementation. |
+| [src/app/](src/app/) | Embedded dashboard and bounded JSON/settings handlers. |
 | [src/include/](src/include/) | Freestanding integer types. |
 | [src/main.c](src/main.c) | Headless application and error/recovery lifecycle. |
+| [src/main_monitor.c](src/main_monitor.c) | Persistent monitor, Wi-Fi/receiver/network integration and USB status. |
 | [tools/](tools/) | Host-only, standard-library Python build, UF2 generation and explicit Windows probe collector. |
 | [tests/](tests/) | Native USB/radio tests and Python packaging/collector tests. |
 | [docs/](docs/) | Pico-specific protocol documentation. |

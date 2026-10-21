@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import struct
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -90,11 +91,20 @@ class FirmwareTests(unittest.TestCase):
                 build.validate_image(image[:length])
 
     def test_sources_stay_inside_tree(self):
-        for name in build.SOURCES:
+        for name in build.SOURCES + build.MONITOR_SOURCES:
             path = (ROOT / name).resolve()
             self.assertTrue(path.is_relative_to(ROOT))
             self.assertTrue(path.is_file())
         self.assertFalse((ROOT / "src").joinpath("build_id.h").exists())
+
+    def test_monitor_requires_explicit_board_and_private_inputs(self):
+        args = SimpleNamespace(confirm_waveshare=False)
+        with self.assertRaisesRegex(ValueError, "confirm-waveshare"):
+            build.monitor_assets(args, ROOT / "build" / "monitor")
+        args = SimpleNamespace(confirm_waveshare=True, credentials=None,
+                               wifi_firmware=None, wifi_nvram=None)
+        with self.assertRaisesRegex(ValueError, "requires --credentials"):
+            build.monitor_assets(args, ROOT / "build" / "monitor")
 
 
 if __name__ == "__main__":

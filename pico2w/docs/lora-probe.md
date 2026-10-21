@@ -61,13 +61,15 @@ RF-path integrity, working reception, or LoRaWAN connectivity.
 
 ### Timing and cancellation
 
-Clock setup is **opt-in along with the probe**. It switches `clk_ref` to the
+Radio-specific clock setup is **opt-in along with the probe**. It switches `clk_ref` to the
 12 MHz XOSC with divide-by-one, and `clk_peri` to XOSC with divide-by-one.
 It resets SPI1 and TIMER1, configures TIMER1's tick generator to 12 reference
 cycles per microsecond and uses the free-running TIMER1 low word. TIMER0,
 the system-clock mux/divider, the USB clock and its PLL are not reconfigured.
 However, if the core or another inherited clock follows `clk_ref`, its
-frequency changes too. Clock configuration is retained after the probe.
+frequency changes too. Separately, USB startup now configures the core at
+120 MHz to satisfy RP2350-E12 before the probe can run.
+Clock configuration is retained after the probe.
 The existing automatic BOOTSEL recovery is not cancelled or refreshed, and
 its wall-clock deadline remains unqualified.
 
@@ -186,12 +188,20 @@ prints JSON on success, and exits nonzero with explicit diagnostics on
 failure. It polls for three seconds; individual WinUSB control transfers
 also have the operating system's control-transfer timeout.
 
-**No physical trial has been performed.** Native tests exercise exact radio
+**A successful physical radio probe has not been qualified.** Native tests exercise exact radio
 command frames, reset timing, timer wrap, stalled timers, stuck BUSY, SPI
 failure, invalid/floating responses, device errors, cancellation, cleanup,
 USB ACK/abort/reset semantics, and collector identity/failure handling.
-Neither toolchain's Arm output nor the physical clocks, GPIOs, SPI, Windows
-binding and USB/radio interaction have been execution-qualified.
+The 2026-10-20 LLVM hardware trial qualified USB execution, automatic Windows
+binding and recovery on RP2350 A2, but monitor radio initialization returned
+`-3005` (invalid command response). GPIO/SPI operation, successful probe
+results and RF reception remained unqualified at that stage. Follow-up
+monitor trials qualified GPIO/SPI control, TCXO setup and continuous RX-mode
+entry after correcting status RFU-bit handling and the expected startup
+XOSC error. The readback-only probe intentionally does not enable the TCXO;
+successful probe results and actual over-the-air reception remain separate
+qualification items. See the
+[physical qualification record](picoctl.md#physical-qualification-2026-10-20).
 
 ## References
 

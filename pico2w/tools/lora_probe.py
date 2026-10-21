@@ -47,7 +47,7 @@ def fresh_nonce():
     return nonce
 
 
-def probe(usb, build_id, serial):
+def identify(usb, build_id, serial):
     device = usb.transfer(0x80, 6, 0x100, 18)
     if (len(device) != 18 or device[:2] != b"\x12\x01" or device[7] != 64 or
             struct.unpack_from("<HH", device, 8) != (0xCAFE, 0x4027)):
@@ -66,6 +66,9 @@ def probe(usb, build_id, serial):
     if f"{high:08X}{low:08X}" != serial.upper():
         raise ValueError("chip ID does not match the explicitly selected serial; radio untouched")
 
+
+def probe(usb, build_id, serial):
+    identify(usb, build_id, serial)
     nonce = fresh_nonce()
     usb.transfer(0x40, 0x54, 0, request_record(build_id, 2, nonce))
     deadline = time.monotonic() + 3.0
@@ -99,6 +102,26 @@ def probe(usb, build_id, serial):
             return result
         time.sleep(0.01)
     raise TimeoutError("probe did not finish before the collector deadline")
+
+
+def monitor_status(usb, build_id, serial):
+    identify(usb, build_id, serial)
+    record = usb.transfer(0xC0, 0x56, 0, 64)
+    if (len(record) != 64 or
+            struct.unpack_from("<4sHHI", record) != (b"P2WS", 1, 64, build_id) or
+            struct.unpack_from("<I", record, 60)[0] != zlib.crc32(record[:60])):
+        raise ValueError("invalid monitor status identity, length or CRC")
+    fields = struct.unpack_from("<IiIIIiIIIIII", record, 12)
+    wifi_stage, wifi_error, dhcp_state, network_error, address, lora_error = fields[:6]
+    ip = ".".join(str((address >> shift) & 255) for shift in (24, 16, 8, 0))
+    return {"serial": serial.upper(), "build_id": f"{build_id:08x}",
+            "wifi_stage": wifi_stage, "wifi_error": wifi_error,
+            "dhcp_state": dhcp_state, "network_error": network_error,
+            "ip": ip, "url": f"http://{ip}/" if address and fields[10] and not wifi_error and
+                            not network_error and dhcp_state in (3, 4) else None,
+            "lora_error": lora_error, "received": fields[6], "network_drops": fields[7],
+            "network_tx": fields[8], "uptime_ms": fields[9],
+            "wifi_connected": bool(fields[10]), "wifi_controller_status": fields[11]}
 
 
 class SetupPacket(ctypes.LittleEndianStructure):
@@ -174,8 +197,10 @@ def main():
     parser.add_argument("--manifest", required=True, type=Path, help="manifest of the installed build")
     parser.add_argument("--confirm-waveshare", action="store_true",
                         help="confirm Pico-LoRa-SX1262-868M wiring; allow resetting the radio")
+    parser.add_argument("--status", action="store_true",
+                        help="read persistent monitor IP/status only; do not request a radio probe")
     args = parser.parse_args()
-    if not args.confirm_waveshare:
+    if not args.confirm_waveshare and not args.status:
         parser.error("--confirm-waveshare is required; this command changes GPIOs and resets the radio")
     if not re.fullmatch(r"[0-9a-fA-F]{16}", args.serial):
         parser.error("--serial must be exactly 16 hexadecimal digits")
@@ -186,7 +211,7 @@ def main():
             raise ValueError("manifest must contain an eight-digit hexadecimal build_id")
         build_id = int(manifest["build_id"], 16)
         with WinUSB(args.device_path) as usb:
-            result = probe(usb, build_id, args.serial)
+            result = monitor_status(usb, build_id, args.serial) if args.status else probe(usb, build_id, args.serial)
         print(json.dumps(result, indent=2))
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         parser.exit(1, f"ERROR: {error}\n")

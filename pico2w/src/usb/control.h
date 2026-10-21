@@ -13,6 +13,8 @@
 #define USB_INFO 0x53u
 #define USB_LORA_SUBMIT 0x54u
 #define USB_LORA_REPORT 0x55u
+#define USB_APP_STATUS 0x56u
+#define USB_WIFI_STATUS 0x58u
 #define USB_PACKET_SIZE 64u
 
 typedef enum {
@@ -53,12 +55,21 @@ typedef struct {
     uint8_t lora_requested;
     uint8_t lora_running;
     uint8_t lora_valid;
+    uint8_t lora_disabled;
+    uint8_t app_status_valid;
+    uint8_t wifi_status_valid;
     uint8_t out_request;
     uint32_t lora_sequence;
+    const uint8_t *in_source;
+    uint16_t in_remaining;
+    uint8_t in_pid;
+    uint8_t in_zlp;
     uint16_t length;
     uint8_t data[USB_PACKET_SIZE];
     uint8_t report[USB_REPORT_SIZE];
     uint8_t lora_report[USB_REPORT_SIZE];
+    uint8_t app_status[USB_REPORT_SIZE];
+    uint8_t wifi_status[USB_REPORT_SIZE];
     char serial[17];
 } usb_control_t;
 

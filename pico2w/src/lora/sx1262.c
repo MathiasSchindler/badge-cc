@@ -1,7 +1,7 @@
 #include "sx1262.h"
 #include "hardware.h"
 
-static int32_t wait_ready(int32_t (*service)(void), uint32_t delay_us) {
+int32_t sx1262_wait(int32_t (*service)(void), uint32_t delay_us) {
     uint32_t start = sx1262_hw_time_us();
     for (uint32_t loops = 0u; loops < 1000000u; ++loops) {
         int32_t error = service();
@@ -17,23 +17,29 @@ static int32_t wait_ready(int32_t (*service)(void), uint32_t delay_us) {
     return SX1262_TIMER_ERROR;
 }
 
-static int32_t exchange(const uint8_t *out, uint8_t *in, uint32_t length,
-                         int32_t (*service)(void)) {
-    int32_t error = wait_ready(service, 0u);
+int32_t sx1262_transfer(const uint8_t *out, uint8_t *in, uint32_t length,
+                        uint8_t *tail, uint32_t tail_length,
+                        int32_t (*service)(void)) {
+    int32_t error = sx1262_wait(service, 0u);
     if (error != 0) return error;
     sx1262_hw_select(1u);
-    for (uint32_t i = 0u; i < length; ++i) {
+    for (uint32_t i = 0u; i < length && error == 0; ++i)
         error = sx1262_hw_byte(out[i], in + i);
-        if (error != 0) break;
-    }
+    for (uint32_t i = 0u; i < tail_length && error == 0; ++i)
+        error = sx1262_hw_byte(0u, tail + i);
     sx1262_hw_select(0u);
     if (error != 0) return error;
-    return wait_ready(service, 0u);
+    return sx1262_wait(service, 0u);
+}
+
+static int32_t exchange(const uint8_t *out, uint8_t *in, uint32_t length,
+                         int32_t (*service)(void)) {
+    return sx1262_transfer(out, in, length, 0, 0u, service);
 }
 
 static int valid_status(uint8_t status) {
     uint8_t command = (uint8_t)((status >> 1u) & 7u);
-    return (status & 0xf1u) == 0x20u &&
+    return (status & 0x70u) == 0x20u &&
            command != 3u && command != 4u && command != 5u && command != 7u;
 }
 
@@ -77,9 +83,9 @@ void sx1262_probe(sx1262_result_t *result, int32_t (*service)(void)) {
     int32_t error = sx1262_hw_init();
     if (error == 0) {
         sx1262_hw_reset(1u);
-        error = wait_ready(service, 20000u);
+        error = sx1262_wait(service, 20000u);
         sx1262_hw_reset(0u);
-        if (error == 0) error = wait_ready(service, 10000u);
+        if (error == 0) error = sx1262_wait(service, 10000u);
         if (error == 0) error = sample(result->samples, 1u, service);
         if (error == 0) error = sample(result->samples + 8u, 0u, service);
         if (error == 0 &&

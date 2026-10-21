@@ -1,0 +1,148 @@
+#ifndef PICO2W_LORA_RECEIVER_H
+#define PICO2W_LORA_RECEIVER_H
+
+#include "types.h"
+#include "sx1262.h"
+
+/*
+ * Receive-only, continuously listening SX1262 LoRa receiver for the Waveshare
+ * Pico-LoRa-SX1262-868M. It never issues SetTx, SetTxContinuousWave,
+ * SetTxInfinitePreamble, SetCad or any LoRaWAN join/transmit operation.
+ *
+ * Scope: LoRaWAN *uplink* traffic only. Standard (non-inverted) IQ is fixed,
+ * so downlinks (inverted IQ) are normally not received. Explicit header mode:
+ * the radio checks payload CRC only when the received header announces one.
+ * "packets" therefore means RxDone without CrcErr, not "CRC verified"; the
+ * SX1262 does not report whether a CRC was present. LoRaWAN fields are a
+ * structural header reading only: no MIC check, no decryption.
+ *
+ * The object is caller-allocated and is not re-entrant: the service callback
+ * must never call back into the receiver. Every SPI wait calls the service;
+ * a nonzero service result cancels the current operation.
+ */
+
+#define SX1262_RX_RING_SIZE 16u
+#define SX1262_RX_MAX_PAYLOAD 255u
+
+#define SX1262_RX_CONFIG_ERROR (-3010)
+#define SX1262_RX_STATE_ERROR (-3011)
+#define SX1262_RX_BOARD_ERROR (-3012) /* board not confirmed: no hardware touched */
+
+/* Only supported board: TCXO on DIO3 at 1.7 V/5 ms, PE4259 RF switch on DIO2. */
+#define SX1262_RX_BOARD_WAVESHARE_PICO_LORA_SX1262_868M 0x57534831u
+
+#define SX1262_RX_MIN_FREQUENCY_HZ 863000000u
+#define SX1262_RX_MAX_FREQUENCY_HZ 870000000u
+#define SX1262_RX_DEFAULT_FREQUENCY_HZ 868100000u
+#define SX1262_RX_DEFAULT_SF 7u
+#define SX1262_RX_DEFAULT_BANDWIDTH_KHZ 125u
+
+#define SX1262_RX_IDLE 0u
+#define SX1262_RX_RUNNING 1u
+#define SX1262_RX_FAULT 2u
+
+/* Packet flags. */
+#define SX1262_RX_HAS_MHDR 1u       /* length >= 1: mhdr/mtype/major are the raw first byte */
+#define SX1262_RX_LORAWAN_DATA 2u   /* structurally plausible LoRaWAN data frame: dev_addr/fctrl/fcnt16 valid */
+
+typedef struct {
+    uint32_t frequency_hz;   /* 863000000..870000000 */
+    uint32_t spreading_factor; /* 7..12 */
+    uint32_t bandwidth_khz;  /* 125, 250 or 500 */
+} sx1262_rx_config_t;
+
+typedef struct {
+    uint32_t sequence;       /* 1-based, increments per stored packet, wraps */
+    uint32_t timestamp_ms;   /* caller-supplied uptime ms at poll that read it */
+    uint32_t frequency_hz;   /* profile active when received */
+    uint8_t spreading_factor;
+    uint8_t flags;
+    uint16_t bandwidth_khz;
+    int32_t rssi_qdb;        /* packet RSSI, quarter dBm (RssiPkt * -2) */
+    int32_t snr_qdb;         /* packet SNR, quarter dB (signed SnrPkt) */
+    int32_t signal_rssi_qdb; /* despread signal RSSI, quarter dBm */
+    uint8_t length;          /* payload bytes valid in payload[] */
+    uint8_t mhdr;
+    uint8_t mtype;           /* mhdr >> 5 */
+    uint8_t major;           /* mhdr & 3 */
+    uint8_t fctrl;
+    uint8_t fopts_length;
+    uint16_t fcnt16;
+    uint32_t dev_addr;       /* little-endian over the air, host value here */
+    uint8_t payload[SX1262_RX_MAX_PAYLOAD]; /* raw PHY payload; encrypted part not decoded */
+} sx1262_rx_packet_t;
+
+typedef struct {
+    uint32_t packets;        /* RxDone without CrcErr, stored */
+    uint32_t crc_errors;
+    uint32_t header_errors;
+    uint32_t headers_valid;
+    uint32_t timeouts;
+    uint32_t overwritten;    /* oldest ring entries replaced */
+    uint32_t rearms;         /* radio found outside RX and reconfigured */
+    uint32_t polls;
+    uint32_t poll_errors;
+    uint32_t configs;        /* successful configurations */
+    uint32_t config_errors;  /* invalid or failed configuration attempts */
+} sx1262_rx_counters_t;
+
+typedef int32_t (*sx1262_service_t)(void);
+
+typedef struct {
+    sx1262_service_t service;
+    uint32_t state;          /* SX1262_RX_IDLE/RUNNING/FAULT */
+    int32_t last_error;      /* most recent error, sticky until next success */
+    uint32_t device_errors;  /* last nonzero GetDeviceErrors value */
+    uint8_t last_status;     /* last SX1262 status byte */
+    uint8_t last_command;    /* most recently attempted opcode */
+    uint32_t last_response;  /* first four reply bytes, little-endian, zero on transfer failure */
+    uint8_t active_valid;    /* active profile reflects a successful config */
+    uint8_t board_confirmed; /* set only by sx1262_receiver_confirm_board */
+    uint16_t last_irq;
+    sx1262_rx_config_t active;
+    sx1262_rx_counters_t counters;
+    uint32_t next_sequence;
+    uint32_t head;           /* next ring slot */
+    uint32_t count;          /* valid ring entries, <= SX1262_RX_RING_SIZE */
+    sx1262_rx_packet_t ring[SX1262_RX_RING_SIZE];
+    uint8_t scratch[SX1262_RX_MAX_PAYLOAD];
+} sx1262_receiver_t;
+
+/* No hardware access. */
+void sx1262_receiver_init(sx1262_receiver_t *rx, sx1262_service_t service);
+/* Caller asserts the attached board; anything else returns SX1262_RX_BOARD_ERROR. */
+int32_t sx1262_receiver_confirm_board(sx1262_receiver_t *rx, uint32_t board);
+void sx1262_rx_default_config(sx1262_rx_config_t *config);
+int32_t sx1262_rx_validate(const sx1262_rx_config_t *config);
+
+/*
+ * Requires sx1262_receiver_confirm_board first (else SX1262_RX_BOARD_ERROR).
+ * Validate, then (re)configure and enter continuous RX. When idle/faulted this
+ * initializes pins/SPI (and clocks only if not already initialized), resets
+ * the radio and performs TCXO/RF-switch/calibration setup. When running it
+ * reconfigures live without radio reset and without touching clocks/TIMER1.
+ * Invalid config: returns SX1262_RX_CONFIG_ERROR, nothing changes.
+ * Failure while running: previous profile is restored if possible (state
+ * stays RUNNING, error returned); otherwise radio released, state FAULT.
+ */
+int32_t sx1262_receiver_configure(sx1262_receiver_t *rx, const sx1262_rx_config_t *config);
+
+/*
+ * Bounded poll: GetIrqStatus, read packets/errors, clear IRQs, rearm if not in RX.
+ * Returns 0 on success whether or not a packet arrived (check count/sequence or
+ * counters.packets for new data); any nonzero return is a negative error.
+ * Service cancellation returns the service's own error and leaves state RUNNING;
+ * -3001..-3006 set state FAULT with pins released; -3011 means not RUNNING.
+ */
+int32_t sx1262_receiver_poll(sx1262_receiver_t *rx, uint32_t now_ms);
+
+/* Standby (best effort), release pins/SPI, state IDLE. */
+void sx1262_receiver_stop(sx1262_receiver_t *rx);
+
+/* index 0 is the newest packet; returns 0 when index >= count. */
+const sx1262_rx_packet_t *sx1262_receiver_packet(const sx1262_receiver_t *rx, uint32_t index);
+
+/* LoRaWAN header inspection only (no decryption/MIC check); exposed for tests. */
+void sx1262_rx_parse(sx1262_rx_packet_t *packet);
+
+#endif

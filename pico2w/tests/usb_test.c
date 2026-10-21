@@ -147,6 +147,62 @@ static void descriptor_tests(void) {
     assert(control.action == USB_ACTION_STALL);
 }
 
+static void windows_descriptor_tests(void) {
+    usb_control_init(&control, build_id, chip_id);
+    setup(0x80u, 6u, 0x3eeu, 0u, 255u);
+    assert(control.length == 18u && control.data[16] == 0x57u);
+    assert(control.data[2] == 'M' && control.data[14] == '0');
+    finish_in();
+    setup(0xc0u, 0x57u, 0u, 4u, 255u);
+    assert(control.length == 40u && usb_load_u32(control.data) == 40u);
+    assert(memcmp(control.data + 18u, "WINUSB", 6u) == 0);
+    finish_in();
+    const uint16_t lengths[] = {1u, 10u, 63u, 64u, 65u, 128u, 146u, 255u};
+    for (uint32_t i = 0u; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+        uint8_t result[146];
+        uint16_t total = 0u, expected = lengths[i] < 146u ? lengths[i] : 146u;
+        uint8_t pid = 1u;
+        setup(0xc1u, 0x57u, 0u, 5u, lengths[i]);
+        while (control.phase == USB_PHASE_DATA_IN) {
+            assert(control.action == USB_ACTION_IN && control.in_pid == pid);
+            assert(control.length <= 64u && total + control.length <= expected);
+            memcpy(result + total, control.data, control.length);
+            total += control.length;
+            usb_control_complete(&control, 1u, NULL, control.length);
+            pid ^= 1u;
+        }
+        assert(total == expected && control.phase == USB_PHASE_STATUS_OUT);
+        usb_control_complete(&control, 0u, NULL, 0u);
+        assert(control.phase == USB_PHASE_IDLE);
+        if (total == 146u) {
+            assert(usb_load_u32(result) == 146u && result[8] == 1u);
+            assert(usb_load_u32(result + 10u) == 136u);
+            assert(usb_load_u32(result + 14u) == 7u && result[18] == 42u);
+            assert(usb_load_u32(result + 62u) == 80u);
+            const char *guid = "{D17518E7-BD1D-4C3D-81A0-5605CAFE4027}";
+            for (uint16_t j = 0u; j < 38u; ++j) {
+                assert(result[66u + j * 2u] == (uint8_t)guid[j]);
+                assert(result[67u + j * 2u] == 0u);
+            }
+            assert(usb_load_u32(result + 142u) == 0u);
+        }
+    }
+    setup(0xc1u, 0x57u, 0u, 5u, 255u);
+    assert(control.in_remaining == 82u);
+    setup(0x80u, 6u, 0x100u, 0u, 18u);
+    assert(control.in_remaining == 0u);
+    finish_in();
+    setup(0xc1u, 0x57u, 0u, 5u, 255u);
+    usb_control_reset(&control);
+    assert(control.in_remaining == 0u && control.in_zlp == 0u);
+    setup(0xc1u, 0x57u, 1u, 5u, 146u);
+    assert(control.action == USB_ACTION_STALL);
+    setup(0xc0u, 0x57u, 0u, 5u, 146u);
+    assert(control.action == USB_ACTION_STALL);
+    usb_control_init(&control, build_id, chip_id);
+    configure();
+}
+
 static void report_tests(void) {
     uint8_t request[64], nonce[16] = {1u};
     setup(0xc0u, USB_REPORT, 0u, 0u, 64u);
@@ -328,11 +384,35 @@ static void lora_tests(void) {
     assert(!control.lora_running && !control.lora_requested && !control.lora_valid);
     usb_control_reset(&control);
     assert(!control.lora_valid);
+    configure();
+    control.lora_disabled = 1u;
+    setup(0x40u, USB_LORA_SUBMIT, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_STALL && !control.lora_requested);
+    setup(0xc0u, USB_APP_STATUS, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_STALL);
+    control.app_status[0] = 0x50u;
+    control.app_status_valid = 1u;
+    setup(0xc0u, USB_APP_STATUS, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_IN && control.data[0] == 0x50u);
+    finish_in();
+    setup(0xc0u, USB_WIFI_STATUS, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_STALL);
+    control.wifi_status[0] = 0x44u;
+    control.wifi_status_valid = 1u;
+    setup(0xc0u, USB_WIFI_STATUS, 0u, 0u, 63u);
+    assert(control.action == USB_ACTION_STALL);
+    setup(0xc0u, USB_WIFI_STATUS, 0u, 0u, 64u);
+    assert(control.action == USB_ACTION_IN && control.data[0] == 0x44u);
+    finish_in();
+    usb_control_reset(&control);
+    assert(control.lora_disabled && control.app_status_valid);
+    assert(control.wifi_status_valid);
 }
 
 int main(void) {
     codec_tests();
     descriptor_tests();
+    windows_descriptor_tests();
     report_tests();
     recovery_tests();
     lora_tests();

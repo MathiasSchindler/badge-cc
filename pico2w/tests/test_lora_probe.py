@@ -34,6 +34,15 @@ class FakeUSB:
         if request == 0x53:
             assert (request_type, payload) == (0xC0, 12)
             return struct.pack("<4sHHI", b"P2WL", 1, 64, BUILD)
+        if request == 0x56:
+            record = bytearray(64)
+            struct.pack_into("<4sHHI", record, 0, b"P2WS", 1, 64, BUILD)
+            struct.pack_into("<IiIIIiIIIIII", record, 12,
+                             3, 0, 3, 0, 0xC0A80150, 0, 15, 2, 30, 10000, 1, 0)
+            struct.pack_into("<I", record, 60, zlib.crc32(record[:60]))
+            if self.corrupt:
+                record[63] ^= 1
+            return bytes(record)
         if request in (0x50, 0x54):
             assert request_type == 0x40 and len(payload) == 64
             assert struct.unpack_from("<I", payload, 12)[0] == (1 if request == 0x50 else 2)
@@ -107,6 +116,13 @@ class CollectorTests(unittest.TestCase):
     def test_setup_packet_layout(self):
         self.assertEqual(bytes(collector.SetupPacket(0x40, 0x54, 0, 0, 64)),
                          b"\x40\x54\x00\x00\x00\x00\x40\x00")
+
+    def test_monitor_status_is_read_only(self):
+        usb = FakeUSB()
+        result = collector.monitor_status(usb, BUILD, SERIAL)
+        self.assertEqual(result["url"], "http://192.168.1.80/")
+        self.assertEqual(result["received"], 15)
+        self.assertEqual(usb.lora_submits, 0)
 
     def test_cli_safety_checks_precede_open(self):
         base = ["lora_probe.py", "--device-path", "not-a-real-device",
