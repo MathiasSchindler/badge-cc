@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "host_platform.h"
 #else
 #include "host_io.h"
 #endif
@@ -1111,9 +1112,9 @@ static void as_assemble(assembler_t *s, unsigned char *input, size_t length,
 #ifndef BADGE_ASM_LIBRARY
 static int as_listing_same_path(assembler_t *s, const char *left, const char *right) {
     char *a=as_copy(s,left),*b=as_copy(s,right);
-    char *ap=strrchr(a,'/'),*bp=strrchr(b,'/');
+    char *ap=(char *)host_last_separator(a),*bp=(char *)host_last_separator(b);
     const char *an=ap?ap+1:a,*bn=bp?bp+1:b;
-    if(strcmp(an,bn)) return 0;
+    if(!host_path_equal(an,bn)) return 0;
     const char *ad=".",*bd=".";
     if(ap) { *ap=0; ad=ap==a?"/":a; }
     if(bp) { *bp=0; bd=bp==b?"/":b; }

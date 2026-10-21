@@ -37,8 +37,12 @@ typedef struct {
 } macro_t;
 typedef struct {
     const char *path;
+#ifdef _WIN32
+    uint64_t device, inode;
+#else
     dev_t device;
     ino_t inode;
+#endif
     int once;
 } input_t;
 typedef struct {
@@ -573,13 +577,17 @@ static void include_file(cpp_t *c, const char *parent, tokens_t args, unsigned d
         name = s.data;
     } else fail(c, "expected a quoted or angle-bracket include name");
     if (name[0] == '\0') fail(c, "empty include name");
-    if (name[0] == '/') {
+    if (name[0] == '/'
+#ifdef _WIN32
+        || name[0] == '\\' || (isalpha((unsigned char)name[0]) && name[1] == ':')
+#endif
+    ) {
         if (!exists(c, name)) fail(c, "include not found: %s", name);
         process_file(c, name, depth + 1);
         return;
     }
     if (local) {
-        const char *slash = strrchr(parent, '/');
+        const char *slash = host_last_separator(parent);
         char *candidate = join_path(c, parent, slash == NULL ? 0 : (size_t)(slash - parent), name);
         if (exists(c, candidate)) { process_file(c, candidate, depth + 1); return; }
     }
