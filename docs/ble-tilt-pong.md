@@ -1,5 +1,9 @@
 # BLE tilt Pong
 
+For the proposed dependency-free HT20 successor with autonomous Wi-Fi-chip
+state transport, see [HT20 tilt Pong](h20-tilt-pong.md). That document is a
+design specification, not a replacement for this implemented BLE game.
+
 `ble_tilt_pong` is a separate Pico SDK firmware for two RP2350B/Pimoroni
 Tufty badges. Build it with:
 

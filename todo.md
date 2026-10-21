@@ -127,6 +127,7 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Implement common-MCS selection, exact rate requests, PHY configuration and airtime deadlines.
 - [x] Implement bounded mixed-format HT TX/RX at MCS0..7 and explicit legacy fallback.
 - [x] Build and hardware-test an autonomous two-badge HT20 button messenger with application acknowledgements, bounded retries and visible recovery; retain startup failures without claiming D2 reliability.
+- [x] Measure messenger timing on both badges, correct its timer timebase, and reduce ACK/display/retry latency with matched hardware comparisons; preserve failed campaigns and the display-regression fix.
 - [x] Implement non-HT WMM/EDCA, protected QoS, per-TID CCMP and bounded A-MSDU receive software.
 - [x] Implement native-tested Block ACK agreements, A-MPDU parsing and ciphertext reordering.
 - [x] Implement readback-verified atomic station/controller policy commits.

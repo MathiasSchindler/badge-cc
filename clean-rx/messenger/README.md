@@ -38,6 +38,13 @@ The TFT shows:
 Traffic is **unencrypted and unauthenticated**. Do not send sensitive data.
 It is neither IP networking nor a general multi-peer protocol.
 
+The [timing measurement and optimization record](LATENCY.md) documents
+on-badge timestamps, the inherited-timer correction, before/after latency,
+all failed intermediate campaigns and the corrected cooperative display.
+The current default establishes true microsecond timing, uses a 1-ms
+application ACK guard and 207..218.6-ms retry spacing. Final median
+first-attempt RTT is approximately 7 ms; this is not a reliability guarantee.
+
 ## Build and install
 
 From the repository root, with LLVM tools on `PATH`:
@@ -73,6 +80,7 @@ Optional diagnostics:
 build/clean-rx/messenger/collector status 08DA26F86E57F5EA
 build/clean-rx/messenger/collector press 08DA26F86E57F5EA 4
 build/clean-rx/messenger/collector pair-test 08DA26F86E57F5EA 9BBF88DD17D66E7D
+build/clean-rx/messenger/collector latency-test 08DA26F86E57F5EA 9BBF88DD17D66E7D 40
 build/clean-rx/messenger/collector bootsel 08DA26F86E57F5EA
 ```
 

@@ -1,8 +1,10 @@
 #include "link.h"
 #include "build_id.h"
+#include "screen.h"
 #include "../badge/loader.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
+#include "../../src/arch/rp2350/nametag_clock.h"
 #include "../../src/platform/badger/wifi_board.h"
 #include "../../src/platform/badger/display.h"
 #include "../../src/platform/badger/graphics.h"
@@ -16,6 +18,12 @@ static badger_canvas_t canvas;
 static uint8_t packet[CLEAN_RX_PACKET_BYTES], tx[MSG_STORAGE], last_packet[98];
 static uint32_t restarts, last_fault, fault_address, fault_actual, retry_boot_at;
 static uint32_t watchdog_at, screen_at, heartbeat_at, boot_at, received, rejected;
+static uint32_t clock_ticks, clock_frames, screen_ticks, screen_max, loop_max, poll_at;
+static uint32_t scheduled_at, scheduled_token;
+static uint8_t scheduled_buttons, scheduled;
+static uint32_t display_column, display_started, display_session, display_sequence;
+static uint32_t paint_ticks, strip_max;
+static uint8_t display_busy, painted;
 static int32_t usb_error;
 static uint8_t radio_ready;
 
@@ -66,9 +74,14 @@ static void button_row(int32_t y, uint8_t mask) {
     }
 }
 
-static void screen(void) {
+static void screen_paint(void) {
     uint32_t now=now_us();
-    badger_gfx_clear(&canvas,0x0863u);
+    if (!painted || MSG_BASELINE) badger_gfx_clear(&canvas,0x0863u);
+    else {
+        badger_gfx_rect(&canvas,0,48,320,20,0x0863u);
+        badger_gfx_rect(&canvas,0,150,320,16,0x0863u);
+        badger_gfx_rect(&canvas,0,170,320,48,0x0863u);
+    }
     badger_gfx_text(&canvas,8,8,MSG_ROLE==1?"HT20 BADGE A":"HT20 BADGE B",2u,0xffffu);
     badger_gfx_text(&canvas,8,34,"CH 1 / MCS 0 / DIRECT / NO AP",1u,0x9cf3u);
     const char *state=!radio_ready?"RADIO RESTARTING":
@@ -90,12 +103,51 @@ static void screen(void) {
     number(8,206,"RADIO BOOTS",restarts);
     number(166,206,"FAULT",last_fault);
     badger_gfx_text(&canvas,8,220,"EXPERIMENTAL / UNENCRYPTED",1u,0xfda8u);
-    badger_display_begin();
-    for (uint32_t row=0u; row<240u; ++row) {
-        badger_display_write_pixels(canvas.pixels+320u*row,320u);
-        (void)service(0);
+    painted=1u;
+    paint_ticks=now_us()-now;
+}
+
+static void screen(void) {
+    uint32_t now=now_us();
+    if (!display_busy) {
+        if (!MSG_BASELINE && radio_ready && (link.active || link.ack_pending)) return;
+        if (now-screen_at<(MSG_BASELINE?250000u:40000u) &&
+            (MSG_BASELINE || (link.receipt.sequence==display_sequence &&
+                             link.receipt.session==display_session))) return;
+        display_started=now;
+        screen_paint();
+        display_session=link.receipt.session; display_sequence=link.receipt.sequence;
+        display_column=0u; display_busy=1u;
     }
-    badger_display_end();
+    uint32_t start=now_us(),columns=MSG_BASELINE?320u:4u;
+    msg_display_columns(&canvas,display_column,columns,service);
+    display_column+=columns;
+    if (display_column==320u) {
+        badger_display_end();
+        display_busy=0u; screen_at=now_us(); screen_ticks=screen_at-display_started;
+        if (screen_ticks>screen_max) screen_max=screen_ticks;
+        if (link.receipt.session==display_session && link.receipt.sequence==display_sequence)
+            msg_displayed(&link,screen_at);
+    } else badger_display_end_update();
+    if (now_us()-start>strip_max) strip_max=now_us()-start;
+}
+
+static int clock_sample(void) {
+    volatile uint32_t *sof=(volatile uint32_t *)0x50110048u;
+    uint32_t previous=*sof&2047u, begin=now_us(), first=0u, frames=0u;
+    uint8_t aligned=0u;
+    while (now_us()-begin<100000u && service(0)) {
+        uint32_t frame=*sof&2047u, now=now_us();
+        if (frame==previous) continue;
+        if (!aligned) { first=now; aligned=1u; }
+        else frames+=(frame-previous)&2047u;
+        previous=frame;
+        if (frames>=32u) {
+            clock_ticks=now-first; clock_frames=frames;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void radio_fault(void) {
@@ -137,9 +189,18 @@ static void usb_snapshot(void) {
     uint32_t generation=live_usb_probe_take(&usb,nonce);
     if (!generation) return;
     uint32_t request_error=0u;
-    if (nonce[0]>1u || (nonce[0]==1u &&
-        !msg_enqueue(&link,nonce[1],MSG_USB,badger_bytes_load_u32(nonce+2u))))
-        request_error=CLEAN_INPUT;
+    if (nonce[0]==1u) {
+        if (!msg_enqueue(&link,nonce[1],MSG_USB,badger_bytes_load_u32(nonce+2u),now_us()))
+            request_error=CLEAN_INPUT;
+    } else if (nonce[0]==2u) {
+        if (scheduled || nonce[1]>31u) request_error=CLEAN_INPUT;
+        else {
+            scheduled_at=now_us()+200000u; scheduled_buttons=nonce[1];
+            scheduled_token=badger_bytes_load_u32(nonce+2u); scheduled=1u;
+        }
+    } else if (nonce[0]==3u) {
+        if (!clock_sample()) request_error=CLEAN_TIMEOUT;
+    } else if (nonce[0]) request_error=CLEAN_INPUT;
     badger_bytes_zero(trace,sizeof(trace));
     uint32_t values[] = {
         MSG_TRACE_MAGIC,MSG_ROLE,link.session,link.sequence,
@@ -157,6 +218,19 @@ static void usb_snapshot(void) {
     badger_bytes_copy(trace+128u,last_packet,sizeof(last_packet));
     badger_bytes_store_u32(trace+228u,link.last_press);
     badger_bytes_store_u32(trace+232u,link.peer_presses);
+    const msg_tx_time_t *t=&link.last_timing;
+    const msg_rx_time_t *r=&link.receipt;
+    uint32_t timing[] = {
+        t->token,t->sequence,t->detected_at,t->queued_at,t->first_tx_at,t->last_tx_at,
+        t->first_done_at,t->last_done_at,t->completed_at,t->attempts,t->outcome,t->flags,
+        r->token,r->session,r->sequence,r->received_at,r->ack_selected_at,r->ack_done_at,
+        r->displayed_at,r->flags,r->duplicates,
+        screen_ticks,screen_max,loop_max,clock_ticks,clock_frames,MSG_ACK_DELAY_US,
+        MSG_RETRY_BASE,!MSG_BASELINE,now_us(),scheduled,link.active?link.timing.token:0u,
+        paint_ticks,strip_max,
+    };
+    for (uint32_t i=0u; i<sizeof(timing)/sizeof(timing[0]); ++i)
+        badger_bytes_store_u32(trace+256u+4u*i,timing[i]);
     usb_report_header(report,0x46363255u,USB_REPORT_BUILD_ID,nonce,3u);
     badger_bytes_store_u32(report+32u,request_error);
     badger_bytes_store_u32(report+36u,link.tx_data);
@@ -173,7 +247,8 @@ static void usb_snapshot(void) {
 void bare_main(void) {
     uint32_t id[2], random[4];
     char serial[17], half[9];
-    if (badger_schedule_bootsel(8000u) || badger_rom_chip_id(id) ||
+    if (badger_schedule_bootsel(8000u) ||
+        (!MSG_BASELINE && nametag_clock_reference()) || badger_rom_chip_id(id) ||
         badger_rom_boot_random(random)) while (1) __asm__ volatile("wfi");
     diag_hex(half,id[1],8u);
     badger_bytes_copy((uint8_t *)serial,(uint8_t *)half,8u);
@@ -187,7 +262,7 @@ void bare_main(void) {
         while (1) __asm__ volatile("wfi");
     radio_boot();
     heartbeat_at=now_us();
-    (void)msg_enqueue(&link,0u,MSG_HEARTBEAT,0u);
+    (void)msg_enqueue(&link,0u,MSG_HEARTBEAT,0u,now_us());
     for (;;) {
         (void)service(0);
         if (usb_error || usb.reboot_requested) {
@@ -199,8 +274,14 @@ void bare_main(void) {
             while (1) __asm__ volatile("wfi");
         }
         uint32_t now=now_us();
+        if (poll_at && now-poll_at>loop_max) loop_max=now-poll_at;
+        poll_at=now;
         msg_buttons(&link,buttons_read(),now);
         usb_snapshot();
+        if (scheduled && now_us()-scheduled_at<0x80000000u) {
+            (void)msg_enqueue(&link,scheduled_buttons,MSG_USB,scheduled_token,now_us());
+            scheduled=0u;
+        }
         if (!radio_ready) {
             if (now-retry_boot_at<0x80000000u) radio_boot();
         } else {
@@ -222,11 +303,14 @@ void bare_main(void) {
             if (radio_ready) {
                 if (now-heartbeat_at>=3000000u+170000u*MSG_ROLE &&
                     !link.active && !link.count) {
-                    (void)msg_enqueue(&link,link.buttons,MSG_HEARTBEAT,0u);
+                    (void)msg_enqueue(&link,link.buttons,MSG_HEARTBEAT,0u,now);
                     heartbeat_at=now;
                 }
                 uint8_t frame[MSG_MPDU];
-                if (msg_next(&link,now_us(),frame) && !transmit(frame)) radio_fault();
+                if (msg_next(&link,now_us(),frame)) {
+                    if (!transmit(frame)) radio_fault();
+                    else msg_transmitted(&link,frame,now_us());
+                }
                 uint32_t check=now_us();
                 uint32_t activity=link.peer_at &&
                     check-link.peer_at<check-boot_at?link.peer_at:boot_at;
@@ -236,6 +320,6 @@ void bare_main(void) {
                 }
             }
         }
-        if (now_us()-screen_at>=250000u) { screen(); screen_at=now_us(); }
+        screen();
     }
 }

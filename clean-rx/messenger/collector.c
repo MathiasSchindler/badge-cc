@@ -34,7 +34,7 @@ static int snapshot(libusb_device_handle *device, uint8_t trace[WIFI_TRACE_SIZE]
     usb_report_request_for_test(request,USB_REPORT_BUILD_ID,nonce,3u);
     if (!transfer(device,0x40u,LIVE_USB_FW_SUBMIT,request,sizeof(request))) return 0;
     int got=0;
-    for (uint32_t i=0u; i<100u; ++i) {
+    for (uint32_t i=0u; i<1000u; ++i) {
         int n=libusb_control_transfer(device,0xc0u,LIVE_USB_FW_REPORT,0u,0u,
                                      report,sizeof(report),1000u);
         if (n==sizeof(report)) { got=1; break; }
@@ -46,7 +46,12 @@ static int snapshot(libusb_device_handle *device, uint8_t trace[WIFI_TRACE_SIZE]
         usb_report_u32(report+8u)!=USB_REPORT_BUILD_ID ||
         usb_report_u32(report+12u)!=3u || memcmp(report+16u,nonce,16u) ||
         usb_report_u32(report+60u)!=diag_crc32(report,60u)) {
-        fputs("Invalid or missing messenger snapshot\n",stderr); return 0;
+        fprintf(stderr,"Invalid or missing messenger snapshot: got=%d request=%u "
+                "build=%08x expected=%08x nonce_match=%d crc_match=%d\n",
+                got,request_id,got?usb_report_u32(report+8u):0u,USB_REPORT_BUILD_ID,
+                got && !memcmp(report+16u,nonce,16u),
+                got && usb_report_u32(report+60u)==diag_crc32(report,60u));
+        return 0;
     }
     for (uint32_t page=0u; page<WIFI_TRACE_PAGES; ++page) {
         uint8_t bytes[64];
@@ -126,13 +131,112 @@ static int exchange(libusb_device_handle *sender, libusb_device_handle *receiver
     return 0;
 }
 
+static uint32_t word(const uint8_t *trace, uint32_t offset) {
+    return usb_report_u32(trace+offset);
+}
+
+static int latency_sample(libusb_device_handle *sender, libusb_device_handle *receiver,
+                          uint8_t buttons, uint32_t token) {
+    uint8_t a[WIFI_TRACE_SIZE],b[WIFI_TRACE_SIZE];
+    if (!snapshot(sender,a,2u,buttons,token)) return -1;
+    uint32_t session=word(a,8u),role=word(a,4u);
+    uint64_t start=milliseconds();
+    /* The event starts 200 ms after arming; no collection during initial exchange. */
+    usleep(500000u);
+    int terminal=0,rx=0;
+    do {
+        if (!snapshot(sender,a,0u,0u,0u) || !snapshot(receiver,b,0u,0u,0u)) return -1;
+        terminal=word(a,256u)==token && word(a,296u)!=0u;
+        rx=word(b,304u)==token && word(b,308u)==session;
+        if (terminal && (word(a,296u)==2u || (rx && (word(b,332u)&15u)==15u))) break;
+        usleep(100000u);
+    } while (milliseconds()-start<8000u);
+    int acked=terminal && word(a,296u)==1u;
+    if (rx) {
+        msg_frame_t m;
+        const uint8_t *p=b+128u;
+        if (!clean_ht_rx_metadata(p[15],p[16],p[17],MSG_MPDU,MSG_CHANNEL,MSG_MCS) ||
+            !msg_decode(&m,p+18u,MSG_MPDU) || m.token!=token || m.session!=session ||
+            m.sequence!=word(b,312u) || m.role!=role || m.buttons!=buttons ||
+            m.kind!=MSG_STATE || m.origin!=MSG_USB ||
+            (terminal && m.sequence!=word(a,260u))) {
+            fputs("Latency event/body/timing correlation mismatch\n",stderr); return -1;
+        }
+    }
+    printf("{\"test\":\"ht20-latency\",\"token\":%u,\"sender_role\":%u,"
+           "\"sender_session\":%u,\"delivered\":%s,\"acked\":%s,"
+           "\"terminal\":%s,\"tx\":[",token,role,session,rx?"true":"false",
+           acked?"true":"false",terminal?"true":"false");
+    for (uint32_t i=0u; i<12u; ++i) printf("%s%u",i?",":"",word(a,256u+4u*i));
+    printf("],\"rx\":[");
+    for (uint32_t i=0u; i<9u; ++i) printf("%s%u",i?",":"",word(b,304u+4u*i));
+    printf("],\"sender_boots\":%u,\"receiver_boots\":%u,"
+           "\"sender_failed\":%u,\"receiver_failed\":%u,"
+           "\"sender_screen_ticks\":%u,\"receiver_screen_ticks\":%u,"
+           "\"sender_loop_max_ticks\":%u,\"receiver_loop_max_ticks\":%u,"
+           "\"sender_paint_ticks\":%u,\"receiver_paint_ticks\":%u,"
+           "\"sender_strip_max_ticks\":%u,\"receiver_strip_max_ticks\":%u,"
+           "\"rx_packet_hex\":\"",
+           word(a,48u),word(b,48u),word(a,40u),word(b,40u),
+           word(a,340u),word(b,340u),word(a,348u),word(b,348u),
+           word(a,384u),word(b,384u),word(a,388u),word(b,388u));
+    if (rx) for (uint32_t i=0u; i<98u; ++i) printf("%02x",b[128u+i]);
+    puts("\"}");
+    fflush(stdout);
+    return acked && rx ? 1:0;
+}
+
+static int latency_test(libusb_device_handle *a, libusb_device_handle *b, uint32_t count) {
+    uint8_t first[WIFI_TRACE_SIZE],second[WIFI_TRACE_SIZE];
+    if (!snapshot(a,first,3u,0u,0u) || !snapshot(b,second,3u,0u,0u)) return 0;
+    if (word(first,4u)==word(second,4u)) { fputs("Latency test needs distinct roles\n",stderr); return 0; }
+    for (uint32_t i=0u; i<2u; ++i) {
+        const uint8_t *t=i?second:first;
+        uint32_t ticks=word(t,352u),frames=word(t,356u);
+        if (!frames || !ticks ||
+            (word(t,368u) && (ticks<frames*990u || ticks>frames*1010u))) {
+            fprintf(stderr,"Missing timer calibration: role=%u ticks=%u frames=%u\n",
+                    word(t,4u),ticks,frames); return 0;
+        }
+        printf("{\"test\":\"ht20-clock\",\"build\":%u,\"role\":%u,"
+               "\"ticks\":%u,\"sof_frames\":%u,\"ack_delay_ticks\":%u,"
+               "\"retry_base_ticks\":%u,\"partial_display\":%u}\n",
+               USB_REPORT_BUILD_ID,word(t,4u),ticks,frames,word(t,360u),
+               word(t,364u),word(t,368u));
+    }
+    uint64_t start=milliseconds();
+    while ((!word(first,104u) || !word(second,104u) ||
+            word(first,92u)>6000u || word(second,92u)>6000u) &&
+           milliseconds()-start<35000u) {
+        usleep(500000u);
+        if (!snapshot(a,first,0u,0u,0u) || !snapshot(b,second,0u,0u,0u)) return 0;
+    }
+    print_status("start-A",first); print_status("start-B",second);
+    uint32_t passed=0u,seed=(uint32_t)milliseconds();
+    for (uint32_t i=0u; i<count; ++i) {
+        uint32_t token=seed+i;
+        if (!token) token=0xffffffffu;
+        int result=latency_sample(i&1u?b:a,i&1u?a:b,(uint8_t)(i%6u==5u?0u:1u<<(i%5u)),token);
+        if (result<0) return 0;
+        passed+=(uint32_t)result;
+    }
+    if (!snapshot(a,first,0u,0u,0u) || !snapshot(b,second,0u,0u,0u)) return 0;
+    print_status("end-A",first); print_status("end-B",second);
+    printf("{\"test\":\"ht20-latency-total\",\"requested\":%u,\"passed\":%u,"
+           "\"failed\":%u}\n",count,passed,count-passed);
+    return passed==count;
+}
+
 int main(int argc, char **argv) {
     if (argc<3 || (strcmp(argv[1],"status") && strcmp(argv[1],"press") &&
-                  strcmp(argv[1],"pair-test") && strcmp(argv[1],"bootsel")) ||
+                  strcmp(argv[1],"pair-test") && strcmp(argv[1],"bootsel") &&
+                  strcmp(argv[1],"latency-test")) ||
         ((!strcmp(argv[1],"status") || !strcmp(argv[1],"bootsel")) && argc!=3) ||
-        ((!strcmp(argv[1],"press") || !strcmp(argv[1],"pair-test")) && argc!=4)) {
+        ((!strcmp(argv[1],"press") || !strcmp(argv[1],"pair-test")) && argc!=4) ||
+        (!strcmp(argv[1],"latency-test") && argc!=5)) {
         fputs("Usage: collector status SERIAL | press SERIAL MASK:0-31 | "
-              "pair-test SERIAL_A SERIAL_B | bootsel SERIAL\n",stderr); return 2;
+              "pair-test SERIAL_A SERIAL_B | latency-test SERIAL_A SERIAL_B COUNT:1-256 | "
+              "bootsel SERIAL\n",stderr); return 2;
     }
     libusb_context *context=NULL;
     int status=libusb_init(&context);
@@ -140,7 +244,16 @@ int main(int argc, char **argv) {
     libusb_device_handle *a=open_badge(context,argv[2]), *b=NULL;
     int ok=a!=NULL;
     uint8_t trace[WIFI_TRACE_SIZE];
-    if (ok && !strcmp(argv[1],"pair-test")) {
+    if (ok && !strcmp(argv[1],"latency-test")) {
+        char *end;
+        unsigned long count=strtoul(argv[4],&end,10);
+        if (!argv[4][0] || *end || count<1u || count>256u || !strcmp(argv[2],argv[3])) {
+            fputs("Invalid latency count or repeated serial\n",stderr); ok=0;
+        } else {
+            b=open_badge(context,argv[3]);
+            ok=b && latency_test(a,b,(uint32_t)count);
+        }
+    } else if (ok && !strcmp(argv[1],"pair-test")) {
         b=open_badge(context,argv[3]);
         uint8_t other[WIFI_TRACE_SIZE];
         ok=b && strcmp(argv[2],argv[3]) && snapshot(a,trace,0u,0u,0u) &&
