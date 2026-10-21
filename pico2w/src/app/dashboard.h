@@ -2,6 +2,7 @@
 #define PICO2W_DASHBOARD_H
 
 #include "net/http.h"
+#include "lora/activity.h"
 
 #define DASHBOARD_PACKETS 8u
 #define DASHBOARD_PROFILE_LORAWAN 0u
@@ -23,6 +24,8 @@ typedef struct {
     uint32_t profile;
     int32_t rssi_qdb;
     int32_t snr_qdb;
+    int32_t signal_rssi_qdb;
+    uint32_t flags;
     uint32_t length;
     uint32_t crc_error; /* payload CRC failed: raw bytes only, never decoded */
     uint8_t data[255];
@@ -53,6 +56,8 @@ typedef struct {
     dashboard_packet_t packets[DASHBOARD_PACKETS];
     void *context;
     int32_t (*configure)(void *context, const dashboard_config_t *config);
+    activity_t *activity;
+    int32_t (*activity_control)(void *context, uint8_t start);
     uint8_t json[HTTP_RESPONSE_MAX - 1024u];
 } dashboard_t;
 

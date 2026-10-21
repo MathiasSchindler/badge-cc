@@ -10,6 +10,7 @@ static const uint8_t ours[6] = {2, 1, 2, 3, 4, 5};
 static const uint8_t peer[6] = {2, 6, 7, 8, 9, 10};
 static uint32_t local_seq, remote_seq;
 static uint16_t peer_window = 4096;
+static uint16_t peer_port = 45678;
 
 static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] << 8u | p[1]); }
 static uint32_t get32(const uint8_t *p) {
@@ -58,6 +59,7 @@ static void init(void) {
     const net_ops_t ops = {NULL, send_frame, respond};
     memset(&net, 0, sizeof(net));
     sends = calls = 0;
+    peer_port = 45678;
     network_init(&net, &ops, ours, 0x12345678, 0);
     assert(sends == 1 && net.dhcp_state == 1);
     assert(get16(last + 34) == 68 && get16(last + 36) == 67);
@@ -111,7 +113,7 @@ static void tcp(uint8_t flags, const uint8_t *body, uint32_t length,
                   uint32_t sequence, uint32_t ack) {
     uint8_t frame[1514];
     uint8_t *t = ip_header(frame, 0xc0a80122, net.ip, 6, (uint16_t)(20 + length));
-    p16(t, 45678); p16(t + 2, 80);
+    p16(t, peer_port); p16(t + 2, 80);
     p32(t + 4, sequence); p32(t + 8, ack);
     t[12] = 0x50; t[13] = flags;
     p16(t + 14, peer_window);
@@ -201,10 +203,29 @@ static void tcp_tests(void) {
     tcp(0x11, NULL, 0, remote_seq, local_seq + 1u);
     assert(last[47] == 0x10 && get32(last + 42) == remote_seq + 1u);
     network_tick(&net, 3100);
-    assert(net.clients[0].state == 0 && net.clients[1].state == 0);
+    for (uint32_t i = 0; i < NET_CLIENTS; ++i) assert(net.clients[i].state == 0);
     connect_client();
     network_tick(&net, 20000);
-    assert(net.clients[0].state == 0 && net.clients[1].state == 0);
+    for (uint32_t i = 0; i < NET_CLIENTS; ++i) assert(net.clients[i].state == 0);
+}
+
+static void concurrent_clients(void) {
+    init(); acquire();
+    for (uint32_t i = 0; i < NET_CLIENTS; ++i) {
+        peer_port = (uint16_t)(45678u + i);
+        connect_client();
+        uint32_t active = 0;
+        for (uint32_t j = 0; j < NET_CLIENTS; ++j) active += net.clients[j].state != 0;
+        assert(active == i + 1);
+    }
+    uint32_t before = sends, dropped = net.dropped;
+    peer_port = 50000;
+    tcp(2, NULL, 0, 1234, 0);
+    assert(sends == before && net.dropped == dropped + 1);
+    network_tick(&net, 16000);
+    for (uint32_t i = 0; i < NET_CLIENTS; ++i) assert(net.clients[i].state == 0);
+    connect_client();
+    assert(last[47] == 0x12);
 }
 
 static void network_tests(void) {
@@ -274,7 +295,7 @@ static void malformed_inputs(void) {
 }
 
 int main(void) {
-    http_tests(); network_tests(); tcp_tests(); malformed_inputs();
+    http_tests(); network_tests(); tcp_tests(); concurrent_clients(); malformed_inputs();
     puts("PASS: strict HTTP, DHCP lease/renewal, ARP/ICMP, TCP segmentation/retransmit/close, bounds");
     return 0;
 }

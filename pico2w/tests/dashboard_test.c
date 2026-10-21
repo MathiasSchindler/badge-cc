@@ -11,6 +11,44 @@ static dashboard_t app;
 static uint8_t response[HTTP_RESPONSE_MAX];
 static uint32_t configured;
 static int32_t config_error;
+static activity_t survey;
+static uint32_t commands;
+static int32_t command_error;
+
+static int32_t control_activity(void *context, uint8_t start) {
+    (void)context;
+    ++commands;
+    if (!command_error) survey.running = start;
+    return command_error;
+}
+
+static void survey_fixture(void) {
+    memset(&survey, 0, sizeof(survey));
+    app.activity = &survey;
+    app.activity_control = control_activity;
+    survey.session = survey.sweep = survey.sample_count = survey.max_gap_ms = 4294967295u;
+    survey.overwritten = 4294967295u;
+    survey.error = survey.restore_error = -2147483647 - 1;
+    for (uint32_t i = 0; i < ACTIVITY_CHANNELS; ++i) {
+        activity_channel_t *c = survey.channels + i;
+        c->frequency_hz = 870000000;
+        c->visits = c->observed_ms = c->samples = c->max_gap_ms = 4294967295u;
+        c->bursts = c->packets = c->crc_errors = 4294967295u;
+        c->baseline_valid = 1;
+        c->baseline_qdb = -510; c->peak_qdb = 0;
+    }
+    survey.head = 0; survey.count = ACTIVITY_EVENTS; survey.burst_active = 1;
+    for (uint32_t i = 0; i < ACTIVITY_EVENTS; ++i) {
+        activity_event_t *e = survey.events + i;
+        e->sequence = e->start_ms = e->duration_ms = e->interval_ms = e->blind_ms = 4294967295u;
+        e->samples = e->max_gap_ms = e->packets = e->crc_errors = 4294967295u;
+        e->first_packet = e->last_packet = 4294967295u;
+        e->frequency_hz = 870000000; e->sf = 12; e->bandwidth_khz = 250; e->profile = 1;
+        e->kind = 1; e->truncated = e->has_interval = e->baseline_valid = 1;
+        e->baseline_qdb = -510; e->peak_qdb = 0;
+    }
+    survey.burst = survey.events[0];
+}
 
 static int32_t configure(void *context, const dashboard_config_t *config) {
     (void)context;
@@ -46,6 +84,8 @@ static void fixture(void) {
         packet->bandwidth_khz = 125;
         packet->rssi_qdb = -401;
         packet->snr_qdb = -9;
+        packet->signal_rssi_qdb = -412;
+        packet->flags = 5;
         packet->length = 255;
         memset(packet->data, 0xab, sizeof(packet->data));
         packet->data[0] = 0x40;
@@ -72,11 +112,20 @@ static uint32_t post(uint8_t allowed, const char *body) {
     return dashboard_http(&app, &request, response, sizeof(response));
 }
 
+static uint32_t survey_post(uint8_t allowed, const char *body) {
+    http_request_t request = {0};
+    strcpy(request.path, "/api/activity");
+    request.post = 1; request.write_allowed = allowed;
+    request.body = (const uint8_t *)body;
+    request.body_size = (uint32_t)strlen(body);
+    return dashboard_http(&app, &request, response, sizeof(response));
+}
+
 static void page_noise_check(void) {
     uint32_t size = get("/");
     response[size] = 0;
     assert(strstr((char *)response, "id=\"noise\"") != NULL);
-    assert(strstr((char *)response, "d.noise_samples?") != NULL);
+    assert(strstr((char *)response, "/dashboard-core.js") != NULL);
 }
 
 int main(int argc, char **argv) {
@@ -85,7 +134,12 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
         assert(_setmode(_fileno(stdout), _O_BINARY) != -1);
 #endif
-        uint32_t size = get(strcmp(argv[1], "--page") == 0 ? "/" : "/api/status");
+        if (strcmp(argv[1], "--activity") == 0) survey_fixture();
+        const char *path = strcmp(argv[1], "--activity") == 0 ? "/api/activity" :
+                           strcmp(argv[1], "--page") == 0 ? "/" :
+                           strcmp(argv[1], "--core") == 0 ? "/dashboard-core.js" :
+                           strcmp(argv[1], "--script") == 0 ? "/dashboard.js" : "/api/status";
+        uint32_t size = get(path);
         assert(fwrite(response, 1, size, stdout) == size);
         return 0;
     }
@@ -95,6 +149,7 @@ int main(int argc, char **argv) {
     response[size] = 0;
     assert(strstr((char *)response, "\"devaddr\":\"12345678\",\"fcnt16\":4660") != NULL);
     assert(strstr((char *)response, "\"rssi_qdb\":-401,\"snr_qdb\":-9") != NULL);
+    assert(strstr((char *)response, "\"signal_rssi_qdb\":-412,\"flags\":5") != NULL);
     assert(strstr((char *)response, "\"lora_state\":1,\"lora_status\":82,\"lora_command\":192,"
                   "\"lora_device_errors\":0,\"lora_polls\":123") != NULL);
     assert(strstr((char *)response, "\"noise_qdb\":-2147483648,\"noise_min_qdb\":-2147483648,"
@@ -125,6 +180,19 @@ int main(int argc, char **argv) {
                       "\"from\":\"11223344\",\"id\":\"55667788\",\"hop_limit\":3,"
                       "\"hop_start\":3,\"want_ack\":true,\"via_mqtt\":true,\"channel\":8,"
                       "\"next_hop\":0,\"relay_node\":68}") != NULL);
+        fixture();
+    }
+    {
+        for (uint32_t i = 0; i < DASHBOARD_PACKETS; ++i) {
+            dashboard_packet_t *p = app.packets + i;
+            p->profile = DASHBOARD_PROFILE_MESHTASTIC;
+            p->sequence = p->uptime_ms = p->frequency_hz = p->flags = 4294967295u;
+            p->rssi_qdb = p->snr_qdb = p->signal_rssi_qdb = -2147483647 - 1;
+            memset(p->data, 0xff, sizeof(p->data));
+        }
+        size = get("/api/status");
+        assert(size > 0 && size < sizeof(response));
+        assert(memcmp(response, "HTTP/1.1 200 OK", 15) == 0);
         fixture();
     }
     {
@@ -191,6 +259,24 @@ int main(int argc, char **argv) {
     assert(app.config.frequency_hz == 868100000);
     app.packet_count = DASHBOARD_PACKETS + 1;
     assert(get("/api/status") > 0 && memcmp(response, "HTTP/1.1 500", 12) == 0);
-    puts("PASS: bounded JSON, metadata, UI, strict EU868 settings, CSRF header and error reporting");
+    survey_fixture();
+    size = get("/api/activity");
+    assert(size > 8000 && size < sizeof(response) && memcmp(response, "HTTP/1.1 200 OK", 15) == 0);
+    assert(survey_post(0, "action=start") && memcmp(response, "HTTP/1.1 403", 12) == 0);
+    assert(commands == 0);
+    static const char *bad_commands[] = {"", "action=", "action=START", "action=startx",
+        "action=stopx", "action=start&", "action=start&action=stop", "running=1"};
+    for (uint32_t i = 0; i < sizeof(bad_commands) / sizeof(bad_commands[0]); ++i)
+        assert(survey_post(1, bad_commands[i]) && memcmp(response, "HTTP/1.1 400", 12) == 0);
+    assert(commands == 0);
+    assert(survey_post(1, "action=start") && survey.running);
+    uint32_t before = configured;
+    assert(post(1, body) && memcmp(response, "HTTP/1.1 409", 12) == 0 && configured == before);
+    assert(survey_post(1, "action=stop") && !survey.running && commands == 2);
+    command_error = SX1262_SPI_ERROR;
+    assert(survey_post(1, "action=start") && memcmp(response, "HTTP/1.1 503", 12) == 0);
+    command_error = SX1262_RX_BUSY_ERROR;
+    assert(survey_post(1, "action=start") && memcmp(response, "HTTP/1.1 409", 12) == 0);
+    puts("PASS: bounded packet/activity JSON, survey controls/conflicts, UI, EU868 settings, CSRF and errors");
     return 0;
 }

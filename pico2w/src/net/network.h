@@ -3,7 +3,7 @@
 
 #include "http.h"
 
-#define NET_CLIENTS 2u
+#define NET_CLIENTS 4u
 #define NET_FRAME_MAX 1514u
 
 typedef struct {

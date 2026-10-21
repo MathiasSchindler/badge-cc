@@ -301,6 +301,55 @@ Audit of the radio configuration against the SX1262 datasheet, all correct:
   `Expect: 100-continue`, which the strict HTTP parser rejects. Use
   `curl.exe`.
 
+## On-device activity survey qualification, 2026-10-21
+
+LLVM build `142815b3` was flashed and tested through the Pico-hosted browser
+dashboard at about 18:53-18:59 CEST. The receive-only activity survey completed
+all 65 settings (863-870 MHz in 125 kHz steps plus eight exact centers),
+then entered the next sweep at SF8. The first sweep used public LoRa
+SF7/BW125 except for the dedicated Meshtastic LongFast SF11/BW250 setting.
+
+- Approximately 329 seconds of cumulative tuned time, including the brief
+  start of sweep two, yielded 17,323 instantaneous RSSI samples: about
+  52.6 samples/second on average, versus the 100/second target.
+- Largest recorded sample gap: **331 ms** with Wi-Fi/HTTP active. Short
+  bursts can be missed and recorded durations are sampled observations.
+- **16 energy-threshold events**, all retained by the browser with no
+  reported event-sequence gaps or evictions. Most were only 6-10 dB above
+  the learned baseline; these are not automatically identified transmitters.
+- Notable undecoded observations:
+
+  | Center | Peak | Above dwell baseline | Observed duration |
+  | --- | --- | --- | --- |
+  | 868.250 MHz | -105 dBm | +10 dB | 121 ms |
+  | 868.300 MHz | -97 dBm | +18 dB | 21 ms |
+  | 868.950 MHz | -94 dBm | +21 dB | 10 ms |
+
+  These are energy measurements, not proof of LoRa, FSK, a particular
+  device or even distinct sources. Different centers/bandwidth overlap
+  and local interference can produce related observations.
+- Repeated observed starts were recorded, including gaps of 135 and
+  892 ms at 868.250 MHz. These are not established transmitter periods.
+- **No matching packets or CRC-error packets during this sweep.** Each
+  setting was observed for only about five seconds and only one SF was
+  tried per visit; this does not establish absence of LoRaWAN or other
+  LoRa traffic. A LongFast position packet had decoded before starting
+  the survey, confirming normal reception outside the scan.
+- Manual profile changes were rejected with HTTP 409 during scanning;
+  an attempted USB one-shot survey returned busy `-3013`, without retuning.
+- Stopping restored 869.525 MHz / SF11 / BW250 / Meshtastic with no
+  survey, restoration or receiver error. The Pico was left in normal
+  continuous LongFast reception, **not** in survey mode.
+
+One browser connection failure was reported and recovered. Direct Windows
+HTTP validation attempts also timed out after partial responses; the
+complete scan was verified through the functioning browser and USB status
+instead. Do not interpret the result as a lossless capture qualification.
+Both LLVM and owned compiler pipelines produced valid freestanding images;
+the owned image (`bad0d995`) was built but not flashed.
+Usage, API units and limits are in the
+[activity survey guide](monitor.md#opt-in-868-mhz-activity-survey).
+
 ## Proposed next steps
 
 1. Done: the antenna path was fixed by replacing the pigtail and antenna.
@@ -312,8 +361,9 @@ Audit of the radio configuration against the SX1262 datasheet, all correct:
    be quiet for long stretches.
 3. Add a USB vendor request to change the radio profile from `picoctl`, so
    that sweeps do not depend on Wi-Fi or HTTP.
-4. Add optional channel hopping: cycle 868.1/868.3/868.5 MHz and SF7 to
-   SF12 with a configurable dwell time.
+4. Done: opt-in broad activity hopping with SF7-SF12 rotation and a
+   fixed five-second dwell. Longer observation is still needed before
+   drawing protocol-availability conclusions.
 5. Add an inverted-IQ option to observe LoRaWAN downlinks on RX2 (869.525
    MHz SF12) and RX1.
 6. Optionally tolerate `Expect: 100-continue` in the HTTP parser by sending

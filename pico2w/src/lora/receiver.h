@@ -28,6 +28,7 @@
 #define SX1262_RX_CONFIG_ERROR (-3010)
 #define SX1262_RX_STATE_ERROR (-3011)
 #define SX1262_RX_BOARD_ERROR (-3012) /* board not confirmed: no hardware touched */
+#define SX1262_RX_BUSY_ERROR (-3013) /* activity survey owns the radio */
 
 /* Only supported board: TCXO on DIO3 at 1.7 V/5 ms, PE4259 RF switch on DIO2. */
 #define SX1262_RX_BOARD_WAVESHARE_PICO_LORA_SX1262_868M 0x57534831u
@@ -164,6 +165,8 @@ int32_t sx1262_receiver_configure(sx1262_receiver_t *rx, const sx1262_rx_config_
  * -3001..-3006 set state FAULT with pins released; -3011 means not RUNNING.
  */
 int32_t sx1262_receiver_poll(sx1262_receiver_t *rx, uint32_t now_ms);
+/* Non-retuning instantaneous RSSI; hardware failures fault the receiver. */
+int32_t sx1262_receiver_rssi(sx1262_receiver_t *rx, int32_t *qdb);
 
 /* Receive-only RSSI survey of one frequency anywhere in the SX1262 tuning
    range, measured in the active profile's bandwidth. */

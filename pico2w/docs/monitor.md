@@ -4,7 +4,10 @@ This opt-in application joins an existing WPA2 Wi-Fi network and serves a
 small browser dashboard from the Pico itself. It listens for matching
 EU868 LoRa packets, retains eight recent packets in RAM and shows raw hex,
 RSSI/SNR, uptime timestamps and the plain Meshtastic or LoRaWAN header
-fields. Every received frame is also streamed over USB to the native
+fields. The live browser viewer accumulates the latest 1,000 packets in
+the tab instead of replacing its list with each device snapshot. It
+decodes public/default-key Meshtastic payloads locally, with optional
+browser-only private keys. Every retained frame is also available over USB to the native
 [`picoctl listen`](picoctl.md#listen-to-meshtastic-traffic) command, which
 decrypts Meshtastic channel traffic on the host.
 There is no cloud service, CDN, SDK, libc, lwIP, allocator or filesystem on
@@ -31,6 +34,60 @@ a missing antenna or an open RF switch; see [rf-field-notes.md](rf-field-notes.m
 SF7-SF12, bandwidth 125/250/500 kHz and the profile can be changed from the
 browser. Changes are RAM-only and affect future reception; previously
 captured packets retain their original profile.
+
+### Live packet viewer
+
+Open the Pico's root URL (currently `http://192.168.178.68/`). No host
+server or CLI is needed. The default radio configuration remains
+869.525 MHz, SF11, BW250; all Meshtastic channel hashes on that radio
+profile are received together.
+
+- New packets append at the bottom once per second without removing
+  earlier rows or collapsing expanded details. The list retains up to
+  1,000 observations in browser memory, including repeated packets heard
+  through different relays. Repeated HTTP snapshots do not duplicate rows.
+- Each expandable row includes sequence, device uptime, estimated local
+  reception time, build ID, frequency/SF/bandwidth/profile, payload length,
+  packet RSSI, despread signal RSSI, SNR, radio flags, CRC-error status and
+  complete raw hex. Meshtastic metadata includes sender/destination,
+  packet ID, channel hash, hop limit/start, estimated hops used, ACK/MQTT
+  flags, next hop and relay byte. A relay byte is not a complete node ID.
+- Public-key decoding shows text, positions, node names/hardware/role,
+  device and environment telemetry. The decoded Data protobuf, plaintext
+  hex and uninterpreted payload fields remain available in details;
+  unknown application types retain their payload hex.
+- Optional key lines use `CHANNEL_NAME BASE64_PSK`. The public `LongFast`
+  key is always present. Additional keys can be 16/32 bytes or a one-byte
+  Meshtastic default-key selector. Keys stay only in this tab's memory:
+  they are not uploaded, stored in browser storage, or included in exports.
+  Loading keys re-decodes retained history. Reloading forgets both history
+  and keys.
+- **Pause display** keeps collecting while freezing the list; resume
+  renders retained arrivals. A hex hash filter affects display only.
+  **Follow newest** controls automatic scrolling. **Clear list** does not
+  replay old device packets. **Export JSON** saves retained packets with
+  decoded data, raw data and loss counters, but no key material.
+- Channel activity counts every observation (not unique senders or
+  messages). Hashes can collide and never establish a channel's name.
+
+Decoding uses dependency-free JavaScript AES-128/256-CTR and bounded
+protobuf parsing in the browser, so it works on this plain HTTP origin
+without WebCrypto's secure-context requirement. It does not run on the
+RP2350; the firmware remains freestanding C. Successful decoding is a
+plausible interpretation, **not cryptographic authentication**. Unknown
+keys and possible PKI messages remain opaque; CRC-failed payloads are
+never decoded. Never infer a channel name or trustworthy sender identity
+just from a matching hash or a successful decode.
+
+The device retains only eight packets for HTTP snapshots (the USB radio
+ring holds sixteen). The browser reports sequence gaps, connection
+failures, detected uptime/build resets, and eviction beyond 1,000 entries.
+Packets before opening, during closed/background-throttled tabs, after
+long outages or overwritten between polls may be lost. Loss across
+restarts cannot be counted exactly; uptime/build reset detection is best
+effort, not a persistent boot identifier. Display timestamps are estimates
+from device uptime and the computer clock, not GPS or exact RF arrival
+times. Export contains decoded positions/messages: treat it as private.
 
 In the Meshtastic profile, frames with at least 16 bytes expose their
 plaintext header (destination, sender, packet ID, hop limit/start, flags,
@@ -62,6 +119,87 @@ No LoRaWAN keys are requested.
 
 Wi-Fi **does transmit**, including association, DHCP, ARP, ICMP and HTTP
 responses. The receive-only restriction applies to the SX1262 radio.
+
+### Opt-in 868 MHz activity survey
+
+The dashboard's **Start broad survey** button starts a repeating receive-only
+scan. **Stop and restore listening** restores the exact profile active before
+starting. Scanning is RAM-only and off after reboot. It interrupts continuous
+LongFast reception: the single SX1262 cannot listen on several settings at once.
+Manual profile changes and the USB one-shot RSSI survey are rejected while it
+owns the radio (busy error `-3013`).
+
+Each sweep visits 65 settings for at least 5 seconds each:
+
+- 863.000 through 870.000 MHz inclusive, at 125 kHz spacing (57 settings).
+- Then exact centers 867.1, 867.3, 867.7, 867.9, 868.1, 868.3, 868.950,
+  and 869.525 MHz. Other common uplink centers already fall on the grid.
+- Public LoRaWAN sync/preamble, BW125, SF7 on the first sweep, then SF8
+  through SF12 on subsequent sweeps before repeating.
+- The dedicated 869.525 MHz setting always uses Meshtastic LongFast
+  SF11/BW250/private sync. All compatible logical channel hashes are heard
+  together. Other Meshtastic presets are not systematically tested.
+
+A sweep takes about 5.5 minutes plus scheduling/tuning overhead; six sweeps
+take roughly 33 minutes. No inverted-IQ LoRaWAN downlink or FSK decoding is
+added. Arbitrary matching LoRa frames are not proof of LoRaWAN.
+
+**Energy measurements:** instantaneous in-band RSSI is sampled at a target
+10 ms interval, independently of packet decoding. The lower RSSI quintile
+of the first 500 ms (at least eight samples) estimates a per-dwell baseline,
+with 1 dB histogram resolution. A rise of at least 6 dB starts a burst.
+Ending requires RSSI below baseline +3 dB for at least 30 ms; duration ends
+at the first observed low sample. Dwell/stop/fault boundaries truncate an
+active burst. Durations are first/last **observed** timing, not exact RF
+airtime. Sample counts and largest actual sample gaps expose scheduling
+limits; short bursts between samples can be missed. Continuous/busy signals
+can contaminate the learned baseline, and energy during warmup is not
+classified as a burst.
+
+The frequency table accumulates tuned observation time, RSSI samples,
+peak RSSI, burst counts and received packet/CRC-error counts. The baseline
+is for the most recent visit; the peak is cumulative for the scan run, so
+do not subtract these as though they came from the same dwell. Expand
+individual events for frequency/SF/BW/profile, uptime start, duration,
+baseline/peak/excess (quarter-dBm / quarter-dB units), sample gaps,
+packet sequence references, and truncation.
+
+Repeated energy starts on the same frequency yield an **observed
+start-to-start gap**, plus `blind_ms` spent off that frequency between the
+starts. This is not a proven transmitter period: transmissions may occur
+while tuned elsewhere, different sources may share a frequency, and later
+visits use different SFs. Neighboring bins may see the same wide signal.
+Sample gaps are additional uncertainty, not included in off-frequency time.
+
+Packets decoded while a burst is open are counted in that burst; this is
+time coincidence, not identification of the energy's source. Packets decoded
+without an active burst get a separate packet-only event, including weak
+LoRa below the energy threshold. Their duration is unknown (encoded as
+zero); the RSSI field is packet RSSI rather than an instantaneous burst
+peak. A missing baseline is JSON `null`, never a fabricated noise-relative
+strength. Decode timestamps are when firmware reads the packet, not its
+on-air start; decoding can complete after an energy burst has closed.
+CRC-failed packets are separate from packets without a reported CRC error.
+Full raw packets remain in the existing packet viewer and USB stream.
+
+`GET /api/activity` returns status, current profile, per-frequency totals,
+an ongoing burst if present, and the latest eight completed events.
+`channels` uses compact rows described by `channel_columns` to keep all
+65 entries plus events below the 15,360-byte response limit. The device
+retains 32 events internally; `overwritten` counts ring evictions, not
+browser losses. The browser accumulates the latest 1,000 events, reports
+sequence gaps and its own evictions, and **Export activity JSON** saves
+that history plus the latest totals. Reloading/closing loses browser
+history. Starting a new scan clears device totals/history and increments
+`session`; the browser keeps older-run events with distinct run IDs.
+
+Control is `POST /api/activity`, body exactly `action=start` or
+`action=stop`, with the same `X-Pico-Request: 1` header as profile changes.
+Malformed/unguarded requests get 400/403; ownership conflicts get 409;
+radio/restore failures get 503. Survey `error` and `restore_error` remain
+visible in status. On a scan failure firmware stops and attempts to restore
+the saved profile. A failed restoration is not reported as healthy listening;
+inspect the radio error and explicitly reapply a profile or restart.
 
 ### Waveshare hardware assumptions
 
@@ -195,7 +333,9 @@ keeps received hex as text rather than HTML.
 
 | Request | Meaning |
 | --- | --- |
-| `GET /` | Dashboard HTML |
+| `GET /` | Live dashboard HTML |
+| `GET /dashboard-core.js` | Browser decoder and capture-history logic |
+| `GET /dashboard.js` | Browser UI and polling |
 | `GET /api/status` | Active profile, counters and recent-packet JSON |
 | `POST /api/config` | Validate and apply a new receive profile |
 
@@ -217,8 +357,10 @@ it is not reported as a successful settings change. Unsupported routes
 return 404. Responses contain Content-Length and Connection: close.
 Status timestamps are polling-time uptime milliseconds, not precise on-air
 timestamps or UTC. RSSI and SNR JSON
-values are signed quarter-decibels (`rssi_qdb` and `snr_qdb`); the browser
-converts them to dBm and dB.
+values are signed quarter-decibels (`rssi_qdb`, `signal_rssi_qdb` and
+`snr_qdb`); the browser converts them to dBm and dB. Packet `flags` exposes
+the receiver flags, including bit 7 for CRC failure. Existing status
+fields and USB behavior are preserved.
 
 HTTP is **unauthenticated and unencrypted**. Anyone on the reachable LAN
 can read packets and change receiver settings. Do not expose or forward
@@ -229,8 +371,12 @@ they do not authenticate clients.
 ### Bounded network stack
 
 - Ethernet, ARP, IPv4, ICMP echo and DHCP (including lease renewal/expiry).
-- TCP port 80 only, two fixed client slots, MSS up to 1024 bytes, one
+- TCP port 80 only, four fixed client slots (including closing connections),
+  MSS up to 1024 bytes, one
   outstanding segment per client, retransmission and finite deadlines.
+- Parallel tabs, browser preconnections or rapid API clients can exhaust
+  that pool temporarily. The viewer times out and retries failed polls,
+  keeps its history, and reports connection failures and sequence gaps.
 - Requests limited to 1024 bytes, form bodies to 256 bytes, responses to
   16384 bytes; no dynamic allocation.
 - HTTP/1.1 GET/POST only, no pipelining, keepalive, chunked bodies,

@@ -56,6 +56,10 @@ The default `--app probe` retains the short-lived, opt-in radio diagnostic.
 The separate `--app monitor` builds a persistent Wi-Fi HTTP dashboard and
 receive-only LoRa monitor (Meshtastic by default, LoRaWAN selectable); it requires explicit private inputs and
 board confirmation. Follow the [monitor build instructions](docs/monitor.md).
+Its opt-in [868 MHz activity survey](docs/monitor.md#opt-in-868-mhz-activity-survey)
+records noise-relative RSSI bursts, observed start gaps and matching LoRa
+packet counts across 65 settings, with browser history and JSON export.
+Scanning interrupts normal single-profile reception; stopping restores it.
 Tests never connect to an AP or open USB/SPI hardware.
 
 ### Native Windows control and deployment
@@ -174,7 +178,11 @@ EU868 LoRaWAN uplink profile at runtime (RAM-only). Received frames are
 streamed over USB to `picoctl listen`, which decrypts Meshtastic channel
 traffic on the host with the project's own AES-CTR and protobuf decoder;
 see [listening to Meshtastic](docs/picoctl.md#listen-to-meshtastic-traffic).
-Keys stay on the host. No LoRaWAN join, MIC verification, on-device
+The browser also provides a continuous live list (latest 1,000 packets),
+all-hash activity, expandable raw/header/radio details, local Meshtastic
+decoding, browser-only optional keys and JSON export; see the
+[live viewer](docs/monitor.md#live-packet-viewer). Keys stay on the host
+or in the browser tab. No LoRaWAN join, MIC verification, on-device
 decryption, LoRa transmission or Internet service is included. It is not a
 gateway or a Meshtastic node. The firmware also reports the channel noise
 floor, and `picoctl survey` measures received power from 150 to 960 MHz to
@@ -186,7 +194,8 @@ the [RF field notes](docs/rf-field-notes.md).
 LLVM monitor images have been flashed and exercised on Pico
 `7C4918BAB9492C77` (RP2350 A2): USB recovery/status, WPA2 authorization,
 DHCP and HTTP serving work, and the SX1262 enters continuous RX without
-errors. No over-the-air packet has yet been captured. The owned pipeline
+errors. Meshtastic LongFast packets have been received and decoded on the
+host; antenna comparisons are recorded in the field notes. The owned pipeline
 is build/layout-qualified, not hardware execution-qualified.
 Building or testing never opens a USB
 device, changes drivers, resets hardware, or flashes firmware.

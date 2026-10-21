@@ -515,7 +515,9 @@ static void test_noise_floor(void) {
     for (uint32_t i = before; i < sim.frames; ++i) assert(sim.log[i].bytes[0] != 0x15);
     /* A SPI failure while sampling is reported like any other command error. */
     sim.spi_fail_at_opcode = 0x15;
+    uint32_t released = sim.releases;
     assert(sx1262_receiver_poll(&rx, 4000) != 0 && rx.noise_samples == 3);
+    assert(sim.releases == released + 1);
     sim.spi_fail_at_opcode = 0;
     /* Reconfiguring starts fresh statistics. */
     sx1262_rx_config_t c;
@@ -523,6 +525,21 @@ static void test_noise_floor(void) {
     c.frequency_hz = 868300000u;
     assert(sx1262_receiver_configure(&rx, &c) == 0);
     assert(rx.noise_samples == 0 && rx.noise_qdb == 0 && rx.noise_min_qdb == 0 && rx.noise_max_qdb == 0);
+}
+
+static void test_instant_rssi(void) {
+    fresh(&rx);
+    int32_t qdb = 123;
+    assert(sx1262_receiver_rssi(&rx, &qdb) == SX1262_RX_STATE_ERROR && qdb == 123 && !sim.frames);
+    start_default();
+    sim.rssi_inst = 201;
+    uint32_t before = sim.frames;
+    assert(sx1262_receiver_rssi(&rx, &qdb) == 0 && qdb == -402);
+    assert(sim.frames == before + 1 && sim.log[before].bytes[0] == 0x15 && rx.noise_samples == 0);
+    sim.spi_fail_at_opcode = 0x15;
+    uint32_t releases = sim.releases;
+    assert(sx1262_receiver_rssi(&rx, &qdb) == SX1262_SPI_ERROR);
+    assert(rx.state == SX1262_RX_FAULT && sim.releases == releases + 1 && qdb == -402);
 }
 
 static void test_ring_bounds(void) {
@@ -716,6 +733,7 @@ int main(void) {
     test_meshtastic();
     test_packet_record();
     test_noise_floor();
+    test_instant_rssi();
     test_survey();
     puts("PASS: SX1262 RX-only frames, LoRaWAN/Meshtastic profiles, metadata, ring, records, noise floor, errors and cleanup");
     return 0;

@@ -15,6 +15,7 @@ static usb_control_t control;
 static network_t network;
 static dashboard_t dashboard;
 static sx1262_receiver_t receiver;
+static activity_t activity;
 static uint8_t frame[NET_FRAME_MAX];
 static uint32_t last_us;
 static uint32_t remainder_us;
@@ -116,6 +117,7 @@ static int send_frame(void *context, const uint8_t *data, uint32_t length) {
 
 static int32_t configure_radio(void *context, const dashboard_config_t *config) {
     (void)context;
+    if (activity.running) return SX1262_RX_BUSY_ERROR;
     sx1262_rx_config_t radio_config;
     radio_config.frequency_hz = config->frequency_hz;
     radio_config.spreading_factor = config->sf;
@@ -125,12 +127,29 @@ static int32_t configure_radio(void *context, const dashboard_config_t *config) 
     return pico2w_lora_error;
 }
 
+static int32_t control_activity(void *context, uint8_t start) {
+    (void)context;
+    int32_t error = start ? activity_start(&activity, &receiver, uptime_ms) :
+                            activity_stop(&activity, &receiver, uptime_ms);
+    pico2w_lora_error = receiver.state == SX1262_RX_RUNNING ? 0 : receiver.last_error;
+    dashboard.config.frequency_hz = receiver.active.frequency_hz;
+    dashboard.config.sf = receiver.active.spreading_factor;
+    dashboard.config.bandwidth_khz = receiver.active.bandwidth_khz;
+    dashboard.config.profile = receiver.active.profile;
+    dashboard.uptime_ms = uptime_ms;
+    return error;
+}
+
 static void packet_source(void *context, uint32_t after_sequence, uint8_t *record) {
     (void)context;
     lora_packet_record(record, PICO2W_BUILD_ID, &receiver, after_sequence);
 }
 
 static void capture_update(void) {
+    dashboard.config.frequency_hz = receiver.active.frequency_hz;
+    dashboard.config.sf = receiver.active.spreading_factor;
+    dashboard.config.bandwidth_khz = receiver.active.bandwidth_khz;
+    dashboard.config.profile = receiver.active.profile;
     dashboard.uptime_ms = uptime_ms;
     dashboard.wifi_error = (int32_t)wifi_station_error();
     dashboard.lora_error = pico2w_lora_error;
@@ -167,6 +186,8 @@ static void capture_update(void) {
         packet->profile = source->profile;
         packet->rssi_qdb = source->rssi_qdb;
         packet->snr_qdb = source->snr_qdb;
+        packet->signal_rssi_qdb = source->signal_rssi_qdb;
+        packet->flags = source->flags;
         packet->length = source->length;
         packet->crc_error = (source->flags & SX1262_RX_CRC_ERROR) != 0u;
         for (uint32_t j = 0u; j < source->length; ++j) packet->data[j] = source->payload[j];
@@ -178,6 +199,10 @@ static void capture_update(void) {
 static void run_survey(void) {
     uint32_t khz = control.survey_pending_khz;
     if (khz == 0u) return;
+    if (activity.running) {
+        usb_control_survey_result(&control, khz, 0u, 0u, SX1262_RX_BUSY_ERROR, 0, 0, 0);
+        return;
+    }
     sx1262_rx_survey_t result;
     int32_t error = sx1262_receiver_survey(&receiver, khz * 1000u, &result);
     if (error != 0 && receiver.state != 1u) pico2w_lora_error = error;
@@ -207,6 +232,8 @@ void bare_main(void) {
     dashboard.config.bandwidth_khz = SX1262_RX_DEFAULT_BANDWIDTH_KHZ;
     dashboard.config.profile = SX1262_RX_DEFAULT_PROFILE;
     dashboard.configure = configure_radio;
+    dashboard.activity = &activity;
+    dashboard.activity_control = control_activity;
     sx1262_receiver_init(&receiver, service);
     wifi_station_set_service(wifi_service, 0);
     wifi_started = wifi_station_init(wifi_default_ssid, wifi_default_passphrase) ? 1u : 0u;
@@ -220,6 +247,10 @@ void bare_main(void) {
             error = sx1262_receiver_poll(&receiver, uptime_ms);
             if (error != 0) pico2w_lora_error = error;
         }
+        uint8_t surveying = activity.running;
+        activity_tick(&activity, &receiver, uptime_ms);
+        if (surveying && !activity.running)
+            pico2w_lora_error = receiver.state == SX1262_RX_RUNNING ? 0 : receiver.last_error;
         run_survey();
         if (wifi_started) wifi_station_service();
         if (!network_ready && wifi_station_link_up()) {

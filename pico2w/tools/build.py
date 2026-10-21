@@ -30,6 +30,7 @@ SOURCES = (
 MONITOR_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
     "src/main_monitor.c",
     "src/lora/receiver.c",
+    "src/lora/activity.c",
     "src/lora/packet_record.c",
     "src/wifi/wifi_station.c",
     "src/wifi/wifi_gspi.c",
@@ -40,11 +41,26 @@ MONITOR_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
 )
 
 
+def dashboard_assets(output):
+    script = (ROOT / "src" / "app" / "dashboard.js").read_text(encoding="ascii")
+    core, separator, ui = script.partition("if (typeof document !== 'undefined') {")
+    if not separator:
+        raise ValueError("dashboard UI entry point missing")
+    assets = {"dashboard_core": core, "dashboard_script": separator + ui}
+    if any(len(text.encode("ascii")) > 15360 for text in assets.values()):
+        raise ValueError("dashboard script asset exceeds HTTP response capacity")
+    (output / "dashboard_script_generated.h").write_text(
+        "".join("static const uint8_t " + name + "[] =\n" +
+                "\n".join(json.dumps(line + "\n") for line in text.splitlines()) +
+                ";\n" for name, text in assets.items()), encoding="ascii")
+
+
 def monitor_assets(args, output):
     if not args.confirm_waveshare:
         raise ValueError("--app monitor requires --confirm-waveshare before compiling radio initialization")
     if args.credentials is None or args.wifi_firmware is None or args.wifi_nvram is None:
         raise ValueError("--app monitor requires --credentials, --wifi-firmware and --wifi-nvram")
+    dashboard_assets(output)
     spec = importlib.util.spec_from_file_location("pico2w_wifi_assets", ROOT / "tools" / "wifi_assets.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -212,11 +228,13 @@ def firmware(args):
 
 def tests(args):
     BUILD.mkdir(exist_ok=True)
+    dashboard_assets(BUILD)
     suites = {
         "usb_test": ("src/usb/control.c", "src/usb/report.c"),
         "lora_test": ("src/lora/sx1262.c",),
         "network_test": ("src/net/network.c", "src/net/http.c"),
         "dashboard_test": ("src/app/dashboard.c", "src/net/http.c"),
+        "activity_test": ("src/lora/activity.c",),
         "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c",
                           "src/lora/packet_record.c", "src/usb/report.c"),
         "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "tools/lorawan.c", "src/usb/report.c"),
@@ -225,7 +243,7 @@ def tests(args):
     for name, sources in suites.items():
         executable = BUILD / (name + (".exe" if os.name == "nt" else ""))
         run([args.host_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
-             "-Isrc/include", "-Isrc", str(ROOT / "tests" / (name + ".c")),
+             "-Isrc/include", "-Isrc", "-I" + str(BUILD), str(ROOT / "tests" / (name + ".c")),
              *(str(ROOT / path) for path in sources), "-o", str(executable)])
         run([str(executable)])
     if os.name == "nt":

@@ -405,11 +405,9 @@ static int32_t poll_once(sx1262_receiver_t *rx, uint32_t now_ms) {
     }
     if (irq == 0u && (rx->noise_samples == 0u ||
                       now_ms - rx->noise_at_ms >= SX1262_RX_NOISE_INTERVAL_MS)) {
-        static const uint8_t get_rssi_inst[] = {0x15u, 0x00u, 0x00u};
-        uint8_t rssi[3];
-        error = command(rx, get_rssi_inst, rssi, sizeof(rssi));
+        int32_t qdb;
+        error = sx1262_receiver_rssi(rx, &qdb);
         if (error != 0) return error;
-        int32_t qdb = -2 * (int32_t)rssi[2];
         rx->noise_qdb = qdb;
         if (rx->noise_samples == 0u || qdb < rx->noise_min_qdb) rx->noise_min_qdb = qdb;
         if (rx->noise_samples == 0u || qdb > rx->noise_max_qdb) rx->noise_max_qdb = qdb;
@@ -423,6 +421,20 @@ static int radio_fault(int32_t error) {
     return error <= SX1262_INIT_ERROR && error >= SX1262_DEVICE_ERROR;
 }
 
+int32_t sx1262_receiver_rssi(sx1262_receiver_t *rx, int32_t *qdb) {
+    static const uint8_t get_rssi_inst[] = {0x15u, 0x00u, 0x00u};
+    uint8_t in[3];
+    if (rx->state != SX1262_RX_RUNNING) return SX1262_RX_STATE_ERROR;
+    int32_t error = command(rx, get_rssi_inst, in, sizeof(get_rssi_inst));
+    if (error != 0) {
+        rx->last_error = error;
+        if (radio_fault(error) && rx->state != SX1262_RX_FAULT) fault(rx, error);
+        return error;
+    }
+    *qdb = -2 * (int32_t)in[2];
+    return 0;
+}
+
 int32_t sx1262_receiver_poll(sx1262_receiver_t *rx, uint32_t now_ms) {
     if (rx->state != SX1262_RX_RUNNING) return SX1262_RX_STATE_ERROR;
     ++rx->counters.polls;
@@ -431,7 +443,7 @@ int32_t sx1262_receiver_poll(sx1262_receiver_t *rx, uint32_t now_ms) {
         ++rx->counters.poll_errors;
         rx->last_error = error;
         /* Service cancellations keep the radio listening; radio faults release it. */
-        if (radio_fault(error)) fault(rx, error);
+        if (radio_fault(error) && rx->state != SX1262_RX_FAULT) fault(rx, error);
     }
     return error;
 }
