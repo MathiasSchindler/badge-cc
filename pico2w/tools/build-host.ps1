@@ -8,6 +8,7 @@ $output = Join-Path $root "build\host"
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 $sources = @(
     (Join-Path $PSScriptRoot "picoctl_protocol.c"),
+    (Join-Path $PSScriptRoot "meshtastic.c"),
     (Join-Path $root "src\usb\report.c")
 )
 $flags = @("-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",

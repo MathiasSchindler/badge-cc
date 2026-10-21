@@ -35,6 +35,31 @@ int wmain(int argc, wchar_t **argv) {
     assert(parse(8, valid, &options) && !options.wait_ip);
     assert(!parse(9, valid, &options));
     assert(!parse(4, valid, &options));
+    wchar_t *listen[] = {L"picoctl", L"listen", L"--serial", L"7C4918BAB9492C77",
+                         L"--psk-file", L"keys.txt", L"--count", L"3", L"--hex"};
+    assert(parse(9, listen, &options));
+    assert(options.count == 3 && options.hex && !options.has_build && !options.has_timeout &&
+           !wcscmp(options.psk_file, L"keys.txt"));
+    assert(parse(4, listen, &options) && !options.psk_file && !options.count);
+    listen[6] = L"0";
+    assert(!parse(8, listen, &options));
+    listen[6] = L"3";
+    listen[8] = L"--wait-ip";
+    assert(!parse(9, listen, &options));
+    wchar_t *listen_upload[] = {L"picoctl", L"listen", L"--serial", L"7C4918BAB9492C77",
+                                L"--uf2", L"x.uf2"};
+    assert(!parse(6, listen_upload, &options));
+    wchar_t *listen_long[] = {L"picoctl", L"listen", L"--serial", L"7C4918BAB9492C77",
+                              L"--timeout", L"86400"};
+    assert(parse(6, listen_long, &options) && options.has_timeout && options.timeout == 86400000u);
+    listen_long[5] = L"86401";
+    assert(!parse(6, listen_long, &options));
+    listen_long[1] = L"status";
+    listen_long[5] = L"301";
+    assert(!parse(6, listen_long, &options));
+    wchar_t *status_hex[] = {L"picoctl", L"status", L"--serial", L"7C4918BAB9492C77",
+                             L"--build-id", L"d1828acd", L"--hex"};
+    assert(!parse(7, status_hex, &options));
     wchar_t *invalid[] = {L"picoctl", L"upload", L"--serial", L"7C4918BAB9492C77"};
     assert(!parse(4, invalid, &options));
     wchar_t *duplicate[] = {L"picoctl", L"bootsel", L"--serial", L"7C4918BAB9492C77",

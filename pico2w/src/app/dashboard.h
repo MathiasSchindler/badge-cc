@@ -4,11 +4,14 @@
 #include "net/http.h"
 
 #define DASHBOARD_PACKETS 8u
+#define DASHBOARD_PROFILE_LORAWAN 0u
+#define DASHBOARD_PROFILE_MESHTASTIC 1u
 
 typedef struct {
     uint32_t frequency_hz;
     uint32_t sf;
     uint32_t bandwidth_khz;
+    uint32_t profile; /* DASHBOARD_PROFILE_*, same values as SX1262_RX_PROFILE_* */
 } dashboard_config_t;
 
 typedef struct {
@@ -17,6 +20,7 @@ typedef struct {
     uint32_t frequency_hz;
     uint32_t sf;
     uint32_t bandwidth_khz;
+    uint32_t profile;
     int32_t rssi_qdb;
     int32_t snr_qdb;
     uint32_t length;

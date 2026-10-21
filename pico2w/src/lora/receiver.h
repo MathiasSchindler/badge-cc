@@ -9,12 +9,13 @@
  * Pico-LoRa-SX1262-868M. It never issues SetTx, SetTxContinuousWave,
  * SetTxInfinitePreamble, SetCad or any LoRaWAN join/transmit operation.
  *
- * Scope: LoRaWAN *uplink* traffic only. Standard (non-inverted) IQ is fixed,
- * so downlinks (inverted IQ) are normally not received. Explicit header mode:
+ * Scope: LoRaWAN *uplink* traffic (LoRaWAN profile) or Meshtastic frames
+ * (Meshtastic profile). Standard (non-inverted) IQ is fixed,
+ * so LoRaWAN downlinks (inverted IQ) are normally not received. Explicit header mode:
  * the radio checks payload CRC only when the received header announces one.
  * "packets" therefore means RxDone without CrcErr, not "CRC verified"; the
- * SX1262 does not report whether a CRC was present. LoRaWAN fields are a
- * structural header reading only: no MIC check, no decryption.
+ * SX1262 does not report whether a CRC was present. Header fields are a
+ * structural reading only: no MIC check, no decryption.
  *
  * The object is caller-allocated and is not re-entrant: the service callback
  * must never call back into the receiver. Every SPI wait calls the service;
@@ -33,9 +34,24 @@
 
 #define SX1262_RX_MIN_FREQUENCY_HZ 863000000u
 #define SX1262_RX_MAX_FREQUENCY_HZ 870000000u
-#define SX1262_RX_DEFAULT_FREQUENCY_HZ 868100000u
-#define SX1262_RX_DEFAULT_SF 7u
-#define SX1262_RX_DEFAULT_BANDWIDTH_KHZ 125u
+
+/* Sync word and preamble family. Both are receive-only. */
+#define SX1262_RX_PROFILE_LORAWAN 0u    /* public sync word 0x34, preamble 8 */
+#define SX1262_RX_PROFILE_MESHTASTIC 1u /* sync word 0x2b, preamble 16 */
+
+/* LoRaWAN EU868 channel 0. */
+#define SX1262_RX_LORAWAN_FREQUENCY_HZ 868100000u
+#define SX1262_RX_LORAWAN_SF 7u
+#define SX1262_RX_LORAWAN_BANDWIDTH_KHZ 125u
+/* Meshtastic EU_868 LongFast: 869.4 MHz + 250 kHz / 2, one slot. */
+#define SX1262_RX_MESHTASTIC_FREQUENCY_HZ 869525000u
+#define SX1262_RX_MESHTASTIC_SF 11u
+#define SX1262_RX_MESHTASTIC_BANDWIDTH_KHZ 250u
+
+#define SX1262_RX_DEFAULT_PROFILE SX1262_RX_PROFILE_MESHTASTIC
+#define SX1262_RX_DEFAULT_FREQUENCY_HZ SX1262_RX_MESHTASTIC_FREQUENCY_HZ
+#define SX1262_RX_DEFAULT_SF SX1262_RX_MESHTASTIC_SF
+#define SX1262_RX_DEFAULT_BANDWIDTH_KHZ SX1262_RX_MESHTASTIC_BANDWIDTH_KHZ
 
 #define SX1262_RX_IDLE 0u
 #define SX1262_RX_RUNNING 1u
@@ -44,11 +60,13 @@
 /* Packet flags. */
 #define SX1262_RX_HAS_MHDR 1u       /* length >= 1: mhdr/mtype/major are the raw first byte */
 #define SX1262_RX_LORAWAN_DATA 2u   /* structurally plausible LoRaWAN data frame: dev_addr/fctrl/fcnt16 valid */
+#define SX1262_RX_MESHTASTIC_HEADER 4u /* Meshtastic profile and length >= 16 */
 
 typedef struct {
     uint32_t frequency_hz;   /* 863000000..870000000 */
     uint32_t spreading_factor; /* 7..12 */
     uint32_t bandwidth_khz;  /* 125, 250 or 500 */
+    uint32_t profile;        /* SX1262_RX_PROFILE_* */
 } sx1262_rx_config_t;
 
 typedef struct {
@@ -62,6 +80,7 @@ typedef struct {
     int32_t snr_qdb;         /* packet SNR, quarter dB (signed SnrPkt) */
     int32_t signal_rssi_qdb; /* despread signal RSSI, quarter dBm */
     uint8_t length;          /* payload bytes valid in payload[] */
+    uint8_t profile;         /* SX1262_RX_PROFILE_* active when received */
     uint8_t mhdr;
     uint8_t mtype;           /* mhdr >> 5 */
     uint8_t major;           /* mhdr & 3 */
@@ -142,7 +161,11 @@ void sx1262_receiver_stop(sx1262_receiver_t *rx);
 /* index 0 is the newest packet; returns 0 when index >= count. */
 const sx1262_rx_packet_t *sx1262_receiver_packet(const sx1262_receiver_t *rx, uint32_t index);
 
-/* LoRaWAN header inspection only (no decryption/MIC check); exposed for tests. */
+/* Header inspection only (no decryption/MIC check); exposed for tests.
+   LoRaWAN fields are parsed only for the LoRaWAN profile. */
 void sx1262_rx_parse(sx1262_rx_packet_t *packet);
+/* Meshtastic LongFast preset for EU_868. */
+void sx1262_rx_meshtastic_config(sx1262_rx_config_t *config);
+void sx1262_rx_lorawan_config(sx1262_rx_config_t *config);
 
 #endif

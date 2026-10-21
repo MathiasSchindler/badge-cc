@@ -2,6 +2,9 @@
 #include "usb/hardware.h"
 #include "lora/hardware.h"
 #include "lora/receiver.h"
+#include "lora/packet_record.h"
+
+_Static_assert(LORA_PACKET_RECORD_SIZE == USB_LORA_PACKET_SIZE, "packet record size");
 #include "wifi/wifi_station.h"
 #include "app/dashboard.h"
 #include "net/network.h"
@@ -117,8 +120,14 @@ static int32_t configure_radio(void *context, const dashboard_config_t *config) 
     radio_config.frequency_hz = config->frequency_hz;
     radio_config.spreading_factor = config->sf;
     radio_config.bandwidth_khz = config->bandwidth_khz;
+    radio_config.profile = config->profile;
     pico2w_lora_error = sx1262_receiver_configure(&receiver, &radio_config);
     return pico2w_lora_error;
+}
+
+static void packet_source(void *context, uint32_t after_sequence, uint8_t *record) {
+    (void)context;
+    lora_packet_record(record, PICO2W_BUILD_ID, &receiver, after_sequence);
 }
 
 static void capture_update(void) {
@@ -151,6 +160,7 @@ static void capture_update(void) {
         packet->frequency_hz = source->frequency_hz;
         packet->sf = source->spreading_factor;
         packet->bandwidth_khz = source->bandwidth_khz;
+        packet->profile = source->profile;
         packet->rssi_qdb = source->rssi_qdb;
         packet->snr_qdb = source->snr_qdb;
         packet->length = source->length;
@@ -168,14 +178,16 @@ void bare_main(void) {
     if (error != 0) recover(error);
     usb_control_init(&control, PICO2W_BUILD_ID, id);
     control.lora_disabled = 1u;
+    control.packet_source = packet_source;
     pico2w_stage = 2u;
     error = usb_hw_init();
     if (error != 0) recover(error);
     usb_ready = 1u;
     dashboard.build_id = PICO2W_BUILD_ID;
-    dashboard.config.frequency_hz = 868100000u;
-    dashboard.config.sf = 7u;
-    dashboard.config.bandwidth_khz = 125u;
+    dashboard.config.frequency_hz = SX1262_RX_DEFAULT_FREQUENCY_HZ;
+    dashboard.config.sf = SX1262_RX_DEFAULT_SF;
+    dashboard.config.bandwidth_khz = SX1262_RX_DEFAULT_BANDWIDTH_KHZ;
+    dashboard.config.profile = SX1262_RX_DEFAULT_PROFILE;
     dashboard.configure = configure_radio;
     sx1262_receiver_init(&receiver, service);
     wifi_station_set_service(wifi_service, 0);

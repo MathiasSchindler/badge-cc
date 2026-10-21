@@ -112,6 +112,8 @@ void usb_control_init(usb_control_t *control, uint32_t build_id,
     control->lora_disabled = 0u;
     control->app_status_valid = 0u;
     control->wifi_status_valid = 0u;
+    control->packet_source = 0;
+    control->packet_context = 0;
     for (uint32_t word = 0u; word < 2u; ++word) {
         control->chip_id[word] = chip_id[word];
         for (uint32_t digit = 0u; digit < 8u; ++digit)
@@ -187,6 +189,12 @@ void usb_control_setup(usb_control_t *control, const uint8_t setup[8]) {
     } else if (type == 1u && request == 11u && value == 0u && index == 0u &&
                length == 0u && control->configured) {
         status_in(control);
+    } else if (control->configured && type == 0xc0u && request == USB_LORA_PACKET &&
+               length == USB_LORA_PACKET_SIZE && control->packet_source != 0) {
+        control->packet_source(control->packet_context,
+                               (uint32_t)value | (uint32_t)index << 16u,
+                               control->packet_record);
+        send(control, control->packet_record, USB_LORA_PACKET_SIZE, length);
     } else if (control->configured && value == 0u && index == 0u) {
         if (type == 0x40u && request == USB_SUBMIT && length == USB_REPORT_SIZE) {
             control->report_valid = 0u;

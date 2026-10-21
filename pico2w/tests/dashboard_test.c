@@ -29,7 +29,7 @@ static void fixture(void) {
     app.lora_status = 0x52;
     app.lora_command = 0xc0;
     app.lora_polls = 123;
-    app.config = (dashboard_config_t){868100000u, 7u, 125u};
+    app.config = (dashboard_config_t){868100000u, 7u, 125u, DASHBOARD_PROFILE_LORAWAN};
     app.configure = configure;
     strcpy(app.ip, "192.168.1.80");
     app.packet_count = DASHBOARD_PACKETS;
@@ -88,7 +88,45 @@ int main(int argc, char **argv) {
                   "\"lora_device_errors\":0,\"lora_polls\":123") != NULL);
     app.packets[0].length = 1;
     size = get("/api/status"); response[size] = 0;
-    assert(strstr((char *)response, "\"devaddr\":null,\"fcnt16\":null") != NULL);
+    assert(strstr((char *)response, "\"devaddr\":null,\"fcnt16\":null,\"mesh\":null") != NULL);
+    assert(strstr((char *)response, "\"config\":{\"frequency_hz\":868100000,\"sf\":7,"
+                  "\"bandwidth_khz\":125,\"profile\":\"lorawan\"}") != NULL);
+    {
+        dashboard_packet_t *packet = app.packets + 1;
+        static const uint8_t header[16] = {0xff, 0xff, 0xff, 0xff, 0x44, 0x33, 0x22, 0x11,
+                                           0x88, 0x77, 0x66, 0x55, 0x7b, 0x08, 0x00, 0x44};
+        memcpy(packet->data, header, sizeof(header));
+        packet->length = 20;
+        packet->profile = DASHBOARD_PROFILE_MESHTASTIC;
+        size = get("/api/status"); response[size] = 0;
+        assert(strstr((char *)response, "\"profile\":\"meshtastic\",\"rssi_qdb\"") != NULL);
+        assert(strstr((char *)response, "\"lorawan_candidate\":false,\"mtype\":255,"
+                      "\"devaddr\":null,\"fcnt16\":null,\"mesh\":{\"to\":\"ffffffff\","
+                      "\"from\":\"11223344\",\"id\":\"55667788\",\"hop_limit\":3,"
+                      "\"hop_start\":3,\"want_ack\":true,\"via_mqtt\":true,\"channel\":8,"
+                      "\"next_hop\":0,\"relay_node\":68}") != NULL);
+        fixture();
+    }
+    {
+        static const char mesh[] = "frequency_hz=869525000&sf=11&bandwidth_khz=250&profile=meshtastic";
+        static const char lorawan[] = "frequency_hz=868100000&sf=7&bandwidth_khz=125&profile=lorawan";
+        static const char *invalid[] = {
+            "frequency_hz=869525000&sf=11&bandwidth_khz=250&profile=",
+            "frequency_hz=869525000&sf=11&bandwidth_khz=250&profile=mesh",
+            "frequency_hz=869525000&sf=11&bandwidth_khz=250&profile=meshtasticx",
+            "frequency_hz=869525000&sf=11&bandwidth_khz=250&profile=meshtastic&",
+            "frequency_hz=869525000&sf=11&bandwidth_khz=250&mode=meshtastic",
+        };
+        dashboard_config_t parsed;
+        assert(dashboard_parse_config((const uint8_t *)mesh, sizeof(mesh) - 1u, &parsed));
+        assert(parsed.profile == DASHBOARD_PROFILE_MESHTASTIC && parsed.frequency_hz == 869525000u &&
+               parsed.sf == 11u && parsed.bandwidth_khz == 250u);
+        assert(dashboard_parse_config((const uint8_t *)lorawan, sizeof(lorawan) - 1u, &parsed));
+        assert(parsed.profile == DASHBOARD_PROFILE_LORAWAN);
+        for (uint32_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+            assert(!dashboard_parse_config((const uint8_t *)invalid[i], (uint32_t)strlen(invalid[i]),
+                                           &parsed));
+    }
     size = get("/");
     assert(size > 4000 && memcmp(response, "HTTP/1.1 200 OK", 15) == 0);
     assert(get("/favicon.ico") > 0 && memcmp(response, "HTTP/1.1 404", 12) == 0);

@@ -33,14 +33,27 @@ static int command_ok(uint8_t status) {
            result != 5u && result != 7u;
 }
 
+void sx1262_rx_meshtastic_config(sx1262_rx_config_t *config) {
+    config->frequency_hz = SX1262_RX_MESHTASTIC_FREQUENCY_HZ;
+    config->spreading_factor = SX1262_RX_MESHTASTIC_SF;
+    config->bandwidth_khz = SX1262_RX_MESHTASTIC_BANDWIDTH_KHZ;
+    config->profile = SX1262_RX_PROFILE_MESHTASTIC;
+}
+
+void sx1262_rx_lorawan_config(sx1262_rx_config_t *config) {
+    config->frequency_hz = SX1262_RX_LORAWAN_FREQUENCY_HZ;
+    config->spreading_factor = SX1262_RX_LORAWAN_SF;
+    config->bandwidth_khz = SX1262_RX_LORAWAN_BANDWIDTH_KHZ;
+    config->profile = SX1262_RX_PROFILE_LORAWAN;
+}
+
 void sx1262_rx_default_config(sx1262_rx_config_t *config) {
-    config->frequency_hz = SX1262_RX_DEFAULT_FREQUENCY_HZ;
-    config->spreading_factor = SX1262_RX_DEFAULT_SF;
-    config->bandwidth_khz = SX1262_RX_DEFAULT_BANDWIDTH_KHZ;
+    sx1262_rx_meshtastic_config(config);
 }
 
 int32_t sx1262_rx_validate(const sx1262_rx_config_t *config) {
     if (config == 0) return SX1262_RX_CONFIG_ERROR;
+    if (config->profile > SX1262_RX_PROFILE_MESHTASTIC) return SX1262_RX_CONFIG_ERROR;
     if (config->frequency_hz < SX1262_RX_MIN_FREQUENCY_HZ ||
         config->frequency_hz > SX1262_RX_MAX_FREQUENCY_HZ)
         return SX1262_RX_CONFIG_ERROR;
@@ -91,10 +104,9 @@ static int32_t apply_profile(sx1262_receiver_t *rx, const sx1262_rx_config_t *co
     static const uint8_t standby[] = {0x80u, 0x00u};
     static const uint8_t packet_type[] = {0x8au, 0x01u};
     static const uint8_t calibrate_image[] = {0x98u, 0xd7u, 0xdbu};      /* 863-870 MHz */
-    /* Preamble 8, explicit header, max length 255, CRC on, standard IQ (uplinks). */
-    static const uint8_t packet_params[] = {0x8cu, 0x00u, 0x08u, 0x00u, 0xffu, 0x01u, 0x00u};
     static const uint8_t read_iq[] = {0x1du, 0x07u, 0x36u, 0x00u, 0x00u};
-    static const uint8_t sync_word[] = {0x0du, 0x07u, 0x40u, 0x34u, 0x44u}; /* public */
+    /* Register 0x08ac = 0x96: RX boosted gain (+~2 dB sensitivity), as Meshtastic uses. */
+    static const uint8_t rx_boosted_gain[] = {0x0du, 0x08u, 0xacu, 0x96u};
     static const uint8_t buffer_base[] = {0x8fu, 0x00u, 0x00u};
     static const uint8_t irq_params[] = {0x08u, (uint8_t)(IRQ_MASK >> 8u), (uint8_t)IRQ_MASK,
                                          (uint8_t)(IRQ_MASK >> 8u), (uint8_t)IRQ_MASK,
@@ -104,7 +116,8 @@ static int32_t apply_profile(sx1262_receiver_t *rx, const sx1262_rx_config_t *co
     static const uint8_t set_rx[] = {0x82u, 0xffu, 0xffu, 0xffu};       /* continuous */
     static const uint8_t get_status[] = {0xc0u, 0x00u};
     uint8_t in[9];
-    uint8_t out[5];
+    uint8_t out[7];
+    uint8_t meshtastic = config->profile == SX1262_RX_PROFILE_MESHTASTIC;
     int32_t error = command(rx, standby, in, sizeof(standby));
     if (error == 0) error = command(rx, packet_type, in, sizeof(packet_type));
     if (error == 0) error = command(rx, calibrate_image, in, sizeof(calibrate_image));
@@ -128,7 +141,17 @@ static int32_t apply_profile(sx1262_receiver_t *rx, const sx1262_rx_config_t *co
     /* Low data-rate optimization where the symbol time is >= 16.38 ms. */
     out[4] = (uint8_t)((bw == 125u && sf >= 11u) || (bw == 250u && sf == 12u));
     error = command(rx, out, in, 5u);
-    if (error == 0) error = command(rx, packet_params, in, sizeof(packet_params));
+    if (error != 0) return error;
+    /* Preamble 8 (LoRaWAN) or 16 (Meshtastic), explicit header, max length 255,
+       CRC on, standard IQ. */
+    out[0] = 0x8cu;
+    out[1] = 0x00u;
+    out[2] = meshtastic ? 0x10u : 0x08u;
+    out[3] = 0x00u;
+    out[4] = 0xffu;
+    out[5] = 0x01u;
+    out[6] = 0x00u;
+    error = command(rx, out, in, 7u);
     if (error == 0) error = command(rx, read_iq, in, sizeof(read_iq));
     if (error != 0) return error;
     /* SX1262 errata 15.4: set bit 2 of register 0x0736 for standard IQ. */
@@ -137,7 +160,16 @@ static int32_t apply_profile(sx1262_receiver_t *rx, const sx1262_rx_config_t *co
     out[2] = 0x36u;
     out[3] = (uint8_t)(in[4] | 0x04u);
     error = command(rx, out, in, 4u);
-    if (error == 0) error = command(rx, sync_word, in, sizeof(sync_word));
+    if (error != 0) return error;
+    /* Register 0x0740: one-byte LoRa sync word nibble-expanded with control
+       bits 0x44 (RadioLib layout): 0x34 public LoRaWAN, 0x2b Meshtastic. */
+    out[0] = 0x0du;
+    out[1] = 0x07u;
+    out[2] = 0x40u;
+    out[3] = meshtastic ? 0x24u : 0x34u;
+    out[4] = meshtastic ? 0xb4u : 0x44u;
+    error = command(rx, out, in, 5u);
+    if (error == 0) error = command(rx, rx_boosted_gain, in, sizeof(rx_boosted_gain));
     if (error == 0) error = command(rx, buffer_base, in, sizeof(buffer_base));
     if (error == 0) error = command(rx, irq_params, in, sizeof(irq_params));
     if (error == 0) error = command(rx, clear_irq, in, sizeof(clear_irq));
@@ -212,6 +244,7 @@ static void commit(sx1262_receiver_t *rx, const sx1262_rx_config_t *config) {
     rx->active.frequency_hz = config->frequency_hz;
     rx->active.spreading_factor = config->spreading_factor;
     rx->active.bandwidth_khz = config->bandwidth_khz;
+    rx->active.profile = config->profile;
     rx->active_valid = 1u;
     rx->state = SX1262_RX_RUNNING;
     rx->last_error = 0;
@@ -229,6 +262,7 @@ int32_t sx1262_receiver_configure(sx1262_receiver_t *rx, const sx1262_rx_config_
     next.frequency_hz = config->frequency_hz;
     next.spreading_factor = config->spreading_factor;
     next.bandwidth_khz = config->bandwidth_khz;
+    next.profile = config->profile;
     if (rx->state == SX1262_RX_RUNNING) {
         error = apply_profile(rx, &next);
         if (error == 0) {
@@ -258,6 +292,11 @@ void sx1262_rx_parse(sx1262_rx_packet_t *packet) {
     packet->fcnt16 = 0u;
     packet->dev_addr = 0u;
     if (packet->length == 0u) return;
+    if (packet->profile == SX1262_RX_PROFILE_MESHTASTIC) {
+        /* Meshtastic: 16-byte little-endian header, never LoRaWAN. */
+        if (packet->length >= 16u) packet->flags = SX1262_RX_MESHTASTIC_HEADER;
+        return;
+    }
     const uint8_t *p = packet->payload;
     packet->mhdr = p[0];
     packet->mtype = (uint8_t)(p[0] >> 5u);
@@ -306,6 +345,7 @@ static int32_t read_packet(sx1262_receiver_t *rx, uint32_t now_ms) {
     packet->snr_qdb = snr >= 128u ? (int32_t)snr - 256 : (int32_t)snr;
     packet->signal_rssi_qdb = -(int32_t)signal * 2;
     packet->length = (uint8_t)length;
+    packet->profile = (uint8_t)rx->active.profile;
     for (uint32_t i = 0u; i < length; ++i) packet->payload[i] = rx->scratch[i];
     sx1262_rx_parse(packet);
     rx->head = (rx->head + 1u) % SX1262_RX_RING_SIZE;

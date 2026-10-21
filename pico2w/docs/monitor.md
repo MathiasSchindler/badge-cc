@@ -1,21 +1,36 @@
-# Pico 2 W HTTP / LoRaWAN monitor
+# Pico 2 W HTTP / LoRa monitor (Meshtastic and LoRaWAN)
 
 This opt-in application joins an existing WPA2 Wi-Fi network and serves a
 small browser dashboard from the Pico itself. It listens for matching
 EU868 LoRa packets, retains eight recent packets in RAM and shows raw hex,
-RSSI/SNR, uptime timestamps and visible LoRaWAN data-frame header fields.
+RSSI/SNR, uptime timestamps and the plain Meshtastic or LoRaWAN header
+fields. Every received frame is also streamed over USB to the native
+[`picoctl listen`](picoctl.md#listen-to-meshtastic-traffic) command, which
+decrypts Meshtastic channel traffic on the host.
 There is no cloud service, CDN, SDK, libc, lwIP, allocator or filesystem on
 the Pico.
 
 ## What it monitors
 
-The initial receive profile is **868.1 MHz, SF7, bandwidth 125 kHz**, coding
-rate 4/5, public LoRaWAN sync word and explicit packet headers. Frequency,
-SF7-SF12 and bandwidth 125/250/500 kHz can be changed from the browser.
-Changes are RAM-only and affect future reception; previously captured
-packets retain their original profile.
+Two receive profiles exist; the default is **Meshtastic EU_868 LongFast**:
 
-IQ is fixed to the normal (uplink) polarity. Standard LoRaWAN downlinks
+| Profile | Frequency | SF / BW / CR | Preamble | Sync word |
+| --- | --- | --- | --- | --- |
+| `meshtastic` (default) | 869.525 MHz | SF11 / 250 kHz / 4/5 | 16 | private `0x2b` (`0x24b4`) |
+| `lorawan` | 868.1 MHz | SF7 / 125 kHz / 4/5 | 8 | public `0x34` (`0x3444`) |
+
+Both use explicit headers, payload CRC, normal IQ and SX126x RX boosted
+gain (register `0x08ac = 0x96`, as Meshtastic does). Frequency,
+SF7-SF12, bandwidth 125/250/500 kHz and the profile can be changed from the
+browser. Changes are RAM-only and affect future reception; previously
+captured packets retain their original profile.
+
+In the Meshtastic profile, frames with at least 16 bytes expose their
+plaintext header (destination, sender, packet ID, hop limit/start, flags,
+channel hash, next hop and relay node). The encrypted payload never gets
+decrypted on the Pico, and the Pico never stores a channel key.
+
+In the LoRaWAN profile, IQ is fixed to the normal (uplink) polarity. Standard LoRaWAN downlinks
 normally use inverted IQ and are not received by this initial application.
 Frames without a payload CRC can be accepted unchecked by the radio; the
 SX1262 does not report CRC presence, only CRC errors. The packet count
@@ -171,8 +186,13 @@ Configuration uses `Content-Type: application/x-www-form-urlencoded`,
 the custom header `X-Pico-Request: 1`, and this exact body order:
 
 ```text
-frequency_hz=868100000&sf=7&bandwidth_khz=125
+frequency_hz=869525000&sf=11&bandwidth_khz=250&profile=meshtastic
 ```
+
+`&profile=meshtastic|lorawan` is optional; when omitted the profile is
+`lorawan` (compatible with earlier clients). Status JSON reports
+`"profile"` in `config` and in every packet, and a `"mesh"` object (or
+`null`) with the plaintext Meshtastic header fields.
 
 Invalid settings return HTTP 400. Missing write header returns 403.
 Radio configuration failure returns 503 and retains explicit error status;

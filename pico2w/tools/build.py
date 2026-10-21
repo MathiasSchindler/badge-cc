@@ -30,6 +30,7 @@ SOURCES = (
 MONITOR_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
     "src/main_monitor.c",
     "src/lora/receiver.c",
+    "src/lora/packet_record.c",
     "src/wifi/wifi_station.c",
     "src/wifi/wifi_gspi.c",
     "src/wifi/wifi_control.c",
@@ -216,8 +217,9 @@ def tests(args):
         "lora_test": ("src/lora/sx1262.c",),
         "network_test": ("src/net/network.c", "src/net/http.c"),
         "dashboard_test": ("src/app/dashboard.c", "src/net/http.c"),
-        "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c"),
-        "picoctl_test": ("tools/picoctl_protocol.c", "src/usb/report.c"),
+        "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c",
+                          "src/lora/packet_record.c", "src/usb/report.c"),
+        "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "src/usb/report.c"),
         "usb_hardware_test": ("src/usb/control.c", "src/usb/report.c"),
     }
     for name, sources in suites.items():
@@ -230,7 +232,8 @@ def tests(args):
         executable = BUILD / "picoctl_windows_test.exe"
         run([args.host_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
              "-municode", "-Isrc/include", str(ROOT / "tests" / "picoctl_windows_test.c"),
-             str(ROOT / "tools" / "picoctl_protocol.c"), str(ROOT / "src" / "usb" / "report.c"),
+             str(ROOT / "tools" / "picoctl_protocol.c"), str(ROOT / "tools" / "meshtastic.c"),
+             str(ROOT / "src" / "usb" / "report.c"),
              "-lsetupapi", "-lcfgmgr32", "-lwinusb", "-lbcrypt", "-lole32",
              "-o", str(executable)])
         run([str(executable)])

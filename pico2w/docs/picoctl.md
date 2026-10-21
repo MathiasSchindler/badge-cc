@@ -32,7 +32,8 @@ and compile directly:
 New-Item -ItemType Directory -Force pico2w\build\host | Out-Null
 cc -std=c11 -Wall -Wextra -Werror -O2 -municode `
   -Ipico2w\src\include `
-  pico2w\tools\picoctl.c pico2w\tools\picoctl_protocol.c pico2w\src\usb\report.c `
+  pico2w\tools\picoctl.c pico2w\tools\picoctl_protocol.c pico2w\tools\meshtastic.c `
+  pico2w\src\usb\report.c `
   -lsetupapi -lcfgmgr32 -lwinusb -lbcrypt -lole32 `
   -o pico2w\build\host\picoctl.exe
 ```
@@ -113,6 +114,49 @@ Current firmware advertises Microsoft OS descriptors for automatic WinUSB bindin
 This host tool does not install a driver or alter Windows registry bindings.
 A descriptor failure must be fixed in firmware/hardware before driver binding
 can help. Discovery cannot make non-enumerating firmware accessible.
+
+## Listen to Meshtastic traffic
+
+```powershell
+.\pico2w\build\host\picoctl.exe listen --serial 7C4918BAB9492C77 `
+  --psk-file ssid-data\meshtastic.txt [--timeout SECONDS] [--count N] [--hex]
+```
+
+`listen` streams every frame the monitor receives over USB (vendor request
+`59`, see [USB protocol](usb-protocol.md#lora-packet-stream)) and prints one
+line per packet: local time, sequence, frequency, SF/BW, RSSI, SNR and
+length, then the decoded Meshtastic header and payload. It polls every
+200 ms when idle, reports packets lost to ring overwrites, reconnects after
+USB resets and notices firmware restarts. It runs until Ctrl+C, `--count`
+packets, or `--timeout` (1..86400 s for `listen`). `--build-id` is optional.
+
+The Pico only sees ciphertext. Decryption is done here with the project's
+own AES-CTR (128/256) and protobuf decoder: nonce = packet ID (u64 LE),
+sender (u32 LE), 32-bit big-endian block counter, exactly as Meshtastic.
+The public default `LongFast` channel (`AQ==`, hash `0x08`) is always tried.
+Add private channels in a git-ignored file, one per line, `#` comments allowed:
+
+```text
+Potsdam <BASE64-PSK>
+```
+
+Keys never leave the host and are never printed; only channel names and
+their 8-bit hashes are. A packet is decoded only when its channel hash
+matches **and** the decrypted bytes parse as a strict `meshtastic_Data`
+protobuf; otherwise it is shown as `encrypted, N bytes (no matching channel
+key)`, or as a PKI direct message (channel hash 0), which requires the
+recipient's private key and is never decrypted. Decoded ports include text
+messages, position, node info and device/environment telemetry; other
+ports show their name and payload size. Example output:
+
+```text
+14:03:12 #12 869.525 MHz SF11/250 RSSI -97.2 dBm SNR 6.50 dB 58 B | !a1b2c3d4 -> ^all id=0x1a2b3c4d hop=3/3 ch=0xe3 relay=0xd4 | [Potsdam] TEXT_MESSAGE_APP "Hallo Potsdam"
+```
+
+(Illustrative line; the exact decoded fields depend on the port.)
+
+Receive-only: the SX1262 never transmits, so nodes do not learn about
+this listener and no ACKs are sent.
 
 ## Restart into BOOTSEL
 

@@ -11,6 +11,7 @@
 #include <wchar.h>
 #include <string.h>
 #include "picoctl_protocol.h"
+#include "meshtastic.h"
 
 static const GUID usb_guid = {0xa5dcbf10, 0x6530, 0x11d2,
                              {0x90, 0x1f, 0x00, 0xc0, 0x4f, 0xb9, 0x51, 0xed}};
@@ -27,14 +28,14 @@ typedef struct {
 } usb_t;
 
 typedef struct {
-    const wchar_t *command, *image, *picotool, *path;
+    const wchar_t *command, *image, *picotool, *path, *psk_file;
     char serial[17];
     wchar_t wide_serial[17];
-    uint32_t build;
+    uint32_t build, count;
     uint8_t sha256[32];
     DWORD timeout;
     GUID guid;
-    int has_serial, has_build, has_hash, has_guid, wait_ip;
+    int has_serial, has_build, has_hash, has_guid, has_timeout, wait_ip, hex;
 } options_t;
 
 static void win_error(const wchar_t *operation, DWORD error) {
@@ -65,11 +66,15 @@ static void usage(void) {
     puts("picoctl list\n"
          "picoctl status --serial HEX16 --build-id HEX8 [--wait-ip]\n"
          "picoctl wifi --serial HEX16 --build-id HEX8\n"
+         "picoctl listen --serial HEX16 [--build-id HEX8] [--psk-file PATH] [--count N] [--hex]\n"
          "picoctl bootsel --serial HEX16\n"
          "picoctl upload --serial HEX16 --build-id HEX8 --uf2 PATH --sha256 HEX64 --picotool PATH [--wait-ip]\n"
          "picoctl check-image --uf2 PATH --sha256 HEX64\n"
-         "Options: --timeout SECONDS (1..300, default 60), --interface-guid GUID,\n"
+         "Options: --timeout SECONDS (1..300, default 60; listen: 1..86400), --interface-guid GUID,\n"
          "         --device-path PATH (explicit existing WinUSB interface).\n"
+         "listen streams received LoRa frames over USB until --timeout/--count (default: forever).\n"
+         "--psk-file lines are \"CHANNEL_NAME BASE64_PSK\"; keys are used on this host only.\n"
+         "The default LongFast channel key (AQ==) is always tried.\n"
          "No driver installation, CDC baud reset, or arbitrary-device selection.\n"
          "upload overwrites selected Pico firmware; status/list/check-image do not reset it.");
 }
@@ -81,6 +86,7 @@ static int parse(int argc, wchar_t **argv, options_t *o) {
     o->command = argv[1];
     if (!wcscmp(o->command, L"--help")) return argc == 2;
     if (wcscmp(o->command, L"list") && wcscmp(o->command, L"status") && wcscmp(o->command, L"wifi") &&
+        wcscmp(o->command, L"listen") &&
         wcscmp(o->command, L"bootsel") && wcscmp(o->command, L"upload") &&
         wcscmp(o->command, L"check-image")) return failure(L"Unknown command.");
     unsigned seen = 0;
@@ -90,6 +96,11 @@ static int parse(int argc, wchar_t **argv, options_t *o) {
         if (!wcscmp(key, L"--wait-ip")) {
             if (o->wait_ip) return failure(L"Duplicate --wait-ip.");
             o->wait_ip = 1;
+            continue;
+        }
+        if (!wcscmp(key, L"--hex")) {
+            if (o->hex) return failure(L"Duplicate --hex.");
+            o->hex = 1;
             continue;
         }
         if (++i == argc) return failure(L"Missing option value.");
@@ -129,13 +140,33 @@ static int parse(int argc, wchar_t **argv, options_t *o) {
             wchar_t *end;
             bit = 128;
             unsigned long seconds = wcstoul(value, &end, 10);
-            if (!*value || *end || seconds < 1 || seconds > 300)
-                return failure(L"--timeout must be 1..300 seconds.");
+            unsigned long limit = wcscmp(o->command, L"listen") ? 300ul : 86400ul;
+            if (!*value || *end || seconds < 1 || seconds > limit)
+                return failure(limit == 300ul ? L"--timeout must be 1..300 seconds."
+                                              : L"listen --timeout must be 1..86400 seconds.");
             o->timeout = (DWORD)seconds * 1000;
+            o->has_timeout = 1;
+        } else if (!wcscmp(key, L"--psk-file")) {
+            bit = 256; o->psk_file = value;
+        } else if (!wcscmp(key, L"--count")) {
+            wchar_t *end;
+            bit = 512;
+            unsigned long count = wcstoul(value, &end, 10);
+            if (!*value || *end || count < 1 || count > 1000000)
+                return failure(L"--count must be 1..1000000.");
+            o->count = (uint32_t)count;
         } else return failure(L"Unknown option.");
         if (seen & bit) return failure(L"Duplicate option.");
         seen |= bit;
     }
+    if (!wcscmp(o->command, L"listen")) {
+        if (!o->has_serial) return failure(L"Explicit --serial is required.");
+        if (seen & ~(1u | 2u | 32u | 64u | 128u | 256u | 512u) || o->wait_ip)
+            return failure(L"listen takes --serial, --build-id, --psk-file, --count, --hex, --timeout and interface options.");
+        return 1;
+    }
+    if (o->hex || (seen & (256u | 512u)))
+        return failure(L"--psk-file, --count and --hex are only valid for listen.");
     if (!wcscmp(o->command, L"list"))
         return seen == 0 && !o->wait_ip ? 1 : failure(L"list takes no options.");
     if (!wcscmp(o->command, L"check-image"))
@@ -177,9 +208,9 @@ static DWORD usb_open(usb_t *usb, const wchar_t *path) {
     return ERROR_SUCCESS;
 }
 
-static int transfer(usb_t *usb, UCHAR type, UCHAR request, USHORT value,
-                    uint8_t *data, USHORT length) {
-    WINUSB_SETUP_PACKET setup = {type, request, value, 0, length};
+static int transfer_index(usb_t *usb, UCHAR type, UCHAR request, USHORT value,
+                          USHORT index, uint8_t *data, USHORT length) {
+    WINUSB_SETUP_PACKET setup = {type, request, value, index, length};
     OVERLAPPED ov = {0};
     ULONG transferred = 0;
     ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -202,6 +233,11 @@ static int transfer(usb_t *usb, UCHAR type, UCHAR request, USHORT value,
     if (!ok) { win_error(L"USB control transfer", error); return 0; }
     if (transferred != length) return failure(L"Short USB control transfer.");
     return 1;
+}
+
+static int transfer(usb_t *usb, UCHAR type, UCHAR request, USHORT value,
+                    uint8_t *data, USHORT length) {
+    return transfer_index(usb, type, request, value, 0, data, length);
 }
 
 static int matches(DEVINST node, const wchar_t *serial, const wchar_t *product) {
@@ -417,6 +453,123 @@ static int wifi_status(const options_t *o) {
     return 1;
 }
 
+static int load_channels(const wchar_t *path, mesh_channel_t *channels, uint32_t *count) {
+    FILE *file = _wfopen(path, L"rb");
+    char line[256];
+    unsigned number = 0;
+    int ok = 1;
+    if (!file) return failure(L"Cannot open --psk-file.");
+    while (ok && fgets(line, sizeof(line), file)) {
+        char *text = line;
+        ++number;
+        if (number == 1 && (unsigned char)text[0] == 0xef && (unsigned char)text[1] == 0xbb &&
+            (unsigned char)text[2] == 0xbf) text += 3;
+        while (*text == ' ' || *text == '\t') ++text;
+        if (!*text || *text == '\r' || *text == '\n' || *text == '#') continue;
+        if (!strchr(text, '\n') && !feof(file)) {
+            fwprintf(stderr, L"--psk-file line %u is too long.\n", number);
+            ok = 0;
+        } else if (*count == MESH_MAX_CHANNELS) {
+            ok = failure(L"Too many channels in --psk-file.");
+        } else if (!mesh_channel_parse(channels + *count, text)) {
+            /* Never echo the line: it holds key material. */
+            fwprintf(stderr, L"--psk-file line %u must be \"CHANNEL_NAME BASE64_PSK\".\n", number);
+            ok = 0;
+        } else ++*count;
+    }
+    SecureZeroMemory(line, sizeof(line));
+    fclose(file);
+    return ok;
+}
+
+static void print_packet(const picoctl_packet_t *p, const mesh_channel_t *channels,
+                         uint32_t count, int hex) {
+    SYSTEMTIME now;
+    char line[1536];
+    GetLocalTime(&now);
+    printf("%02u:%02u:%02u #%lu %.3f MHz SF%lu/%lu RSSI %.1f dBm SNR %.2f dB %lu B | ",
+           now.wHour, now.wMinute, now.wSecond, (unsigned long)p->sequence,
+           p->frequency_hz / 1e6, (unsigned long)p->sf, (unsigned long)p->bandwidth_khz,
+           p->rssi_qdb / 4.0, p->snr_qdb / 4.0, (unsigned long)p->length);
+    if (p->profile == 1u) {
+        mesh_describe(p->payload, p->length, channels, count, line, sizeof(line));
+        fputs(line, stdout);
+    } else printf("LoRaWAN profile frame (not decoded)");
+    putchar('\n');
+    if (hex) {
+        printf("    ");
+        for (uint32_t i = 0; i < p->length; ++i) printf("%02x", p->payload[i]);
+        putchar('\n');
+    }
+    fflush(stdout);
+}
+
+static int listen_packets(const options_t *o) {
+    mesh_channel_t channels[MESH_MAX_CHANNELS];
+    uint32_t count = 0, last = 0, printed = 0, build = 0;
+    const uint8_t default_index = 1;
+    int connected = 0, ok = 1;
+    usb_t usb = {INVALID_HANDLE_VALUE, NULL};
+    mesh_channel_init(channels + count++, "LongFast", &default_index, 1);
+    if (o->psk_file && !load_channels(o->psk_file, channels, &count)) {
+        SecureZeroMemory(channels, sizeof(channels));
+        return 0;
+    }
+    SetConsoleOutputCP(CP_UTF8);
+    fprintf(stderr, "Channels:");
+    for (uint32_t i = 0; i < count; ++i)
+        fprintf(stderr, " %s(hash 0x%02x)", channels[i].name, channels[i].hash);
+    fputc('\n', stderr);
+    ULONGLONG deadline = o->has_timeout ? GetTickCount64() + o->timeout : 0;
+    while (!deadline || GetTickCount64() < deadline) {
+        uint8_t record[PICOCTL_PACKET_SIZE];
+        picoctl_packet_t p;
+        if (!connected) {
+            uint8_t info[12];
+            int found = discover(o, 0, 0, &usb);
+            if (found < 0) { ok = 0; break; }
+            if (!found) { Sleep(500); continue; }
+            if (!identify(&usb, o, o->has_build) || !transfer(&usb, 0xc0, 0x53, 0, info, 12)) {
+                usb_close(&usb);
+                ok = 0;
+                break;
+            }
+            build = usb_load_u32(info + 8);
+            connected = 1;
+            fprintf(stderr, "Listening to Pico %s (build %08lx) over USB; Ctrl+C to stop.\n",
+                    o->serial, (unsigned long)build);
+        }
+        if (!transfer_index(&usb, 0xc0, 0x59, (USHORT)last, (USHORT)(last >> 16),
+                            record, PICOCTL_PACKET_SIZE)) {
+            usb_close(&usb);
+            connected = 0;
+            fprintf(stderr, "USB link lost (old firmware without request 0x59, or a reset); reconnecting.\n");
+            Sleep(1000);
+            continue;
+        }
+        if (!picoctl_packet(record, build, &p)) {
+            usb_close(&usb);
+            ok = failure(L"Invalid LoRa packet record (CRC/format/build).");
+            break;
+        }
+        if ((int32_t)(p.newest - last) < 0) {
+            fprintf(stderr, "Device packet sequence restarted (firmware reset).\n");
+            last = 0;
+            continue;
+        }
+        if (!p.present) { Sleep(200); continue; }
+        if (last && p.sequence != last + 1)
+            fprintf(stderr, "(missed %lu packets: device ring overwritten)\n",
+                    (unsigned long)(p.sequence - last - 1));
+        print_packet(&p, channels, count, o->hex);
+        last = p.sequence;
+        if (o->count && ++printed >= o->count) break;
+    }
+    if (connected) usb_close(&usb);
+    SecureZeroMemory(channels, sizeof(channels));
+    return ok;
+}
+
 static int enter_bootsel(const options_t *o) {
     int boot = discover(o, 1, 0, NULL);
     if (boot < 0) return 0;
@@ -618,6 +771,7 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (!wcscmp(options.command, L"status")) return status_wait(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"wifi")) return wifi_status(&options) ? 0 : 1;
+    if (!wcscmp(options.command, L"listen")) return listen_packets(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"bootsel")) {
         if (!enter_bootsel(&options)) return 1;
         printf("{\"serial\":\"%s\",\"bootsel_observed\":true}\n", options.serial);

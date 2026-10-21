@@ -50,10 +50,47 @@ static void field(writer_t *writer, const char *key, uint32_t n) {
     number(writer, n);
 }
 
+static const char *profile_name(uint32_t profile) {
+    return profile == DASHBOARD_PROFILE_MESHTASTIC ? "meshtastic" : "lorawan";
+}
+
+static uint32_t le32(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8u | (uint32_t)p[2] << 16u |
+           (uint32_t)p[3] << 24u;
+}
+
 static void config_json(writer_t *writer, const dashboard_config_t *config) {
     field(writer, "{\"frequency_hz\":", config->frequency_hz);
     field(writer, ",\"sf\":", config->sf);
     field(writer, ",\"bandwidth_khz\":", config->bandwidth_khz);
+    text(writer, ",\"profile\":\"");
+    text(writer, profile_name(config->profile));
+    text(writer, "\"}");
+}
+
+/* Plain Meshtastic header; the payload stays encrypted on the device. */
+static void meshtastic_json(writer_t *writer, const dashboard_packet_t *packet) {
+    const uint8_t *p = packet->data;
+    text(writer, ",\"mesh\":");
+    if (packet->profile != DASHBOARD_PROFILE_MESHTASTIC || packet->length < 16u) {
+        text(writer, "null");
+        return;
+    }
+    text(writer, "{\"to\":\"");
+    hex(writer, le32(p), 8u);
+    text(writer, "\",\"from\":\"");
+    hex(writer, le32(p + 4u), 8u);
+    text(writer, "\",\"id\":\"");
+    hex(writer, le32(p + 8u), 8u);
+    field(writer, "\",\"hop_limit\":", p[12] & 7u);
+    field(writer, ",\"hop_start\":", (uint32_t)p[12] >> 5u);
+    text(writer, ",\"want_ack\":");
+    text(writer, (p[12] & 8u) ? "true" : "false");
+    text(writer, ",\"via_mqtt\":");
+    text(writer, (p[12] & 16u) ? "true" : "false");
+    field(writer, ",\"channel\":", p[13]);
+    field(writer, ",\"next_hop\":", p[14]);
+    field(writer, ",\"relay_node\":", p[15]);
     character(writer, '}');
 }
 
@@ -96,13 +133,17 @@ static uint32_t status_json(dashboard_t *app) {
         field(&writer, ",\"frequency_hz\":", packet->frequency_hz);
         field(&writer, ",\"sf\":", packet->sf);
         field(&writer, ",\"bandwidth_khz\":", packet->bandwidth_khz);
+        text(&writer, ",\"profile\":\"");
+        text(&writer, profile_name(packet->profile));
+        character(&writer, '"');
         text(&writer, ",\"rssi_qdb\":");
         signed_number(&writer, packet->rssi_qdb);
         text(&writer, ",\"snr_qdb\":");
         signed_number(&writer, packet->snr_qdb);
         field(&writer, ",\"length\":", packet->length);
-        uint32_t mtype = packet->length ? packet->data[0] >> 5u : 255u;
-        uint8_t data_frame = packet->length >= 12u && mtype >= 2u && mtype <= 5u &&
+        uint8_t lorawan = packet->profile == DASHBOARD_PROFILE_LORAWAN;
+        uint32_t mtype = packet->length && lorawan ? packet->data[0] >> 5u : 255u;
+        uint8_t data_frame = lorawan && packet->length >= 12u && mtype >= 2u && mtype <= 5u &&
                              (packet->data[0] & 31u) == 0u &&
                              (packet->data[5] & 15u) <= packet->length - 12u;
         text(&writer, ",\"lorawan_candidate\":");
@@ -116,6 +157,7 @@ static uint32_t status_json(dashboard_t *app) {
             field(&writer, ",\"fcnt16\":", (uint32_t)packet->data[6] |
                                             (uint32_t)packet->data[7] << 8u);
         } else text(&writer, "null,\"fcnt16\":null");
+        meshtastic_json(&writer, packet);
         text(&writer, ",\"hex\":\"");
         for (uint32_t j = 0u; j < packet->length; ++j) hex(&writer, packet->data[j], 2u);
         text(&writer, "\"}");
@@ -141,12 +183,32 @@ int dashboard_parse_config(const uint8_t *data, uint32_t length,
         if (!digits) return 0;
         if (field_index != 2u && (position == length || data[position++] != '&')) return 0;
     }
-    if (position != length || values[0] < 863000000u || values[0] > 870000000u ||
+    uint32_t profile = DASHBOARD_PROFILE_LORAWAN;
+    if (position != length) {
+        static const char prefix[] = "&profile=";
+        static const char *names[] = {"lorawan", "meshtastic"};
+        for (uint32_t i = 0u; prefix[i]; ++i)
+            if (position == length || data[position++] != (uint8_t)prefix[i]) return 0;
+        uint32_t rest = length - position, found = 0u;
+        for (uint32_t n = 0u; n < 2u && !found; ++n) {
+            uint32_t size = 0u;
+            while (names[n][size]) ++size;
+            if (size != rest) continue;
+            found = 1u;
+            for (uint32_t i = 0u; i < size; ++i)
+                if (data[position + i] != (uint8_t)names[n][i]) found = 0u;
+            if (found) profile = n;
+        }
+        if (!found) return 0;
+        position = length;
+    }
+    if (values[0] < 863000000u || values[0] > 870000000u ||
         values[1] < 7u || values[1] > 12u ||
         (values[2] != 125u && values[2] != 250u && values[2] != 500u)) return 0;
     config->frequency_hz = values[0];
     config->sf = values[1];
     config->bandwidth_khz = values[2];
+    config->profile = profile;
     return 1;
 }
 

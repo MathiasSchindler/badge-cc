@@ -77,6 +77,35 @@ int picoctl_wifi_diagnostic(const uint8_t record[64], uint32_t build) {
            usb_load_u32(record + 60) == usb_crc32(record, 60);
 }
 
+int picoctl_packet(const uint8_t record[PICOCTL_PACKET_SIZE], uint32_t build,
+                   picoctl_packet_t *p) {
+    if (usb_load_u32(record) != 0x50573250u || record[4] != 1u || record[5] != 0u ||
+        record[6] != (PICOCTL_PACKET_SIZE & 255u) || record[7] != (PICOCTL_PACKET_SIZE >> 8) ||
+        usb_load_u32(record + 8) != build || usb_load_u32(record + 12) > 1u ||
+        usb_load_u32(record + 324) != usb_crc32(record, 324)) return 0;
+    p->present = usb_load_u32(record + 12);
+    p->newest = usb_load_u32(record + 16);
+    p->oldest = usb_load_u32(record + 20);
+    p->sequence = usb_load_u32(record + 24);
+    p->timestamp_ms = usb_load_u32(record + 28);
+    p->frequency_hz = usb_load_u32(record + 32);
+    p->bandwidth_khz = (uint32_t)record[36] | (uint32_t)record[37] << 8;
+    p->sf = record[38];
+    p->profile = record[39];
+    p->rssi_qdb = (int32_t)usb_load_u32(record + 40);
+    p->snr_qdb = (int32_t)usb_load_u32(record + 44);
+    p->signal_rssi_qdb = (int32_t)usb_load_u32(record + 48);
+    p->packets = usb_load_u32(record + 52);
+    p->crc_errors = usb_load_u32(record + 56);
+    p->header_errors = usb_load_u32(record + 60);
+    p->length = record[64];
+    p->flags = record[65];
+    if (!p->present && (p->length || p->sequence)) return 0;
+    if (p->present && (!p->sequence || p->profile > 1u)) return 0;
+    for (uint32_t i = 0; i < 255u; ++i) p->payload[i] = record[68 + i];
+    return 1;
+}
+
 int picoctl_uf2_block(const uint8_t b[512], uint32_t index, uint32_t count) {
     return count != 0 && count <= 16384 && index < count &&
            usb_load_u32(b) == 0x0a324655u && usb_load_u32(b + 4) == 0x9e5d5157u &&

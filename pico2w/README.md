@@ -54,7 +54,7 @@ directory. It also works on POSIX hosts with the corresponding path syntax.
 
 The default `--app probe` retains the short-lived, opt-in radio diagnostic.
 The separate `--app monitor` builds a persistent Wi-Fi HTTP dashboard and
-receive-only LoRaWAN uplink monitor; it requires explicit private inputs and
+receive-only LoRa monitor (Meshtastic by default, LoRaWAN selectable); it requires explicit private inputs and
 board confirmation. Follow the [monitor build instructions](docs/monitor.md).
 Tests never connect to an AP or open USB/SPI hardware.
 
@@ -168,9 +168,15 @@ communication is a separate hardware-qualification step.
 
 The [persistent monitor](docs/monitor.md) instead joins a WPA2 network,
 obtains an IPv4 address by DHCP and serves a local HTTP dashboard. It
-starts receive-only SX1262 operation with a fixed EU868 profile and accepts
-RAM-only profile changes. No LoRaWAN join, MIC verification, decryption,
-LoRa transmission or Internet service is included. It is not a gateway.
+starts receive-only SX1262 operation on the Meshtastic EU_868 LongFast
+profile (869.525 MHz, SF11/BW250, sync word `0x2b`) and can switch to an
+EU868 LoRaWAN uplink profile at runtime (RAM-only). Received frames are
+streamed over USB to `picoctl listen`, which decrypts Meshtastic channel
+traffic on the host with the project's own AES-CTR and protobuf decoder;
+see [listening to Meshtastic](docs/picoctl.md#listen-to-meshtastic-traffic).
+Keys stay on the host. No LoRaWAN join, MIC verification, on-device
+decryption, LoRa transmission or Internet service is included. It is not a
+gateway or a Meshtastic node.
 
 ## Hardware status and safety
 

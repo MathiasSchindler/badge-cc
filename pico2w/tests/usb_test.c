@@ -409,6 +409,46 @@ static void lora_tests(void) {
     assert(control.wifi_status_valid);
 }
 
+static uint32_t packet_after;
+static void fake_packet(void *context, uint32_t after, uint8_t *record) {
+    assert(context == &packet_after);
+    packet_after = after;
+    for (uint32_t i = 0u; i < USB_LORA_PACKET_SIZE; ++i) record[i] = (uint8_t)(i * 3u + after);
+}
+
+static void packet_tests(void) {
+    configure();
+    setup(0xc0u, USB_LORA_PACKET, 0u, 0u, USB_LORA_PACKET_SIZE);
+    assert(control.action == USB_ACTION_STALL);
+    control.packet_source = fake_packet;
+    control.packet_context = &packet_after;
+    setup(0xc0u, USB_LORA_PACKET, 0u, 0u, USB_LORA_PACKET_SIZE - 1u);
+    assert(control.action == USB_ACTION_STALL);
+    setup(0x40u, USB_LORA_PACKET, 0u, 0u, USB_LORA_PACKET_SIZE);
+    assert(control.action == USB_ACTION_STALL);
+    static uint8_t result[USB_LORA_PACKET_SIZE];
+    uint32_t total = 0u;
+    uint8_t pid = 1u;
+    setup(0xc0u, USB_LORA_PACKET, 0x5678u, 0x1234u, USB_LORA_PACKET_SIZE);
+    assert(packet_after == 0x12345678u);
+    while (control.phase == USB_PHASE_DATA_IN) {
+        assert(control.action == USB_ACTION_IN && control.in_pid == pid && control.length <= 64u);
+        assert(total + control.length <= USB_LORA_PACKET_SIZE);
+        memcpy(result + total, control.data, control.length);
+        total += control.length;
+        usb_control_complete(&control, 1u, NULL, control.length);
+        pid ^= 1u;
+    }
+    assert(total == USB_LORA_PACKET_SIZE && control.phase == USB_PHASE_STATUS_OUT);
+    usb_control_complete(&control, 0u, NULL, 0u);
+    assert(control.phase == USB_PHASE_IDLE);
+    for (uint32_t i = 0u; i < USB_LORA_PACKET_SIZE; ++i) assert(result[i] == (uint8_t)(i * 3u + 0x78u));
+    usb_control_reset(&control);
+    setup(0xc0u, USB_LORA_PACKET, 0u, 0u, USB_LORA_PACKET_SIZE);
+    assert(control.action == USB_ACTION_STALL); /* unconfigured after bus reset */
+    configure();
+}
+
 int main(void) {
     codec_tests();
     descriptor_tests();
@@ -416,6 +456,7 @@ int main(void) {
     report_tests();
     recovery_tests();
     lora_tests();
-    puts("PASS: CRC, strict records, descriptors, EP0 sequencing, reports, LoRa, reset and recovery");
+    packet_tests();
+    puts("PASS: CRC, strict records, descriptors, EP0 sequencing, reports, LoRa, packets, reset and recovery");
     return 0;
 }

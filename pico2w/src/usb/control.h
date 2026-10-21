@@ -15,7 +15,12 @@
 #define USB_LORA_REPORT 0x55u
 #define USB_APP_STATUS 0x56u
 #define USB_WIFI_STATUS 0x58u
+#define USB_LORA_PACKET 0x59u /* wValue/wIndex: low/high half of last seen sequence */
+#define USB_LORA_PACKET_SIZE 328u
 #define USB_PACKET_SIZE 64u
+
+/* Fills a USB_LORA_PACKET_SIZE record for packets after the given sequence. */
+typedef void (*usb_packet_source_t)(void *context, uint32_t after_sequence, uint8_t *record);
 
 typedef enum {
     USB_ACTION_NONE,
@@ -70,6 +75,9 @@ typedef struct {
     uint8_t lora_report[USB_REPORT_SIZE];
     uint8_t app_status[USB_REPORT_SIZE];
     uint8_t wifi_status[USB_REPORT_SIZE];
+    uint8_t packet_record[USB_LORA_PACKET_SIZE];
+    usb_packet_source_t packet_source; /* optional; request stalls when null */
+    void *packet_context;
     char serial[17];
 } usb_control_t;
 

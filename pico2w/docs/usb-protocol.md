@@ -154,3 +154,46 @@ Steps: 0 pre-load, 1 core reset, 2 RAM setup, 3 firmware write,
 Event type 0 is SET_SSID: status 0 means success, 3 means no matching
 network found. The event is diagnostic; WPA2 readiness still requires the
 separate associated/authorized station flags, followed by DHCP.
+
+## LoRa packet stream
+
+Configured monitor firmware accepts device-IN vendor request `59`, exact
+length 328, as a gap-free cursor over the receiver's 16-packet RAM ring.
+`wValue | wIndex << 16` is the last sequence number the host has seen
+(0 initially). The response holds the oldest retained packet whose
+sequence is newer (serial-number comparison), or no packet. It is
+read-only, CRC-checked and not nonce-bound; `picoctl listen` checks the
+running build first with the identity report. All integers are little-endian:
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 4 | ASCII `P2WP` |
+| 4 | 2 | Version 1 |
+| 6 | 2 | Length 328 |
+| 8 | 4 | Running build ID |
+| 12 | 4 | Present flag: 1 packet follows, 0 nothing newer |
+| 16 | 4 | Newest retained sequence (0 if none) |
+| 20 | 4 | Oldest retained sequence (0 if none) |
+| 24 | 4 | Packet sequence (0 if absent) |
+| 28 | 4 | Uptime milliseconds when read from the radio |
+| 32 | 4 | Frequency in Hz |
+| 36 | 2 | Bandwidth kHz |
+| 38 | 1 | Spreading factor |
+| 39 | 1 | Profile: 0 LoRaWAN, 1 Meshtastic |
+| 40 | 4 | Signed packet RSSI, quarter dBm |
+| 44 | 4 | Signed SNR, quarter dB |
+| 48 | 4 | Signed signal RSSI, quarter dBm |
+| 52 | 4 | Received packet counter |
+| 56 | 4 | CRC error counter |
+| 60 | 4 | Header error counter |
+| 64 | 1 | Payload length 0-255 |
+| 65 | 1 | Parser flags (bit 2: Meshtastic header present) |
+| 66 | 2 | Zero |
+| 68 | 255 | Payload, zero-padded |
+| 323 | 1 | Zero |
+| 324 | 4 | CRC-32/ISO-HDLC over bytes 0-323 |
+
+If `oldest` is newer than the host cursor + 1, packets were overwritten
+before being read. If `newest` is older than the cursor, the firmware
+restarted. Payloads are raw radio bytes; Meshtastic channel keys are never
+sent to or stored on the Pico.
