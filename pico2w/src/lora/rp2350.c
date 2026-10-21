@@ -8,11 +8,12 @@
 #define CS (1u << 3u)
 #define RESET (1u << 15u)
 #define OUTPUTS (CS | RESET)
+#define ANT_SW (1u << 22u)
 #define SPI1_RESET (1u << 19u)
 #define TIMER1_RESET (1u << 24u)
 #define GPIO_RESETS ((1u << 6u) | (1u << 9u))
 
-static uint8_t pins_ready;
+static uint8_t pins_ready, antenna_powered;
 
 static int wait_mask(volatile uint32_t *reg, uint32_t mask, uint32_t wanted) {
     for (uint32_t loops = 0u; loops < 100000u; ++loops)
@@ -135,7 +136,20 @@ int32_t sx1262_hw_byte(uint8_t out, uint8_t *in) {
     return 0;
 }
 
+void sx1262_hw_antenna_power(void) {
+    if (!pins_ready || antenna_powered) return;
+    SIO(0x18u) = ANT_SW;
+    pin(22u, 5u, 1u);
+    SIO(0x38u) = ANT_SW;
+    antenna_powered = 1u;
+}
+
 void sx1262_hw_release(void) {
+    if (antenna_powered) {
+        SIO(0x40u) = ANT_SW;
+        SIO(0x20u) = ANT_SW;
+        antenna_powered = 0u;
+    }
     if (!pins_ready) return;
     sx1262_hw_select(0u);
     sx1262_hw_reset(0u);

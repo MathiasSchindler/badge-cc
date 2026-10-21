@@ -191,7 +191,8 @@ static int32_t apply_profile(sx1262_receiver_t *rx, const sx1262_rx_config_t *co
 }
 
 /* Hardware reset and board setup from the Waveshare reference: TCXO on DIO3
-   at 1.7 V with 5 ms start-up, DIO2 drives the PE4259 RF switch. */
+   at 1.7 V with 5 ms start-up, DIO2 drives the PE4259 RF switch, whose
+   supply may come from GP22 (ANT_SW option B). */
 static int32_t start_radio(sx1262_receiver_t *rx, const sx1262_rx_config_t *config) {
     static const uint8_t get_status[] = {0xc0u, 0x00u};
     static const uint8_t get_errors[] = {0x17u, 0x00u, 0x00u, 0x00u};
@@ -203,6 +204,7 @@ static int32_t start_radio(sx1262_receiver_t *rx, const sx1262_rx_config_t *conf
     uint8_t in[5];
     int32_t error = sx1262_hw_init();
     if (error != 0) return error;
+    sx1262_hw_antenna_power();
     sx1262_hw_reset(1u);
     error = sx1262_wait(rx->service, 20000u);
     sx1262_hw_reset(0u);
@@ -246,6 +248,8 @@ static void commit(sx1262_receiver_t *rx, const sx1262_rx_config_t *config) {
     rx->active.bandwidth_khz = config->bandwidth_khz;
     rx->active.profile = config->profile;
     rx->active_valid = 1u;
+    rx->noise_qdb = rx->noise_min_qdb = rx->noise_max_qdb = 0;
+    rx->noise_samples = 0u;
     rx->state = SX1262_RX_RUNNING;
     rx->last_error = 0;
     ++rx->counters.configs;
@@ -316,7 +320,7 @@ void sx1262_rx_parse(sx1262_rx_packet_t *packet) {
     packet->flags |= SX1262_RX_LORAWAN_DATA;
 }
 
-static int32_t read_packet(sx1262_receiver_t *rx, uint32_t now_ms) {
+static int32_t read_packet(sx1262_receiver_t *rx, uint32_t now_ms, uint8_t crc_error) {
     static const uint8_t buffer_status[] = {0x13u, 0x00u, 0x00u, 0x00u};
     static const uint8_t packet_status[] = {0x14u, 0x00u, 0x00u, 0x00u, 0x00u};
     uint8_t in[5];
@@ -347,11 +351,19 @@ static int32_t read_packet(sx1262_receiver_t *rx, uint32_t now_ms) {
     packet->length = (uint8_t)length;
     packet->profile = (uint8_t)rx->active.profile;
     for (uint32_t i = 0u; i < length; ++i) packet->payload[i] = rx->scratch[i];
-    sx1262_rx_parse(packet);
+    if (crc_error) {
+        /* Clear parsed fields by parsing an empty frame, then mark it. */
+        packet->length = 0u;
+        sx1262_rx_parse(packet);
+        packet->length = (uint8_t)length;
+        packet->flags = SX1262_RX_CRC_ERROR;
+    } else {
+        sx1262_rx_parse(packet);
+    }
     rx->head = (rx->head + 1u) % SX1262_RX_RING_SIZE;
     if (rx->count < SX1262_RX_RING_SIZE) ++rx->count;
     else ++rx->counters.overwritten;
-    ++rx->counters.packets;
+    if (!crc_error) ++rx->counters.packets;
     return 0;
 }
 
@@ -372,8 +384,8 @@ static int32_t poll_once(sx1262_receiver_t *rx, uint32_t now_ms) {
     if (irq & IRQ_HEADER_VALID) ++rx->counters.headers_valid;
     if (irq & IRQ_HEADER_ERROR) ++rx->counters.header_errors;
     if (irq & IRQ_CRC_ERROR) ++rx->counters.crc_errors;
-    else if (irq & IRQ_RX_DONE) {
-        error = read_packet(rx, now_ms);
+    if (irq & IRQ_RX_DONE) {
+        error = read_packet(rx, now_ms, (irq & IRQ_CRC_ERROR) != 0u);
         if (error != 0) return error;
     }
     if (irq & IRQ_TIMEOUT) ++rx->counters.timeouts;
@@ -389,6 +401,20 @@ static int32_t poll_once(sx1262_receiver_t *rx, uint32_t now_ms) {
         error = apply_profile(rx, &rx->active);
         if (error != 0) return error;
         ++rx->counters.rearms;
+        return 0;
+    }
+    if (irq == 0u && (rx->noise_samples == 0u ||
+                      now_ms - rx->noise_at_ms >= SX1262_RX_NOISE_INTERVAL_MS)) {
+        static const uint8_t get_rssi_inst[] = {0x15u, 0x00u, 0x00u};
+        uint8_t rssi[3];
+        error = command(rx, get_rssi_inst, rssi, sizeof(rssi));
+        if (error != 0) return error;
+        int32_t qdb = -2 * (int32_t)rssi[2];
+        rx->noise_qdb = qdb;
+        if (rx->noise_samples == 0u || qdb < rx->noise_min_qdb) rx->noise_min_qdb = qdb;
+        if (rx->noise_samples == 0u || qdb > rx->noise_max_qdb) rx->noise_max_qdb = qdb;
+        ++rx->noise_samples;
+        rx->noise_at_ms = now_ms;
     }
     return 0;
 }
@@ -405,6 +431,71 @@ int32_t sx1262_receiver_poll(sx1262_receiver_t *rx, uint32_t now_ms) {
         ++rx->counters.poll_errors;
         rx->last_error = error;
         /* Service cancellations keep the radio listening; radio faults release it. */
+        if (radio_fault(error)) fault(rx, error);
+    }
+    return error;
+}
+
+static int32_t survey_once(sx1262_receiver_t *rx, uint32_t frequency_hz,
+                           sx1262_rx_survey_t *result) {
+    static const uint8_t standby[] = {0x80u, 0x00u};
+    static const uint8_t set_rx[] = {0x82u, 0xffu, 0xffu, 0xffu};
+    static const uint8_t get_status[] = {0xc0u, 0x00u};
+    static const uint8_t get_rssi_inst[] = {0x15u, 0x00u, 0x00u};
+    uint8_t in[5];
+    uint8_t out[5];
+    int32_t error = command(rx, standby, in, sizeof(standby));
+    if (error != 0) return error;
+    /* CalibrateImage takes 4 MHz steps; cover at least +-4 MHz. */
+    uint32_t mhz = frequency_hz / 1000000u;
+    out[0] = 0x98u;
+    out[1] = (uint8_t)((mhz - 4u) / 4u);
+    out[2] = (uint8_t)((mhz + 7u) / 4u);
+    error = command(rx, out, in, 3u);
+    if (error != 0) return error;
+    uint32_t frequency = frequency_register(frequency_hz);
+    out[0] = 0x86u;
+    out[1] = (uint8_t)(frequency >> 24u);
+    out[2] = (uint8_t)(frequency >> 16u);
+    out[3] = (uint8_t)(frequency >> 8u);
+    out[4] = (uint8_t)frequency;
+    error = command(rx, out, in, 5u);
+    if (error == 0) error = command(rx, set_rx, in, sizeof(set_rx));
+    if (error == 0) error = command(rx, get_status, in, sizeof(get_status));
+    if (error != 0) return error;
+    rx->last_status = in[1];
+    if (chip_mode(in[1]) != MODE_RX || !command_ok(in[1])) return SX1262_RESPONSE_ERROR;
+    int32_t sum = 0;
+    for (uint32_t i = 0u; i < SX1262_RX_SURVEY_SAMPLES; ++i) {
+        error = sx1262_wait(rx->service, i == 0u ? 2000u : 500u);
+        if (error == 0) error = command(rx, get_rssi_inst, in, sizeof(get_rssi_inst));
+        if (error != 0) return error;
+        int32_t qdb = -2 * (int32_t)in[2];
+        if (i == 0u || qdb < result->min_qdb) result->min_qdb = qdb;
+        if (i == 0u || qdb > result->max_qdb) result->max_qdb = qdb;
+        sum += qdb;
+    }
+    result->samples = SX1262_RX_SURVEY_SAMPLES;
+    result->mean_qdb = sum / (int32_t)SX1262_RX_SURVEY_SAMPLES;
+    return 0;
+}
+
+int32_t sx1262_receiver_survey(sx1262_receiver_t *rx, uint32_t frequency_hz,
+                               sx1262_rx_survey_t *result) {
+    result->frequency_hz = frequency_hz;
+    result->bandwidth_khz = rx->active.bandwidth_khz;
+    result->samples = 0u;
+    result->min_qdb = result->mean_qdb = result->max_qdb = 0;
+    if (rx->state != SX1262_RX_RUNNING) return SX1262_RX_STATE_ERROR;
+    if (frequency_hz < SX1262_RX_SURVEY_MIN_HZ || frequency_hz > SX1262_RX_SURVEY_MAX_HZ)
+        return SX1262_RX_CONFIG_ERROR;
+    int32_t error = survey_once(rx, frequency_hz, result);
+    /* Always try to return to the listening profile, even after a failure. */
+    int32_t restore = apply_profile(rx, &rx->active);
+    if (error == 0) error = restore;
+    if (error != 0) {
+        result->samples = 0u;
+        rx->last_error = error;
         if (radio_fault(error)) fault(rx, error);
     }
     return error;

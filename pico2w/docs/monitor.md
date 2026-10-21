@@ -20,7 +20,14 @@ Two receive profiles exist; the default is **Meshtastic EU_868 LongFast**:
 | `lorawan` | 868.1 MHz | SF7 / 125 kHz / 4/5 | 8 | public `0x34` (`0x3444`) |
 
 Both use explicit headers, payload CRC, normal IQ and SX126x RX boosted
-gain (register `0x08ac = 0x96`, as Meshtastic does). Frequency,
+gain (register `0x08ac = 0x96`, as Meshtastic does). While the radio is idle
+in RX, the firmware samples the instantaneous channel RSSI (`GetRssiInst`)
+every 250 ms and keeps the latest, minimum and maximum value since the last
+configuration. They appear as "Noise now / min / max" on the page, as
+`noise_qdb`, `noise_min_qdb`, `noise_max_qdb` and `noise_samples` (quarter dBm)
+in `/api/status`, and in the `picoctl listen` status line. A floor near the
+SX1262 sensitivity limit (about -120 dBm at 125 kHz) that never moves points at
+a missing antenna or an open RF switch; see [rf-field-notes.md](rf-field-notes.md). Frequency,
 SF7-SF12, bandwidth 125/250/500 kHz and the profile can be changed from the
 browser. Changes are RAM-only and affect future reception; previously
 captured packets retain their original profile.
@@ -36,6 +43,12 @@ Frames without a payload CRC can be accepted unchecked by the radio; the
 SX1262 does not report CRC presence, only CRC errors. The packet count
 therefore means received without a reported CRC error, not authenticated
 or necessarily CRC-verified LoRaWAN packets.
+
+Frames whose payload CRC fails are still stored in the history, marked
+`"crc_error":true` and "CRC error" in the table. Their RSSI, SNR and raw bytes
+help to tell weak or distant transmitters from a configuration mismatch.
+They are never parsed or decoded, and they count towards `crc_errors`, not
+`received`.
 
 This is a **single-profile receiver, not a gateway or spectrum analyser**.
 It misses traffic on all other profiles and while it is reconfiguring.
@@ -56,10 +69,14 @@ The monitor deliberately configures the SX1262's DIO3 TCXO control to
 1.7 V with a 5 ms startup interval, as in the manufacturer's linked demo,
 and DIO2 as RF-switch control. This is different from the readback-only
 probe. Confirm that the board is the Waveshare Pico-LoRa-SX1262-868M.
-The board's RF-switch supply jumper may select GP22 instead of 3.3 V;
-the default position is not verified. This software does not drive GP22,
-so that jumper position may prevent reception. Check the schematic and
-actual board before the hardware trial rather than guessing a GPIO level.
+The RF switch supply is selected by a 0 ohm resistor marked `ANT_SW`
+(A: 3V3, B: GP22), hidden under the Pico when the HAT is fitted. Since
+build `c3747393` the receiver drives GP22 high (push-pull) while it owns
+the radio, so the switch is powered with either fit; with A fitted, GP22
+is simply unconnected. Release and faults float GP22 again. The board used
+here is fitted with A. The
+readback-only probe never touches GP22. On-air results are in the
+[RF field notes](rf-field-notes.md).
 
 ## Dependency and private-build boundary
 

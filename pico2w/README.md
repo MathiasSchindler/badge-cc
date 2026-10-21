@@ -176,7 +176,10 @@ traffic on the host with the project's own AES-CTR and protobuf decoder;
 see [listening to Meshtastic](docs/picoctl.md#listen-to-meshtastic-traffic).
 Keys stay on the host. No LoRaWAN join, MIC verification, on-device
 decryption, LoRa transmission or Internet service is included. It is not a
-gateway or a Meshtastic node.
+gateway or a Meshtastic node. The firmware also reports the channel noise
+floor, and `picoctl survey` measures received power from 150 to 960 MHz to
+check the antenna path. On-air trials, nearby TTN gateways and open RF questions are kept in
+the [RF field notes](docs/rf-field-notes.md).
 
 ## Hardware status and safety
 

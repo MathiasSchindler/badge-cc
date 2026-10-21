@@ -219,7 +219,7 @@ def tests(args):
         "dashboard_test": ("src/app/dashboard.c", "src/net/http.c"),
         "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c",
                           "src/lora/packet_record.c", "src/usb/report.c"),
-        "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "src/usb/report.c"),
+        "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "tools/lorawan.c", "src/usb/report.c"),
         "usb_hardware_test": ("src/usb/control.c", "src/usb/report.c"),
     }
     for name, sources in suites.items():
@@ -232,7 +232,7 @@ def tests(args):
         executable = BUILD / "picoctl_windows_test.exe"
         run([args.host_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
              "-municode", "-Isrc/include", str(ROOT / "tests" / "picoctl_windows_test.c"),
-             str(ROOT / "tools" / "picoctl_protocol.c"), str(ROOT / "tools" / "meshtastic.c"),
+             str(ROOT / "tools" / "picoctl_protocol.c"), str(ROOT / "tools" / "meshtastic.c"), str(ROOT / "tools" / "lorawan.c"),
              str(ROOT / "src" / "usb" / "report.c"),
              "-lsetupapi", "-lcfgmgr32", "-lwinusb", "-lbcrypt", "-lole32",
              "-o", str(executable)])

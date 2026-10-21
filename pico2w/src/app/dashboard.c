@@ -72,7 +72,8 @@ static void config_json(writer_t *writer, const dashboard_config_t *config) {
 static void meshtastic_json(writer_t *writer, const dashboard_packet_t *packet) {
     const uint8_t *p = packet->data;
     text(writer, ",\"mesh\":");
-    if (packet->profile != DASHBOARD_PROFILE_MESHTASTIC || packet->length < 16u) {
+    if (packet->profile != DASHBOARD_PROFILE_MESHTASTIC || packet->length < 16u ||
+        packet->crc_error) {
         text(writer, "null");
         return;
     }
@@ -117,6 +118,13 @@ static uint32_t status_json(dashboard_t *app) {
     field(&writer, ",\"received\":", app->received);
     field(&writer, ",\"crc_errors\":", app->crc_errors);
     field(&writer, ",\"header_errors\":", app->header_errors);
+    text(&writer, ",\"noise_qdb\":");
+    signed_number(&writer, app->noise_qdb);
+    text(&writer, ",\"noise_min_qdb\":");
+    signed_number(&writer, app->noise_min_qdb);
+    text(&writer, ",\"noise_max_qdb\":");
+    signed_number(&writer, app->noise_max_qdb);
+    field(&writer, ",\"noise_samples\":", app->noise_samples);
     field(&writer, ",\"overwritten\":", app->overwritten);
     field(&writer, ",\"network_drops\":", app->network_drops);
     field(&writer, ",\"retransmits\":", app->retransmits);
@@ -141,7 +149,9 @@ static uint32_t status_json(dashboard_t *app) {
         text(&writer, ",\"snr_qdb\":");
         signed_number(&writer, packet->snr_qdb);
         field(&writer, ",\"length\":", packet->length);
-        uint8_t lorawan = packet->profile == DASHBOARD_PROFILE_LORAWAN;
+        text(&writer, ",\"crc_error\":");
+        text(&writer, packet->crc_error ? "true" : "false");
+        uint8_t lorawan = packet->profile == DASHBOARD_PROFILE_LORAWAN && !packet->crc_error;
         uint32_t mtype = packet->length && lorawan ? packet->data[0] >> 5u : 255u;
         uint8_t data_frame = lorawan && packet->length >= 12u && mtype >= 2u && mtype <= 5u &&
                              (packet->data[0] & 31u) == 0u &&

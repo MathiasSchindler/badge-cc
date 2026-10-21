@@ -1,5 +1,6 @@
 #include "../tools/picoctl_protocol.h"
 #include "../tools/meshtastic.h"
+#include "../tools/lorawan.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -100,6 +101,17 @@ static void meshtastic_tests(void) {
     assert(!mesh_describe(frame, size, channels, 2, line, sizeof(line)));
     assert(strstr(line, "PKI direct message"));
     assert(!mesh_describe(frame, 15, channels, 2, line, sizeof(line)) && strstr(line, "short frame"));
+    /* Unknown hash, but encrypted with a known key under another name. */
+    size = text_frame(frame, channels + 1, MESH_BROADCAST, "renamed");
+    frame[13] = 0x55;
+    assert(mesh_describe(frame, size, channels, 2, line, sizeof(line)));
+    assert(strstr(line, "ch=0x55") && strstr(line, "[other channel, key of Test] TEXT_MESSAGE_APP \"renamed\""));
+    size = text_frame(frame, channels, MESH_BROADCAST, "public");
+    frame[13] = 0x03;
+    assert(mesh_describe(frame, size, channels + 1, 1, line, sizeof(line)));
+    assert(strstr(line, "[other channel, default key] TEXT_MESSAGE_APP \"public\""));
+    /* The default key is always tried, even when no channel is configured. */
+    assert(mesh_describe(frame, size, channels, 0, line, sizeof(line)) && strstr(line, "default key"));
 
     mesh_data_t data;
     const uint8_t position[] = {0x08, 0x03, 0x12, 0x0e, 0x0d, 0x80, 0x04, 0xa3, 0x1e,
@@ -118,6 +130,54 @@ static void meshtastic_tests(void) {
     assert(mesh_describe(frame, 16 + sizeof(position), channels + 2, 1, line, sizeof(line)));
     assert(strstr(line, "POSITION_APP alt=34m sats=7 lat=51.40000 lon=10.00000"));
     assert(!strcmp(mesh_port_name(67), "TELEMETRY_APP") && !strcmp(mesh_port_name(500), "PORT"));
+}
+
+static void lorawan_tests(void) {
+    char line[512];
+    lorawan_frame_t f;
+    uint32_t type, nwk;
+    /* TTN: NetID 0x000013 -> type 0, NwkID 0x13 -> DevAddr 26xxxxxx/27xxxxxx. */
+    lorawan_netid(0x260B1234u, &type, &nwk);
+    assert(type == 0u && nwk == 0x13u);
+    lorawan_netid(0x27FFFFFFu, &type, &nwk);
+    assert(type == 0u && nwk == 0x13u && lorawan_operator(0x27FFFFFFu));
+    assert(lorawan_operator(0x28000000u) == NULL);
+    lorawan_netid(0xE0123456u, &type, &nwk);  /* 1110 prefix: type 3, 11-bit NwkID */
+    assert(type == 3u && nwk == ((0xE0123456u >> 17u) & 0x7ffu));
+    lorawan_netid(0xFF000000u, &type, &nwk);
+    assert(type == 8u);
+
+    /* Unconfirmed up, DevAddr 260B1234, FCtrl ADR|1 FOpt, FCnt 0x0102, FPort 2, 3 B. */
+    static const uint8_t up[] = {0x40, 0x34, 0x12, 0x0b, 0x26, 0x81, 0x02, 0x01, 0x06,
+                                 0x02, 0xaa, 0xbb, 0xcc, 1, 2, 3, 4};
+    assert(lorawan_parse(up, sizeof(up), &f) && f.dev_addr == 0x260B1234u && f.fcnt16 == 0x0102u);
+    assert(f.has_fport && f.fport == 2u && f.frm_length == 3u && f.fopts_length == 1u);
+    assert(lorawan_describe(up, sizeof(up), line, sizeof(line)));
+    assert(!strcmp(line, "UnconfirmedUp DevAddr 260B1234 (NetID type 0 NwkID 0x13, The Things Network) "
+                         "FCnt16 258 FPort 2 3 B FOpts 1 B [ADR] | MIC not verified"));
+    /* Minimal frame without FPort; downlink FPending flag. */
+    static const uint8_t down[] = {0x60, 1, 0, 0, 0x26, 0x10, 5, 0, 9, 9, 9, 9};
+    assert(lorawan_describe(down, sizeof(down), line, sizeof(line)));
+    assert(strstr(line, "UnconfirmedDown") && strstr(line, "no FPort") && strstr(line, "[FPending]"));
+    /* Join request: EUIs displayed big-endian. */
+    uint8_t join[23] = {0x00};
+    for (uint32_t i = 0; i < 8; ++i) { join[1 + i] = (uint8_t)(0x10 + i); join[9 + i] = (uint8_t)(0xa0 + i); }
+    join[17] = 0x34; join[18] = 0x12;
+    assert(lorawan_describe(join, sizeof(join), line, sizeof(line)));
+    assert(!strcmp(line, "JoinRequest JoinEUI 1716151413121110 DevEUI A7A6A5A4A3A2A1A0 DevNonce 4660 | MIC not verified"));
+    /* Rejections: FOpts overflow, major 1, RFU bits, short, bad join sizes. */
+    static const uint8_t overflow[] = {0x40, 1, 2, 3, 4, 0x01, 5, 6, 9, 9, 9, 9};
+    assert(!lorawan_parse(overflow, sizeof(overflow), &f));
+    uint8_t bad[12] = {0x41};
+    assert(!lorawan_parse(bad, sizeof(bad), &f));
+    bad[0] = 0x44;
+    assert(!lorawan_parse(bad, sizeof(bad), &f));
+    assert(!lorawan_parse(up, 11, &f) && !lorawan_parse(join, 22, &f) && !lorawan_parse(up, 0, &f));
+    assert(!lorawan_describe(bad, sizeof(bad), line, sizeof(line)) && strstr(line, "not a LoRaWAN"));
+    /* Output is truncated safely. */
+    char tiny[8];
+    lorawan_describe(up, sizeof(up), tiny, sizeof(tiny));
+    assert(strlen(tiny) == 7u);
 }
 
 static void packet_record_tests(uint32_t build) {
@@ -140,8 +200,14 @@ static void packet_record_tests(uint32_t build) {
     usb_store_u32(record + 44, (uint32_t)-7);
     record[64] = 3;
     record[68] = 0xab;
-    usb_store_u32(record + 324, usb_crc32(record, 324));
+    record[324] = 0x5e; record[325] = 0xfe;   /* -418 */
+    record[326] = 0x40; record[327] = 0xfe;   /* -448 */
+    record[328] = 0x70; record[329] = 0xfe;   /* -400 */
+    usb_store_u32(record + 332, 77);
+    usb_store_u32(record + 336, usb_crc32(record, 336));
     assert(picoctl_packet(record, build, &packet));
+    assert(packet.noise_qdb == -418 && packet.noise_min_qdb == -448 &&
+           packet.noise_max_qdb == -400 && packet.noise_samples == 77);
     assert(packet.present && packet.newest == 9 && packet.oldest == 2 && packet.sequence == 5);
     assert(packet.frequency_hz == 869525000u && packet.bandwidth_khz == 250 && packet.sf == 11);
     assert(packet.profile == 1 && packet.rssi_qdb == -400 && packet.snr_qdb == -7);
@@ -152,9 +218,70 @@ static void packet_record_tests(uint32_t build) {
         assert(!picoctl_packet(record, build, &packet));
         record[i] ^= 0x10;
     }
+    /* Reserved bytes must stay zero even with a valid CRC. */
+    const unsigned reserved[] = {66, 67, 323, 330, 331};
+    for (unsigned i = 0; i < sizeof(reserved) / sizeof(reserved[0]); ++i) {
+        record[reserved[i]] = 1;
+        usb_store_u32(record + 336, usb_crc32(record, 336));
+        assert(!picoctl_packet(record, build, &packet));
+        record[reserved[i]] = 0;
+    }
     usb_store_u32(record + 24, 0);
-    usb_store_u32(record + 324, usb_crc32(record, 324));
+    usb_store_u32(record + 336, usb_crc32(record, 336));
     assert(!picoctl_packet(record, build, &packet));
+}
+
+static void survey_record_tests(uint32_t build) {
+    uint8_t r[PICOCTL_SURVEY_SIZE] = {0};
+    picoctl_survey_t s;
+    usb_store_u32(r, 0x56573250u);
+    r[4] = 1; r[5] = 2; r[6] = PICOCTL_SURVEY_SIZE;
+    usb_store_u32(r + 8, build);
+    usb_store_u32(r + 12, 806000u);
+    r[16] = 250; r[18] = 16;
+    r[20] = 0x60; r[21] = 0xfe; /* -416 */
+    r[22] = 0x80; r[23] = 0xfe; /* -384 */
+    r[24] = 0xa0; r[25] = 0xfe; /* -352 */
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(picoctl_survey(r, build, 806000u, &s));
+    assert(s.state == 2 && s.bandwidth_khz == 250 && s.samples == 16);
+    assert(s.min_qdb == -416 && s.mean_qdb == -384 && s.max_qdb == -352);
+    assert(!picoctl_survey(r, build + 1, 806000u, &s));
+    assert(!picoctl_survey(r, build, 807000u, &s));
+    for (unsigned i = 0; i < PICOCTL_SURVEY_SIZE; ++i) {
+        r[i] ^= 0x04;
+        assert(!picoctl_survey(r, build, 806000u, &s));
+        r[i] ^= 0x04;
+    }
+    /* min > mean is inconsistent even with a valid CRC. */
+    r[20] = 0x90;
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(!picoctl_survey(r, build, 806000u, &s));
+    /* Pending: everything after the frequency is zero. */
+    memset(r + 16, 0, 12);
+    r[5] = 1;
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(picoctl_survey(r, build, 806000u, &s) && s.state == 1 && s.samples == 0);
+    r[18] = 1;
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(!picoctl_survey(r, build, 806000u, &s));
+    r[18] = 0;
+    /* Failed: negative error at 20, the rest zero. */
+    r[5] = 3;
+    usb_store_u32(r + 20, (uint32_t)-3011);
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(picoctl_survey(r, build, 806000u, &s) && s.state == 3 && s.error == -3011);
+    r[16] = 1;
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(!picoctl_survey(r, build, 806000u, &s));
+    r[16] = 0;
+    usb_store_u32(r + 20, 5);
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(!picoctl_survey(r, build, 806000u, &s));
+    r[5] = 4;
+    usb_store_u32(r + 20, 0);
+    usb_store_u32(r + 28, usb_crc32(r, 28));
+    assert(!picoctl_survey(r, build, 806000u, &s));
 }
 
 int main(void) {
@@ -238,7 +365,9 @@ int main(void) {
     }
     crypto_tests();
     meshtastic_tests();
+    lorawan_tests();
     packet_record_tests(build);
+    survey_record_tests(build);
     uint8_t block[512] = {0};
     const uint32_t header[] = {0x0a324655, 0x9e5d5157, 0x2000, 0x10000000,
                               256, 0, 1, 0xe48bff59};

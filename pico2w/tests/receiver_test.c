@@ -10,7 +10,7 @@
 typedef struct { uint8_t bytes[12]; uint32_t length; } frame_t;
 
 static struct {
-    int selected, reset, pins;
+    int selected, reset, pins, antenna;
     uint32_t inits, releases;
     uint32_t now, reset_at, released_at;
     uint8_t mode, packet_type, stuck_miso, busy_stuck, spi_fail_at_opcode;
@@ -20,7 +20,7 @@ static struct {
     uint16_t reset_errors;
     uint16_t irq, errors;
     uint8_t regs_0736, sync[2], rx_gain;
-    uint8_t buffer[256], rx_length, rx_start, rssi, snr, signal;
+    uint8_t buffer[256], rx_length, rx_start, rssi, snr, signal, rssi_inst;
     uint8_t out[300], in[300];
     uint32_t index;
     frame_t log[512];
@@ -29,7 +29,7 @@ static struct {
 
 static const uint8_t allowed[] = {
     0x80, 0x97, 0x07, 0x89, 0x9d, 0x8a, 0x98, 0x86, 0x8b, 0x8c, 0x1d, 0x0d,
-    0x8f, 0x08, 0x02, 0x17, 0x82, 0xc0, 0x12, 0x13, 0x14, 0x1e
+    0x8f, 0x08, 0x02, 0x17, 0x82, 0xc0, 0x12, 0x13, 0x14, 0x1e, 0x15
 };
 /* SetTx, TX CW, TX infinite preamble, CAD, CAD params, TX params, PA config,
    WriteBuffer, Sleep, RxDutyCycle, FS, regulator/fallback/stop-timer changes. */
@@ -143,6 +143,7 @@ int32_t sx1262_hw_byte(uint8_t out, uint8_t *in) {
         switch (op) {
         case 0x12: v = i == 2 ? (uint8_t)(sim.irq >> 8) : i == 3 ? (uint8_t)sim.irq : v; break;
         case 0x13: v = i == 2 ? sim.rx_length : i == 3 ? sim.rx_start : v; break;
+        case 0x15: v = i == 2 ? sim.rssi_inst : v; break;
         case 0x14: v = i == 2 ? sim.rssi : i == 3 ? sim.snr : i == 4 ? sim.signal : v; break;
         case 0x17: v = i == 2 ? (uint8_t)(sim.errors >> 8) : i == 3 ? (uint8_t)sim.errors : v; break;
         case 0x1d:
@@ -167,7 +168,13 @@ int32_t sx1262_hw_byte(uint8_t out, uint8_t *in) {
 void sx1262_hw_release(void) {
     assert(!sim.selected && !sim.reset);
     sim.pins = 0;
+    sim.antenna = 0;
     ++sim.releases;
+}
+
+void sx1262_hw_antenna_power(void) {
+    assert(sim.pins && !sim.selected && !sim.antenna);
+    sim.antenna = 1;
 }
 
 static int32_t service(void) {
@@ -332,13 +339,23 @@ static void test_reception(void) {
     assert(sx1262_receiver_packet(&rx, 1) == 0);
 
     sim.snr = 0x1c;
-    sim.irq = 0x0002 | 0x0040; /* CRC error: payload must not be read */
+    /* CRC error: kept for diagnostics, flagged, unparsed and not a good packet. */
+    inject(frame, sizeof(frame), 0x10);
+    sim.irq = 0x0002 | 0x0040;
     from = sim.frames;
     assert(sx1262_receiver_poll(&rx, 2) == 0);
-    assert(rx.counters.crc_errors == 1 && rx.count == 1 && count_opcode(from, 0x1e) == 0 && sim.irq == 0);
+    assert(rx.counters.crc_errors == 1 && rx.counters.packets == 1 && rx.count == 2);
+    assert(count_opcode(from, 0x1e) == 1 && sim.irq == 0);
+    p = sx1262_receiver_packet(&rx, 0);
+    assert(p->sequence == 2 && p->flags == SX1262_RX_CRC_ERROR && p->length == sizeof(frame));
+    assert(p->snr_qdb == 28 && p->rssi_qdb == -160 && memcmp(p->payload, frame, sizeof(frame)) == 0);
+    assert(p->mhdr == 0 && p->mtype == 0 && p->dev_addr == 0 && p->fcnt16 == 0 && p->fctrl == 0);
+    sim.irq = 0x0040; /* CRC flag without RxDone: counted only */
+    assert(sx1262_receiver_poll(&rx, 3) == 0);
+    assert(rx.counters.crc_errors == 2 && rx.count == 2 && sim.irq == 0);
     sim.irq = 0x0020;
     assert(sx1262_receiver_poll(&rx, 3) == 0);
-    assert(rx.counters.header_errors == 1 && rx.count == 1 && sim.irq == 0);
+    assert(rx.counters.header_errors == 1 && rx.count == 2 && sim.irq == 0);
 
     /* Arbitrary non-LoRaWAN-looking payloads are stored without claims. */
     static const uint8_t join[] = {0x00, 1, 2, 3};
@@ -425,6 +442,10 @@ static void test_meshtastic(void) {
     assert(sim.sync[0] == 0x34 && sim.sync[1] == 0x44 && rx.active.profile == SX1262_RX_PROFILE_LORAWAN);
 }
 
+static int32_t s16(const uint8_t *b) {
+    return (int32_t)(((uint32_t)b[0] | (uint32_t)b[1] << 8) ^ 0x8000u) - 0x8000;
+}
+
 static void test_packet_record(void) {
     static uint8_t record[LORA_PACKET_RECORD_SIZE];
     start_default();
@@ -432,7 +453,8 @@ static void test_packet_record(void) {
     assert(usb_load_u32(record) == LORA_PACKET_RECORD_MAGIC && record[4] == 1);
     assert(record[6] == (LORA_PACKET_RECORD_SIZE & 255u) && record[7] == (LORA_PACKET_RECORD_SIZE >> 8));
     assert(usb_load_u32(record + 8) == 0x12345678u && usb_load_u32(record + 12) == 0);
-    assert(usb_load_u32(record + 16) == 0 && usb_load_u32(record + 324) == usb_crc32(record, 324));
+    assert(usb_load_u32(record + 16) == 0 && usb_load_u32(record + 336) == usb_crc32(record, 336));
+    assert(usb_load_u32(record + 332) == 0 && record[66] == 0 && record[323] == 0 && record[330] == 0);
     static uint8_t data[40];
     for (uint32_t n = 1; n <= 18; ++n) {
         data[0] = (uint8_t)n;
@@ -451,7 +473,56 @@ static void test_packet_record(void) {
     assert(usb_load_u32(record + 24) == 11 && record[68] == 11);
     lora_packet_record(record, 1u, &rx, 18);
     assert(usb_load_u32(record + 12) == 0 && usb_load_u32(record + 24) == 0 && record[64] == 0);
-    assert(usb_load_u32(record + 324) == usb_crc32(record, 324));
+    assert(usb_load_u32(record + 336) == usb_crc32(record, 336));
+    /* Noise-floor block: int16 now/min/max at 324/326/328, samples at 332. */
+    sim.rssi_inst = 211; /* -105.5 dBm */
+    assert(sx1262_receiver_poll(&rx, 5000) == 0 && rx.noise_samples == 1);
+    lora_packet_record(record, 1u, &rx, 18);
+    assert(s16(record + 324) == -422);
+    assert(s16(record + 326) == -422);
+    assert(s16(record + 328) == -422);
+    assert(usb_load_u32(record + 332) == 1 && usb_load_u32(record + 336) == usb_crc32(record, 336));
+}
+
+static void test_noise_floor(void) {
+    start_default();
+    assert(rx.noise_samples == 0);
+    sim.rssi_inst = 180; /* -90 dBm */
+    uint32_t before = sim.frames;
+    assert(sx1262_receiver_poll(&rx, 1000) == 0);
+    assert(sim.log[sim.frames - 1].bytes[0] == 0x15 && sim.log[sim.frames - 1].length == 3);
+    assert(rx.noise_samples == 1 && rx.noise_qdb == -360);
+    assert(rx.noise_min_qdb == -360 && rx.noise_max_qdb == -360);
+    /* Rate limited to one sample per SX1262_RX_NOISE_INTERVAL_MS. */
+    before = sim.frames;
+    sim.rssi_inst = 240;
+    assert(sx1262_receiver_poll(&rx, 1000 + SX1262_RX_NOISE_INTERVAL_MS - 1) == 0);
+    assert(rx.noise_samples == 1);
+    for (uint32_t i = before; i < sim.frames; ++i) assert(sim.log[i].bytes[0] != 0x15);
+    assert(sx1262_receiver_poll(&rx, 1000 + SX1262_RX_NOISE_INTERVAL_MS) == 0);
+    assert(rx.noise_samples == 2 && rx.noise_qdb == -480);
+    assert(rx.noise_min_qdb == -480 && rx.noise_max_qdb == -360);
+    sim.rssi_inst = 100;
+    assert(sx1262_receiver_poll(&rx, 2000) == 0);
+    assert(rx.noise_samples == 3 && rx.noise_qdb == -200);
+    assert(rx.noise_min_qdb == -480 && rx.noise_max_qdb == -200);
+    /* A pending IRQ is serviced instead of sampling. */
+    static uint8_t data[4] = {1, 2, 3, 4};
+    inject(data, 4, 0);
+    before = sim.frames;
+    assert(sx1262_receiver_poll(&rx, 3000) == 0);
+    assert(rx.noise_samples == 3 && rx.counters.packets == 1);
+    for (uint32_t i = before; i < sim.frames; ++i) assert(sim.log[i].bytes[0] != 0x15);
+    /* A SPI failure while sampling is reported like any other command error. */
+    sim.spi_fail_at_opcode = 0x15;
+    assert(sx1262_receiver_poll(&rx, 4000) != 0 && rx.noise_samples == 3);
+    sim.spi_fail_at_opcode = 0;
+    /* Reconfiguring starts fresh statistics. */
+    sx1262_rx_config_t c;
+    sx1262_rx_lorawan_config(&c);
+    c.frequency_hz = 868300000u;
+    assert(sx1262_receiver_configure(&rx, &c) == 0);
+    assert(rx.noise_samples == 0 && rx.noise_qdb == 0 && rx.noise_min_qdb == 0 && rx.noise_max_qdb == 0);
 }
 
 static void test_ring_bounds(void) {
@@ -584,6 +655,55 @@ static void test_stop(void) {
     assert(rx.state == SX1262_RX_IDLE && !sim.pins && sim.mode == 2);
 }
 
+static void test_survey(void) {
+    sx1262_rx_survey_t r;
+    fresh(&rx);
+    assert(sx1262_receiver_survey(&rx, 806000000u, &r) == SX1262_RX_STATE_ERROR && sim.frames == 0);
+    start_default();
+    assert(sim.antenna); /* ANT_SW option B: GP22 powers the RF switch */
+    uint32_t before = sim.frames;
+    assert(sx1262_receiver_survey(&rx, 149999999u, &r) == SX1262_RX_CONFIG_ERROR);
+    assert(sx1262_receiver_survey(&rx, 960000001u, &r) == SX1262_RX_CONFIG_ERROR);
+    assert(sim.frames == before && r.samples == 0);
+
+    sim.rssi_inst = 150; /* -75 dBm */
+    assert(sx1262_receiver_survey(&rx, 806000000u, &r) == 0);
+    assert(r.frequency_hz == 806000000u && r.bandwidth_khz == 125u);
+    assert(r.samples == SX1262_RX_SURVEY_SAMPLES);
+    assert(r.min_qdb == -300 && r.mean_qdb == -300 && r.max_qdb == -300);
+    /* Standby, image calibration 800..812 MHz, 806 MHz, continuous RX, status. */
+    const uint8_t standby[] = {0x80, 0x00}, image[] = {0x98, 200, 203};
+    const uint8_t freq[] = {0x86, 0x32, 0x60, 0x00, 0x00}, set_rx[] = {0x82, 0xff, 0xff, 0xff};
+    expect(before, standby, 2);
+    expect(before + 1, image, 3);
+    expect(before + 2, freq, 5);
+    expect(before + 3, set_rx, 4);
+    assert(sim.log[before + 4].bytes[0] == 0xc0);
+    for (uint32_t i = 0; i < SX1262_RX_SURVEY_SAMPLES; ++i)
+        assert(sim.log[before + 5 + i].bytes[0] == 0x15 && sim.log[before + 5 + i].length == 3);
+    /* Active profile restored: back on 868.1 MHz, in RX, statistics untouched. */
+    const uint8_t home[] = {0x86, 0x36, 0x41, 0x99, 0x99};
+    int restored = 0;
+    for (uint32_t i = before + 5 + SX1262_RX_SURVEY_SAMPLES; i < sim.frames; ++i)
+        restored |= memcmp(sim.log[i].bytes, home, 5) == 0;
+    assert(restored && sim.mode == 5 && rx.state == SX1262_RX_RUNNING);
+    assert(rx.active.frequency_hz == 868100000u && rx.noise_samples == 0);
+    const uint8_t edge_low[] = {0x98, 36, 39}, edge_high[] = {0x98, 239, 241};
+    before = sim.frames;
+    assert(sx1262_receiver_survey(&rx, 150000000u, &r) == 0);
+    expect(before + 1, edge_low, 3);
+    before = sim.frames;
+    assert(sx1262_receiver_survey(&rx, 960000000u, &r) == 0);
+    expect(before + 1, edge_high, 3);
+
+    /* SPI fault mid-survey: error returned, radio released like a poll fault. */
+    sim.spi_fail_at_opcode = 0x15;
+    assert(sx1262_receiver_survey(&rx, 806000000u, &r) == SX1262_SPI_ERROR);
+    assert(r.samples == 0 && rx.state == SX1262_RX_FAULT && rx.last_error == SX1262_SPI_ERROR);
+    assert(!sim.antenna);
+    sim.spi_fail_at_opcode = 0;
+}
+
 int main(void) {
     test_init_frames();
     test_profiles();
@@ -595,6 +715,8 @@ int main(void) {
     test_stop();
     test_meshtastic();
     test_packet_record();
-    puts("PASS: SX1262 RX-only frames, LoRaWAN/Meshtastic profiles, metadata, ring, records, errors and cleanup");
+    test_noise_floor();
+    test_survey();
+    puts("PASS: SX1262 RX-only frames, LoRaWAN/Meshtastic profiles, metadata, ring, records, noise floor, errors and cleanup");
     return 0;
 }

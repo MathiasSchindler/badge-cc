@@ -53,6 +53,9 @@
 #define SX1262_RX_DEFAULT_SF SX1262_RX_MESHTASTIC_SF
 #define SX1262_RX_DEFAULT_BANDWIDTH_KHZ SX1262_RX_MESHTASTIC_BANDWIDTH_KHZ
 
+/* GetRssiInst noise-floor sampling interval while idle in RX. */
+#define SX1262_RX_NOISE_INTERVAL_MS 250u
+
 #define SX1262_RX_IDLE 0u
 #define SX1262_RX_RUNNING 1u
 #define SX1262_RX_FAULT 2u
@@ -61,6 +64,9 @@
 #define SX1262_RX_HAS_MHDR 1u       /* length >= 1: mhdr/mtype/major are the raw first byte */
 #define SX1262_RX_LORAWAN_DATA 2u   /* structurally plausible LoRaWAN data frame: dev_addr/fctrl/fcnt16 valid */
 #define SX1262_RX_MESHTASTIC_HEADER 4u /* Meshtastic profile and length >= 16 */
+/* Payload CRC failed: kept for its RSSI/SNR and raw bytes, never parsed, and
+   counted in crc_errors instead of packets. */
+#define SX1262_RX_CRC_ERROR 0x80u
 
 typedef struct {
     uint32_t frequency_hz;   /* 863000000..870000000 */
@@ -120,6 +126,10 @@ typedef struct {
     uint16_t last_irq;
     sx1262_rx_config_t active;
     sx1262_rx_counters_t counters;
+    /* Instantaneous RSSI (GetRssiInst, quarter dBm) sampled while idle in RX.
+       Reset on every successful configuration; samples == 0 means none yet. */
+    int32_t noise_qdb, noise_min_qdb, noise_max_qdb;
+    uint32_t noise_samples, noise_at_ms;
     uint32_t next_sequence;
     uint32_t head;           /* next ring slot */
     uint32_t count;          /* valid ring entries, <= SX1262_RX_RING_SIZE */
@@ -154,6 +164,29 @@ int32_t sx1262_receiver_configure(sx1262_receiver_t *rx, const sx1262_rx_config_
  * -3001..-3006 set state FAULT with pins released; -3011 means not RUNNING.
  */
 int32_t sx1262_receiver_poll(sx1262_receiver_t *rx, uint32_t now_ms);
+
+/* Receive-only RSSI survey of one frequency anywhere in the SX1262 tuning
+   range, measured in the active profile's bandwidth. */
+#define SX1262_RX_SURVEY_MIN_HZ 150000000u
+#define SX1262_RX_SURVEY_MAX_HZ 960000000u
+#define SX1262_RX_SURVEY_SAMPLES 16u
+
+typedef struct {
+    uint32_t frequency_hz;
+    uint32_t bandwidth_khz;
+    uint32_t samples;
+    int32_t min_qdb, mean_qdb, max_qdb; /* GetRssiInst, quarter dBm */
+} sx1262_rx_survey_t;
+
+/*
+ * Requires RUNNING. Calibrates the image band around frequency_hz, enters
+ * continuous RX there, takes SX1262_RX_SURVEY_SAMPLES GetRssiInst readings,
+ * then always restores the active profile (frames heard on the survey
+ * frequency are discarded). Out-of-range frequency: SX1262_RX_CONFIG_ERROR,
+ * no radio access. Radio faults release the radio as in poll.
+ */
+int32_t sx1262_receiver_survey(sx1262_receiver_t *rx, uint32_t frequency_hz,
+                               sx1262_rx_survey_t *result);
 
 /* Standby (best effort), release pins/SPI, state IDLE. */
 void sx1262_receiver_stop(sx1262_receiver_t *rx);

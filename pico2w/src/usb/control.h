@@ -16,8 +16,19 @@
 #define USB_APP_STATUS 0x56u
 #define USB_WIFI_STATUS 0x58u
 #define USB_LORA_PACKET 0x59u /* wValue/wIndex: low/high half of last seen sequence */
-#define USB_LORA_PACKET_SIZE 328u
+#define USB_LORA_PACKET_SIZE 340u
 #define USB_PACKET_SIZE 64u
+/* Receive-only RSSI survey: wValue/wIndex = low/high half of frequency in kHz.
+   The first request for a frequency queues it and answers "pending"; the main
+   loop measures it; repeating the request returns the result. */
+#define USB_LORA_SURVEY 0x5au
+#define USB_LORA_SURVEY_SIZE 32u
+#define USB_LORA_SURVEY_MAGIC 0x56573250u /* "P2WV" */
+#define USB_LORA_SURVEY_MIN_KHZ 150000u
+#define USB_LORA_SURVEY_MAX_KHZ 960000u
+#define USB_SURVEY_PENDING 1u
+#define USB_SURVEY_DONE 2u
+#define USB_SURVEY_FAILED 3u
 
 /* Fills a USB_LORA_PACKET_SIZE record for packets after the given sequence. */
 typedef void (*usb_packet_source_t)(void *context, uint32_t after_sequence, uint8_t *record);
@@ -78,6 +89,10 @@ typedef struct {
     uint8_t packet_record[USB_LORA_PACKET_SIZE];
     usb_packet_source_t packet_source; /* optional; request stalls when null */
     void *packet_context;
+    uint8_t survey_enabled;     /* set by the application that services surveys */
+    uint32_t survey_pending_khz; /* 0: nothing queued */
+    uint32_t survey_done_khz;    /* frequency whose result is in survey_record */
+    uint8_t survey_record[USB_LORA_SURVEY_SIZE];
     char serial[17];
 } usb_control_t;
 
@@ -88,5 +103,10 @@ void usb_control_setup(usb_control_t *control, const uint8_t setup[8]);
 void usb_control_complete(usb_control_t *control, uint8_t in,
                            const uint8_t *data, uint16_t length);
 void usb_control_lora_result(usb_control_t *control, const sx1262_result_t *result);
+/* Completes the queued survey: state USB_SURVEY_DONE with quarter-dBm values,
+   or USB_SURVEY_FAILED with error (min/mean/max ignored). */
+void usb_control_survey_result(usb_control_t *control, uint32_t khz, uint32_t bandwidth_khz,
+                               uint32_t samples, int32_t error, int32_t min_qdb,
+                               int32_t mean_qdb, int32_t max_qdb);
 
 #endif

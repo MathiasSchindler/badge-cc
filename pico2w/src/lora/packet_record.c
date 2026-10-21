@@ -38,5 +38,12 @@ void lora_packet_record(uint8_t record[LORA_PACKET_RECORD_SIZE], uint32_t build_
         record[65] = packet->flags;
         for (uint32_t i = 0u; i < packet->length; ++i) record[68u + i] = packet->payload[i];
     }
-    usb_store_u32(record + 324u, usb_crc32(record, 324u));
+    record[324] = (uint8_t)rx->noise_qdb;
+    record[325] = (uint8_t)((uint32_t)rx->noise_qdb >> 8u);
+    record[326] = (uint8_t)rx->noise_min_qdb;
+    record[327] = (uint8_t)((uint32_t)rx->noise_min_qdb >> 8u);
+    record[328] = (uint8_t)rx->noise_max_qdb;
+    record[329] = (uint8_t)((uint32_t)rx->noise_max_qdb >> 8u);
+    usb_store_u32(record + 332u, rx->noise_samples);
+    usb_store_u32(record + LORA_PACKET_RECORD_CRC, usb_crc32(record, LORA_PACKET_RECORD_CRC));
 }

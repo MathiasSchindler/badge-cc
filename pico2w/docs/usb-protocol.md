@@ -158,7 +158,7 @@ separate associated/authorized station flags, followed by DHCP.
 ## LoRa packet stream
 
 Configured monitor firmware accepts device-IN vendor request `59`, exact
-length 328, as a gap-free cursor over the receiver's 16-packet RAM ring.
+length 340, as a gap-free cursor over the receiver's 16-packet RAM ring.
 `wValue | wIndex << 16` is the last sequence number the host has seen
 (0 initially). The response holds the oldest retained packet whose
 sequence is newer (serial-number comparison), or no packet. It is
@@ -169,7 +169,7 @@ running build first with the identity report. All integers are little-endian:
 | --- | --- | --- |
 | 0 | 4 | ASCII `P2WP` |
 | 4 | 2 | Version 1 |
-| 6 | 2 | Length 328 |
+| 6 | 2 | Length 340 |
 | 8 | 4 | Running build ID |
 | 12 | 4 | Present flag: 1 packet follows, 0 nothing newer |
 | 16 | 4 | Newest retained sequence (0 if none) |
@@ -187,13 +187,59 @@ running build first with the identity report. All integers are little-endian:
 | 56 | 4 | CRC error counter |
 | 60 | 4 | Header error counter |
 | 64 | 1 | Payload length 0-255 |
-| 65 | 1 | Parser flags (bit 2: Meshtastic header present) |
+| 65 | 1 | Flags (bit 0: MHDR, bit 1: LoRaWAN data frame, bit 2: Meshtastic header present, bit 7: payload CRC failed) |
 | 66 | 2 | Zero |
 | 68 | 255 | Payload, zero-padded |
 | 323 | 1 | Zero |
-| 324 | 4 | CRC-32/ISO-HDLC over bytes 0-323 |
+| 324 | 2 | Signed latest noise sample (GetRssiInst), quarter dBm |
+| 326 | 2 | Signed minimum noise sample since configuration, quarter dBm |
+| 328 | 2 | Signed maximum noise sample since configuration, quarter dBm |
+| 330 | 2 | Zero |
+| 332 | 4 | Noise sample count since configuration (0: none, fields are 0) |
+| 336 | 4 | CRC-32/ISO-HDLC over bytes 0-335 |
+
+The noise block and counters describe the receiver at request time, so they
+are present even when no packet follows. `picoctl` rejects records whose
+zero bytes are not zero.
 
 If `oldest` is newer than the host cursor + 1, packets were overwritten
 before being read. If `newest` is older than the cursor, the firmware
 restarted. Payloads are raw radio bytes; Meshtastic channel keys are never
 sent to or stored on the Pico.
+
+## RSSI survey
+
+Monitor firmware accepts device-IN vendor request `5A`, exact length 32,
+with `wValue | wIndex << 16` as a frequency in kHz (150000-960000). The
+receive-only survey measures energy without demodulating anything. Radio
+work never runs inside the USB handler, which is serviced during SX1262
+SPI waits: a new frequency is queued and answered with a pending record,
+and the main loop performs the measurement. The host repeats the same
+request until the state is no longer pending. Requesting another frequency
+discards the previous result.
+
+The main loop puts the radio in standby, calibrates the image rejection
+for the target, tunes, enters continuous RX and averages 16 `GetRssiInst`
+samples about 0.5 ms apart, using the active profile's bandwidth. It then
+reapplies the active profile, so listening continues on the configured
+channel. An SPI or radio failure faults the receiver, exactly like a
+failure while polling. The SX1262 never transmits.
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 4 | ASCII `P2WV` |
+| 4 | 1 | Version 1 |
+| 5 | 1 | State: 1 pending, 2 done, 3 failed |
+| 6 | 2 | Length 32 |
+| 8 | 4 | Running build ID |
+| 12 | 4 | Frequency in kHz, echoed |
+| 16 | 2 | Bandwidth kHz (done only, else 0) |
+| 18 | 2 | Sample count (done only, else 0) |
+| 20 | 2 | Done: signed minimum, quarter dBm. Failed: bytes 20-23 hold a negative error code |
+| 22 | 2 | Done: signed mean, quarter dBm |
+| 24 | 2 | Done: signed maximum, quarter dBm |
+| 26 | 2 | Zero |
+| 28 | 4 | CRC-32/ISO-HDLC over bytes 0-27 |
+
+`picoctl` rejects unused bytes that are not zero, a mismatched build or
+frequency, and done records with minimum > mean > maximum out of order.

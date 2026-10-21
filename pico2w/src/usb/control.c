@@ -114,6 +114,9 @@ void usb_control_init(usb_control_t *control, uint32_t build_id,
     control->wifi_status_valid = 0u;
     control->packet_source = 0;
     control->packet_context = 0;
+    control->survey_enabled = 0u;
+    control->survey_pending_khz = 0u;
+    control->survey_done_khz = 0u;
     for (uint32_t word = 0u; word < 2u; ++word) {
         control->chip_id[word] = chip_id[word];
         for (uint32_t digit = 0u; digit < 8u; ++digit)
@@ -122,6 +125,44 @@ void usb_control_init(usb_control_t *control, uint32_t build_id,
     }
     control->serial[16] = '\0';
     usb_control_reset(control);
+}
+
+static void survey_record(usb_control_t *control, uint32_t khz, uint32_t state,
+                          uint32_t bandwidth_khz, uint32_t samples, int32_t error,
+                          int32_t min_qdb, int32_t mean_qdb, int32_t max_qdb) {
+    uint8_t *r = control->survey_record;
+    for (uint32_t i = 0u; i < USB_LORA_SURVEY_SIZE; ++i) r[i] = 0u;
+    usb_store_u32(r, USB_LORA_SURVEY_MAGIC);
+    r[4] = 1u;
+    r[5] = (uint8_t)state;
+    r[6] = USB_LORA_SURVEY_SIZE;
+    usb_store_u32(r + 8u, control->build_id);
+    usb_store_u32(r + 12u, khz);
+    if (state == USB_SURVEY_DONE) {
+        r[16] = (uint8_t)bandwidth_khz;
+        r[17] = (uint8_t)(bandwidth_khz >> 8u);
+        r[18] = (uint8_t)samples;
+        r[19] = (uint8_t)(samples >> 8u);
+        r[20] = (uint8_t)min_qdb;
+        r[21] = (uint8_t)((uint32_t)min_qdb >> 8u);
+        r[22] = (uint8_t)mean_qdb;
+        r[23] = (uint8_t)((uint32_t)mean_qdb >> 8u);
+        r[24] = (uint8_t)max_qdb;
+        r[25] = (uint8_t)((uint32_t)max_qdb >> 8u);
+    } else if (state == USB_SURVEY_FAILED) {
+        usb_store_u32(r + 20u, (uint32_t)error);
+    }
+    usb_store_u32(r + 28u, usb_crc32(r, 28u));
+}
+
+void usb_control_survey_result(usb_control_t *control, uint32_t khz, uint32_t bandwidth_khz,
+                               uint32_t samples, int32_t error, int32_t min_qdb,
+                               int32_t mean_qdb, int32_t max_qdb) {
+    if (khz == 0u || khz != control->survey_pending_khz) return;
+    survey_record(control, khz, error == 0 ? USB_SURVEY_DONE : USB_SURVEY_FAILED,
+                  bandwidth_khz, samples, error, min_qdb, mean_qdb, max_qdb);
+    control->survey_done_khz = khz;
+    control->survey_pending_khz = 0u;
 }
 
 void usb_control_setup(usb_control_t *control, const uint8_t setup[8]) {
@@ -195,6 +236,18 @@ void usb_control_setup(usb_control_t *control, const uint8_t setup[8]) {
                                (uint32_t)value | (uint32_t)index << 16u,
                                control->packet_record);
         send(control, control->packet_record, USB_LORA_PACKET_SIZE, length);
+    } else if (control->configured && type == 0xc0u && request == USB_LORA_SURVEY &&
+               length == USB_LORA_SURVEY_SIZE && control->survey_enabled &&
+               ((uint32_t)value | (uint32_t)index << 16u) >= USB_LORA_SURVEY_MIN_KHZ &&
+               ((uint32_t)value | (uint32_t)index << 16u) <= USB_LORA_SURVEY_MAX_KHZ) {
+        uint32_t khz = (uint32_t)value | (uint32_t)index << 16u;
+        if (khz != control->survey_done_khz) {
+            /* A new frequency replaces any queued one; the host polls for it. */
+            control->survey_pending_khz = khz;
+            control->survey_done_khz = 0u;
+            survey_record(control, khz, USB_SURVEY_PENDING, 0u, 0u, 0, 0, 0, 0);
+        }
+        send(control, control->survey_record, USB_LORA_SURVEY_SIZE, length);
     } else if (control->configured && value == 0u && index == 0u) {
         if (type == 0x40u && request == USB_SUBMIT && length == USB_REPORT_SIZE) {
             control->report_valid = 0u;

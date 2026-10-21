@@ -21,6 +21,10 @@ static int32_t configure(void *context, const dashboard_config_t *config) {
 
 static void fixture(void) {
     memset(&app, 0, sizeof(app));
+    app.noise_qdb = -2147483647 - 1; /* widest signed values keep the JSON bound honest */
+    app.noise_min_qdb = -2147483647 - 1;
+    app.noise_max_qdb = -2147483647 - 1;
+    app.noise_samples = 4294967295u;
     app.build_id = 0x12345678;
     app.uptime_ms = 123456;
     app.received = 8;
@@ -68,6 +72,13 @@ static uint32_t post(uint8_t allowed, const char *body) {
     return dashboard_http(&app, &request, response, sizeof(response));
 }
 
+static void page_noise_check(void) {
+    uint32_t size = get("/");
+    response[size] = 0;
+    assert(strstr((char *)response, "id=\"noise\"") != NULL);
+    assert(strstr((char *)response, "d.noise_samples?") != NULL);
+}
+
 int main(int argc, char **argv) {
     fixture();
     if (argc == 2) {
@@ -86,6 +97,15 @@ int main(int argc, char **argv) {
     assert(strstr((char *)response, "\"rssi_qdb\":-401,\"snr_qdb\":-9") != NULL);
     assert(strstr((char *)response, "\"lora_state\":1,\"lora_status\":82,\"lora_command\":192,"
                   "\"lora_device_errors\":0,\"lora_polls\":123") != NULL);
+    assert(strstr((char *)response, "\"noise_qdb\":-2147483648,\"noise_min_qdb\":-2147483648,"
+                  "\"noise_max_qdb\":-2147483648,\"noise_samples\":4294967295,") != NULL);
+    page_noise_check();
+    app.packets[0].crc_error = 1;
+    size = get("/api/status"); response[size] = 0;
+    assert(strstr((char *)response, "\"crc_error\":true,\"lorawan_candidate\":false,\"mtype\":255,"
+                  "\"devaddr\":null,\"fcnt16\":null,\"mesh\":null") != NULL);
+    assert(strstr((char *)response, "\"crc_error\":false,\"lorawan_candidate\":true") != NULL);
+    app.packets[0].crc_error = 0;
     app.packets[0].length = 1;
     size = get("/api/status"); response[size] = 0;
     assert(strstr((char *)response, "\"devaddr\":null,\"fcnt16\":null,\"mesh\":null") != NULL);

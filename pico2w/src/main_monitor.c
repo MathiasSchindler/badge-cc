@@ -143,6 +143,10 @@ static void capture_update(void) {
     dashboard.received = receiver.counters.packets;
     dashboard.crc_errors = receiver.counters.crc_errors;
     dashboard.header_errors = receiver.counters.header_errors;
+    dashboard.noise_qdb = receiver.noise_qdb;
+    dashboard.noise_min_qdb = receiver.noise_min_qdb;
+    dashboard.noise_max_qdb = receiver.noise_max_qdb;
+    dashboard.noise_samples = receiver.noise_samples;
     dashboard.network_drops = network.dropped;
     dashboard.retransmits = network.retransmits;
     for (uint32_t i = 0u; i < sizeof(dashboard.ip); ++i) dashboard.ip[i] = network.address[i];
@@ -150,8 +154,8 @@ static void capture_update(void) {
     if (newest == 0 || newest->sequence == last_packet_sequence) return;
     last_packet_sequence = newest->sequence;
     dashboard.packet_count = receiver.count < DASHBOARD_PACKETS ? receiver.count : DASHBOARD_PACKETS;
-    dashboard.overwritten = receiver.counters.packets > DASHBOARD_PACKETS ?
-                              receiver.counters.packets - DASHBOARD_PACKETS : 0u;
+    dashboard.overwritten = newest->sequence > DASHBOARD_PACKETS ?
+                              newest->sequence - DASHBOARD_PACKETS : 0u;
     for (uint32_t i = 0u; i < dashboard.packet_count; ++i) {
         const sx1262_rx_packet_t *source = sx1262_receiver_packet(&receiver, i);
         dashboard_packet_t *packet = dashboard.packets + i;
@@ -164,8 +168,21 @@ static void capture_update(void) {
         packet->rssi_qdb = source->rssi_qdb;
         packet->snr_qdb = source->snr_qdb;
         packet->length = source->length;
+        packet->crc_error = (source->flags & SX1262_RX_CRC_ERROR) != 0u;
         for (uint32_t j = 0u; j < source->length; ++j) packet->data[j] = source->payload[j];
     }
+}
+
+/* Runs here, outside the radio driver: USB requests are serviced inside SPI
+   waits, so the request handler only queues the frequency. */
+static void run_survey(void) {
+    uint32_t khz = control.survey_pending_khz;
+    if (khz == 0u) return;
+    sx1262_rx_survey_t result;
+    int32_t error = sx1262_receiver_survey(&receiver, khz * 1000u, &result);
+    if (error != 0 && receiver.state != 1u) pico2w_lora_error = error;
+    usb_control_survey_result(&control, khz, result.bandwidth_khz, result.samples, error,
+                              result.min_qdb, result.mean_qdb, result.max_qdb);
 }
 
 void bare_main(void) {
@@ -179,6 +196,7 @@ void bare_main(void) {
     usb_control_init(&control, PICO2W_BUILD_ID, id);
     control.lora_disabled = 1u;
     control.packet_source = packet_source;
+    control.survey_enabled = 1u;
     pico2w_stage = 2u;
     error = usb_hw_init();
     if (error != 0) recover(error);
@@ -202,6 +220,7 @@ void bare_main(void) {
             error = sx1262_receiver_poll(&receiver, uptime_ms);
             if (error != 0) pico2w_lora_error = error;
         }
+        run_survey();
         if (wifi_started) wifi_station_service();
         if (!network_ready && wifi_station_link_up()) {
             uint8_t mac[6];

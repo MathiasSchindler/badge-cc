@@ -77,12 +77,43 @@ int picoctl_wifi_diagnostic(const uint8_t record[64], uint32_t build) {
            usb_load_u32(record + 60) == usb_crc32(record, 60);
 }
 
+static int32_t load_s16(const uint8_t *b) {
+    return (int32_t)(((uint32_t)b[0] | (uint32_t)b[1] << 8) ^ 0x8000u) - 0x8000;
+}
+
+int picoctl_survey(const uint8_t r[PICOCTL_SURVEY_SIZE], uint32_t build, uint32_t khz,
+                   picoctl_survey_t *s) {
+    if (usb_load_u32(r) != 0x56573250u || r[4] != 1u || r[6] != PICOCTL_SURVEY_SIZE ||
+        r[7] != 0u || usb_load_u32(r + 8) != build || usb_load_u32(r + 12) != khz ||
+        r[5] < 1u || r[5] > 3u || r[26] || r[27] ||
+        usb_load_u32(r + 28) != usb_crc32(r, 28)) return 0;
+    for (unsigned i = 16; i < 28; ++i)
+        if (r[5] != 2u && (r[5] == 1u || i < 20 || i >= 24) && r[i]) return 0;
+    s->state = r[5];
+    s->khz = khz;
+    s->bandwidth_khz = s->samples = 0;
+    s->error = s->min_qdb = s->mean_qdb = s->max_qdb = 0;
+    if (s->state == 2u) {
+        s->bandwidth_khz = (uint32_t)r[16] | (uint32_t)r[17] << 8;
+        s->samples = (uint32_t)r[18] | (uint32_t)r[19] << 8;
+        s->min_qdb = load_s16(r + 20);
+        s->mean_qdb = load_s16(r + 22);
+        s->max_qdb = load_s16(r + 24);
+        if (!s->samples || s->min_qdb > s->mean_qdb || s->mean_qdb > s->max_qdb) return 0;
+    } else if (s->state == 3u) {
+        s->error = (int32_t)usb_load_u32(r + 20);
+        if (s->error >= 0) return 0;
+    }
+    return 1;
+}
+
 int picoctl_packet(const uint8_t record[PICOCTL_PACKET_SIZE], uint32_t build,
                    picoctl_packet_t *p) {
     if (usb_load_u32(record) != 0x50573250u || record[4] != 1u || record[5] != 0u ||
         record[6] != (PICOCTL_PACKET_SIZE & 255u) || record[7] != (PICOCTL_PACKET_SIZE >> 8) ||
         usb_load_u32(record + 8) != build || usb_load_u32(record + 12) > 1u ||
-        usb_load_u32(record + 324) != usb_crc32(record, 324)) return 0;
+        usb_load_u32(record + PICOCTL_PACKET_CRC) != usb_crc32(record, PICOCTL_PACKET_CRC) ||
+        record[66] || record[67] || record[323] || record[330] || record[331]) return 0;
     p->present = usb_load_u32(record + 12);
     p->newest = usb_load_u32(record + 16);
     p->oldest = usb_load_u32(record + 20);
@@ -100,6 +131,10 @@ int picoctl_packet(const uint8_t record[PICOCTL_PACKET_SIZE], uint32_t build,
     p->header_errors = usb_load_u32(record + 60);
     p->length = record[64];
     p->flags = record[65];
+    p->noise_qdb = load_s16(record + 324);
+    p->noise_min_qdb = load_s16(record + 326);
+    p->noise_max_qdb = load_s16(record + 328);
+    p->noise_samples = usb_load_u32(record + 332);
     if (!p->present && (p->length || p->sequence)) return 0;
     if (p->present && (!p->sequence || p->profile > 1u)) return 0;
     for (uint32_t i = 0; i < 255u; ++i) p->payload[i] = record[68 + i];

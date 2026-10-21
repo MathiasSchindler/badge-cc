@@ -24,6 +24,7 @@ typedef struct {
     int32_t rssi_qdb;
     int32_t snr_qdb;
     uint32_t length;
+    uint32_t crc_error; /* payload CRC failed: raw bytes only, never decoded */
     uint8_t data[255];
 } dashboard_packet_t;
 
@@ -33,6 +34,8 @@ typedef struct {
     uint32_t received;
     uint32_t crc_errors;
     uint32_t header_errors;
+    int32_t noise_qdb, noise_min_qdb, noise_max_qdb; /* quarter dBm */
+    uint32_t noise_samples;
     uint32_t overwritten;
     uint32_t network_drops;
     uint32_t retransmits;

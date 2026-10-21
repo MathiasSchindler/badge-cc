@@ -19,6 +19,14 @@ uint8_t sx1262_hw_busy(void);
 void sx1262_hw_reset(uint8_t asserted);
 void sx1262_hw_select(uint8_t selected);
 int32_t sx1262_hw_byte(uint8_t out, uint8_t *in);
+/*
+ * Waveshare "ANT_SW" option: the RF switch supply comes from 3V3 (A) or
+ * GP22 (B), selected by a 0R resistor. Drives GP22 high (push-pull) so the
+ * switch is powered in either fit; with A fitted GP22 is unconnected.
+ * Requires sx1262_hw_init. Release floats GP22 again if it was driven.
+ */
+void sx1262_hw_antenna_power(void);
+/* Releases NSS/RESET/SPI and, if driven, GP22. */
 void sx1262_hw_release(void);
 
 #endif

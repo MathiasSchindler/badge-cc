@@ -459,6 +459,23 @@ int mesh_describe(const uint8_t *frame, uint32_t length,
         describe_data(&out, &d);
         return 1;
     }
+    /* Unknown hash: the channel may use a known key under another name (the
+       hash mixes both). Accept only a strict parse on a known port. */
+    for (uint32_t i = 0u; h.channel != 0u && i <= channel_count; ++i) {
+        const uint8_t *key = i < channel_count ? channels[i].key : default_psk;
+        uint32_t key_length = i < channel_count ? channels[i].key_length : 16u;
+        uint8_t plain[256];
+        mesh_data_t d;
+        if (!key_length) continue;
+        memcpy(plain, frame + MESH_HEADER_SIZE, size);
+        mesh_ctr(key, key_length, h.from, h.id, plain, size);
+        if (!mesh_data_decode(plain, size, &d) || !strcmp(mesh_port_name(d.portnum), "PORT"))
+            continue;
+        if (i < channel_count) put(&out, " | [other channel, key of %s]", channels[i].name);
+        else put(&out, " | [other channel, default key]");
+        describe_data(&out, &d);
+        return 1;
+    }
     if (h.channel == 0u && h.to != MESH_BROADCAST)
         put(&out, " | PKI direct message, %lu bytes (not decryptable with a channel key)",
             (unsigned long)size);

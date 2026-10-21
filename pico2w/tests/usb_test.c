@@ -449,6 +449,65 @@ static void packet_tests(void) {
     configure();
 }
 
+static void survey_tests(void) {
+    usb_control_reset(&control);
+    configure();
+    /* 868.1 MHz = 868100 kHz = 0x000d3f04 */
+    setup(0xc0u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE);
+    assert(control.action == USB_ACTION_STALL); /* not enabled by the application */
+    control.survey_enabled = 1u;
+    setup(0xc0u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE - 1u);
+    assert(control.action == USB_ACTION_STALL);
+    setup(0x40u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE);
+    assert(control.action == USB_ACTION_STALL);
+    setup(0xc0u, USB_LORA_SURVEY, (uint16_t)149999u, (uint16_t)(149999u >> 16), USB_LORA_SURVEY_SIZE);
+    assert(control.action == USB_ACTION_STALL && control.survey_pending_khz == 0u);
+    setup(0xc0u, USB_LORA_SURVEY, (uint16_t)960001u, (uint16_t)(960001u >> 16), USB_LORA_SURVEY_SIZE);
+    assert(control.action == USB_ACTION_STALL && control.survey_pending_khz == 0u);
+
+    setup(0xc0u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE);
+    assert(control.action == USB_ACTION_IN && control.length == USB_LORA_SURVEY_SIZE);
+    assert(control.survey_pending_khz == 868100u);
+    assert(usb_load_u32(control.data) == USB_LORA_SURVEY_MAGIC && control.data[5] == USB_SURVEY_PENDING);
+    assert(usb_load_u32(control.data + 8) == build_id && usb_load_u32(control.data + 12) == 868100u);
+    assert(usb_load_u32(control.data + 28) == usb_crc32(control.data, 28));
+    finish_in();
+
+    /* A stale result for another frequency is ignored. */
+    usb_control_survey_result(&control, 868300u, 250u, 16u, 0, -460, -450, -440);
+    assert(control.survey_pending_khz == 868100u && control.survey_done_khz == 0u);
+    usb_control_survey_result(&control, 868100u, 250u, 16u, 0, -460, -450, -440);
+    assert(control.survey_pending_khz == 0u && control.survey_done_khz == 868100u);
+    setup(0xc0u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE);
+    assert(control.action == USB_ACTION_IN && control.data[5] == USB_SURVEY_DONE);
+    assert(control.data[16] == 250u && control.data[17] == 0u && control.data[18] == 16u);
+    assert((uint16_t)(control.data[20] | control.data[21] << 8) == (uint16_t)-460);
+    assert((uint16_t)(control.data[22] | control.data[23] << 8) == (uint16_t)-450);
+    assert((uint16_t)(control.data[24] | control.data[25] << 8) == (uint16_t)-440);
+    assert(usb_load_u32(control.data + 28) == usb_crc32(control.data, 28));
+    finish_in();
+    assert(control.survey_pending_khz == 0u); /* repeating does not re-queue */
+
+    /* A new frequency invalidates the old result; failures carry the error. */
+    setup(0xc0u, USB_LORA_SURVEY, (uint16_t)950000u, (uint16_t)(950000u >> 16), USB_LORA_SURVEY_SIZE);
+    assert(control.data[5] == USB_SURVEY_PENDING && control.survey_done_khz == 0u);
+    finish_in();
+    setup(0xc0u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE);
+    assert(control.data[5] == USB_SURVEY_PENDING && control.survey_pending_khz == 868100u);
+    finish_in();
+    usb_control_survey_result(&control, 868100u, 0u, 0u, -3011, 0, 0, 0);
+    setup(0xc0u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE);
+    assert(control.data[5] == USB_SURVEY_FAILED && (int32_t)usb_load_u32(control.data + 20) == -3011);
+    for (uint32_t i = 16u; i < 20u; ++i) assert(control.data[i] == 0u);
+    for (uint32_t i = 24u; i < 28u; ++i) assert(control.data[i] == 0u);
+    finish_in();
+
+    usb_control_reset(&control);
+    setup(0xc0u, USB_LORA_SURVEY, 0x3f04u, 0x000du, USB_LORA_SURVEY_SIZE);
+    assert(control.action == USB_ACTION_STALL); /* unconfigured after bus reset */
+    configure();
+}
+
 int main(void) {
     codec_tests();
     descriptor_tests();
@@ -457,6 +516,7 @@ int main(void) {
     recovery_tests();
     lora_tests();
     packet_tests();
-    puts("PASS: CRC, strict records, descriptors, EP0 sequencing, reports, LoRa, packets, reset and recovery");
+    survey_tests();
+    puts("PASS: CRC, strict records, descriptors, EP0 sequencing, reports, LoRa, packets, survey, reset and recovery");
     return 0;
 }

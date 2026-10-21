@@ -20,7 +20,8 @@ or radio-firmware dependency.
 | RESET, active low | GP15 |
 | DIO1 | GP20, input only; not used for polling |
 
-The probe does not touch GP22, battery ADC GP26, the Pico wireless chip,
+The probe does not touch GP22 (the monitor powers the `ANT_SW` RF-switch
+supply through it; see monitor.md), battery ADC GP26, the Pico wireless chip,
 TCXO/DIO3 configuration, or RF-switch/DIO2 configuration. Do not connect
 5 V logic to these signals. No battery is required by the software.
 

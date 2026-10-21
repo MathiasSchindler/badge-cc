@@ -54,6 +54,26 @@ int wmain(int argc, wchar_t **argv) {
     assert(parse(6, listen_long, &options) && options.has_timeout && options.timeout == 86400000u);
     listen_long[5] = L"86401";
     assert(!parse(6, listen_long, &options));
+    wchar_t *survey[] = {L"picoctl", L"survey", L"--serial", L"7C4918BAB9492C77",
+                         L"--from", L"791", L"--to", L"821"};
+    assert(parse(4, survey, &options) && options.from_mhz == 700 && options.to_mhz == 960);
+    assert(parse(8, survey, &options) && options.from_mhz == 791 && options.to_mhz == 821);
+    survey[5] = L"149";
+    assert(!parse(8, survey, &options));
+    survey[5] = L"900";
+    assert(!parse(8, survey, &options)); /* from > to */
+    survey[5] = L"821";
+    assert(parse(8, survey, &options) && options.from_mhz == 821 && options.to_mhz == 821);
+    survey[7] = L"961";
+    assert(!parse(8, survey, &options));
+    survey[6] = L"--hex";
+    assert(!parse(7, survey, &options));
+    survey[1] = L"listen";
+    survey[6] = L"--to";
+    survey[7] = L"900";
+    assert(!parse(8, survey, &options)); /* --from/--to only for survey */
+    survey[1] = L"survey";
+    assert(!parse(3, survey, &options)); /* --serial required */
     listen_long[1] = L"status";
     listen_long[5] = L"301";
     assert(!parse(6, listen_long, &options));

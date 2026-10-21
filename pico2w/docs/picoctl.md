@@ -32,7 +32,7 @@ and compile directly:
 New-Item -ItemType Directory -Force pico2w\build\host | Out-Null
 cc -std=c11 -Wall -Wextra -Werror -O2 -municode `
   -Ipico2w\src\include `
-  pico2w\tools\picoctl.c pico2w\tools\picoctl_protocol.c pico2w\tools\meshtastic.c `
+  pico2w\tools\picoctl.c pico2w\tools\picoctl_protocol.c pico2w\tools\meshtastic.c pico2w\tools\lorawan.c `
   pico2w\src\usb\report.c `
   -lsetupapi -lcfgmgr32 -lwinusb -lbcrypt -lole32 `
   -o pico2w\build\host\picoctl.exe
@@ -141,9 +141,14 @@ Potsdam <BASE64-PSK>
 ```
 
 Keys never leave the host and are never printed; only channel names and
-their 8-bit hashes are. A packet is decoded only when its channel hash
+their 8-bit hashes are. A packet is decoded when its channel hash
 matches **and** the decrypted bytes parse as a strict `meshtastic_Data`
-protobuf; otherwise it is shown as `encrypted, N bytes (no matching channel
+protobuf. The hash mixes channel name and key, so a channel that reuses a
+known key under another name has an unknown hash. For such packets every
+configured key and the public default key are tried as well; a result is
+accepted only on a strict parse with a known port number and is shown as
+`[other channel, default key]` or `[other channel, key of NAME]`.
+Otherwise a packet is shown as `encrypted, N bytes (no matching channel
 key)`, or as a PKI direct message (channel hash 0), which requires the
 recipient's private key and is never decrypted. Decoded ports include text
 messages, position, node info and device/environment telemetry; other
@@ -155,8 +160,60 @@ ports show their name and payload size. Example output:
 
 (Illustrative line; the exact decoded fields depend on the port.)
 
+In the LoRaWAN profile the same command prints the unencrypted MAC header
+instead: message type, DevAddr with its NetID type/NwkID and operator (TTN
+is NetID `000013`, DevAddr `26xxxxxx`/`27xxxxxx`), FCnt16, FPort, FOpts and
+ADR/ACK flags; join requests show JoinEUI, DevEUI and DevNonce. The MIC is
+not verified and FRMPayload stays encrypted.
+
+Frames that failed the radio's payload CRC are printed as `CRC ERROR`,
+with their RSSI and SNR and always with a hex dump, and are not decoded.
+
+Right after connecting and then every 60 s, `listen` writes a status line
+to stderr, so silence can be told apart from a dead RF path:
+
+```text
+14:51:00 radio: rx=0 crc_err=0 hdr_err=0 noise now -118.5 min -121.0 max -104.5 dBm (2400 samples since config)
+```
+
+Noise values come from the firmware's 250 ms `GetRssiInst` sampling.
+
+To switch the radio profile over HTTP from PowerShell, use `curl.exe`, not
+`Invoke-WebRequest`: Windows PowerShell 5.1 sends `Expect: 100-continue`,
+which the monitor's strict HTTP parser rejects as malformed.
+
+```powershell
+curl.exe -s -X POST -H "X-Pico-Request: 1" `
+  -H "Content-Type: application/x-www-form-urlencoded" `
+  --data "frequency_hz=868100000&sf=7&bandwidth_khz=125&profile=lorawan" `
+  http://192.168.178.68/api/config
+```
+
 Receive-only: the SX1262 never transmits, so nodes do not learn about
 this listener and no ACKs are sent.
+
+## Survey the spectrum
+
+`survey` answers "does the antenna path receive anything at all?" It
+reads the RSSI at every MHz from `--from` to `--to` (default 700-960, valid
+150-960) and prints mean and maximum, a bar and the German allocation of
+each step. LTE 800 (791-821 MHz) and GSM/LTE 900 (925-960 MHz) downlinks
+transmit continuously, so with a working antenna they stand well clear of
+the floor even indoors.
+
+```powershell
+.\pico2w\build\host\picoctl.exe survey --serial 7C4918BAB9492C77
+.\pico2w\build\host\picoctl.exe survey --serial 7C4918BAB9492C77 --from 791 --to 821
+```
+
+The summary compares the floor (25th percentile of the means) with the
+strongest signal at least 3 MHz wide, scored by the weakest mean of 3
+adjacent steps. At least 15 dB above the floor means the path receives;
+6-15 dB means weak signals only; less means the RF path is suspect.
+Single-MHz spikes, here on multiples of 16 MHz, are on-board clock
+harmonics; they are reported separately and do not count as reception. The
+radio returns to the configured profile after each step; it never
+transmits. A full 261-step sweep takes about 16 seconds.
 
 ## Restart into BOOTSEL
 
