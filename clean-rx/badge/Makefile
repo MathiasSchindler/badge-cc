@@ -9,6 +9,7 @@ CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 CFLAGS += $(EXTRA_CFLAGS)
 SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
+	$(ROOT)/src/arch/rp2350/nametag_clock.c \
 	$(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb_hw.c \
 	$(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 	$(ROOT)/src/platform/badger/wifi_board.c $(ROOT)/src/platform/badger/wifi_pio.c \

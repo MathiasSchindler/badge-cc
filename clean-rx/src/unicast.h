@@ -161,8 +161,28 @@ static inline int clean_tx_tail_poll(clean_tx_tail_t *s, int active) {
 #define CLEAN_DCF_ENABLE 0x680u
 #define CLEAN_TX_CLEANUP_REQUEST 0x6acu
 #define CLEAN_TX_CLEANUP_COUNT 0x6adu
+#define CLEAN_TX_COMPLETION 0x6aeu
+#define CLEAN_TX_PRE_RESPONSE 0x6afu
+#define CLEAN_TX_COMPLETION_CLOSED 8u
+#define CLEAN_TX_COMPLETION_ADDR 0x204f0u
+#define CLEAN_TX_COMPLETION_DETAIL 492u
+#define CLEAN_TX_COMPLETION_MAGIC 0x3143544du
+#define CLEAN_TX_START_HANDOFFS_ADDR (CLEAN_TX_COMPLETION_ADDR + 28u)
+#define CLEAN_TX_COMPLETION_HANDOFFS_ADDR (CLEAN_TX_START_HANDOFFS_ADDR + 4u)
+typedef struct {
+    uint32_t magic, latched, preserved, raw_conditions;
+    uint32_t request, pipeline;
+    uint32_t timeouts;
+} clean_tx_completion_status_t;
+_Static_assert(CLEAN_TX_COMPLETION_ADDR >= CLEAN_AUTH_FAILURE_ADDR + sizeof(clean_auth_failure_t) &&
+               CLEAN_TX_COMPLETION_ADDR + sizeof(clean_tx_completion_status_t) ==
+                   CLEAN_TX_START_HANDOFFS_ADDR &&
+               CLEAN_TX_COMPLETION_HANDOFFS_ADDR + 4u <= 0x20d00u &&
+               CLEAN_TX_COMPLETION_DETAIL >= 296u + 180u &&
+               CLEAN_TX_COMPLETION_DETAIL + sizeof(clean_tx_completion_status_t) <= 520u,
+               "Owned TX completion evidence must not overlap existing reports");
 _Static_assert(CLEAN_TX_CLEANUP_REQUEST >= CLEAN_RX_TRACE_SHM + CLEAN_RX_TRACE_WORDS &&
-               CLEAN_TX_CLEANUP_COUNT + 1u <= CLEAN_HT_EARLY_SHM,
+               CLEAN_TX_PRE_RESPONSE + 1u <= CLEAN_HT_EARLY_SHM,
                "TX cleanup state must not overlap receive evidence");
 #define CLEAN_DCF_REQUEST 0x681u
 #define CLEAN_DCF_SLOTS 0x682u
@@ -202,6 +222,37 @@ _Static_assert(CLEAN_TX_CLEANUP_REQUEST >= CLEAN_RX_TRACE_SHM + CLEAN_RX_TRACE_W
 #define CLEAN_TEST_ACK_MAX 16u
 #define CLEAN_DCF_FIRED 2u
 #define CLEAN_DCF_DEFERRED 3u
+#define CLEAN_TX_CLEANUP_ABORT 2u
+static inline uint16_t clean_dcf_cancel_request(uint16_t request) {
+    return request == CLEAN_DCF_FIRED ? CLEAN_DCF_FIRED : 0u;
+}
+
+static inline int clean_tx_phy_start_owned(uint16_t request, uint16_t pending,
+        uint16_t response, uint16_t completion, uint16_t ifs) {
+    return request == CLEAN_DCF_FIRED && pending == 1u && response == 0u &&
+        !(completion & CLEAN_TX_COMPLETION_CLOSED) && (ifs & 0x100u);
+}
+
+static inline int clean_tx_completion_owned(uint16_t request, uint16_t pending,
+        uint16_t response, uint16_t completion, uint16_t txe, uint16_t ifs) {
+    return request == CLEAN_DCF_FIRED && !pending && !response &&
+        !(completion & CLEAN_TX_COMPLETION_CLOSED) &&
+        (txe & 0x480u) == 0x400u && !(ifs & 0x100u);
+}
+
+static inline int clean_tx_completion_waiting(uint32_t started, uint32_t now,
+        uint32_t airtime) {
+    return now - started < airtime + 2000u;
+}
+
+static inline int clean_tx_incomplete_retryable(uint32_t conditions, uint16_t request,
+        uint16_t pending, uint16_t response, uint16_t txe, uint16_t ifs) {
+    return (conditions & ~CLEAN_TX_COMPLETION_CLOSED) == 5u &&
+        request == CLEAN_DCF_FIRED && !pending &&
+        !(txe & 0x80u) && !(ifs & 0x100u) &&
+        (response == 0u ? (conditions & CLEAN_TX_COMPLETION_CLOSED) || !(txe & 0x400u) :
+                         response == 2u && (txe & 0x400u));
+}
 #define CLEAN_MAC_RADIO_ADDR 0x20210u
 #define CLEAN_MAC_RADIO_MAGIC 0x3343414du
 #define CLEAN_MAC_TRACE_ADDR 0x20250u

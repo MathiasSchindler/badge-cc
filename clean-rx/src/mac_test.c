@@ -425,6 +425,13 @@ static void soak_protocol(void) {
     nonce[13] = 0u;
     uint8_t packet[CLEAN_TX_STORAGE_BYTES];
     clean_soak_status_t s = {.target = CLEAN_SOAK_MAX_FRAMES};
+    for (uint32_t wrap = 0u; wrap < 2u; ++wrap) {
+        uint32_t at = wrap ? 0xfffffff0u : 123u;
+        assert(clean_soak_close_pending(at, at));
+        assert(clean_soak_close_pending(at, at + CLEAN_SOAK_RETRY_US));
+        assert(clean_soak_close_pending(at, at + CLEAN_SOAK_CLOSE_US - 1u));
+        assert(!clean_soak_close_pending(at, at + CLEAN_SOAK_CLOSE_US));
+    }
     s.elapsed_us = 0xffffffffu; s.elapsed_hi = 1u;
     assert(clean_soak_elapsed(&s) == 8589934591ULL);
     s.elapsed_us = (uint32_t)CLEAN_SOAK_MAX_US;

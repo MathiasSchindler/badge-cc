@@ -1645,7 +1645,135 @@ static void transmit_cleanup(void) {
     r[CLEAN_TX_CLEANUP_COUNT] = 65535u;
     assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[CLEAN_TX_CLEANUP_REQUEST] &&
            !r[CLEAN_RESPONSE_PENDING] && !r[CLEAN_TX_CLEANUP_COUNT] && !phy_writes);
+    for (uint32_t fault = 0u; fault < 8u; ++fault) {
+        memset(r, 0, sizeof(r));
+        r[CLEAN_TX_CLEANUP_REQUEST] = CLEAN_TX_CLEANUP_ABORT;
+        r[CLEAN_DCF_REQUEST] = CLEAN_DCF_FIRED;
+        r[0x1087u] = 1u;
+        r[0x1081u] = 0xd0u;
+        r[0x601u] = 14u;
+        r[CLEAN_SHM_FRAME + 4u] = 0x108u;
+        if (fault == 1u) r[0x100du] = 0x1000u;
+        if (fault == 2u) r[0x1087u] |= 0x80u;
+        if (fault == 3u) r[0x1148u] = 0x100u;
+        if (fault == 4u) r[CLEAN_DCF_TX_PENDING] = 1u;
+        if (fault == 5u) r[CLEAN_RESPONSE_PENDING] = 1u;
+        if (fault == 6u) r[CLEAN_DCF_REQUEST] = 1u;
+        assert(psm_run(r, fault == 7u ? 2 : 0, TX_CLEANUP_ENTER) ==
+               (fault == 7u ? 130u : 124u));
+        assert(r[0x601u] == 14u && r[CLEAN_SHM_FRAME + 4u] == 0x108u);
+        assert(!phy_writes);
+        assert(r[CLEAN_TX_CLEANUP_REQUEST] == (fault ? CLEAN_TX_CLEANUP_ABORT : 0u));
+        assert(r[CLEAN_TX_CLEANUP_COUNT] == (fault ? 0u : 1u));
+        assert(r[0x1081u] == (fault ? 0xd0u : 0u));
+    }
     puts("PSM TX cleanup: RX priority, active RX/TX/drain deferral, owned completion and PHY register preservation; NOT RF");
+}
+
+static void transmit_completion(void) {
+    uint16_t r[0x1800];
+    for (uint32_t fault = 0u; fault < 8u; ++fault)
+        assert(clean_tx_completion_owned(fault == 1u ? 1u : 2u, fault == 2u,
+            fault == 3u ? 1u : fault == 4u ? 2u : 0u,
+            fault == 5u ? 5u | CLEAN_TX_COMPLETION_CLOSED : 5u,
+            fault == 6u ? 0x480u : fault == 7u ? 1u : 0x400u, 0u) == !fault);
+    assert(!clean_tx_completion_owned(2u, 0u, 0u, 5u, 0x400u, 0x100u));
+    for (uint32_t start = 0u; start < 2u; ++start) {
+        uint32_t at = start ? 0xfffffff0u : 123u;
+        assert(clean_tx_completion_waiting(at, at, 516u));
+        assert(clean_tx_completion_waiting(at, at + 2515u, 516u));
+        assert(!clean_tx_completion_waiting(at, at + 2516u, 516u));
+        assert(!clean_tx_completion_waiting(at, at + 100000u, 516u));
+    }
+    for (uint32_t request = 0u; request <= 65535u; ++request)
+        assert(clean_dcf_cancel_request((uint16_t)request) ==
+               (request == CLEAN_DCF_FIRED ? CLEAN_DCF_FIRED : 0u));
+    for (uint32_t fault = 0u; fault < 8u; ++fault)
+        assert(clean_tx_phy_start_owned(fault == 1u ? 1u : 2u,
+            fault == 2u ? 0u : fault == 3u ? 2u : 1u,
+            fault == 4u ? 1u : fault == 5u ? 2u : 0u,
+            fault == 6u ? CLEAN_TX_COMPLETION_CLOSED : 0u,
+            fault == 7u ? 0u : 0x100u) == !fault);
+    for (uint32_t conditions = 0u; conditions < 32u; ++conditions)
+        for (uint32_t fault = 0u; fault < 6u; ++fault)
+            assert(clean_tx_incomplete_retryable(conditions, fault == 1u ? 1u : 2u,
+                fault == 2u, fault == 3u, fault == 4u ? 0x80u : 1u,
+                fault == 5u ? 0x100u : 0u) ==
+                ((conditions == 5u || conditions == 13u) && !fault));
+    assert(!clean_tx_incomplete_retryable(5u, 2u, 0u, 0u, 0x400u, 0u));
+    assert(clean_tx_incomplete_retryable(13u, 2u, 0u, 0u, 0x400u, 0u));
+    assert(clean_tx_incomplete_retryable(5u, 2u, 0u, 2u, 0x401u, 0x2fu));
+    assert(!clean_tx_incomplete_retryable(5u, 2u, 0u, 2u, 1u, 0x2fu));
+    assert(!clean_tx_incomplete_retryable(5u, 2u, 0u, 2u, 0x481u, 0x2fu));
+    assert(!clean_tx_incomplete_retryable(5u, 2u, 0u, 2u, 0x401u, 0x12fu));
+    assert(!clean_tx_incomplete_retryable(5u, 2u, 0u, 1u, 0x401u, 0x2fu));
+    assert(!clean_tx_incomplete_retryable(5u, 2u, 0u, 3u, 0x401u, 0x2fu));
+    for (uint32_t fault = 0u; fault < 7u; ++fault) {
+        memset(r, 0, sizeof(r));
+        r[CLEAN_DCF_REQUEST] = CLEAN_DCF_FIRED;
+        r[CLEAN_DCF_REQUEST] = clean_dcf_cancel_request(r[CLEAN_DCF_REQUEST]);
+        r[0x1087u] = 0x400u;
+        if (fault == 1u) r[0x1087u] |= 0x80u;
+        if (fault == 2u) r[0x1087u] = 0u;
+        if (fault == 3u) r[0x1148u] = 0x100u;
+        if (fault == 4u) r[CLEAN_DCF_TX_PENDING] = 1u;
+        if (fault == 5u) r[CLEAN_RESPONSE_PENDING] = 2u;
+        if (fault == 6u) r[CLEAN_DCF_REQUEST] = 1u;
+        assert(psm_run(r, 1, ACK_TX_CLEAR) == 198u);
+        uint16_t expected = fault == 0u ? 7u : fault == 1u ? 6u :
+            fault == 2u ? 5u : fault == 3u ? 3u : 0u;
+        if (fault != 6u) expected |= CLEAN_TX_COMPLETION_CLOSED;
+        assert(r[CLEAN_TX_COMPLETION] == expected);
+        /* A fast peer reply replaces the data TX status with response status
+         * before the ARM's next poll. The data completion must survive. */
+        r[0x1087u] = 0xc1u;
+        r[0x1148u] = 0x2fu;
+        assert(r[CLEAN_TX_COMPLETION] == expected);
+        assert(psm_run(r, 0, DCF_IDLE) == 124u);
+        assert(r[CLEAN_TX_COMPLETION] == expected);
+    }
+    memset(r, 0, sizeof(r));
+    r[CLEAN_DCF_REQUEST] = CLEAN_DCF_FIRED;
+    r[0x1087u] = 1u;
+    assert(psm_run(r, 1, ACK_TX_CLEAR) == 198u);
+    assert((r[CLEAN_TX_COMPLETION] & 7u) == 5u && r[CLEAN_RESPONSE_PENDING] == 2u);
+    r[0x1087u] = 0x400u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[CLEAN_RESPONSE_PENDING]);
+    assert(psm_run(r, 0, DCF_IDLE) == 124u);
+    assert((r[CLEAN_TX_COMPLETION] & 7u) == 5u);
+    memset(r, 0, sizeof(r));
+    r[CLEAN_DCF_ENABLE] = 1u;
+    r[CLEAN_DCF_REQUEST] = CLEAN_DCF_FIRED;
+    r[CLEAN_DCF_TX_PENDING] = 1u;
+    r[0x1148u] = 0x100u;
+    r[0x1119u] = 1234u;
+    r[0x111au] = 7u;
+    assert(psm_run(r, 2, DCF_IDLE) == 130u);
+    assert(!r[CLEAN_DCF_TX_PENDING]);
+    assert(r[CLEAN_DCF_TX_LO] == 1234u && r[CLEAN_DCF_TX_HI] == 7u);
+    memset(r, 0, sizeof(r));
+    r[CLEAN_TX_COMPLETION] = 7u | CLEAN_TX_COMPLETION_CLOSED;
+    r[CLEAN_DCF_ENABLE] = r[CLEAN_DCF_REQUEST] = 1u;
+    r[CLEAN_DCF_IDLE_VALID] = 3u;
+    r[0x1148u] = 3u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u);
+    assert(r[CLEAN_DCF_REQUEST] == CLEAN_DCF_FIRED && !r[CLEAN_TX_COMPLETION]);
+    assert(r[CLEAN_DCF_TX_PENDING]);
+    r[0x1087u] = 0x400u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[CLEAN_TX_COMPLETION]);
+    r[0x1148u] |= 0x100u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[CLEAN_DCF_TX_PENDING]);
+    r[0x1148u] &= (uint16_t)~0x100u;
+    assert(psm_run(r, 0, DCF_IDLE) == 124u && r[CLEAN_TX_COMPLETION] == 7u);
+    memset(r, 0, sizeof(r));
+    r[CLEAN_DCF_REQUEST] = CLEAN_DCF_FIRED;
+    r[0x1087u] = 0x400u;
+    r[0x1148u] = 0x100u;
+    assert(psm_run(r, 2, DCF_IDLE) == 130u && r[CLEAN_TX_COMPLETION] == 3u);
+    r[0x1087u] = 1u;
+    r[0x1148u] = 0u;
+    assert(psm_run(r, 0, ACK_ENTER) == 198u && r[CLEAN_TX_COMPLETION] == 7u);
+    puts("PSM TX completion: delayed ARM polling survives response status reuse; busy, no-done, pending PHY/response, new submission and stale-owner controls pass; NOT RF");
 }
 
 static void aggregate_handoff_trace(void) {
@@ -2562,6 +2690,7 @@ int main(void) {
     aggregate_interface_trace();
     aggregate_probe_trace();
     transmit_cleanup();
+    transmit_completion();
     ht_qos_acknowledgements();
     ack_capture_evidence();
     assert(psm_ucode_byte_count == sizeof(psm_ucode_bytes));

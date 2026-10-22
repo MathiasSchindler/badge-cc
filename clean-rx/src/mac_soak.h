@@ -16,7 +16,32 @@
 #define CLEAN_SOAK_PAYLOADS 7u
 #define CLEAN_SOAK_FRAGMENT_DETAIL (CLEAN_SOAK_DETAIL + 64u)
 #define CLEAN_SOAK_FRAGMENT_MAGIC 0x3147534du
+#define CLEAN_SOAK_PROGRESS_DETAIL 720u
+#define CLEAN_SOAK_PROGRESS_MAGIC 0x3150534du
+#define CLEAN_SOAK_NO_RESULT 0xffffffffu
+#define CLEAN_SOAK_RETRY_US 2000000u
+#define CLEAN_SOAK_CLOSE_US (CLEAN_SOAK_RETRY_US + 100000u)
+#define CLEAN_SOAK_SNAPSHOT_FROZEN 1u
+#define CLEAN_SOAK_SNAPSHOT_MAILBOX 2u
+#define CLEAN_SOAK_SNAPSHOT_FULL 4u
 #define CLEAN_SOAK_FAULT_DETAIL 1920u
+
+enum {
+    CLEAN_SOAK_SETUP = 1u, CLEAN_SOAK_READY, CLEAN_SOAK_SEND,
+    CLEAN_SOAK_RECEIVE, CLEAN_SOAK_FINISHED, CLEAN_SOAK_CLOSING
+};
+
+typedef struct {
+    uint32_t magic, ready_us, first_send_us, first_result_us, first_rx_us;
+    uint32_t phase, index, fragment, attempts, result;
+    uint32_t ref_before, tick_cycles_before, ref_after, tick_cycles_after, sys_khz_q5;
+    uint32_t snapshot_flags, snapshot_stop_error, phy_start_handoffs, completion_handoffs;
+    uint32_t closing_duplicates;
+} clean_soak_progress_t;
+
+_Static_assert(sizeof(clean_soak_progress_t) == 80u &&
+               CLEAN_SOAK_PROGRESS_DETAIL + sizeof(clean_soak_progress_t) <= 800u,
+               "Soak progress must fit before station diagnostic records");
 
 _Static_assert(CLEAN_SOAK_FAULT_DETAIL + 2u * CLEAN_RX_FAULT_WORDS <= 1960u,
                "RX fault report must not overlap fixture inputs");
@@ -37,7 +62,8 @@ typedef struct {
 } clean_soak_fragment_status_t;
 
 _Static_assert(sizeof(clean_soak_fragment_status_t) == 100u &&
-               CLEAN_SOAK_FRAGMENT_DETAIL + sizeof(clean_soak_fragment_status_t) <= 720u,
+               CLEAN_SOAK_FRAGMENT_DETAIL + sizeof(clean_soak_fragment_status_t) <=
+                   CLEAN_SOAK_PROGRESS_DETAIL,
                "Fragment evidence must fit before other diagnostic records");
 
 static inline uint32_t clean_soak_fragments(const uint8_t nonce[14]) {
@@ -66,6 +92,10 @@ typedef struct {
 } clean_soak_status_t;
 
 _Static_assert(sizeof(clean_soak_status_t) == 64u, "MSK3 status wire layout");
+
+static inline int clean_soak_close_pending(uint32_t started, uint32_t now) {
+    return now - started < CLEAN_SOAK_CLOSE_US;
+}
 
 static inline uint64_t clean_soak_elapsed(const clean_soak_status_t *s) {
     return ((uint64_t)s->elapsed_hi << 32u) | s->elapsed_us;

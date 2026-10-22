@@ -1,6 +1,11 @@
 # Bounded legacy fragmentation qualification
 
 Date: 2026-10-22. A2/A3 implementation progress; A1/A2/A3 remain incomplete.
+Subsequent work adds
+[completion-timeout recovery, failure localization and longer RF trials](MAC_RELIABILITY_RECOVERY.md),
+including timer-reference, response-retirement, PHY-start and held-RX
+completion fixes and a final-reply retry grace;
+the original failures below remain part of the evidence.
 All implementation, fixture, host and test changes stay under `clean-rx/`;
 the root roadmap only links to this status.
 

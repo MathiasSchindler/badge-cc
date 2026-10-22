@@ -32,12 +32,26 @@ See [MAC implementation and evidence](clean-rx/badge/README.md#milestone-a-mac-i
 
 ### A1. Correct medium access
 
+Bounded backoff/timeout implementation and native NAV/EIFS/overlap controls
+are recorded in [MAC reliability recovery](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md).
+Controlled RF contention and timing qualification remain open.
+
 - [ ] Complete carrier/NAV sensing, interframe spacing, random backoff,
   freezing/resumption and contention-window updates.
 - [ ] Test idle/busy/overlapping traffic, NAV expiry and retry exhaustion.
 - [ ] Independently verify RF channel access under controlled contention.
 
 ### A2. Reliable ACKs and retransmissions
+
+Fired-request ownership and explicit, bounded recovery of quiescent
+TX-completion timeouts are implemented and hardware-tested; see
+[recovery evidence and unresolved causes](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md).
+Failed attempts remain TIMEOUTs, not successful completions.
+Completed automatic-response status is never credited as Data success.
+Follow-up localization fixes timer reference, response-retirement ownership
+and missed PHY-start observations; completion waits are elapsed-time bounded.
+Live failure snapshots are explicitly labelled, and the fixture keeps RX
+active for the peer's bounded final-reply retries.
 
 - [ ] Complete response-rate/preamble selection, turnaround, bounded retries
   and meaningful completion reporting.
@@ -50,6 +64,19 @@ See [MAC implementation and evidence](clean-rx/badge/README.md#milestone-a-mac-i
 Bounded legacy fragmentation/retry implementation and paired-badge evidence
 are recorded in [fragmentation qualification](clean-rx/dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
 This is partial A2/A3 progress, not the sustained/interoperability gate below.
+Follow-up [recovery trials](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md)
+passed 1,000 maximum-size MSDUs per direction for both two- and
+sixteen-fragment profiles, including explicit completion-timeout recovery.
+Earlier sixteen-fragment and 5,000-per-direction mixed-size controls passed;
+the 100,000-per-direction gate failed. Follow-up trials localized mailbox
+stalls, mid-run ACKed-but-undelivered replies and premature final-reply
+shutdown. A later exact long replay reached 64,003 deliveries per endpoint
+before ACK exhaustion, with unexpected ACK-suppression state on its peer;
+it is not a passing 100,000-frame gate. First-no-reception behavior also
+remains unresolved. A1/A2/A3 are not complete.
+The latest build passes 5,000 mixed-size exchanges per direction and
+lost-final-ACK closing controls in both roles; its fragmented trial lost
+the initiator's USB report, so it is not a new fragmented qualification.
 
 - [ ] Complete duplicate, fragmentation, RTS/CTS and protection handling.
 - [ ] Verify malformed frames, bad FCS, saturation and DMA/credit boundaries.

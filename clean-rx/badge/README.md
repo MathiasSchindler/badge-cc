@@ -727,6 +727,87 @@ cover all existing PHY/preamble selections, but this new RF evidence is only
 [complete trial/failure record](../dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
 A1/A2/A3 remain incomplete.
 
+### Quiescent TX-completion timeout recovery
+
+Profile 3 now preserves fired ownership across an access-cancellation race and
+latches each Data submission's MAC/PHY completion conditions separately, before
+RX priority handling and automatic response setup. A fresh trigger clears the
+previous submission's evidence. The original TX diagnostic/mailbox is unchanged.
+
+A missing TXE done event is **not success**. If PHY start was observed and
+the MAC/PHY are quiescent without PHY error, the attempted submission can
+return `CLEAN_UNICAST_TIMEOUT` rather than terminating the controller when
+there is no response owner, or when a completed response owns raw done status.
+Response completion never establishes Data success; active/incomplete response
+ownership remains fatal. The timeout counts against the existing retry bound
+and grows CW.
+PSM cleanup independently rechecks RX/TX/ownership hazards before resetting
+template controls, preserving held RX captures. Further TX defers until cleanup.
+The caller retries the same sequence/fragment/body; protected retries retain
+their existing ciphertext/PN behavior. Other completion faults remain fatal.
+
+A separate 28-byte `MTC1` record at controller address `0x204f0` is copied to
+detail offset 492 for station/soak reports. JSON exposes
+`mac_tx_completion_report`, `mac_tx_completion_latched`,
+`mac_tx_completion_preserved`, `mac_tx_completion_raw`,
+`mac_tx_completion_request`, `mac_tx_completion_pipeline` and
+`mac_tx_completion_timeouts`. The last counter distinguishes explicit
+missing-completion TIMEOUTs from ordinary lost-ACK timeouts; it is included in,
+not added to, normal attempt/timeout accounting. Retained bits are 1 = MAC not
+busy, 2 = MAC done, 4 = PHY idle and 8 = sampling closed before response
+reuse. Only the lower three bits establish complete Data evidence; retired
+response status cannot fill missing Data bits. These are local engine observations,
+not RF timing evidence.
+
+Build `7f4875b7` passed 1,000 maximum-size MSDUs per direction in each of the
+two-/sixteen-fragment profiles, plus 5,000 mixed-size MSDUs per direction
+across sequence wrap. All passing runs deliberately suppressed two ACKs per
+endpoint and reported zero corruption, duplicate application delivery or
+ordering errors. An eight-suppressed-ACK negative trial verified eight
+failed attempts, CW 1023 and no false success/controller fault.
+That build's 100,000-per-direction mixed-size attempt stopped near 48,900
+MSDUs after a completed response blocked missing-Data-completion recovery.
+Earlier build `08ff63a8` includes that quiescent-response TIMEOUT case and passed
+1,000 sixteen-fragment MSDUs and 5,000 mixed-size MSDUs per direction.
+Its exact-challenge 100,000 retry failed immediately without eligible peer
+receptions. Its exhaustion negative correctly bounded eight attempts but
+suppressed only six eligible ACKs, not eight. These failures are retained;
+the sustained gate remains open.
+See [all trials, failed approaches and unresolved causes](../dev-doc/MAC_RELIABILITY_RECOVERY.md).
+The physical cause of the missing TXE event and a separate first-no-reception
+failure remain unresolved; this is explicit bounded recovery, not a claim that
+those underlying RF/event conditions have been eliminated.
+
+Follow-up localization fixes the badge's uninitialized TIMER0 reference,
+retired-response contamination of incomplete Data evidence, and RX-priority
+loss of an observable PHY-start pulse. Profile-3 completion now uses a
+single `airtime + 2,000 us` elapsed-time bound instead of three
+iteration-count waits. While PSM holds an RX capture, a guarded ARM observer
+can retain real Data completion only before any response reuse. Capture
+bytes and RX credits are not discarded.
+
+Soak JSON adds `progress_*`, `clock_*`, `host_submit_before_us`,
+`host_submit_after_us`, `host_report_us`, `snapshot_flags`,
+`snapshot_stop_error`, `mac_tx_phy_start_handoffs` and
+`mac_tx_completion_handoffs` and `closing_duplicates_suppressed`. The separate
+`MSP1` record at detail offset 720 is currently 80 bytes. Frozen complete
+snapshots have flags 7; live
+non-atomic snapshots have flags 6 and cannot pass acceptance. Per-fragment
+results start at `0xffffffff`, not stale success. Use a matching image and
+collector. First-send timing is command preparation, not an on-air timestamp.
+After its final reply delivery, the initiator services RX for the peer's
+existing two-second retry bound plus one 100-ms command bound, allowing a
+lost final ACK to be retried before shutdown. This does not increase retries
+or accept a duplicate application delivery.
+
+Latest build `d4ae73fb` passes those closing controls in both roles and a
+5,000-per-direction mixed-size run. Its fragmented run lost the initiator's
+USB device/report and is not a pass. The preceding `3bb01fa7` exact long
+replay reached 64,003 deliveries per endpoint before ACK exhaustion, with
+9 suppressed ACKs reported on a peer configured for 2. These distinct
+remaining failures, and initial no-reception failures, keep A1/A2/A3 open;
+the detailed record above retains all trials and verified flash restoration.
+
 ### Historical CCK fixture results
 
 Final build `9c3deabc`, channel 1, evidence prefix
