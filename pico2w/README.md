@@ -7,6 +7,12 @@ The default LLVM build takes no input from the badge directories. An optional
 owned-toolchain mode accepts an explicit directory of prebuilt compiler tools;
 the firmware sources remain entirely local.
 
+An additional [clean-rx radio lab](radio/README.md) builds a headless Pico UF2
+and separate badge A/B UF2s. It has physically exchanged fresh binary payloads
+between a Pico 2 W and both 2026 badges. This optional target reuses sources
+from the parent repository, requires LLVM/Make/libusb on the host, and is not
+part of the standalone USB-only build described below.
+
 ## Dependencies
 
 **Firmware:** none. The target uses project-owned C and a small assembly boot
@@ -122,9 +128,14 @@ report payload. Device communication is a separate hardware-qualification step.
 
 ## Hardware status and safety
 
-Builds and native tests are verified; **this target has not yet been flashed
-or physically qualified on a Pico 2 W**. Building or testing never opens a USB
-device, changes drivers, resets hardware, or flashes firmware.
+Builds and native tests are verified. An authorized 2026-10-22 trial of this
+USB-only image on A2 Pico `6572BE3E4636AF51` did not complete USB enumeration;
+automatic BOOTSEL recovery was observed. It is **not hardware-qualified**.
+The separate [radio target](radio/README.md) explicitly configures a 120 MHz
+system clock and passed live USB and three-device radio exchange on that Pico.
+That result does not qualify this unchanged inherited-clock USB-only image.
+Building or testing either target never opens a USB device, changes drivers,
+resets hardware, or flashes firmware.
 
 Installation would replace the selected device's current application.
 Save any needed firmware/data first, select the actual device explicitly, and
@@ -150,6 +161,7 @@ fails, physical BOOTSEL recovery is necessary.
 | [tools/](tools/) | Host-only, standard-library Python build and UF2 generation. |
 | [tests/](tests/) | Native protocol/control tests and Python image-packaging tests. |
 | [docs/](docs/) | Pico-specific protocol documentation. |
+| [radio/](radio/) | Optional repository-integrated clean-rx radio lab, separate headless Pico and display-capable badge images, collector and native tests. |
 
 The starting implementations were the badge project's `src/arch/rp2350/`,
 `src/usb/`, and `src/shared/usb_report.c`. They are local adaptations, not
