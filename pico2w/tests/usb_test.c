@@ -410,6 +410,35 @@ static void lora_tests(void) {
 }
 
 static uint32_t packet_after;
+static void link_submit_tests(void) {
+    usb_control_init(&control, build_id, chip_id);
+    configure();
+    uint8_t record[64], nonce[16] = {1};
+    usb_report_request(record, build_id, nonce);
+    usb_store_u32(record + 12, 3);
+    repair_crc(record);
+    setup(0x40, USB_LINK_SUBMIT, 0, 0, 64);
+    assert(control.action == USB_ACTION_STALL);
+    control.link_enabled = 1; control.lora_disabled = 1;
+    setup(0x40, USB_LORA_SUBMIT, 0, 0, 64);
+    assert(control.action == USB_ACTION_STALL);
+    setup(0x40, USB_LINK_SUBMIT, 0, 0, 64);
+    assert(control.action == USB_ACTION_OUT);
+    usb_control_complete(&control, 0, record, 64);
+    assert(control.phase == USB_PHASE_STATUS_IN && !control.lora_requested);
+    usb_control_complete(&control, 1, NULL, 0);
+    assert(control.lora_requested);
+    setup(0x40, USB_LINK_SUBMIT, 0, 0, 64);
+    assert(control.action == USB_ACTION_STALL);
+    usb_control_reset(&control);
+    configure();
+    usb_store_u32(record + 12, 2); repair_crc(record);
+    setup(0x40, USB_LINK_SUBMIT, 0, 0, 64);
+    usb_control_complete(&control, 0, record, 64);
+    assert(control.action == USB_ACTION_STALL && !control.lora_requested);
+    usb_control_init(&control, build_id, chip_id);
+    assert(!control.link_enabled);
+}
 static void fake_packet(void *context, uint32_t after, uint8_t *record) {
     assert(context == &packet_after);
     packet_after = after;
@@ -517,6 +546,7 @@ int main(void) {
     lora_tests();
     packet_tests();
     survey_tests();
+    link_submit_tests();
     puts("PASS: CRC, strict records, descriptors, EP0 sequencing, reports, LoRa, packets, survey, reset and recovery");
     return 0;
 }

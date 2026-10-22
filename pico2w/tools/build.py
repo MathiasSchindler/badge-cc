@@ -39,6 +39,10 @@ MONITOR_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
     "src/net/http.c",
     "src/app/dashboard.c",
 )
+LINK_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
+    "src/main_link_test.c", "src/lora/receiver.c", "src/lora/link_test.c",
+    "src/lora/packet_record.c",
+)
 
 
 def dashboard_assets(output):
@@ -117,7 +121,9 @@ def validate_image(image):
 
 
 def firmware(args):
-    output = BUILD / "monitor" if args.app == "monitor" else BUILD
+    output = BUILD / args.app if args.app in ("monitor", "link-test") else BUILD
+    if args.app == "link-test" and not args.confirm_waveshare:
+        raise ValueError("--app link-test requires --confirm-waveshare; enables bounded LoRa TX")
     if args.toolchain == "owned":
         output = output / "owned"
     output.mkdir(parents=True, exist_ok=True)
@@ -155,7 +161,8 @@ def firmware(args):
         "-Isrc/include", "-Isrc", "-I" + str(output),
     ]
     objects = []
-    sources = [ROOT / name for name in (MONITOR_SOURCES if args.app == "monitor" else SOURCES)]
+    sources = [ROOT / name for name in (MONITOR_SOURCES if args.app == "monitor" else
+                                       LINK_SOURCES if args.app == "link-test" else SOURCES)]
     if args.app == "monitor":
         sources.append(output / "wifi_assets_generated.c")
     for source in sources:
@@ -235,6 +242,7 @@ def tests(args):
         "network_test": ("src/net/network.c", "src/net/http.c"),
         "dashboard_test": ("src/app/dashboard.c", "src/net/http.c"),
         "activity_test": ("src/lora/activity.c",),
+        "link_test": ("src/lora/link_test.c", "src/usb/report.c"),
         "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c",
                           "src/lora/packet_record.c", "src/usb/report.c"),
         "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "tools/lorawan.c", "src/usb/report.c"),
@@ -268,7 +276,7 @@ def main():
     parser.add_argument("--host-cc", default="cc")
     parser.add_argument("--toolchain", choices=("llvm", "owned"), default="llvm")
     parser.add_argument("--owned-tools", type=Path, help="directory containing native badge compiler tools")
-    parser.add_argument("--app", choices=("probe", "monitor"), default="probe")
+    parser.add_argument("--app", choices=("probe", "monitor", "link-test"), default="probe")
     parser.add_argument("--credentials", type=Path, help="private UTF-8 two-line SSID/passphrase file")
     parser.add_argument("--wifi-firmware", type=Path, help="explicit original pinned CYW43439 data header")
     parser.add_argument("--wifi-nvram", type=Path, help="explicit original pinned board configuration header")

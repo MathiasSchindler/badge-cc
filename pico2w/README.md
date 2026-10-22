@@ -68,6 +68,10 @@ packet counts across 65 settings, with browser history and JSON export.
 Scanning interrupts normal single-profile reception; stopping restores it.
 Tests never connect to an AP or open USB/SPI hardware.
 
+The separate opt-in [SX1262 link test](docs/lora-link-test.md) adds bounded,
+host-triggered low-power LoRa transmissions for testing two HAT-equipped
+Picos. It does not enable transmission in the probe or monitor.
+
 ### Native Windows control and deployment
 
 The project-owned [picoctl C host tool](docs/picoctl.md) discovers USB devices,

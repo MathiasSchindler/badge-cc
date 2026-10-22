@@ -13,6 +13,7 @@
 #include "picoctl_protocol.h"
 #include "meshtastic.h"
 #include "lorawan.h"
+#include "../src/lora/link_test.h"
 
 static const GUID usb_guid = {0xa5dcbf10, 0x6530, 0x11d2,
                              {0x90, 0x1f, 0x00, 0xc0, 0x4f, 0xb9, 0x51, 0xed}};
@@ -32,6 +33,7 @@ typedef struct {
     const wchar_t *command, *image, *picotool, *path, *psk_file;
     char serial[17];
     wchar_t wide_serial[17];
+    char peer[17];
     uint32_t build, count, from_mhz, to_mhz;
     uint8_t sha256[32];
     DWORD timeout;
@@ -69,6 +71,8 @@ static void usage(void) {
          "picoctl wifi --serial HEX16 --build-id HEX8\n"
          "picoctl listen --serial HEX16 [--build-id HEX8] [--psk-file PATH] [--count N] [--hex]\n"
          "picoctl survey --serial HEX16 [--build-id HEX8] [--from MHZ] [--to MHZ]\n"
+         "picoctl link-test --serial HEX16 --peer HEX16 --build-id HEX8\n"
+         "picoctl link-status --serial HEX16 --build-id HEX8\n"
          "picoctl bootsel --serial HEX16\n"
          "picoctl upload --serial HEX16 --build-id HEX8 --uf2 PATH --sha256 HEX64 --picotool PATH [--wait-ip]\n"
          "picoctl check-image --uf2 PATH --sha256 HEX64\n"
@@ -78,6 +82,8 @@ static void usage(void) {
          "--psk-file lines are \"CHANNEL_NAME BASE64_PSK\"; keys are used on this host only.\n"
          "The default LongFast channel key (AQ==) is always tried.\n"
          "survey measures received power per MHz (default 700..960, range 150..960; receive-only).\n"
+         "link-test transmits three bounded low-power LoRa challenges each way; requires the separate link-test firmware.\n"
+         "link-status never transmits. Attach suitable antennas before link-test.\n"
          "No driver installation, CDC baud reset, or arbitrary-device selection.\n"
          "upload overwrites selected Pico firmware; status/list/check-image do not reset it.");
 }
@@ -91,7 +97,9 @@ static int parse(int argc, wchar_t **argv, options_t *o) {
     if (wcscmp(o->command, L"list") && wcscmp(o->command, L"status") && wcscmp(o->command, L"wifi") &&
         wcscmp(o->command, L"listen") && wcscmp(o->command, L"survey") &&
         wcscmp(o->command, L"bootsel") && wcscmp(o->command, L"upload") &&
-        wcscmp(o->command, L"check-image")) return failure(L"Unknown command.");
+        wcscmp(o->command, L"check-image") && wcscmp(o->command, L"link-test") &&
+        wcscmp(o->command, L"link-status"))
+        return failure(L"Unknown command.");
     unsigned seen = 0;
     for (int i = 2; i < argc; ++i) {
         const wchar_t *key = argv[i], *value;
@@ -166,10 +174,24 @@ static int parse(int argc, wchar_t **argv, options_t *o) {
             if (!*value || *end || mhz < 150 || mhz > 960)
                 return failure(L"--from/--to must be 150..960 MHz.");
             if (from) o->from_mhz = (uint32_t)mhz; else o->to_mhz = (uint32_t)mhz;
+        } else if (!wcscmp(key, L"--peer")) {
+            bit = 4096;
+            if (!ascii(value, text, sizeof(text)) || !picoctl_serial(text, o->peer))
+                return failure(L"--peer requires exactly 16 hexadecimal digits.");
         } else return failure(L"Unknown option.");
         if (seen & bit) return failure(L"Duplicate option.");
         seen |= bit;
     }
+    if (!wcscmp(o->command, L"link-test")) {
+        if (seen != (1u | 2u | 4096u) || o->wait_ip || o->hex)
+            return failure(L"link-test requires only --serial, --peer and --build-id.");
+        if (!strcmp(o->serial, o->peer)) return failure(L"Link-test devices must be distinct.");
+        return 1;
+    }
+    if (seen & 4096u) return failure(L"--peer is only valid for link-test.");
+    if (!wcscmp(o->command, L"link-status"))
+        return seen == (1u | 2u) && !o->wait_ip && !o->hex ? 1 :
+               failure(L"link-status requires only --serial and --build-id.");
     if (!wcscmp(o->command, L"listen")) {
         if (!o->has_serial) return failure(L"Explicit --serial is required.");
         if (seen & ~(1u | 2u | 32u | 64u | 128u | 256u | 512u) || o->wait_ip)
@@ -715,6 +737,164 @@ static int survey_spectrum(const options_t *o) {
     return 1;
 }
 
+static int link_status_read(usb_t *usb, uint32_t build, uint8_t record[64]) {
+    if (!transfer(usb, 0xc0, 0x56, 0, record, 64)) return 0;
+    if (usb_load_u32(record) != LINK_STATUS_MAGIC || record[4] != 1 || record[5] ||
+        record[6] != 64 || record[7] || usb_load_u32(record + 8) != build ||
+        usb_load_u32(record + 60) != usb_crc32(record, 60) ||
+        usb_load_u32(record + 48) != LINK_FREQUENCY_HZ ||
+        usb_load_u32(record + 52) != LINK_INTERVAL_MS ||
+        usb_load_u32(record + 56) != LINK_MAX_ATTEMPTS)
+        return failure(L"Not the expected bounded LoRa link-test firmware.");
+    if (usb_load_u32(record + 16) != SX1262_RX_RUNNING || usb_load_u32(record + 20) ||
+        usb_load_u32(record + 32) || usb_load_u32(record + 36)) {
+        fprintf(stderr, "Link radio unhealthy: state=%lu rx_error=%ld tx_error=%ld restore_error=%ld\n",
+                (unsigned long)usb_load_u32(record + 16), (long)(int32_t)usb_load_u32(record + 20),
+                (long)(int32_t)usb_load_u32(record + 32), (long)(int32_t)usb_load_u32(record + 36));
+        uint8_t diagnostic[64];
+        if (transfer(usb, 0xc0, 0x58, 0, diagnostic, sizeof(diagnostic)) &&
+            usb_load_u32(diagnostic) == LINK_STATUS_MAGIC &&
+            usb_load_u32(diagnostic + 60) == usb_crc32(diagnostic, 60))
+            fprintf(stderr, "Radio diagnostic: opcode=0x%02lx response=0x%08lx status=0x%02lx device_errors=0x%04lx app_error=%ld\n",
+                    (unsigned long)usb_load_u32(diagnostic + 12), (unsigned long)usb_load_u32(diagnostic + 16),
+                    (unsigned long)usb_load_u32(diagnostic + 20), (unsigned long)usb_load_u32(diagnostic + 24),
+                    (long)(int32_t)usb_load_u32(diagnostic + 28));
+        return 0;
+    }
+    return 1;
+}
+
+static int link_status(const options_t *o) {
+    usb_t usb = {INVALID_HANDLE_VALUE, NULL};
+    if (discover(o, 0, 0, &usb) != 1) return failure(L"Selected link-test runtime not found.");
+    uint8_t r[64];
+    int ok = identify(&usb, o, 1) && link_status_read(&usb, o->build, r);
+    if (ok) printf("{\"serial\":\"%s\",\"build_id\":\"%08lx\",\"state\":\"receiving\","
+                   "\"attempts\":%lu,\"transmitted\":%lu,\"received\":%lu,\"crc_errors\":%lu,"
+                   "\"uptime_ms\":%lu,\"frequency_hz\":%lu,\"automatic_transmissions\":false}\n",
+                   o->serial, (unsigned long)o->build, (unsigned long)usb_load_u32(r+24),
+                   (unsigned long)usb_load_u32(r+28), (unsigned long)usb_load_u32(r+40),
+                   (unsigned long)usb_load_u32(r+44), (unsigned long)usb_load_u32(r+12),
+                   (unsigned long)usb_load_u32(r+48));
+    usb_close(&usb);
+    return ok;
+}
+
+static int link_packet_read(usb_t *usb, uint32_t build, uint32_t after, picoctl_packet_t *packet) {
+    uint8_t record[PICOCTL_PACKET_SIZE];
+    if (!transfer_index(usb, 0xc0, 0x59, (USHORT)after, (USHORT)(after >> 16),
+                        record, sizeof(record))) return 0;
+    if (!picoctl_packet(record, build, packet)) return failure(L"Invalid link packet USB record.");
+    return 1;
+}
+
+static int link_exchange(usb_t *sender, usb_t *receiver_usb, const options_t *o,
+                          const char *from, const char *to, uint32_t *cursor) {
+    uint8_t record[64], nonce[16], id[8];
+    if (!link_status_read(sender, o->build, record)) return 0;
+    uint32_t sequence = usb_load_u32(record + 24) + 1u;
+    if (BCryptGenRandom(NULL, nonce, sizeof(nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+        return failure(L"Link challenge generation failed.");
+    usb_report_request(record, o->build, nonce);
+    usb_store_u32(record + 12, 3u);
+    usb_store_u32(record + 60, usb_crc32(record, 60));
+    if (!transfer(sender, 0x40, 0x5b, 0, record, sizeof(record))) return 0;
+    ULONGLONG deadline = GetTickCount64() + 3000;
+    int done = 0;
+    while (GetTickCount64() < deadline) {
+        Sleep(20);
+        if (!transfer(sender, 0xc0, 0x55, 0, record, sizeof(record))) return 0;
+        if (usb_load_u32(record) != USB_RESPONSE_MAGIC || usb_load_u32(record + 8) != o->build ||
+            usb_load_u32(record + 12) != 3u || memcmp(record + 16, nonce, sizeof(nonce)) ||
+            usb_load_u32(record + 60) != usb_crc32(record, 60))
+            return failure(L"Link transmit response integrity mismatch.");
+        if (usb_load_u32(record + 32) == 1u) { done = 1; break; }
+        if (usb_load_u32(record + 32) == 2u) {
+            fprintf(stderr, "Link transmission failed: %ld\n", (long)(int32_t)usb_load_u32(record + 36));
+            return 0;
+        }
+    }
+    if (!done) return failure(L"Timed out waiting for LoRa TxDone.");
+    if (!picoctl_hex(from, id, sizeof(id))) return failure(L"Invalid sender identity.");
+    uint32_t high = (uint32_t)id[0] << 24 | (uint32_t)id[1] << 16 | (uint32_t)id[2] << 8 | id[3];
+    uint32_t low = (uint32_t)id[4] << 24 | (uint32_t)id[5] << 16 | (uint32_t)id[6] << 8 | id[7];
+    deadline = GetTickCount64() + 3000;
+    while (GetTickCount64() < deadline) {
+        picoctl_packet_t packet;
+        if (!link_packet_read(receiver_usb, o->build, *cursor, &packet)) return 0;
+        if (packet.present) {
+            *cursor = packet.sequence;
+            const uint8_t *p = packet.payload;
+            if (!(packet.flags & SX1262_RX_CRC_ERROR) && packet.length == LINK_PACKET_SIZE &&
+                packet.frequency_hz == LINK_FREQUENCY_HZ && packet.sf == 7 && packet.bandwidth_khz == 125 &&
+                usb_load_u32(p) == LINK_PACKET_MAGIC && usb_load_u32(p + 4) == low &&
+                usb_load_u32(p + 8) == high && usb_load_u32(p + 12) == sequence &&
+                !memcmp(p + 16, nonce, sizeof(nonce)) && usb_load_u32(p + 32) == usb_crc32(p, 32)) {
+                printf("{\"from\":\"%s\",\"to\":\"%s\",\"sequence\":%lu,\"payload_verified\":true,"
+                       "\"frequency_hz\":%lu,\"sf\":7,\"bandwidth_khz\":125,\"tx_dbm\":0,"
+                       "\"rssi_dbm\":%.2f,\"snr_db\":%.2f}\n",
+                       from, to, (unsigned long)sequence, (unsigned long)LINK_FREQUENCY_HZ,
+                       packet.rssi_qdb / 4.0, packet.snr_qdb / 4.0);
+                fflush(stdout);
+                return 1;
+            }
+        }
+        Sleep(20);
+    }
+    return failure(L"No matching over-the-air challenge received; link NOT verified.");
+}
+
+static int link_pair(const options_t *o) {
+    options_t peer = *o;
+    memcpy(peer.serial, o->peer, sizeof(peer.serial));
+    for (unsigned i = 0; i < 17; ++i) peer.wide_serial[i] = (wchar_t)peer.serial[i];
+    usb_t devices[2] = {{INVALID_HANDLE_VALUE, NULL}, {INVALID_HANDLE_VALUE, NULL}};
+    int ok = 0;
+    if (discover(o, 0, 0, &devices[0]) != 1 || discover(&peer, 0, 0, &devices[1]) != 1) {
+        failure(L"Both selected runtime devices must be connected.");
+        goto cleanup;
+    }
+    if (!identify(&devices[0], o, 1) || !identify(&devices[1], &peer, 1)) goto cleanup;
+    uint8_t records[2][64];
+    uint32_t cursor[2];
+    for (unsigned i = 0; i < 2; ++i) {
+        picoctl_packet_t packet;
+        if (!link_status_read(&devices[i], o->build, records[i]) ||
+            !link_packet_read(&devices[i], o->build, 0, &packet)) goto cleanup;
+        cursor[i] = packet.newest;
+        if (usb_load_u32(records[i] + 24) > LINK_MAX_ATTEMPTS - 3u) {
+            failure(L"Insufficient per-boot transmit budget for three tests in each direction.");
+            goto cleanup;
+        }
+    }
+    puts("Bounded LoRa test: three fresh 36-byte challenges each way; 869.850 MHz, SF7/BW125, 0 dBm.");
+    puts("Waiting 20 seconds before the first transmission (also covers previous test runs).");
+    fflush(stdout);
+    Sleep(LINK_INTERVAL_MS);
+    for (unsigned n = 0; n < 6; ++n) {
+        unsigned from = n % 2, to = 1u - from;
+        ULONGLONG deadline = GetTickCount64() + LINK_INTERVAL_MS + 3000;
+        for (;;) {
+            if (!link_status_read(&devices[from], o->build, records[from])) goto cleanup;
+            uint32_t up = usb_load_u32(records[from] + 12);
+            if (up >= LINK_INTERVAL_MS) break;
+            if (GetTickCount64() >= deadline) { failure(L"Firmware uptime is not advancing."); goto cleanup; }
+            Sleep(100);
+        }
+        if (n) Sleep(LINK_INTERVAL_MS / 2u + 200u);
+        if (!link_exchange(&devices[from], &devices[to], o,
+                           from ? peer.serial : o->serial, to ? peer.serial : o->serial, &cursor[to]))
+            goto cleanup;
+    }
+    for (unsigned i = 0; i < 2; ++i)
+        if (!link_status_read(&devices[i], o->build, records[i])) goto cleanup;
+    puts("PASS: 3/3 verified packets in each direction; both radios restored to receive mode. No automatic transmissions.");
+    ok = 1;
+cleanup:
+    usb_close(&devices[0]); usb_close(&devices[1]);
+    return ok;
+}
+
 static int enter_bootsel(const options_t *o) {
     int boot = discover(o, 1, 0, NULL);
     if (boot < 0) return 0;
@@ -918,6 +1098,8 @@ int wmain(int argc, wchar_t **argv) {
     if (!wcscmp(options.command, L"wifi")) return wifi_status(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"listen")) return listen_packets(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"survey")) return survey_spectrum(&options) ? 0 : 1;
+    if (!wcscmp(options.command, L"link-test")) return link_pair(&options) ? 0 : 1;
+    if (!wcscmp(options.command, L"link-status")) return link_status(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"bootsel")) {
         if (!enter_bootsel(&options)) return 1;
         printf("{\"serial\":\"%s\",\"bootsel_observed\":true}\n", options.serial);

@@ -87,6 +87,22 @@ int wmain(int argc, wchar_t **argv) {
     assert(!parse(6, duplicate, &options));
     wchar_t *unknown[] = {L"picoctl", L"status", L"--unknown", L"anything"};
     assert(!parse(4, unknown, &options));
+    wchar_t *link_args[] = {L"picoctl", L"link-test", L"--serial", L"7C4918BAB9492C77",
+                            L"--peer", L"6D64320DF2BB57D8", L"--build-id", L"12345678"};
+    assert(parse(8, link_args, &options));
+    assert(!strcmp(options.peer, "6D64320DF2BB57D8") && options.build == 0x12345678);
+    assert(!parse(6, link_args, &options));
+    link_args[5] = L"7c4918bab9492c77";
+    assert(!parse(8, link_args, &options));
+    wchar_t *link_status_args[] = {L"picoctl", L"link-status", L"--serial", L"7C4918BAB9492C77",
+                                   L"--build-id", L"12345678", L"--wait-ip"};
+    assert(parse(6, link_status_args, &options));
+    assert(!parse(7, link_status_args, &options));
+    assert(!parse(4, link_status_args, &options));
+    link_args[5] = L"invalid";
+    assert(!parse(8, link_args, &options));
+    link_args[5] = L"6D64320DF2BB57D8"; link_args[1] = L"status";
+    assert(!parse(8, link_args, &options));
 
     wchar_t directory[MAX_PATH], path[MAX_PATH];
     assert(GetTempPathW(MAX_PATH, directory));

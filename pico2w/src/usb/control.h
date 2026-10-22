@@ -12,6 +12,7 @@
 #define USB_BOOTSEL 0x52u
 #define USB_INFO 0x53u
 #define USB_LORA_SUBMIT 0x54u
+#define USB_LINK_SUBMIT 0x5bu /* opt-in link-test app only; test ID 3 */
 #define USB_LORA_REPORT 0x55u
 #define USB_APP_STATUS 0x56u
 #define USB_WIFI_STATUS 0x58u
@@ -72,6 +73,7 @@ typedef struct {
     uint8_t lora_running;
     uint8_t lora_valid;
     uint8_t lora_disabled;
+    uint8_t link_enabled;
     uint8_t app_status_valid;
     uint8_t wifi_status_valid;
     uint8_t out_request;

@@ -110,6 +110,7 @@ void usb_control_init(usb_control_t *control, uint32_t build_id,
     control->rejected = 0u;
     control->lora_sequence = 0u;
     control->lora_disabled = 0u;
+    control->link_enabled = 0u;
     control->app_status_valid = 0u;
     control->wifi_status_valid = 0u;
     control->packet_source = 0;
@@ -264,9 +265,11 @@ void usb_control_setup(usb_control_t *control, const uint8_t setup[8]) {
             uint8_t info[12] = {'P', '2', 'W', 'L', 1u, 0u, 64u, 0u};
             usb_store_u32(info + 8u, control->build_id);
             send(control, info, sizeof(info), length);
-        } else if (type == 0x40u && request == USB_LORA_SUBMIT &&
+        } else if (type == 0x40u &&
+                   ((request == USB_LORA_SUBMIT && !control->lora_disabled) ||
+                    (request == USB_LINK_SUBMIT && control->link_enabled)) &&
                    length == USB_REPORT_SIZE && !control->lora_requested &&
-                   !control->lora_running && !control->lora_disabled) {
+                   !control->lora_running) {
             control->lora_valid = 0u;
             control->length = USB_REPORT_SIZE;
             control->action = USB_ACTION_OUT;
@@ -339,9 +342,10 @@ void usb_control_complete(usb_control_t *control, uint8_t in,
         }
     } else if (control->phase == USB_PHASE_DATA_OUT && !in && data != 0 &&
                length == USB_REPORT_SIZE) {
-        uint8_t lora = control->out_request == USB_LORA_SUBMIT;
+        uint8_t link = control->out_request == USB_LINK_SUBMIT;
+        uint8_t lora = control->out_request == USB_LORA_SUBMIT || link;
         if (usb_report_check_test(data, length, control->build_id,
-                                  lora ? 2u : USB_REPORT_TEST_ID) != USB_RECORD_OK) {
+                                  link ? 3u : lora ? 2u : USB_REPORT_TEST_ID) != USB_RECORD_OK) {
             stall(control);
             return;
         }
