@@ -138,6 +138,18 @@ int main(void) {
     no_report();
     begin(0u);
     assert(!state.overflow);
+    clicker_chord_t chord={0u,0u,0u,0u};
+    assert(!clicker_chord_update(&chord,0x18u,0x18u,0u) && !chord.blocked);
+    assert(!clicker_chord_update(&chord,0x19u,0x19u,100u) && chord.blocked);
+    assert(!clicker_chord_update(&chord,0x19u,0x19u,1000099u));
+    assert(clicker_chord_update(&chord,0x19u,0x19u,1000100u));
+    assert(!clicker_chord_update(&chord,0x19u,0x19u,2000100u));
+    assert(!clicker_chord_update(&chord,0u,0u,2000200u) && !chord.blocked);
+    assert(!clicker_chord_update(&chord,0x19u,0x19u,3000000u));
+    assert(!clicker_chord_update(&chord,0x09u,0x09u,3500000u));
+    assert(!clicker_chord_update(&chord,0x19u,0x19u,4000000u));
+    assert(!clicker_chord_update(&chord,0x19u,0x19u,4500000u));
+    assert(clicker_chord_update(&chord,0x19u,0x19u,5000000u));
     puts("PASS: board profile, five keys, debounce threshold, startup-held suppression,");
     puts("      tap/release ordering, backpressure, hold, reconnect, wrap and overflow");
     return 0;

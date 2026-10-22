@@ -146,6 +146,22 @@ int main(void) {
     assert(bt.rx_packets == 1u && badger_bytes_load_u32(ram + base + 0x200cu) == 8u);
 
     start();
+    uint8_t acl[CLICKER_BT_PACKET_MAX];
+    for (uint32_t i = 0u; i < sizeof(acl); ++i) acl[i] = (uint8_t)i;
+    acl[0] = 1u; acl[1] = 0x20u;
+    acl[2] = 0xfcu; acl[3] = 1u;
+    assert(clicker_bt_send(&bt, 2u, acl, sizeof(acl)) == 1);
+    assert(badger_bytes_load_u32(ram + base + 0x2000u) == 516u);
+    event(2u, acl, sizeof(acl));
+    assert(clicker_bt_receive(&bt, &type, output, sizeof(output), &length) == 1);
+    assert(type == 2u && length == sizeof(acl) && memcmp(output, acl, length) == 0);
+
+    start();
+    event(4u, completed, sizeof(completed));
+    assert(clicker_bt_receive(&bt, &type, output, sizeof(completed) - 1u, &length) == -1);
+    assert(bt.error == CLICKER_BT_PACKET && badger_bytes_load_u32(ram + base + 0x200cu) == 0u);
+
+    start();
     event(4u, completed, sizeof(completed));
     badger_bytes_store_u32(ram + base + 0x2008u, 4u);
     assert(clicker_bt_receive(&bt, &type, output, sizeof(output), &length) == 0);

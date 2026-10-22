@@ -118,6 +118,7 @@ static wifi_bus_result_t transfer(const wifi_wire_t *wire, const uint8_t *tx,
         address = window_base | (address & 0x7fffu);
         assert(size <= WIFI_FW_BACKPLANE_BLOCK && address+size <= sizeof(memory));
         assert((address & 0x7fffu) + size <= 0x8000u);
+        if (live_backplane) assert((address & 0xfffu) + size <= 0x1000u);
         if (cmd & 0x80000000u) {
             assert(tx_length >= size+4u && rx_length == 0u && (arm_reset || live_backplane));
             memcpy(memory+address, tx+4u, size);
@@ -316,6 +317,9 @@ int main(void) {
     for (uint32_t i = 0u; i < sizeof(bp_source); ++i) bp_source[i] = (uint8_t)(i * 7u);
     assert(wifi_firmware_backplane_write(0x7fc0u, bp_source, sizeof(bp_source)));
     assert(wifi_firmware_backplane_read(0x7fc0u, bp_result, sizeof(bp_result)));
+    assert(memcmp(bp_source, bp_result, sizeof(bp_source)) == 0);
+    assert(wifi_firmware_backplane_write(0xfffcu, bp_source, sizeof(bp_source)));
+    assert(wifi_firmware_backplane_read(0xfffcu, bp_result, sizeof(bp_result)));
     assert(memcmp(bp_source, bp_result, sizeof(bp_source)) == 0);
     assert(wifi_firmware_backplane_write32(0x10000u, 0x12345678u));
     uint32_t bp_value;

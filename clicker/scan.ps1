@@ -58,6 +58,8 @@ public static class ClickerBleScan {
 
 try {
     [ClickerBleScan]::Start($ExpectedAddress)
+    $scanStartedAt = [DateTimeOffset]::Now
+    $rebootedAt = $null
     Start-Sleep -Milliseconds 500
     if ([ClickerBleScan]::Status() -ne 'Started') {
         throw "Windows BLE watcher failed to start: $([ClickerBleScan]::Status())"
@@ -68,6 +70,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Advertising image flash/readback verification failed' }
         & $Picotool reboot --ser $Serial
         if ($LASTEXITCODE -ne 0) { throw 'Badge reboot failed' }
+        $rebootedAt = [DateTimeOffset]::Now
     }
     $received = New-Object 'System.Collections.Generic.List[string]'
     $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -83,6 +86,16 @@ try {
     }
     $log = "$PSScriptRoot\..\build\clicker\advertising-observation.txt"
     $received | Set-Content -LiteralPath $log
+    @{
+        scan_started_at = $scanStartedAt.ToString('o')
+        rebooted_at = if ($rebootedAt) { $rebootedAt.ToString('o') } else { $null }
+        scan_ended_at = [DateTimeOffset]::Now.ToString('o')
+        expected_address = $ExpectedAddress
+        serial = $Serial
+        image_sha256 = if ($FlashImage) { (Get-FileHash $FlashImage -Algorithm SHA256).Hash } else { $null }
+        count = $received.Count
+        advertisements = @($received.ToArray())
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$PSScriptRoot\..\build\clicker\advertising-observation.json"
     Write-Output "Captured $($received.Count) matching advertisements."
     $received | Select-Object -First 3
     $received | Select-Object -Last 1

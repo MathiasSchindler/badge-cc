@@ -17,6 +17,14 @@ typedef struct {
     uint8_t keys[CLICKER_QUEUE_SIZE];
     uint8_t head, count, release_pending, overflow;
 } clicker_input_t;
+typedef struct {
+    uint32_t started;
+    uint8_t blocked, all, fired;
+} clicker_chord_t;
+/* A/Left + Up + Down, continuously held; block reports until all controls
+   are released, including after an interrupted hold. */
+uint8_t clicker_chord_update(clicker_chord_t *chord, uint8_t raw,
+                              uint8_t stable, uint32_t tick);
 
 void clicker_input_init(clicker_input_t *state);
 /* A new connection discards offline clicks and waits for stable button releases. */

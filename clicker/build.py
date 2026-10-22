@@ -124,6 +124,10 @@ def tests(cc):
     for name, sources in [
         ("bluetooth", [HERE / "bluetooth.c", HERE / "test_bluetooth.c",
                        ROOT / "src" / "tools" / "diagnostics_logic.c"]),
+        ("security", [HERE / name for name in ("crypto.c", "bond.c", "test_security.c")] +
+                     [ROOT / "src" / "tools" / "diagnostics_logic.c"]),
+        ("host", [HERE / name for name in ("host.c", "gatt.c", "crypto.c", "bond.c", "test_host.c")] +
+                 [ROOT / "src" / "tools" / "diagnostics_logic.c"]),
         ("wifi-firmware", [ROOT / "src" / "host" / "tests" / "wifi_firmware_test.c",
                            ROOT / "src" / "radio" / "wifi_firmware.c",
                            ROOT / "src" / "radio" / "wifi_control.c",
@@ -169,6 +173,10 @@ def firmware(board, cc, app, host_cc):
         flags.append("-DCLICKER_CONTROLLER")
         if app == "advertise":
             flags.append("-DCLICKER_ADVERTISE")
+        if app == "hid":
+            flags.append("-DCLICKER_HID")
+            sources.extend(HERE / name for name in
+                           ("host.c", "gatt.c", "crypto.c", "bond.c", "flash.c", "hid.c"))
         sources.extend([
             HERE / "bluetooth.c", HERE / "controller.c", output / "vendor.S",
             ROOT / "src" / "platform" / "badger" / "wifi_board.c",
@@ -189,6 +197,8 @@ def firmware(board, cc, app, host_cc):
         objects.append(obj)
     elf, binary = output / "clicker.elf", output / "clicker.bin"
     linker = ROOT / "src" / "arch" / "rp2350" / "memmap_flash.ld"
+    if app == "hid":
+        linker = HERE / "memmap.ld"
     run([tool("ld.lld"), "-T", str(linker), "--gc-sections", "--fatal-warnings",
          "-Map=" + str(output / "clicker.map"), *map(str, objects), "-o", str(elf)])
     undefined = subprocess.check_output([tool("llvm-nm"), "--undefined-only", str(elf)], text=True)
@@ -196,7 +206,8 @@ def firmware(board, cc, app, host_cc):
         raise ValueError(f"unexpected runtime dependencies: {undefined}")
     run([tool("llvm-objcopy"), "-O", "binary", str(elf), str(binary)])
     image = binary.read_bytes()
-    if not 84 <= len(image) <= 4 * 1024 * 1024:
+    image_limit = 0x3fe000 if app == "hid" else 4 * 1024 * 1024
+    if not 84 <= len(image) <= image_limit:
         raise ValueError("invalid firmware length")
     stack, reset = struct.unpack_from("<2I", image)
     if stack != 0x20082000 or not reset & 1 or not 0x10000000 <= (reset & ~1) < 0x10000000 + len(image):
@@ -231,7 +242,7 @@ def firmware(board, cc, app, host_cc):
         raise ValueError("UF2 round trip mismatch")
     manifest.write_text(
         f"board={board}\napp={app}\n"
-        f"status={app}-diagnostic-no-hid\n"
+        f"status={'ble-hid-legacy-passkey-four-bonds' if app == 'hid' else app + '-diagnostic-no-hid'}\n"
         f"firmware_bytes={len(image)}\nuf2_sha256={hashlib.sha256(blocks).hexdigest()}\n",
         encoding="ascii")
     print(f"PASS: {uf2} ({len(image)} firmware bytes, no undefined symbols)")
@@ -240,7 +251,7 @@ def firmware(board, cc, app, host_cc):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--board", choices=("2025", "2026"))
-    parser.add_argument("--app", choices=("input", "controller", "advertise"), default="input")
+    parser.add_argument("--app", choices=("input", "controller", "advertise", "hid"), default="input")
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--cc", default="cc", help="native host tools/test compiler")
     parser.add_argument("--target-cc", default="clang")

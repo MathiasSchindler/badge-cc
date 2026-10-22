@@ -7,6 +7,10 @@
 #include "../src/radio/wifi_firmware.h"
 #include "../src/tools/diagnostics_logic.h"
 #include "../src/arch/rp2350/bootrom_reboot.h"
+#ifdef CLICKER_HID
+#include "hid.h"
+static uint8_t hid_running;
+#endif
 
 static badger_canvas_t *screen;
 static clicker_input_t *buttons;
@@ -76,6 +80,9 @@ static void draw(void) {
 
 static int service(void *context) {
     (void)context;
+#ifdef CLICKER_HID
+    if (hid_running) return 1;
+#endif
     uint32_t tick = now(0);
     clicker_input_sample(buttons, read_buttons(), tick);
     if (tick - drawn_at >= 250000u) {
@@ -83,10 +90,14 @@ static int service(void *context) {
         draw();
     }
     return
+#ifdef CLICKER_HID
+        tick - started_at < 30000000u;
+#else
 #ifdef CLICKER_ADVERTISE
         (cleaning_up || (buttons->stable & 2u) == 0u) && tick - started_at < 60000000u;
 #else
         (buttons->stable & 2u) == 0u && tick - started_at < 30000000u;
+#endif
 #endif
 }
 
@@ -189,7 +200,7 @@ static int advertise(void) {
         !advertise_command(0x2008u, data, sizeof(data)) ||
         !advertise_command(0x200au, &enabled, 1u)) return 0;
     advertising = complete = 1u;
-    phase = "ADVERTISING 25S - NO HID OR PAIRING";
+    phase = "BOUNDED ADVERTISING - NO HID/PAIRING";
     draw();
     uint32_t start = now(0);
     while (now(0) - start < 25000000u) {
@@ -211,6 +222,12 @@ void clicker_controller_run(badger_canvas_t *canvas, clicker_input_t *input,
     wifi_board_select_pio(1u);
     started_at = drawn_at = now(0);
     succeeded = (uint8_t)run_checks();
+#ifdef CLICKER_HID
+    if (succeeded) {
+        hid_running=1u;
+        clicker_hid_run(canvas,input,buttons_read,&bluetooth,address,acl_size,acl_count);
+    }
+#endif
 #ifdef CLICKER_ADVERTISE
     if (succeeded) succeeded = (uint8_t)advertise();
 #endif
