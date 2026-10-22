@@ -5,6 +5,7 @@
 #include "mac.h"
 #include "mac_soak.h"
 #include "sdio_ring.h"
+#include "tx_diag.h"
 #include "../badge/station_rx.h"
 
 static void fcs(uint8_t *m, uint32_t n) {
@@ -1055,7 +1056,86 @@ static void cck_ack_clock(void) {
     puts("CCK ACK clock: all rates/preambles/sizes and TSF wrap preserve the physical-tail ACK window across completion resampling; obsolete PHY-start expiry reproduced");
 }
 
+static void cck_abort_recovery(void) {
+    clean_tx_error_status_t base = {.magic=CLEAN_TX_ERROR_MAGIC, .valid=15u};
+    base.phase[CLEAN_TX_FIRED] = (clean_tx_phase_t){
+        .at=0xffffff00u, .phyctl=0x40u, .phyctl1=0x1002u, .owners=2u};
+    base.phase[CLEAN_TX_FIRST_ERROR] = (clean_tx_phase_t){
+        .at=0x1du, .error=0x10u, .txe=1u, .ifs=0x23u,
+        .phyctl=0x40u, .phyctl1=0x1002u, .owners=2u};
+    assert(clean_tx_cck_abort_retryable(&base, 0x10u, 280u));
+    clean_tx_error_status_t short_preamble = base;
+    short_preamble.phase[CLEAN_TX_FIRED].phyctl = 0x50u;
+    short_preamble.phase[CLEAN_TX_FIRST_ERROR].phyctl = 0x50u;
+    assert(clean_tx_cck_abort_retryable(&short_preamble, 0x10u, 280u));
+    short_preamble.phase[CLEAN_TX_FIRED].phyctl = 0x41u;
+    short_preamble.phase[CLEAN_TX_FIRST_ERROR].phyctl = 0x41u;
+    assert(!clean_tx_cck_abort_retryable(&short_preamble, 0x10u, 280u));
+    for (uint32_t before = 0u; before <= 0x30u; before += 0x10u) {
+        for (uint32_t after = 0x10u; after <= 0x30u; after += 0x10u) {
+            clean_tx_error_status_t sticky = base;
+            for (uint32_t i = 0u; i < 3u; ++i) sticky.phase[i].error = (uint16_t)before;
+            sticky.phase[CLEAN_TX_FIRST_ERROR].error = (uint16_t)after;
+            assert(clean_tx_cck_abort_retryable(&sticky, (uint16_t)after, 280u));
+        }
+    }
+    for (uint32_t fault = 0u; fault < 22u; ++fault) {
+        clean_tx_error_status_t s = base;
+        uint16_t final_error = 0x10u;
+        if (fault == 0u) s.magic = 0u;
+        if (fault == 1u) s.valid = 7u;
+        if (fault == 2u) s.phase[CLEAN_TX_PREPARE].error = 0x10u;
+        if (fault == 3u) s.phase[CLEAN_TX_ARMED].error = 0x10u;
+        if (fault == 4u) s.phase[CLEAN_TX_FIRED].error = 0x10u;
+        if (fault == 5u) final_error = 0x20u;
+        if (fault == 6u) s.phase[CLEAN_TX_FIRST_ERROR].error = 0x20u;
+        if (fault == 7u) s.phase[CLEAN_TX_FIRED].owners = 0x12u;
+        if (fault == 8u) s.phase[CLEAN_TX_FIRST_ERROR].owners = 0x202u;
+        if (fault == 9u) s.phase[CLEAN_TX_FIRST_ERROR].txe |= 0x80u;
+        if (fault == 10u) s.phase[CLEAN_TX_FIRST_ERROR].txe |= 0x400u;
+        if (fault == 11u) s.phase[CLEAN_TX_FIRST_ERROR].ifs |= 0x100u;
+        if (fault == 12u) s.phase[CLEAN_TX_FIRST_ERROR].ifs |= 0x400u;
+        if (fault == 13u) s.phase[CLEAN_TX_FIRED].phyctl |= 0x10u;
+        if (fault == 14u) s.phase[CLEAN_TX_FIRST_ERROR].phyctl1 ^= 0x800u;
+        if (fault == 15u) s.phase[CLEAN_TX_FIRST_ERROR].at = 0xffffff00u + 2281u;
+        if (fault == 16u) s.phase[CLEAN_TX_FIRST_ERROR].at = 0xfffffeffu;
+        if (fault == 17u) s.phase[CLEAN_TX_FIRST_ERROR].owners = 0x1002u;
+        if (fault == 18u) final_error = 0u;
+        if (fault == 19u) {
+            final_error = 0x40u;
+            s.phase[CLEAN_TX_FIRST_ERROR].error = final_error;
+        }
+        if (fault == 20u)
+            for (uint32_t i = 0u; i < 3u; ++i) s.phase[i].error = 0x40u;
+        if (fault == 21u) s.phase[CLEAN_TX_FIRST_ERROR].owners = 1u;
+        assert(!clean_tx_cck_abort_retryable(&s, final_error, 280u));
+    }
+    base.phase[CLEAN_TX_FIRST_ERROR].at = base.phase[CLEAN_TX_FIRED].at + 2280u;
+    assert(clean_tx_cck_abort_retryable(&base, 0x10u, 280u));
+    base.phase[CLEAN_TX_FIRST_ERROR].error = 0x40u;
+    assert(!clean_tx_cck_abort_retryable(&base, 0x40u, 280u));
+    base.phase[CLEAN_TX_FIRST_ERROR].error = 0x10u;
+    clean_tx_abort_status_t report = {.magic=CLEAN_TX_ABORT_MAGIC};
+    assert(clean_tx_abort_status_valid(&report, 0u));
+    report.count = 1u;
+    report.fired_at = base.phase[CLEAN_TX_FIRED].at;
+    report.first = base.phase[CLEAN_TX_FIRST_ERROR];
+    report.completion = 5u;
+    assert(clean_tx_abort_status_valid(&report, 1u));
+    assert(!clean_tx_abort_status_valid(&report, 0u));
+    report.before_error = 0x10u;
+    assert(!clean_tx_abort_status_valid(&report, 1u));
+    report.before_error = 0u;
+    report.completion = 7u;
+    assert(!clean_tx_abort_status_valid(&report, 1u));
+    report.completion = 5u;
+    report.first.owners = 0x202u;
+    assert(!clean_tx_abort_status_valid(&report, 1u));
+    puts("CCK PHY abort: owned long/short-CCK-only quiescence, known sticky/new status, unknown errors, timing boundary and TSF wrap pass; no completion credit");
+}
+
 int main(void) {
+    cck_abort_recovery();
     returned_ack();
     cck_ack_clock();
     pause_psm();

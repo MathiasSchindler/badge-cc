@@ -870,6 +870,37 @@ The known 1-Mbps/full-size truncation, sustained and independent ACK/SIFS/
 full-credit gates remain open. Both original full flashes were restored and
 independently verified; Pico is unchanged.
 
+### Owned CCK PHY-error retirement
+
+The earlier blanket nonzero-PHY-error exclusion is now narrowed for proven
+quiescent CCK incomplete transmissions. Known observed status `0x0010`,
+`0x0020` or `0x0030`, long or short preamble, can be retired through the
+ownership-checked abort/rearm handshake as a **failed attempt/TIMEOUT**.
+No Data completion, ACK or application delivery is credited. Existing retry
+limits, CW behavior and sequence/fragment/protected-byte identity remain
+unchanged; unknown bits, active hardware and unsafe ownership remain fatal.
+Status can be sticky across successful packets, so the guard preserves stable
+prepare/armed/fired baselines and checks current ownership and a bounded idle
+error sample instead of treating every nonzero bit as a fresh fault.
+
+Soak detail adds the 100-byte `TXP1` phase trace at 876 and the 40-byte `PTA1`
+sticky first-retirement/count record at 1960. JSON exposes `tx_phases`,
+`tx_select_operand`, `tx_select_readback`, `tx_plcp`, `tx_phy_aborts`,
+`tx_phy_abort_valid` and `tx_first_phy_abort`. The first-retirement record
+survives later successful attempts; the phase trace describes the last
+attempt. Its final phase is the first quiescent error sample, not necessarily
+the first assertion of a PHY error bit. Use matching firmware and collector.
+Acceptance validates both timeout bounds on the abort count and exact
+MPDU-attempt accounting, including fragmented MSDUs.
+
+The selector is correctly `0x0826` before trigger; later `0x082c` is engine
+state. Explicit PLCP refreshing was tested and removed because it did not
+fix the failures. The first guarded candidate recovers an actual `0x0010`
+event and passes six exact/repeated 100-MSDU controls. This does not establish
+the silicon meaning of those bits or eliminate the separate no-first-RX,
+1-Mbps truncation, sustained and independent RF-timing gates.
+See [provenance, guard and retained trials](../dev-doc/MAC_RELIABILITY_RECOVERY.md#cck-phy-error-retirement-and-retained-provenance).
+
 ### Historical CCK fixture results
 
 Final build `9c3deabc`, channel 1, evidence prefix

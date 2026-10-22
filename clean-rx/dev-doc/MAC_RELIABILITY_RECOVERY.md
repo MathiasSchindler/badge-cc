@@ -700,6 +700,73 @@ originals and match SHA256
 `2db102857596e0e680415be45b21ffb703a149c24ba9ee0b4950d008bf7ab3b3` (B).
 Both badges are left in BOOTSEL. Pico and shared infrastructure are untouched.
 
+## CCK PHY-error retirement and retained provenance
+
+Evidence for this follow-up is under `build/clean-rx/cck-error-20261022/`.
+The `observe-*`, `select-*` and `plcp-*` campaigns each retain three passing
+and three failed positive pairs. They replay the three previous failing
+challenges twice, rather than discarding unfavorable runs.
+
+The phase trace proves a current Data attempt can begin with zero PHY error
+and later report `0x0010`, with fired Data ownership, idle MAC/PHY and retained
+completion 5 (missing MAC-done). The selector computed by PSM and read back
+before triggering is correctly `0x0826`; the later `0x082c` value is engine
+state, not evidence of an incorrectly constructed selector. Refreshing the
+legacy PLCP registers explicitly did not eliminate failures and was removed.
+`D11+0x3ee` is the PHY-TX-error register, but no verified meaning for its
+individual bits has been established. Do not label `0x0010` an underrun.
+
+The first guarded retirement (`abort-*`) passes all six exact/repeated
+controls. One actual `0x0010` failure is retired on badge B in `exact-two`,
+after which both endpoints finish 100 cyclic-size deliveries. Broader
+testing of the long/fresh-error-only candidate (`692a5294`, `final-*`)
+also exposes short-preamble errors, fresh `0x0020`, and a `0x0020` baseline
+followed by `0x0030`. PHY error bits can remain latched across successful
+packets; nonzero status alone does not prove a fresh fault.
+
+### Guard and reporting
+
+The new guard supersedes the blanket zero-error exclusion only for an owned,
+quiescent **CCK** incomplete transmission with observed status limited to
+`0x0010`, `0x0020` or `0x0030`, using either preamble. It requires:
+
+- stable prepare/armed/fired error baselines containing no unknown bits;
+- matching final and first quiescent-error samples within `airtime + 2,000 us`;
+- unchanged fired CCK PHY/rate controls and exactly the current fired Data
+  owner, without pending start, response or cleanup ownership;
+- no current TXE busy/MAC-done or PHY TX/RX activity, retained completion
+  exactly 5, and an observed physical CCK tail that has ended.
+
+The paused-PSM cleanup handshake independently rechecks ownership and RX/TX
+hazards before abort/rearm. This is a failed attempted submission: it increments
+the engine timeout count, returns TIMEOUT, grows CW and consumes one of the
+existing eight attempts. It does not invent Data completion, an ACK or delivery.
+Existing sequence/fragment, Retry/FCS and protected-byte/PN retry behavior is
+unchanged. Unknown bits, unsafe ownership, active hardware and non-CCK faults
+remain fatal. This is bounded recovery, not proof that the underlying PHY
+condition has been eliminated or its silicon cause identified.
+
+`TXP1` at SRAM `0x20560`, detail 876, is 100 bytes. It retains validity,
+computed/read-back selector, three PLCP words and four 20-byte phase samples:
+prepare, armed, fired and first **quiescent** error. Each sample has a timestamp,
+PHY error, TXE/IFS state, PHY controls, remaining template bytes, selector and
+packed ownership. The last phase is not necessarily the first raw assertion
+of an error bit.
+
+`PTA1` at SRAM `0x205c4`, detail 1960, is 40 bytes and ends at detail 2000,
+before fixture mode/channel. It retains a count and the first retired
+attempt's fired timestamp, three baseline errors, completion and error phase
+even after later successful retries replace ordinary TX diagnostics.
+Collector acceptance requires valid report operands, count no greater than
+engine/application timeouts, and exact attempts = ACKed MPDUs + timeouts.
+Fragmented MSDUs therefore contribute their actual fragment count.
+
+Default, HT-response/WMM/EDCA and opt-in HT/SHM Block-ACK controller/badge
+builds and native sanitizer suites pass. Native tests cover known sticky/new
+status combinations, both preambles, timestamp wrap, busy/response/cleanup
+ownership, unknown bits, unstable baselines and malformed report accounting.
+These are not independent RF timing measurements.
+
 ## Borrowed hardware restoration
 
 Both full 16 MiB original flashes were backed up and verified before testing.

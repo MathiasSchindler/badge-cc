@@ -1847,6 +1847,8 @@ static void transmit_completion(void) {
     r[0x1148u] = 3u;
     assert(psm_run(r, 0, DCF_IDLE) == 124u);
     assert(r[CLEAN_DCF_REQUEST] == CLEAN_DCF_FIRED && !r[CLEAN_TX_COMPLETION]);
+    assert(r[CLEAN_TX_SELECT_OPERAND] == 0x0826u &&
+           r[CLEAN_TX_SELECT_READBACK] == 0x0826u);
     assert(r[CLEAN_DCF_TX_PENDING]);
     r[0x1087u] = 0x400u;
     assert(psm_run(r, 0, DCF_IDLE) == 124u && !r[CLEAN_TX_COMPLETION]);

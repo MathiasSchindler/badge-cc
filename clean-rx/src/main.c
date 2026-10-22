@@ -600,6 +600,25 @@ static uint32_t mac_now(void) {
     return mmio_read32(D11_BASE + (station_hw ? 0x180u : 0x1cu));
 }
 
+static void station_tx_phase(uint32_t index) {
+    volatile clean_tx_error_status_t *s =
+        (volatile clean_tx_error_status_t *)CLEAN_TX_ERROR_ADDR;
+    volatile clean_tx_phase_t *p = &s->phase[index];
+    p->at = mac_now();
+    p->error = mmio_read16(D11_BASE + 0x3eeu);
+    p->txe = mmio_read16(D11_BASE + 0x50eu);
+    p->ifs = mmio_read16(D11_BASE + 0x690u);
+    p->phyctl = mmio_read16(D11_BASE + 0x50cu);
+    p->phyctl1 = mmio_read16(D11_BASE + 0x514u);
+    p->bytes = mmio_read16(D11_BASE + 0x56au);
+    p->select = mmio_read16(D11_BASE + 0x568u);
+    p->owners = shm_read16(CLEAN_DCF_REQUEST) |
+        (shm_read16(CLEAN_DCF_TX_PENDING) << 4u) |
+        (shm_read16(CLEAN_RESPONSE_PENDING) << 8u) |
+        (shm_read16(CLEAN_TX_CLEANUP_REQUEST) << 12u);
+    s->valid |= 1u << index;
+}
+
 static void station_bad_rx(uint32_t now) {
     if (!station_edca.enabled) clean_dcf_bad_rx(&station_legacy_dcf, now);
     else for (uint32_t i = 0u; i < 4u; ++i) clean_dcf_bad_rx(&station_edca.ac[i], now);
@@ -1390,6 +1409,12 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         (void)mmio_read32(D11_MACCONTROL);
         return 2;
     }
+    volatile clean_tx_error_status_t *tx_error =
+        (volatile clean_tx_error_status_t *)CLEAN_TX_ERROR_ADDR;
+    tx_error->magic = CLEAN_TX_ERROR_MAGIC;
+    tx_error->valid = 0u;
+    tx_error->select_operand = tx_error->select_readback = 0u;
+    station_tx_phase(CLEAN_TX_PREPARE);
     if (station_hw) shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
     MBOX->rc_dacbuf = 0x55550001u;
     phy_tx_hw_configure(channel);
@@ -1496,8 +1521,10 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
             shm_write16(CLEAN_DCF_ACK_US,
                 (uint16_t)(airtime + ack_timeout));
         }
+        station_tx_phase(CLEAN_TX_ARMED);
         int access = station_wait_access(mac_tx_ctl | 2u, ack_sent, cts_sent);
         if (access != 1) return access;
+        station_tx_phase(CLEAN_TX_FIRED);
         if (!station_hw) {
             mmio_write32(D11_MACCONTROL, mac_tx_ctl);
             (void)mmio_read32(D11_MACCONTROL);
@@ -1547,6 +1574,10 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
             station_service_tx();
             uint16_t txe = mmio_read16(D11_BASE + 0x50eu);
             uint16_t ifs = mmio_read16(D11_BASE + 0x690u);
+            if (!(tx_error->valid & (1u << CLEAN_TX_FIRST_ERROR)) &&
+                !(txe & 0x480u) && !(ifs & 0xf00u) &&
+                mmio_read16(D11_BASE + 0x3eeu))
+                station_tx_phase(CLEAN_TX_FIRST_ERROR);
             st_50e_seen |= txe;
             st_690_seen |= ifs;
             if (!(txe & 0x80u)) raw_conditions |= 1u;
@@ -1642,6 +1673,11 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     tx_diag.mac_complete_us = mac_now();
     tx_diag.status_after = tx_status();
     tx_diag.phy_error = mmio_read16(D11_BASE + 0x3eeu);
+    tx_error->select_operand = shm_read16(CLEAN_TX_SELECT_OPERAND);
+    tx_error->select_readback = shm_read16(CLEAN_TX_SELECT_READBACK);
+    for (uint32_t i = 0u; i < 3u; ++i)
+        tx_error->plcp[i] = mmio_read16(D11_BASE + 0x5c0u + 2u * i);
+    tx_error->reserved = 0u;
     tx_diag.psm_debug = mmio_read32(D11_BASE + 0x154u);
     if (station_hw) {
         completion_by_arm |= station_observe_tx_completion();
@@ -1676,10 +1712,27 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         (void)mmio_read32(D11_MACCONTROL);
         phy_tx_set_inhibit(1);
     }
-    uint32_t incomplete = station_hw && phy_drained && !tx_diag.phy_error &&
+    uint32_t quiescent = station_hw && phy_drained &&
         clean_tx_incomplete_retryable(TX_COMPLETION->latched, TX_COMPLETION->request,
             shm_read16(CLEAN_DCF_TX_PENDING), shm_read16(CLEAN_RESPONSE_PENDING),
             mmio_read16(D11_BASE + 0x50eu), mmio_read16(D11_BASE + 0x690u));
+    uint32_t phy_aborted = quiescent && TX_COMPLETION->latched == 5u &&
+        !shm_read16(CLEAN_RESPONSE_PENDING) && cck_ack_window && cck_tx_tail.ended &&
+        clean_tx_cck_abort_retryable(tx_error, tx_diag.phy_error, airtime);
+    uint32_t incomplete = quiescent && (!tx_diag.phy_error || phy_aborted);
+    if (phy_aborted) {
+        volatile clean_tx_abort_status_t *s =
+            (volatile clean_tx_abort_status_t *)CLEAN_TX_ABORT_ADDR;
+        if (!s->count) {
+            s->fired_at = tx_error->phase[CLEAN_TX_FIRED].at;
+            s->before_error = tx_error->phase[CLEAN_TX_PREPARE].error;
+            s->armed_error = tx_error->phase[CLEAN_TX_ARMED].error;
+            s->fired_error = tx_error->phase[CLEAN_TX_FIRED].error;
+            s->completion = (uint16_t)TX_COMPLETION->latched;
+            s->first = tx_error->phase[CLEAN_TX_FIRST_ERROR];
+        }
+        ++s->count;
+    }
     if (station_mac && phy_drained && (tx_conditions == 7u || incomplete)) {
         uint32_t control = mmio_read32(D11_MACCONTROL);
         mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(control));
@@ -1888,6 +1941,11 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
 #endif
     volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
     for (uint32_t i = 0u; i < 4u; ++i) tail[i] = 0u;
+    volatile clean_tx_abort_status_t *abort_status =
+        (volatile clean_tx_abort_status_t *)CLEAN_TX_ABORT_ADDR;
+    volatile uint8_t *abort_bytes = (volatile uint8_t *)abort_status;
+    for (uint32_t i = 0u; i < sizeof(*abort_status); ++i) abort_bytes[i] = 0u;
+    abort_status->magic = CLEAN_TX_ABORT_MAGIC;
     volatile uint8_t *ht_bytes = (volatile uint8_t *)HT_RX;
     for (uint32_t i = 0u; i < sizeof(*HT_RX); ++i) ht_bytes[i] = 0u;
     HT_RX->magic = CLEAN_HT_RX_MAGIC;

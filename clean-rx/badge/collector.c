@@ -790,6 +790,12 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         memcpy(&observed, detail + CLEAN_ACK_OBSERVE_DETAIL, sizeof(observed));
         clean_ack_arith_t arith;
         memcpy(&arith, detail + CLEAN_ACK_ARITH_DETAIL, sizeof(arith));
+        clean_tx_abort_status_t tx_abort;
+        memcpy(&tx_abort, detail + CLEAN_TX_ABORT_DETAIL, sizeof(tx_abort));
+        uint32_t engine_timeouts = usb_report_u32(detail + CLEAN_TX_COMPLETION_DETAIL +
+            __builtin_offsetof(clean_tx_completion_status_t, timeouts));
+        int abort_valid = clean_tx_abort_status_valid(&tx_abort, engine_timeouts) &&
+            tx_abort.count <= s.tx_timeouts;
         clean_unicast_status_t unicast;
         memcpy(&unicast, detail + 1000u, sizeof(unicast));
         uint8_t own[6];
@@ -844,6 +850,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         }
         int valid = s.magic == CLEAN_SOAK_STATUS_MAGIC && !usb_report_u32(detail + 8u) &&
             s.target == usb_report_u32(nonce + 8u) && s.tx_acked == s.target &&
+            s.tx_attempts == s.target * fragment_count + s.tx_timeouts && abort_valid &&
             s.received == s.target && !s.failure && !s.corrupt && !s.duplicates && !s.out_of_order &&
             s.rx_phy_checked == s.target && !s.rx_phy_mismatch &&
             usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 100u) == nonce[12] &&
@@ -955,6 +962,38 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             usb_report_u32(detail + 232u), usb_report_u32(detail + 236u));
         printf(",\"phy_465\":%u,\"phy_42c\":%u",
             usb_report_u32(detail + 240u), usb_report_u32(detail + 244u));
+        clean_tx_error_status_t tx_error;
+        if (tx_abort.magic == CLEAN_TX_ABORT_MAGIC) {
+            printf(",\"tx_phy_abort_valid\":%s,\"tx_phy_aborts\":%u,"
+                   "\"tx_first_phy_abort\":{\"fired_at\":%u,"
+                   "\"before_error\":%u,\"armed_error\":%u,\"fired_error\":%u,"
+                   "\"completion\":%u,\"at\":%u,\"error\":%u,\"txe\":%u,\"ifs\":%u,"
+                   "\"owners\":%u}", abort_valid ? "true" : "false",
+                   tx_abort.count, tx_abort.fired_at,
+                   tx_abort.before_error, tx_abort.armed_error, tx_abort.fired_error,
+                   tx_abort.completion, tx_abort.first.at, tx_abort.first.error,
+                   tx_abort.first.txe, tx_abort.first.ifs, tx_abort.first.owners);
+        }
+        memcpy(&tx_error, detail + CLEAN_TX_ERROR_DETAIL, sizeof(tx_error));
+        if (tx_error.magic == CLEAN_TX_ERROR_MAGIC) {
+            printf(",\"tx_phase_valid\":%u,\"tx_select_operand\":%u,"
+                   "\"tx_select_readback\":%u,\"tx_plcp\":[%u,%u,%u],"
+                   "\"tx_phases\":[", tx_error.valid,
+                   tx_error.select_operand, tx_error.select_readback,
+                   tx_error.plcp[0], tx_error.plcp[1], tx_error.plcp[2]);
+            for (unsigned i = 0u; i < 4u; ++i) {
+                if (!(tx_error.valid & (1u << i))) {
+                    printf("%snull", i ? "," : "");
+                    continue;
+                }
+                const clean_tx_phase_t *p = &tx_error.phase[i];
+                printf("%s{\"at\":%u,\"error\":%u,\"txe\":%u,\"ifs\":%u,"
+                       "\"phyctl\":%u,\"phyctl1\":%u,\"bytes\":%u,\"select\":%u,"
+                       "\"owners\":%u}", i ? "," : "", p->at, p->error, p->txe,
+                       p->ifs, p->phyctl, p->phyctl1, p->bytes, p->select, p->owners);
+            }
+            putchar(']');
+        }
         fputs(",\"rx_fifo_fault\":[", stdout);
         for (unsigned i = 0u; i < CLEAN_RX_FAULT_WORDS; ++i)
             printf("%s%u", i ? "," : "",

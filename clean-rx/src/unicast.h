@@ -3,6 +3,7 @@
 
 #include "phy_rates.h"
 #include "mac.h"
+#include "tx_diag.h"
 
 #define CLEAN_UNICAST_ADDR 0x201e0u
 #define CLEAN_UNICAST_MAGIC 0x314b4341u
@@ -165,6 +166,8 @@ static inline uint32_t clean_tx_tail_ack_start(const clean_tx_tail_t *s,
 #define CLEAN_ACK_HOOK 314u
 #define CLEAN_DCF_ENABLE 0x680u
 #define CLEAN_TX_CLEANUP_REQUEST 0x6acu
+#define CLEAN_TX_SELECT_OPERAND 0x781u
+#define CLEAN_TX_SELECT_READBACK 0x782u
 #define CLEAN_TX_CLEANUP_COUNT 0x6adu
 #define CLEAN_TX_COMPLETION 0x6aeu
 #define CLEAN_TX_PRE_RESPONSE 0x6afu
@@ -294,6 +297,11 @@ typedef struct {
     uint32_t magic;
     uint16_t airtime, sum, limit, reserved;
 } clean_ack_arith_t;
+_Static_assert(CLEAN_TX_SELECT_OPERAND >= CLEAN_ACK_ARITH_SHM + 3u &&
+               CLEAN_TX_SELECT_READBACK + 1u <= 0x7a0u &&
+               CLEAN_TX_ERROR_ADDR >= CLEAN_ACK_ARITH_ADDR + sizeof(clean_ack_arith_t) &&
+               CLEAN_TX_ERROR_DETAIL >= CLEAN_ACK_ARITH_DETAIL + sizeof(clean_ack_arith_t),
+               "TX phase evidence must not overlap ACK arithmetic");
 _Static_assert(sizeof(clean_ack_arith_t) == 12u &&
                CLEAN_ACK_ARITH_SHM + 3u <= 0x7a0u &&
                CLEAN_ACK_ARITH_ADDR + sizeof(clean_ack_arith_t) <= 0x20d00u &&

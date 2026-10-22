@@ -1116,7 +1116,11 @@ static void run(const uint8_t nonce[16]) {
                     clean_block(&l, CLEAN_ACK_OBSERVE_ADDR, detail + CLEAN_ACK_OBSERVE_DETAIL,
                                 sizeof(clean_ack_observe_t), 0u) &&
                     clean_block(&l, CLEAN_ACK_ARITH_ADDR, detail + CLEAN_ACK_ARITH_DETAIL,
-                                sizeof(clean_ack_arith_t), 0u);
+                                sizeof(clean_ack_arith_t), 0u) &&
+                    clean_block(&l, CLEAN_TX_ERROR_ADDR, detail + CLEAN_TX_ERROR_DETAIL,
+                                sizeof(clean_tx_error_status_t), 0u) &&
+                    clean_block(&l, CLEAN_TX_ABORT_ADDR, detail + CLEAN_TX_ABORT_DETAIL,
+                                sizeof(clean_tx_abort_status_t), 0u);
         }
     }
     if (snapshot && station_mode() && !badger_bytes_load_u32(detail + 596u))

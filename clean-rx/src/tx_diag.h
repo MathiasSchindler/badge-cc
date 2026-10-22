@@ -56,4 +56,65 @@ typedef struct {
 
 _Static_assert(sizeof(clean_tx_diag_t) == 180u, "TX diagnostic size");
 
+#define CLEAN_TX_ERROR_MAGIC 0x31505854u
+#define CLEAN_TX_ERROR_ADDR 0x20560u
+#define CLEAN_TX_ERROR_DETAIL 876u
+enum { CLEAN_TX_PREPARE, CLEAN_TX_ARMED, CLEAN_TX_FIRED, CLEAN_TX_FIRST_ERROR };
+typedef struct {
+    uint32_t at;
+    uint16_t error, txe, ifs, phyctl, phyctl1, bytes, select, owners;
+} clean_tx_phase_t;
+typedef struct {
+    uint32_t magic, valid;
+    uint16_t select_operand, select_readback;
+    uint16_t plcp[3], reserved;
+    clean_tx_phase_t phase[4];
+} clean_tx_error_status_t;
+_Static_assert(sizeof(clean_tx_error_status_t) == 100u &&
+               CLEAN_TX_ERROR_DETAIL + sizeof(clean_tx_error_status_t) <= 976u &&
+               CLEAN_TX_ERROR_ADDR + sizeof(clean_tx_error_status_t) <= 0x20d00u,
+               "TX phase evidence must fit before DCF evidence");
+
+#define CLEAN_TX_ABORT_MAGIC 0x31415450u
+#define CLEAN_TX_ABORT_ADDR (CLEAN_TX_ERROR_ADDR + sizeof(clean_tx_error_status_t))
+#define CLEAN_TX_ABORT_DETAIL 1960u
+typedef struct {
+    uint32_t magic, count, fired_at;
+    uint16_t before_error, armed_error, fired_error, completion;
+    clean_tx_phase_t first;
+} clean_tx_abort_status_t;
+_Static_assert(sizeof(clean_tx_abort_status_t) == 40u &&
+               CLEAN_TX_ABORT_DETAIL + sizeof(clean_tx_abort_status_t) <= 2000u &&
+               CLEAN_TX_ABORT_ADDR + sizeof(clean_tx_abort_status_t) <= 0x20d00u,
+               "First PHY abort must not overlap mode/challenge or frame slots");
+
+/* PHY error bits can survive successful packets. They are retained evidence,
+ * never proof of a fresh fault or permission to credit a completion. */
+static inline int clean_tx_cck_abort_retryable(const volatile clean_tx_error_status_t *s,
+        uint16_t final_error, uint32_t airtime) {
+    const volatile clean_tx_phase_t *f = &s->phase[CLEAN_TX_FIRED];
+    const volatile clean_tx_phase_t *e = &s->phase[CLEAN_TX_FIRST_ERROR];
+    uint16_t before = s->phase[CLEAN_TX_PREPARE].error;
+    return s->magic == CLEAN_TX_ERROR_MAGIC && s->valid == 15u &&
+        !(before & ~0x30u) && before == s->phase[CLEAN_TX_ARMED].error &&
+        before == f->error && final_error && !(final_error & ~0x30u) &&
+        e->error == final_error &&
+        f->owners == 2u && e->owners == 2u &&
+        (f->phyctl & 0x0fu) == 0u && f->phyctl == e->phyctl &&
+        f->phyctl1 == e->phyctl1 &&
+        !(e->txe & 0x480u) && !(e->ifs & 0xf00u) &&
+        e->at - f->at <= airtime + 2000u;
+}
+
+static inline int clean_tx_abort_status_valid(const clean_tx_abort_status_t *s,
+        uint32_t timeouts) {
+    if (s->magic != CLEAN_TX_ABORT_MAGIC || s->count > timeouts) return 0;
+    return !s->count || (!(s->before_error & ~0x30u) &&
+        s->before_error == s->armed_error && s->before_error == s->fired_error &&
+        s->completion == 5u && s->first.error && !(s->first.error & ~0x30u) &&
+        s->first.owners == 2u &&
+        !(s->first.phyctl & 0x0fu) && !(s->first.txe & 0x480u) &&
+        !(s->first.ifs & 0xf00u) && s->first.at - s->fired_at <= 32767u);
+}
+
 #endif
