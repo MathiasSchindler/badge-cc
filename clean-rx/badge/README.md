@@ -888,8 +888,10 @@ sticky first-retirement/count record at 1960. JSON exposes `tx_phases`,
 `tx_select_operand`, `tx_select_readback`, `tx_plcp`, `tx_phy_aborts`,
 `tx_phy_abort_valid` and `tx_first_phy_abort`. The first-retirement record
 survives later successful attempts; the phase trace describes the last
-attempt. Its final phase is the first quiescent error sample, not necessarily
-the first assertion of a PHY error bit. Use matching firmware and collector.
+attempt. Its final phase starts with the first quiescent error sample and is
+refreshed when known latched bits accumulate; it is not necessarily the first
+assertion of a PHY error bit. Unknown observations are retained, not overwritten
+by later known status. Use matching firmware and collector.
 Acceptance validates both timeout bounds on the abort count and exact
 MPDU-attempt accounting, including fragmented MSDUs.
 
@@ -900,6 +902,28 @@ event and passes six exact/repeated 100-MSDU controls. This does not establish
 the silicon meaning of those bits or eliminate the separate no-first-RX,
 1-Mbps truncation, sustained and independent RF-timing gates.
 See [provenance, guard and retained trials](../dev-doc/MAC_RELIABILITY_RECOVERY.md#cck-phy-error-retirement-and-retained-provenance).
+
+Broad-campaign build `a4eefd5a` retires 12 real PHY errors, including a sticky
+`0x0020` baseline followed by `0x0030`. Its 34-case campaign has 29 passing
+positive pairs, three failed positive pairs and two controlled exhaustion
+negatives. All 16 legacy PHY/role matrix controls pass (1 Mbps uses 1,500
+bytes), as do 5,000 mixed-size OFDM MSDUs/direction, 1,000 two-/sixteen-fragment
+MSDUs/direction and both closing controls. The three failures exhaust the
+initial eight attempts without first RX, with no controller/PHY fault.
+The independent raw-record/ACK/fragment oracle retains those failures and
+reports **QUALIFICATION: FAILED**. This resolves the observed fatal handling,
+not every remaining RF failure or the independent timing/sustained gates.
+Later replays expose a stale first-error sample followed by additional known
+bits; final source `460b7228` fixes that sampling case without relaxing
+completion/ownership checks. A further `0x0028` baseline / `0x0038` failure
+contains unqualified bit `0x0008` and remains explicitly fatal. ACK exhaustion
+also remains possible after initial deliveries. See the retained follow-up
+campaigns above; final-source testing does not replace the earlier failures.
+Final-source focused controls pass 1,000 cyclic 2-Mbps and 100 short-preamble
+MSDUs/direction. Forward exhaustion is fully controlled; reverse exhaustion
+has eight attempts but only five eligible suppressed ACKs and is explicitly
+**not a passing controlled negative**. The overall final campaign remains
+failed, with no false success or widened retry bound.
 
 ### Historical CCK fixture results
 

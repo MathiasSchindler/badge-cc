@@ -1574,9 +1574,8 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
             station_service_tx();
             uint16_t txe = mmio_read16(D11_BASE + 0x50eu);
             uint16_t ifs = mmio_read16(D11_BASE + 0x690u);
-            if (!(tx_error->valid & (1u << CLEAN_TX_FIRST_ERROR)) &&
-                !(txe & 0x480u) && !(ifs & 0xf00u) &&
-                mmio_read16(D11_BASE + 0x3eeu))
+            if (!(txe & 0x480u) && !(ifs & 0xf00u) &&
+                clean_tx_error_sample_needed(tx_error, mmio_read16(D11_BASE + 0x3eeu)))
                 station_tx_phase(CLEAN_TX_FIRST_ERROR);
             st_50e_seen |= txe;
             st_690_seen |= ifs;

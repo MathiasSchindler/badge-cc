@@ -751,7 +751,9 @@ computed/read-back selector, three PLCP words and four 20-byte phase samples:
 prepare, armed, fired and first **quiescent** error. Each sample has a timestamp,
 PHY error, TXE/IFS state, PHY controls, remaining template bytes, selector and
 packed ownership. The last phase is not necessarily the first raw assertion
-of an error bit.
+of an error bit. It is refreshed when known latched bits accumulate after
+the initial quiescent sample. An observed unknown status is retained and
+cannot be overwritten by a later known-only value.
 
 `PTA1` at SRAM `0x205c4`, detail 1960, is 40 bytes and ends at detail 2000,
 before fixture mode/channel. It retains a count and the first retired
@@ -766,6 +768,97 @@ builds and native sanitizer suites pass. Native tests cover known sticky/new
 status combinations, both preambles, timestamp wrap, busy/response/cleanup
 ownership, unknown bits, unstable baselines and malformed report accounting.
 These are not independent RF timing measurements.
+
+### Broad RF qualification (`a4eefd5a`)
+
+`recover-*` retains all 34 trials: **29 passing positive pairs, three failed
+positive pairs**, and two fully controlled exhaustion negatives. The three
+failures are `exact-two`, `repeat-fivehalf` and `stress-two`. All exhaust
+eight initial attempts without a peer application reception or returned ACK,
+with zero controller fault, zero PHY error and no error retirement. They are
+the separate no-first-RX failure, not another missing-MAC-done fatal error.
+The entire campaign and independent oracle correctly exit 1.
+
+Twelve actual known-status PHY failures are retired in passing trials.
+Retained first-abort records include fresh `0x0010`, fresh `0x0020`, and
+`stress-fivehalf`'s stable `0x0020` baseline followed by `0x0030`.
+Both endpoints of that last trial finish 1,000 cyclic-size deliveries.
+No controller-fatal completion failure remains in this matrix; that is not
+proof of universal failure-free operation or an eliminated physical cause.
+
+| Control | Result |
+| --- | --- |
+| Eight legacy PHY/preamble profiles, both role assignments, 100 MSDUs/direction, drop 2 | All 16 pairs pass; 1 Mbps uses 1,500-byte payloads, others cyclic sizes |
+| 1,000 cyclic MSDUs/direction, 5.5 Mbps and reverse-role 11 Mbps | Both pass, including real error retirement; 2-Mbps trial fails before first RX |
+| Cyclic-size OFDM, 5,000 MSDUs/direction | Pass; 5,118/5,121 attempts, 118/121 timeouts, including two explicit engine timeouts per endpoint |
+| Two-fragment OFDM, 1,000 MSDUs/direction | Pass; 2,052/2,057 attempts, 52/57 timeouts, 1/3 engine timeouts |
+| Sixteen-fragment OFDM, 1,000 MSDUs/direction | Pass; 16,113/16,138 attempts, 113/138 timeouts, 4/8 engine timeouts |
+| Zero suppression, 100 cyclic OFDM MSDUs/direction, both roles | Both pass |
+| One-MSDU OFDM closing control, drop 1, both roles | Both pass |
+| Exhaust first fragment with drop 8, both roles | Both controlled negatives: exactly eight attempts/timeouts and eight eligible suppressions, no false success or controller fault |
+
+Passing records retain exact counts, reset CW, valid returned ACK CRC/RA/PHY/
+timestamps, healthy suppression accounting and frozen complete snapshots.
+`recover-oracle.log` independently verifies all 68 raw binary/JSON endpoint
+records, ACK single-bit-corruption negatives, abort evidence, exact attempts,
+36 last-index fragment CRCs and four reassembled CRCs. It reports
+**QUALIFICATION: FAILED**, retaining all three startup failures.
+
+The 1-Mbps/2,304-byte truncation and the interrupted 100,000-frame gate are
+not retested. A2/A3 remain open for these receive/sustained failures and
+independent ACK/SIFS, late/missing-ACK, full-credit and interoperability
+qualification. A later passing replay cannot erase the failed startup trials.
+
+### Late-latching regression and additional exclusions
+
+The unchanged `a4eefd5a` follow-up (`confirm-*`) has six positive passes and
+one failure in seven pairs. The failing 2-Mbps stress replay stops at
+272/271 deliveries: the responder's baseline and first quiescent error are
+`0x0020`, but final error is `0x0030`. Keeping only the first quiescent sample
+incorrectly excludes this later known-bit transition. The first-error slot
+now resamples monotonic known-bit additions during the same bounded wait;
+final/sample equality, ownership and timing checks are not weakened.
+Native regression first reproduces the stale-sample rejection, then verifies
+the resampled transition, wrap boundary and unknown-error preservation.
+
+Candidate `711154c1` (`latch-*`) retains eight passing positive pairs, two
+failed positive pairs and two controlled exhaustion negatives. A repeated
+1,000-MSDU 2-Mbps trial completes in both directions with four retirements.
+Two-/sixteen-fragment 100-MSDU controls, the exact earlier challenges and
+11-Mbps reverse-role control pass. The first stress trial stops at 548
+deliveries with **previously unqualified bit `0x0008`**: stable baseline
+`0x0028`, final/sample `0x0038`, idle fired Data ownership and completion 5.
+This is deliberately still fatal, not silently added to the known mask.
+The other failed pair exhausts ACK retries after initial short-preamble
+deliveries without a controller fault. Neither is excluded from qualification.
+
+Final source `460b7228` also preserves an unknown error observed after an
+earlier known sample, even if later reads contain only known bits.
+Unknown observations cannot be erased to manufacture retryability.
+Default, HT-response/WMM/EDCA and HT/SHM Block-ACK builds/native sanitizer
+suites pass; the new `0x0028`/`0x0038` case has explicit rejection coverage.
+The broader 34-case results above belong to `a4eefd5a`, not a full rerun on
+this final source. All `confirm-*` and `latch-*` raw records and independent
+oracle failures are retained.
+
+The final-source `guard-*` focused campaign retains two positive passes
+(1,000 cyclic-size 2-Mbps MSDUs/direction and 100 short-preamble MSDUs/direction),
+one fully controlled forward exhaustion negative, and **one failed reverse
+negative control**. The last initiator correctly stops at eight actual
+attempts/timeouts, but the responder sees/suppresses only five eligible
+fragments, leaving budget 3. This is not the required eight-suppression
+negative; uncontrolled missing receptions cannot be reclassified as
+intentional ACK loss. There is no invariant fault, false success or controller
+fault in these four trials. No PHY retirement occurs in their positive
+controls, so real recovery evidence remains in the earlier named campaigns.
+`guard-oracle.log` verifies all eight raw endpoint records and reports
+**QUALIFICATION: FAILED**. The final source has not passed a complete 34-case
+rerun or the sustained/interoperability gates.
+
+Every CCK campaign restored both full original 16-MiB images. The final
+`guard-SERIAL-restored.bin` readbacks compare byte-for-byte with the pre-test
+images and match the SHA-256 values below. Both badges are in BOOTSEL with
+no remaining test/restore process. Pico and shared infrastructure are unchanged.
 
 ## Borrowed hardware restoration
 

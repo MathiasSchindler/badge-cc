@@ -60,13 +60,27 @@ window. A real sum-mismatch fault with otherwise consistent retained counters
 also prompted register-only comparisons and explicit computed-sum/limit
 evidence. This does not prove the earlier spontaneous suppression cause fixed.
 See the [A2 follow-up and retained failures](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#a2-follow-up-suppression-invariants-and-cck-ack-clock-ownership).
-Final build `b0aedeee` passes 5,000 cyclic-size MSDUs per direction, 100
-two-/sixteen-fragment MSDUs per direction, the exact earlier sum-fault replay
-and both controlled eight-drop exhaustion negatives. Its campaign still has
-3 failed positive CCK controls (21 positive pairs pass): missing MAC-done
-with PHY error `0x0010`, not another suppression-count fault. A2 remains open;
-the nonzero-error completion path and independent RF timing/full-credit
-qualification are not complete.
+The CCK follow-up preserves prepare/armed/fired/error ownership evidence and
+retires known `0x0010`/`0x0020`/`0x0030` idle incomplete transmissions through
+checked abort/rearm, still as failed attempts/TIMEOUTs. Stable sticky error
+baselines and both preambles are covered; unknown bits and unsafe ownership
+remain fatal. Build `a4eefd5a` recovers 12 real errors, passes all 16 tested
+legacy PHY/role controls, 5,000 cyclic-size MSDUs per direction, 1,000
+two-/sixteen-fragment MSDUs per direction and both exhaustion negatives.
+Its 34-case campaign has 29 positive pairs passing and **3 failed positive
+pairs**, now all no-first-RX/initial ACK exhaustion without controller/PHY
+faults, not the former fatal CCK completion error. Later replays expose a
+stale first-error sample followed by additional known bits; final source
+`460b7228` fixes that sampling case while retaining unknown-error evidence.
+They also expose an unqualified `0x0028` baseline / `0x0038` error (bit
+`0x0008`), which remains fatal, and ACK exhaustion after initial deliveries.
+Final-source focused controls pass 1,000 cyclic 2-Mbps and 100 short-preamble
+MSDUs/direction; its reverse exhaustion control records five suppressions for
+eight attempts and is not a controlled-negative pass.
+See [CCK provenance, retirement and retained failures](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#cck-phy-error-retirement-and-retained-provenance).
+A2 remains open for the remaining PHY/RX/ACK failures and independent RF
+timing/full-credit qualification; the silicon meaning/cause of the observed
+PHY status is not established.
 
 - [ ] Complete response-rate/preamble selection, turnaround, bounded retries
   and meaningful completion reporting.
@@ -92,9 +106,11 @@ shutdown. A later exact long replay reached 64,003 deliveries per endpoint
 before ACK exhaustion, with unexpected ACK-suppression state on its peer;
 it is not a passing 100,000-frame gate. First-no-reception behavior also
 remains unresolved. A1/A2/A3 are not complete.
-The latest build passes 5,000 mixed-size exchanges per direction and
-lost-final-ACK closing controls in both roles; its fragmented trial lost
-the initiator's USB report, so it is not a new fragmented qualification.
+Build `a4eefd5a` passes 5,000 mixed-size exchanges per direction, 1,000
+maximum-size MSDUs per direction with both two and sixteen fragments, and
+lost-final-ACK closing controls in both roles. Its broader campaign still has
+three initial no-reception failures; this is not a sustained/interoperability
+pass or a new 100,000-frame qualification.
 
 - [ ] Complete duplicate, fragmentation, RTS/CTS and protection handling.
 - [ ] Verify malformed frames, bad FCS, saturation and DMA/credit boundaries.

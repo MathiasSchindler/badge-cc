@@ -1071,6 +1071,31 @@ static void cck_abort_recovery(void) {
     short_preamble.phase[CLEAN_TX_FIRED].phyctl = 0x41u;
     short_preamble.phase[CLEAN_TX_FIRST_ERROR].phyctl = 0x41u;
     assert(!clean_tx_cck_abort_retryable(&short_preamble, 0x10u, 280u));
+    clean_tx_error_status_t accumulating = base;
+    for (uint32_t i = 0u; i < 4u; ++i) accumulating.phase[i].error = 0x20u;
+    assert(!clean_tx_cck_abort_retryable(&accumulating, 0x30u, 6300u));
+    assert(clean_tx_error_sample_needed(&accumulating, 0x30u));
+    assert(!clean_tx_error_sample_needed(&accumulating, 0x20u));
+    assert(!clean_tx_error_sample_needed(&accumulating, 0x10u));
+    assert(!clean_tx_error_sample_needed(&accumulating, 0u));
+    assert(clean_tx_error_sample_needed(&accumulating, 0x70u));
+    accumulating.phase[CLEAN_TX_FIRST_ERROR].error = 0x30u;
+    accumulating.phase[CLEAN_TX_FIRST_ERROR].at =
+        accumulating.phase[CLEAN_TX_FIRED].at + 6300u;
+    assert(clean_tx_cck_abort_retryable(&accumulating, 0x30u, 6300u));
+    assert(!clean_tx_error_sample_needed(&accumulating, 0x30u));
+    accumulating.phase[CLEAN_TX_FIRST_ERROR].error = 0x40u;
+    assert(!clean_tx_error_sample_needed(&accumulating, 0x30u));
+    assert(!clean_tx_error_sample_needed(&accumulating, 0x70u));
+    assert(!clean_tx_cck_abort_retryable(&accumulating, 0x30u, 6300u));
+    accumulating.valid = 7u;
+    assert(clean_tx_error_sample_needed(&accumulating, 0x40u));
+    assert(!clean_tx_error_sample_needed(&accumulating, 0u));
+    accumulating = base;
+    for (uint32_t i = 0u; i < 3u; ++i) accumulating.phase[i].error = 0x28u;
+    accumulating.phase[CLEAN_TX_FIRST_ERROR].error = 0x38u;
+    assert(!clean_tx_cck_abort_retryable(&accumulating, 0x38u, 9520u));
+    assert(!clean_tx_error_sample_needed(&accumulating, 0x30u));
     for (uint32_t before = 0u; before <= 0x30u; before += 0x10u) {
         for (uint32_t after = 0x10u; after <= 0x30u; after += 0x10u) {
             clean_tx_error_status_t sticky = base;

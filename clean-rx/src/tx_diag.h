@@ -90,6 +90,14 @@ _Static_assert(sizeof(clean_tx_abort_status_t) == 40u &&
 
 /* PHY error bits can survive successful packets. They are retained evidence,
  * never proof of a fresh fault or permission to credit a completion. */
+static inline int clean_tx_error_sample_needed(const volatile clean_tx_error_status_t *s,
+        uint16_t current) {
+    uint16_t previous = s->phase[CLEAN_TX_FIRST_ERROR].error;
+    return current && (!(s->valid & (1u << CLEAN_TX_FIRST_ERROR)) ||
+        (!(previous & ~0x30u) && current != previous &&
+         ((current & ~0x30u) || (current & previous) == previous)));
+}
+
 static inline int clean_tx_cck_abort_retryable(const volatile clean_tx_error_status_t *s,
         uint16_t final_error, uint32_t airtime) {
     const volatile clean_tx_phase_t *f = &s->phase[CLEAN_TX_FIRED];
