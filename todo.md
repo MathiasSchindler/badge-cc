@@ -88,9 +88,28 @@ be attributed to the missing test frames. New first-`0x0008` and rejected-Data
 prefix evidence narrows future captures without widening the recovery mask.
 Targeted build `77bae4fe` passes four 2,000-MSDU/direction 2-Mbps stress pairs
 and four exact exhaustion negatives, with 21 known-status retirements.
-Three matching rejected prefixes report RXE length 62 versus expected
-66/2338 bytes; their PLCP CRCs are valid. The origin of those inconsistent
-captures and the unreproduced `0x0008` remain open, as do the initial failures.
+The earlier inference of 62-byte test-frame truncation is withdrawn:
+short rejected frames can expose a previous header in SHM. A native regression
+reproduces that diagnostic misattribution; capture now requires active
+streaming and its prefix threshold. An opt-in poisoned-scratch/66-byte probe
+investigates actual copy provenance. Physical RX loss and unreproduced
+`0x0008` remain open, as do the initial failures.
+The follow-up probe captures raw next-length `0x8000` with copy-register zero
+and an unwritten poisoned tail. A proposed minimum-length guard passed native
+tests but failed all five RF controls with zero receptions and no eligible
+suppression; it was withdrawn. The original zero-permitted branch is retained
+and tested over all 65,536 operands. These register values alone do not prove
+an invalid RF frame or a faulty copy.
+Final first-any probe build `571d4b98` passes five bounded controls: two exact
+eight-suppression negatives, 2,000 and 100 cyclic MSDUs/direction in opposite
+roles, and 100 32-byte MSDUs/direction. Its independent oracle verifies 4,400
+received MSDUs and two known-status retirements. This does not erase the
+initial startup failure, reproduce bit `0x0008` or complete A2/A3 qualification.
+Default build `66bf3b9c` also passes both exact exhaustion negatives and both-role
+100-MSDU/direction cyclic controls (400 received MSDUs). Four positive-control
+TIMEOUTs remain unexplained after subtracting intentional peer suppressions
+and the one known-status retirement; successful retries are not proof that the
+underlying missing receptions/ACKs are fixed.
 See [PHY/RX provenance and retained failed controls](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
 
 - [ ] Complete response-rate/preamble selection, turnaround, bounded retries

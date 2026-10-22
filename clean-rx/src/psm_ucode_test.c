@@ -84,6 +84,10 @@ static void capture_layout(uint8_t original[2360]) {
     restore(original,162u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_IF_BODY),
             WORD(0x3f0u,0x1fffu,0x1800u,0x1780u));
 #endif
+#if CLEAN_RX_REJECT_PROBE
+    restore(original, 130u, WORD(0x77fu,0x1780u,0x1780u,RX_REJECT_CLEAR_0),
+            WORD(0x307u,0x1800u,0x1078u,0x1078u));
+#endif
     restore(original, 138u, WORD(0x785u,0x1780u,0x1780u,139u),
             WORD(0x785u,0x1780u,0x1780u,257u));
     restore(original, 143u, WORD(0x77fu,0x1780u,0x1780u,RX_PREFIX_EOI),
@@ -642,6 +646,24 @@ static void stream_stall(void) {
 
 static void receive_completion(void) {
     uint16_t r[0x1800];
+    for (uint32_t length = 0u; length <= 65535u; ++length) {
+        memset(r, 0, sizeof(r));
+        r[0x1782u] = (uint16_t)length;
+        r[CLEAN_SHM_RXE_LIMIT] = CLEAN_RXE_BYTES;
+        uint32_t pc = 155u;
+        for (uint32_t step = 0u; pc >= 155u && pc < 158u && step < 3u; ++step) {
+            uint64_t w = instruction(pc++);
+            uint32_t op = (uint32_t)(w >> 39u), d = (uint32_t)w & 0x1fffu;
+            uint16_t a = ack_operand(r, (uint32_t)(w >> 26u) & 0x1fffu);
+            uint16_t b = ack_operand(r, (uint32_t)(w >> 13u) & 0x1fffu);
+            if (op == 0xd0u) { if (a == b) pc = d; }
+            else if (op == 0xdau) { if (a < b) pc = d; }
+            else if (op == 0xdcu) { if (a > b) pc = d; }
+            else { assert(op == 0x3f0u); r[d] = a; }
+        }
+        assert(pc == (length == 1u ? 257u : length > CLEAN_RXE_BYTES ? 259u : 158u));
+    }
+    assert(instruction(158u) == WORD(0x3f0u,0x1782u,0x1800u,0x102au));
     for (uint32_t event = 0u; event < 4u; ++event) {
         memset(r, 0, sizeof(r));
         uint32_t events = ((event & 1u) ? 1u << 5u : 0u) |
@@ -714,6 +736,7 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
         if (pc == AMPDU_SHM_WAIT && regs[0x601u]) return pc;
 #endif
         if (pc == 198u || pc == 266u || pc == 124u || pc == 130u ||
+            (CLEAN_RX_REJECT_PROBE && pc == 131u) ||
             (CLEAN_RX_AMPDU_DMA && (pc == 253u || pc == 220u)) ||
             pc == 118u || pc == 129u || pc == 163u ||
             pc == 148u || pc == 154u || pc == 262u || pc == 263u) return pc;
@@ -818,10 +841,23 @@ static void authentication_failure_capture(void) {
     assert(psm_run(r, 0, DCF_BAD) == 266u);
     assert(r[CLEAN_DCF_EIFS] && r[CLEAN_DCF_REQUEST] == CLEAN_DCF_DEFERRED);
     assert(r[CLEAN_AUTH_FAILURE_SHM] == 1u);
+    memset(r, 0, sizeof(r));
+    r[CLEAN_DCF_ENABLE] = 1u;
+    r[CLEAN_DCF_EIFS_US] = 94u;
+    r[CLEAN_DCF_REQUEST] = 1u;
+    assert(psm_run(r, 0, DCF_BAD_LENGTH) == 266u);
+    assert(r[0x7a9u] == 1u && r[CLEAN_DCF_EIFS] &&
+           r[CLEAN_DCF_REQUEST] == CLEAN_DCF_DEFERRED);
+    assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_ACK_SEEN] && !r[0x601u]);
     base[CLEAN_DCF_ENABLE] = 1u;
-    base[0x100cu] = 178u;
+    base[0x100cu] = CLEAN_RX_STREAM_PREFIX_BYTES + 50u;
+    base[0x1004u] = 2u;
+    base[0x102bu] = 0x1234u;
+    base[0x102au] = base[0x100cu];
+    for (uint32_t i = 20u; i < 33u; ++i)
+        base[CLEAN_SHM_FRAME + 1u + i] = (uint16_t)(0x1020u + i);
     base[CLEAN_SHM_FRAME + 4u] = 0x0d08u;
-    for (uint32_t fault = 0u; fault < 10u; ++fault) {
+    for (uint32_t fault = 0u; fault < 14u; ++fault) {
         memcpy(r, base, sizeof(r));
         if (fault == 1u) r[CLEAN_ACK_ENABLE] = 0u;
         if (fault == 2u) r[CLEAN_DCF_ENABLE] = 0u;
@@ -833,16 +869,47 @@ static void authentication_failure_capture(void) {
             r[CLEAN_AUTH_FAILURE_SHM] = 1u;
             r[CLEAN_AUTH_FAILURE_SHM + 1u] = 123u;
         }
-        if (fault == 9u) r[0x100cu] = 40u;
+        if (fault == 9u) r[0x100cu] = CLEAN_RX_STREAM_PREFIX_BYTES;
+        if (fault == 10u) r[0x100cu] = CLEAN_RX_STREAM_PREFIX_BYTES - 1u;
+        if (fault == 11u) r[0x1004u] = 0u;
+        if (fault == 12u) r[0x100cu] = 40u;
+        if (fault == 13u) r[0x100cu] = 62u;
         assert(psm_run(r, 0, DCF_BAD) == 266u);
-        int captured = fault == 0u || fault == 5u || fault == 6u || fault == 9u;
+        int captured = CLEAN_RX_REJECT_PROBE ?
+            fault != 1u && fault != 2u && fault != 8u :
+            fault == 0u || fault == 5u || fault == 6u || fault == 9u;
         assert(r[CLEAN_AUTH_FAILURE_SHM] == (captured || fault == 8u));
         assert(r[0x7a8u] == 1u && !r[CLEAN_ACK_SENT] && !r[CLEAN_ACK_SEEN]);
         if (captured)
             for (uint32_t i = 0u; i < 20u; ++i)
                 assert(r[CLEAN_AUTH_FAILURE_SHM + 8u + i] == r[CLEAN_SHM_FRAME + 1u + i]);
+#if CLEAN_RX_REJECT_PROBE
+        if (captured) {
+            assert(r[CLEAN_RX_REJECT_SHM] == 0x1234u);
+            assert(r[CLEAN_AUTH_FAILURE_SHM + 7u] == base[0x102au]);
+            for (uint32_t i = 0u; i < 13u; ++i)
+                assert(r[CLEAN_RX_REJECT_SHM + 1u + i] ==
+                       r[CLEAN_SHM_FRAME + 21u + i]);
+        } else assert(!r[CLEAN_RX_REJECT_SHM]);
+#endif
         if (fault == 8u) assert(r[CLEAN_AUTH_FAILURE_SHM + 1u] == 123u);
     }
+#if CLEAN_RX_REJECT_PROBE
+    memcpy(r, base, sizeof(r));
+    r[CLEAN_SHM_FRAME] = 0x1234u;
+    r[CLEAN_SHM_FRAME + 34u] = 0x5678u;
+    r[0x1078u] = 0xffffu;
+    assert(psm_run(r, 0, RX_REJECT_CLEAR_0) == 131u);
+    for (uint32_t i = 0u; i < 33u; ++i)
+        assert(r[CLEAN_SHM_FRAME + 1u + i] == 0xffffu);
+    assert(r[CLEAN_SHM_FRAME] == 0x1234u && r[CLEAN_SHM_FRAME + 34u] == 0x5678u);
+    assert(r[0x1078u] == 0xff7fu);
+    for (uint32_t i = 0u; i < 3u; ++i)
+        r[CLEAN_SHM_FRAME + 1u + i] = base[CLEAN_SHM_FRAME + 1u + i];
+    assert(psm_run(r, 0, DCF_BAD) == 266u);
+    assert(r[CLEAN_AUTH_FAILURE_SHM] == 1u);
+    assert(r[CLEAN_AUTH_FAILURE_SHM + 11u] == 0xffffu);
+#endif
     puts("PSM rejected authentication/Data: bounded raw evidence, either bound address, no ACK/delivery, EIFS retained; NOT RF");
 }
 

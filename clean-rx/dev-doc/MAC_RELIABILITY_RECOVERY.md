@@ -879,7 +879,9 @@ ACK eligibility, delivery, the recovery mask or the eight-attempt limit:
   atomic hardware trace. An absent observation is reported as JSON `null`.
 - `soak_bad_fcs` reuses the rejected-authentication record for the first
   matching rejected Data prefix while DCF and ACK reception are enabled.
-  It requires at least 40 RXE bytes and either own RA or bound-peer TA.
+  It originally required at least 40 RXE bytes and either own RA or bound-peer
+  TA. The freshness correction below additionally requires active receive
+  streaming and its prefix threshold (normally 128 bytes).
   The existing authentication capture remains active. This path still
   discards the frame, does not ACK or deliver it, and preserves bad-FCS/EIFS
   handling. The 60-byte snapshot occupies soak detail `1616..1676`, after
@@ -957,8 +959,10 @@ It does not erase the two initial failed pairs or close overall qualification.
 No `0x0008` observation occurs in these trials. Its earlier origin and
 silicon meaning are therefore still unresolved; the guard has not been widened.
 
-The rejected-prefix diagnostic does now capture three matching fixture
-headers on the bad-FCS path, rather than only aggregate ambient errors:
+The original rejected-prefix diagnostic saved three matching fixture headers
+on the bad-FCS path. **The inferred association with the rejected RF frame is
+withdrawn**: the freshness investigation below reproduces stale-SHM attribution.
+These historical values are not proof of truncation of the matching fixture:
 
 | Endpoint evidence | Fixture index/sequence | Expected RXE bytes | Reported RXE bytes |
 | --- | --- | --- | --- |
@@ -971,20 +975,128 @@ the saved sequence equals the saved fixture index. Independent decoding
 checks their PLCP CRCs: the first declares 9,328 us, matching a 2,304-byte
 MSDU at 2 Mbps, and the others declare 240 us, matching 32-byte MSDUs.
 All report `status1=0x4042`, `status2=0x0040`.
-Thus there is concrete matching-header evidence of rejection/length
-inconsistency before ACK eligibility. It is not a full-frame CRC check or
-proof of on-air corruption versus premature/short/misreported RX completion.
+These are matching SHM headers sampled at rejection, not proven current-frame
+bytes. Valid PLCP CRCs and fixture indices do not establish header freshness.
 These later passing runs also do not explain the earlier six-of-eight
 negative, which has no matching rejected prefix.
 
-The next discriminating measurement is RX-end/FIFO/copied-length provenance
-for these short rejected captures, ideally with an independent RF witness.
+The discriminating measurement is RX-end/FIFO/copied-length provenance
+and explicit scratch freshness, ideally with an independent RF witness.
 Changing promiscuous filtering, dropping FCS/NAV validation or accepting
 unknown PHY bits would not establish that cause and has not been done.
 
 Both `edge-SERIAL-restored.bin` full-flash readbacks match the original images
 and SHA-256 values below. Both badges are confirmed in BOOTSEL; no campaign
 or restoration process remains. Pico and shared infrastructure are untouched.
+
+### Freshness correction and copy-length hypothesis
+
+The legacy stream threshold is normally 128 bytes. A rejected frame below
+that threshold has not necessarily supplied a current MAC header to SHM;
+the final good-frame copy/publication path is not run for a rejection.
+The former 40-byte diagnostic gate could therefore attribute previous
+receive bytes to an unrelated rejection. A native counterexample fails
+before the correction and passes after requiring the stream-enable bit
+and its configured prefix threshold for Data-header attribution.
+This is a necessary provenance gate, not full-frame CRC proof.
+
+`CLEAN_RX_REJECT_PROBE=1` is an opt-in legacy-only probe. It poisons the first
+66 SHM receive bytes before the prefix-copy request, replays the original
+RX-start control instruction, and snapshots the first rejected frame's
+backing bytes plus raw next-length (`0x102b`) and requested-copy (`0x102a`)
+registers. It borrows 28 bytes of unused legacy HT-failure storage and detail
+`1060..1088`; layout assertions prevent overlap. It does not advertise a
+matching peer frame: `soak_bad_fcs` is null and `rx_reject_probe` explicitly
+contains generic scratch evidence, including any unwritten poison.
+The probe changes RX instruction timing, remains disabled by default and
+is compile-time incompatible with HT RX.
+
+The initial matching-only poison candidate `79e7b554`, before the new length
+guard, retains seven pairs under `build/clean-rx/rxend-20261022/`.
+Both exhaustion negatives, three 2,000-MSDU/direction cyclic stress pairs and
+the 100-MSDU/direction OFDM control pass. One repeated stress pair again fails
+with zero initial deliveries; it is retained, not excused. The independent
+14-endpoint oracle reports 12,200 received MSDUs, six known-status retirements
+and **QUALIFICATION: FAILED**.
+
+Two poisoned snapshots in the last stress pair still show matching old
+fixture bytes, but both report raw next-length `0x8000`, copy-register
+**zero**, RXE count 62 and an unwritten `ffffffff` tail. The
+32-byte fixture's full 66-byte backing sample fails the independent MAC FCS
+check. These are not qualified complete current-frame receptions.
+
+This motivated a hypothesis, not a proven controller defect: PC 155 rejects
+only value `1`, whereas zero reaches the body-copy setup. An experimental
+guard rejected every value below the six-byte PLCP prefix through the
+existing bad-length/EIFS path. Its native test passed all 65,536 operands,
+but that proved only the proposed branch logic, not its silicon premise.
+
+Candidate `f06364cc` in `build/clean-rx/rxend-20261022/final/` failed **all five**
+RF pairs: both exact-eight-suppression negatives, both cyclic controls
+(2,000 and 100 MSDUs/direction), and a 100-MSDU/direction 32-byte control.
+Every sender exhausted eight attempts, and no receiver accepted a Data frame
+or exercised a suppression. The receiver probes instead froze at RXE count
+six with raw next-length `0x8000`, copy register six and all bytes after the
+prefix still poisoned. The proposed guard was therefore withdrawn.
+These controls do not establish what the silicon does with zero; they
+explicitly disprove treating the native guard test as RF qualification.
+The final native regression preserves the original zero-permitted branch
+for all 65,536 operands and checks the original upper bound, bad-length
+accounting, EIFS, deferred access and no ACK/delivery on that discard path.
+The raw register field is named `next_length`, not a verified decoded PLCP
+length. Historical candidate JSON used the less precise `decoded_length`.
+
+After withdrawing the guard, first-any probe build **`571d4b98`** passes the
+same five controls in `build/clean-rx/rxend-20261022/no-guard/`:
+
+- Both controlled negatives record exactly eight attempts, eight TIMEOUTs
+  and eight eligible receiver suppressions, not merely an exhausted sender.
+- The 2-Mbps cyclic controls deliver 2,000 MSDUs/direction with A initiating
+  and 100 MSDUs/direction with B initiating.
+- The 2-Mbps, 32-byte control delivers another 100 MSDUs/direction.
+- The independent 10-endpoint binary/JSON oracle verifies the build ID,
+  frozen fields, all 66 probe bytes and metadata, exact output shape and
+  delivery/integrity/suppression invariants: **4,400 received MSDUs**, two
+  known-status incomplete-TX retirements, 1,080 aggregate bad-FCS counts and
+  **QUALIFICATION: PASSED** for these bounded controls.
+
+Eight generic rejection samples are retained. The first two are unrelated
+beacon-looking scratch with raw next-length `0x8000`, copy register zero
+and RXE count 134; neither is labelled matching Data. Successful controlled
+traffic with this unchanged zero-permitted branch reinforces the rejection
+of the minimum-length hypothesis. None of these controls captures bit `0x08`;
+its silicon cause remains unobserved. The initial startup failure and all
+earlier failed controls remain recorded, and this instruction-adding probe
+is not independent RF-timing or overall A2/A3 qualification.
+
+Default build **`66bf3b9c`**, without the instruction-adding probe, also passes
+all four controls in `build/clean-rx/rxend-20261022/default-final/`: both exact
+eight-suppression negatives and both-role 100-MSDU/direction cyclic 2-Mbps
+controls. Its eight-endpoint oracle verifies **400 received MSDUs**, one
+known-status retirement, 109 aggregate bad-FCS counts and
+**QUALIFICATION: PASSED** for this bounded matrix.
+
+Passing does not mean the unexplained losses disappeared. Across the four
+positive default endpoints there are **four TIMEOUTs** beyond the eight
+intentional peer suppressions and one known-status retirement. In particular,
+`cycle-b` B/initiator takes 104 attempts for 100 acknowledged MSDUs, with
+four TIMEOUTs, two actual peer suppressions and no known-status retirement.
+The peer has only the two expected MAC-level duplicates and no matching
+streamed rejected-Data snapshot. Those duplicate counts are independently
+checked against the frozen binary fields. They do not by themselves identify
+RF loss versus ACK decoding or RX copy/handoff timing; ambient bad-FCS totals
+are still not attributed to these missing attempts. Per-attempt current-frame
+evidence and the unobserved bit-`0x08` origin remain open.
+
+The initial restoration was interrupted when the USB hub disappeared.
+After reconnection both full originals were reloaded, verified and independently
+read back; `SERIAL-restored-retry.bin` matches the established originals and
+their SHA-256 values below. That USB interruption is separate from the earlier
+RF trial failures and is not asserted to explain them.
+The withdrawn-guard, final-probe and final-default campaigns each subsequently
+restore and verify both full originals independently. The final-default
+readbacks again match both original SHA-256 values byte-for-byte, and both
+badges are confirmed in BOOTSEL. The Pico and shared firmware are untouched.
 
 ## Borrowed hardware restoration
 

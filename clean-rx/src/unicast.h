@@ -78,6 +78,26 @@ static inline int clean_edca_command_valid(uint32_t command, uint32_t enabled,
 #define CLEAN_AUTH_FAILURE_ADDR 0x204b0u
 #define CLEAN_AUTH_FAILURE_MAGIC 0x31464142u
 #define CLEAN_AUTH_FAILURE_DETAIL 600u
+#ifndef CLEAN_RX_REJECT_PROBE
+#define CLEAN_RX_REJECT_PROBE 0
+#endif
+_Static_assert(CLEAN_RX_REJECT_PROBE == 0 || CLEAN_RX_REJECT_PROBE == 1,
+               "Rejected RX probe must be zero or one");
+_Static_assert(!CLEAN_RX_REJECT_PROBE || !CLEAN_RX_HT_RX,
+               "Rejected RX probe borrows unused legacy-only HT failure storage");
+#define CLEAN_RX_REJECT_SHM CLEAN_HT_FAILURE_SHM
+#define CLEAN_RX_REJECT_ADDR CLEAN_HT_FAILURE_ADDR
+#define CLEAN_RX_REJECT_DETAIL 1060u
+typedef struct {
+    uint16_t next_length;
+    uint8_t tail[26];
+} clean_rx_reject_probe_t;
+_Static_assert(sizeof(clean_rx_reject_probe_t) == 28u &&
+               CLEAN_RX_REJECT_SHM + sizeof(clean_rx_reject_probe_t) / 2u <= CLEAN_AUTH_FAILURE_SHM &&
+               CLEAN_RX_REJECT_ADDR + sizeof(clean_rx_reject_probe_t) <= CLEAN_EDCA_STATUS_ADDR &&
+               CLEAN_RX_REJECT_DETAIL >= CLEAN_PHY_EDGE_DETAIL + sizeof(clean_phy_edge_t) &&
+               CLEAN_RX_REJECT_DETAIL + sizeof(clean_rx_reject_probe_t) <= 1088u,
+               "Rejected RX probe must fit before authentication/status/packet storage");
 
 typedef struct {
     uint32_t magic;

@@ -1124,7 +1124,12 @@ static void run(const uint8_t nonce[16]) {
                     clean_block(&l, CLEAN_PHY_EDGE_ADDR, detail + CLEAN_PHY_EDGE_DETAIL,
                                 sizeof(clean_phy_edge_t), 0u) &&
                     clean_block(&l, CLEAN_AUTH_FAILURE_ADDR, detail + CLEAN_SOAK_BAD_FCS_DETAIL,
-                                sizeof(clean_auth_failure_t), 0u);
+                                sizeof(clean_auth_failure_t), 0u)
+#if CLEAN_RX_REJECT_PROBE
+                    && clean_block(&l, CLEAN_RX_REJECT_ADDR, detail + CLEAN_RX_REJECT_DETAIL,
+                                   sizeof(clean_rx_reject_probe_t), 0u)
+#endif
+                    ;
         }
     }
     if (snapshot && station_mode() && !badger_bytes_load_u32(detail + 596u))

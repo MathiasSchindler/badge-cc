@@ -3058,6 +3058,11 @@ void cyw43_main(void) {
         for (uint32_t i = 0u; i < CLEAN_AUTH_FAILURE_WORDS; ++i)
             words[i] = shm_read16(CLEAN_AUTH_FAILURE_SHM + i);
         failure->magic = CLEAN_AUTH_FAILURE_MAGIC;
+#if CLEAN_RX_REJECT_PROBE
+        volatile uint16_t *probe = (volatile uint16_t *)CLEAN_RX_REJECT_ADDR;
+        for (uint32_t i = 0u; i < sizeof(clean_rx_reject_probe_t) / 2u; ++i)
+            probe[i] = shm_read16(CLEAN_RX_REJECT_SHM + i);
+#endif
     }
     volatile uint16_t *early = (volatile uint16_t *)&HT_DIAG->early;
     for (uint32_t i = 0u; i < CLEAN_HT_EARLY_WORDS; ++i)

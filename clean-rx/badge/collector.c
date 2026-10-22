@@ -1004,7 +1004,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         else fputs(",\"phy_first_bit8\":null", stdout);
         clean_auth_failure_t rejected;
         memcpy(&rejected, detail + CLEAN_SOAK_BAD_FCS_DETAIL, sizeof(rejected));
-        if (rejected.magic == CLEAN_AUTH_FAILURE_MAGIC) {
+        if (!CLEAN_RX_REJECT_PROBE && rejected.magic == CLEAN_AUTH_FAILURE_MAGIC) {
             printf(",\"soak_bad_fcs\":{\"count\":%u,\"length\":%u,\"phy\":%u,"
                    "\"status1\":%u,\"status2\":%u,\"at\":%u,\"raw\":\"",
                    rejected.count, rejected.length, rejected.phy,
@@ -1014,6 +1014,24 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                 printf("%02x", rejected.raw[i]);
             fputs("\"}", stdout);
         } else fputs(",\"soak_bad_fcs\":null", stdout);
+#if CLEAN_RX_REJECT_PROBE
+        if (rejected.magic == CLEAN_AUTH_FAILURE_MAGIC && rejected.count) {
+            clean_rx_reject_probe_t probe;
+            memcpy(&probe, detail + CLEAN_RX_REJECT_DETAIL, sizeof(probe));
+            printf(",\"rx_reject_probe\":{\"count\":%u,\"length\":%u,\"phy\":%u,"
+                   "\"status1\":%u,\"status2\":%u,\"at\":%u,"
+                   "\"next_length\":%u,\"copy_length\":%u,\"raw\":\"",
+                   rejected.count, rejected.length, rejected.phy,
+                   rejected.status1, rejected.status2,
+                   (uint32_t)rejected.time_lo | ((uint32_t)rejected.time_hi << 16u),
+                   probe.next_length, rejected.reserved);
+            for (unsigned i = 0u; i < sizeof(rejected.raw); ++i)
+                printf("%02x", rejected.raw[i]);
+            for (unsigned i = 0u; i < sizeof(probe.tail); ++i)
+                printf("%02x", probe.tail[i]);
+            fputs("\"}", stdout);
+        } else fputs(",\"rx_reject_probe\":null", stdout);
+#endif
         fputs(",\"rx_fifo_fault\":[", stdout);
         for (unsigned i = 0u; i < CLEAN_RX_FAULT_WORDS; ++i)
             printf("%s%u", i ? "," : "",

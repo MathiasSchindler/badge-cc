@@ -897,7 +897,10 @@ MPDU-attempt accounting, including fragmented MSDUs.
 
 Additional soak evidence exposes `phy_first_bit8` (first sampled new PHY
 `0x0008`, or `null`) and `soak_bad_fcs` (a bounded matching rejected Data
-prefix, reusing the existing rejected-authentication capture). The former
+prefix, reusing the existing rejected-authentication capture). Data capture
+requires active receive streaming and its prefix threshold (normally 128
+RXE bytes), so an unstreamed short frame cannot be labelled from stale SHM.
+The former
 includes prior/current status, timestamp, TXE/IFS/PHY controls, byte count and
 sampled owners; it is not an atomic trace or exact silicon assertion time.
 The latter saves only 40 RXE bytes, including six PLCP bytes, as 80 hex
@@ -909,10 +912,31 @@ the unknown-error guard remains intact. Use matching firmware and collector.
 See [PHY/RX provenance and retained failed controls](../dev-doc/MAC_RELIABILITY_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
 Targeted build `77bae4fe` passes four 2,000-MSDU/direction 2-Mbps stress
 pairs, four exact exhaustion negatives and a zero-injected-loss control.
-It captures three matching rejected prefixes with reported RXE length 62
-despite PLCP/header expectations of 66 or 2338 bytes. This narrows some loss
-to RX rejection/length inconsistency, not its physical cause. Bit `0x0008`
+Its original diagnostic saved three matching SHM prefixes at RXE length 62,
+but their attribution to the rejected frames is withdrawn: short rejected
+frames can leave a previous frame's header in SHM. The freshness gate above
+fixes that diagnostic false attribution, not the physical loss. Bit `0x0008`
 is not reproduced, and earlier startup/negative failures remain retained.
+
+For legacy-only receive-copy investigation, matching controller and badge
+builds can opt into `EXTRA_CFLAGS=-DCLEAN_RX_REJECT_PROBE=1`. This poisons
+the first 66 receive-scratch bytes before the prefix-copy request and saves
+the first rejected frame, without claiming it matches the peer, including
+an additional 26 bytes plus the raw next-length (`next_length`, `0x102b`)
+and requested-copy (`copy_length`, `0x102a`) registers.
+JSON `rx_reject_probe` contains a 66-byte/132-hex-character backing-memory
+sample, including any unwritten poison bytes; it is not a claim that 66 bytes
+were received. In probe builds `soak_bad_fcs` is `null`, rather than labelling
+this generic snapshot as matching Data. The probe adds receive-path instructions,
+is disabled by default and is not compatible with HT RX or an RF-timing
+qualification.
+
+Do not interpret raw next-length `0x8000` or copy-register zero alone as an
+invalid RF frame or an unsafe copy. An experimental minimum-length guard
+passed native tests but prevented every reception in five hardware controls;
+it was withdrawn. Native tests now preserve the original zero-permitted
+branch over all 65,536 operands and retain the upper-bound/bad-length handling,
+EIFS, deferred access and no ACK/delivery on bad-length rejection.
 
 The selector is correctly `0x0826` before trigger; later `0x082c` is engine
 state. Explicit PLCP refreshing was tested and removed because it did not
