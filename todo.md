@@ -47,6 +47,10 @@ See [MAC implementation and evidence](clean-rx/badge/README.md#milestone-a-mac-i
 
 ### A3. Receive correctness and interoperability
 
+Bounded legacy fragmentation/retry implementation and paired-badge evidence
+are recorded in [fragmentation qualification](clean-rx/dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
+This is partial A2/A3 progress, not the sustained/interoperability gate below.
+
 - [ ] Complete duplicate, fragmentation, RTS/CTS and protection handling.
 - [ ] Verify malformed frames, bad FCS, saturation and DMA/credit boundaries.
 - [ ] Verify at least 100,000 bidirectional application frames per direction

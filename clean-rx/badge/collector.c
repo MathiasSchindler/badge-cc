@@ -753,11 +753,50 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (tx == 19u || tx == 20u) {
         clean_soak_status_t s;
         memcpy(&s, detail + CLEAN_SOAK_DETAIL, sizeof(s));
+        clean_soak_fragment_status_t fragments;
+        memcpy(&fragments, detail + CLEAN_SOAK_FRAGMENT_DETAIL, sizeof(fragments));
+        uint32_t fragment_count = clean_soak_fragments(nonce);
+        uint32_t role = tx == 19u ? 1u : 2u;
+        int fragment_valid = fragments.magic == CLEAN_SOAK_FRAGMENT_MAGIC &&
+            fragments.fragments_per_msdu == fragment_count &&
+            fragments.tx_mpdu_acked == s.target * fragment_count;
+        if (fragment_count > 1u) {
+            fragment_valid = fragment_valid && fragments.reassembled == s.target &&
+                fragments.rx_mpdu_checked >= s.target * fragment_count &&
+                fragments.last_index == s.target - 1u &&
+                fragments.fragment_bitmap == (1u << fragment_count) - 1u &&
+                !(fragments.retry_bitmap & ~fragments.fragment_bitmap);
+            uint8_t expected[CLEAN_TX_STORAGE_BYTES];
+            for (uint32_t f = 0u; f < fragment_count; ++f) {
+                uint32_t length = clean_soak_fragment_frame(expected, nonce,
+                    (uint8_t)(3u - role), fragments.last_index, f);
+                if (length && (fragments.retry_bitmap & (1u << f)) &&
+                    !clean_mac_retry(expected + 6u, length - 6u)) length = 0u;
+                fragment_valid = fragment_valid && length &&
+                    fragments.fragment_fcs[f] == usb_report_u32(expected + length - 4u);
+            }
+            uint32_t length = clean_soak_fragment_frame(expected, nonce,
+                (uint8_t)(3u - role), fragments.last_index, 0u);
+            uint8_t duration[2] = {expected[8], expected[9]};
+            length = length ? clean_soak_frame(expected, nonce,
+                (uint8_t)(3u - role), fragments.last_index) : 0u;
+            expected[8] = duration[0]; expected[9] = duration[1];
+            fragment_valid = fragment_valid && length &&
+                fragments.reassembled_fcs == clean_mac_fcs(expected + 6u, length - 10u) &&
+                usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 4u) == s.target &&
+                usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 12u) ==
+                    s.target * (fragment_count - 1u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 16u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 20u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 24u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 28u);
+        }
         int valid = s.magic == CLEAN_SOAK_STATUS_MAGIC && !usb_report_u32(detail + 8u) &&
             s.target == usb_report_u32(nonce + 8u) && s.tx_acked == s.target &&
             s.received == s.target && !s.failure && !s.corrupt && !s.duplicates && !s.out_of_order &&
             s.rx_phy_checked == s.target && !s.rx_phy_mismatch &&
-            usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 100u) == nonce[12];
+            usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 100u) == nonce[12] &&
+            fragment_valid;
         printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,"
                "\"mode\":\"mac-soak\",\"role\":%u,\"valid\":%s,\"error\":%u,\"actual\":%u,"
                "\"target\":%u,\"tx_acked\":%u,\"tx_attempts\":%u,\"tx_timeouts\":%u,"
@@ -780,6 +819,16 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                clean_soak_phy_names[clean_soak_phy(nonce)], clean_soak_payload_names[nonce[13] >> 3u],
                s.rx_phy_checked,
                s.rx_phy_mismatch, s.rx_phy_last);
+        printf(",\"fragments_per_msdu\":%u,\"fragment_report_valid\":%s,"
+               "\"tx_mpdu_acked\":%u,\"rx_mpdu_checked\":%u,\"reassembled\":%u,"
+               "\"fragment_last_index\":%u,\"fragment_bitmap\":%u,\"fragment_retry_bitmap\":%u,"
+               "\"reassembled_fcs\":\"%08x\",\"fragment_fcs\":[",
+               fragment_count, fragment_valid ? "true" : "false", fragments.tx_mpdu_acked,
+               fragments.rx_mpdu_checked, fragments.reassembled, fragments.last_index,
+               fragments.fragment_bitmap, fragments.retry_bitmap, fragments.reassembled_fcs);
+        for (uint32_t f = 0u; f < fragment_count; ++f)
+            printf("%s\"%08x\"", f ? "," : "", fragments.fragment_fcs[f]);
+        putchar(']');
         print_mac_timing(detail);
         print_tx_diag(detail);
         fputs(",\"psm_diag\":[", stdout);
@@ -1162,7 +1211,7 @@ int main(int argc, char **argv) {
             for (; payload < CLEAN_SOAK_PAYLOADS; ++payload)
                 if (strcmp(argv[9], clean_soak_payload_names[payload]) == 0) break;
             if (payload == CLEAN_SOAK_PAYLOADS) {
-                fputs("MAC soak payload must be cycle, 32, 1500, 2304 or cck-boundary\n", stderr);
+                fputs("MAC soak payload must be cycle, 32, 1500, 2304, cck-boundary, frag2 or frag16\n", stderr);
                 return 2;
             }
         }

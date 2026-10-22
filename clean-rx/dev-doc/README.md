@@ -34,6 +34,9 @@ firmware.
   independently observed missing replies, timing/rate controls, bounded
   station receive FIFO, legacy regressions, matched-amplitude HT replays
   and rejected authentication capture.
+- [Bounded legacy fragmentation qualification](LEGACY_FRAGMENTATION_QUALIFICATION.md):
+  reliable-TX fragment admission, two-/sixteen-fragment maximum-MSDU fixtures,
+  forced ACK loss, independent CRC checks, retained RF failures and A2/A3 limits.
 
 Keep experiment commands, build IDs, trial counts, logs, unresolved behavior
 and proposed changes here. Document current user-visible behavior and

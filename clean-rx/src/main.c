@@ -2150,7 +2150,7 @@ void cyw43_main(void) {
                 !clean_mac_valid(frame + 6u, tx_len - 6u) ||
                 (frame[10] & 1u) ||
                 (!ht_clocked && tx_tid < 0) ||
-                (frame[28] & 15u) || !addresses_match)) {
+                !addresses_match)) {
                 fail(0x85u, FW_TX_BUF_ADDR, tx_len);
                 break;
             }

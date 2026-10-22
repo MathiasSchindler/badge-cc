@@ -43,6 +43,8 @@ static uint8_t wpa_secret[64];
 /* RX consumers run synchronously; share a packet outside the 8 KiB stack. */
 static uint8_t rx_packet[CLEAN_RX_PACKET_BYTES];
 static uint8_t soak_tx[CLEAN_TX_STORAGE_BYTES];
+static uint8_t soak_expected[CLEAN_TX_STORAGE_BYTES];
+static clean_soak_fragment_status_t soak_fragments;
 static uint32_t soak_watchdog_at;
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size);
 static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd);
@@ -290,6 +292,45 @@ static int soak_receive(clean_loader_t *l, clean_soak_status_t *s,
     uint8_t own[6], peer[6];
     clean_soak_address(own, nonce, role);
     clean_soak_address(peer, nonce, (uint8_t)(3u - role));
+    uint8_t *mpdu = rx_packet + 18u;
+    if (clean_soak_fragments(nonce) > 1u && size >= 46u &&
+        badger_bytes_equal(mpdu + 4u, own, 6u) &&
+        badger_bytes_equal(mpdu + 10u, peer, 6u) && mpdu[0] == 8u) {
+        uint32_t sequence = ((uint32_t)mpdu[22] | ((uint32_t)mpdu[23] << 8u)) >> 4u;
+        uint32_t index = s->received;
+        if (sequence != (index & 4095u)) {
+            if (!index || sequence != ((index - 1u) & 4095u)) {
+                l->error = CLEAN_INPUT; l->actual = sequence; return 0;
+            }
+            --index;
+        }
+        uint32_t fragment = mpdu[22] & 15u;
+        uint32_t expected = clean_soak_fragment_frame(soak_expected, nonce,
+            (uint8_t)(3u - role), index, fragment);
+        if (expected && (mpdu[1] & 8u) &&
+            !clean_mac_retry(soak_expected + 6u, expected - 6u)) expected = 0u;
+        uint32_t rate = clean_soak_rate(nonce);
+        uint8_t metadata = rate == 4u ? CLEAN_RX_OFDM :
+            clean_soak_short(nonce) ? CLEAN_RX_SHORT_PREAMBLE : 0u;
+        uint8_t signal = rate == 4u ? clean_ofdm_rates[0].signal : clean_cck_rates[rate].signal;
+        if (!expected || size != expected + 12u || rx_packet[17] ||
+            (rate == 4u ? (rx_packet[15] & 15u) != signal : rx_packet[15] != signal) ||
+            rx_packet[16] != (metadata | 1u) ||
+            !badger_bytes_equal(mpdu, soak_expected + 6u, size - 18u)) {
+            ++s->corrupt; s->failure = 1u;
+            l->error = CLEAN_INPUT; l->actual = fragment; return 0;
+        }
+        ++soak_fragments.rx_mpdu_checked;
+        if (soak_fragments.last_index != index) {
+            soak_fragments.last_index = index;
+            soak_fragments.fragment_bitmap = soak_fragments.retry_bitmap = 0u;
+            badger_bytes_zero((uint8_t *)soak_fragments.fragment_fcs,
+                             sizeof(soak_fragments.fragment_fcs));
+        }
+        soak_fragments.fragment_bitmap |= 1u << fragment;
+        if (mpdu[1] & 8u) soak_fragments.retry_bitmap |= 1u << fragment;
+        soak_fragments.fragment_fcs[fragment] = badger_bytes_load_u32(rx_packet + size - 4u);
+    }
     int mac = clean_station_rx(&station_rx, rx_packet, &size, own, peer,
                                l->wire->now_us(l->wire->context));
     if (mac < 0 && mac != CLEAN_MAC_PROTECTED) {
@@ -300,12 +341,16 @@ static int soak_receive(clean_loader_t *l, clean_soak_status_t *s,
         l->error = CLEAN_INPUT; l->actual = s->failure;
         return 0;
     }
+    if (mac == CLEAN_MAC_DELIVER && size >= 18u && rx_packet[17] == CLEAN_RX_REASSEMBLED) {
+        ++soak_fragments.reassembled;
+        soak_fragments.reassembled_fcs = badger_bytes_load_u32(rx_packet + size - 4u);
+    }
     return 1;
 }
 
-static int soak_send(clean_loader_t *l, clean_soak_status_t *s,
-                      const uint8_t nonce[14], uint8_t role, uint32_t index) {
-    uint32_t length = clean_soak_frame(soak_tx, nonce, role, index);
+static int soak_send_fragment(clean_loader_t *l, clean_soak_status_t *s,
+        const uint8_t nonce[14], uint8_t role, uint32_t index, uint32_t fragment) {
+    uint32_t length = clean_soak_fragment_frame(soak_tx, nonce, role, index, fragment);
     if (!length) { l->error = CLEAN_INPUT; l->actual = index; return 0; }
     uint32_t started = l->wire->now_us(l->wire->context), attempts = 0u;
     while (attempts < 8u) {
@@ -323,7 +368,7 @@ static int soak_send(clean_loader_t *l, clean_soak_status_t *s,
         }
         attempts += status.attempts;
         s->tx_attempts += status.attempts;
-        if (status.result == CLEAN_UNICAST_ACKED) { ++s->tx_acked; return 1; }
+        if (status.result == CLEAN_UNICAST_ACKED) { ++soak_fragments.tx_mpdu_acked; return 1; }
         if (status.result == CLEAN_UNICAST_BUSY) ++s->deferrals;
         else if (status.result == CLEAN_UNICAST_TIMEOUT) ++s->tx_timeouts;
         else { l->error = CLEAN_CONTROLLER; l->actual = status.result; return 0; }
@@ -337,10 +382,21 @@ static int soak_send(clean_loader_t *l, clean_soak_status_t *s,
     return 0;
 }
 
+static int soak_send(clean_loader_t *l, clean_soak_status_t *s,
+                      const uint8_t nonce[14], uint8_t role, uint32_t index) {
+    for (uint32_t fragment = 0u; fragment < clean_soak_fragments(nonce); ++fragment)
+        if (!soak_send_fragment(l, s, nonce, role, index, fragment)) return 0;
+    ++s->tx_acked;
+    return 1;
+}
+
 static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
     clean_soak_status_t s;
     badger_bytes_zero((uint8_t *)&s, sizeof(s));
     s.magic = CLEAN_SOAK_STATUS_MAGIC;
+    badger_bytes_zero((uint8_t *)&soak_fragments, sizeof(soak_fragments));
+    soak_fragments.magic = CLEAN_SOAK_FRAGMENT_MAGIC;
+    soak_fragments.fragments_per_msdu = clean_soak_fragments(nonce);
     s.target = badger_bytes_load_u32(nonce + 8u);
     l->budget_us = CLEAN_SOAK_MAX_US + 5000000u;
     uint8_t role = nonce[14] == 19u ? 1u : 2u;
@@ -380,6 +436,8 @@ static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
     s.elapsed_us = (uint32_t)elapsed;
     s.elapsed_hi = (uint32_t)(elapsed >> 32u);
     badger_bytes_copy(detail + CLEAN_SOAK_DETAIL, (const uint8_t *)&s, sizeof(s));
+    badger_bytes_copy(detail + CLEAN_SOAK_FRAGMENT_DETAIL,
+                     (const uint8_t *)&soak_fragments, sizeof(soak_fragments));
 }
 
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size) {

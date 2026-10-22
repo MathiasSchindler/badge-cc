@@ -324,7 +324,16 @@ static inline int clean_cck11_valid(const volatile uint8_t *plcp, uint32_t mpdu)
 /* Header selection only; callers must independently validate FCS and peers. */
 static inline int clean_station_tx_tid(const volatile uint8_t *m, uint32_t n,
                                        uint32_t qos_enabled) {
-    if (n < 28u || (m[22] & 15u)) return -1;
+    if (n < 28u) return -1;
+    if ((m[22] & 15u) || (m[1] & 4u)) {
+        /* A bounded legacy fragment is an independently ACKed MPDU.
+         * QoS/HT fragment scheduling is not installed by this path. */
+        uint32_t overhead = (m[1] & 64u) ? 16u : 0u;
+        if (m[0] != 8u || (m[1] & 0x83u) != 1u ||
+            n <= 28u + overhead || n > 28u + overhead + CLEAN_MSDU_BYTES ||
+            ((m[22] & 15u) == 15u && (m[1] & 4u))) return -1;
+        return 0;
+    }
     if ((m[0] & 15u) == 0u && !(m[1] & 7u)) return 6;
     if (m[0] == 8u && (m[1] & 7u) == 1u) return 0;
     if (!qos_enabled || n < 30u || (m[0] != 0x88u && m[0] != 0xc8u) ||

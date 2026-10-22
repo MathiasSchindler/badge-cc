@@ -463,6 +463,107 @@ static void soak_protocol(void) {
     puts("MAC: continuous-fixture sequence/wrap, all payload sizes, corruption, duplicates and ordering OK; NOT OTA");
 }
 
+static void soak_fragment_protocol(void) {
+    uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u,7u,8u};
+    uint8_t tx[CLEAN_TX_STORAGE_BYTES], packet[CLEAN_RX_PACKET_BYTES], expected[CLEAN_TX_STORAGE_BYTES];
+    const uint32_t indices[] = {0u, 4095u, 4096u, 99999u};
+    for (uint32_t profile = 5u; profile < CLEAN_SOAK_PAYLOADS; ++profile)
+        for (uint32_t phy = 0u; phy < CLEAN_SOAK_PHYS; ++phy)
+            for (uint32_t role = 1u; role <= 2u; ++role)
+                for (uint32_t test = 0u; test < sizeof(indices) / sizeof(indices[0]); ++test) {
+                    nonce[13] = (uint8_t)((profile << 3u) | phy);
+                    uint32_t count = clean_soak_fragments(nonce), index = indices[test];
+                    assert(count == (profile == 5u ? 2u : 16u));
+                    assert(!clean_soak_fragment_frame(tx, nonce, (uint8_t)role, index, count));
+                    clean_mac_rx_t rx;
+                    clean_mac_rx_init(&rx);
+                    clean_soak_status_t s = {.target = CLEAN_SOAK_MAX_FRAMES, .received = index};
+                    uint8_t own[6], peer[6];
+                    clean_soak_address(own, nonce, (uint8_t)(3u - role));
+                    clean_soak_address(peer, nonce, (uint8_t)role);
+                    uint32_t size = 0u, tick = UINT32_MAX - 100u;
+                    for (uint32_t f = 0u; f < count; ++f) {
+                        uint32_t length = clean_soak_fragment_frame(tx, nonce, (uint8_t)role, index, f);
+                        assert(length == 34u + CLEAN_MSDU_BYTES / count);
+                        assert(clean_mac_valid(tx + 6u, length - 6u));
+                        assert(clean_station_tx_tid(tx + 6u, length - 6u, 0u) == 0);
+                        assert((tx[28] & 15u) == f);
+                        assert(!!(tx[7] & 4u) == (f + 1u < count));
+                        uint32_t rate = clean_soak_rate(nonce);
+                        uint32_t ack = rate == 4u ? clean_ofdm_airtime_us(14u, 0u) :
+                            clean_cck_airtime_us(14u, rate, clean_soak_short(nonce));
+                        uint32_t airtime = rate == 4u ? clean_ofdm_airtime_us(length - 6u, 0u) :
+                            clean_cck_airtime_us(length - 6u, rate, clean_soak_short(nonce));
+                        uint32_t duration = tx[8] | ((uint32_t)tx[9] << 8u);
+                        assert(duration == 10u + ack +
+                            (f + 1u < count ? 20u + ack + airtime : 0u));
+                        memset(packet, 0, 18u);
+                        packet[15] = rate == 4u ? clean_ofdm_rates[0].signal :
+                            clean_cck_rates[rate].signal;
+                        packet[16] = 1u | (rate == 4u ? CLEAN_RX_OFDM :
+                            clean_soak_short(nonce) ? CLEAN_RX_SHORT_PREAMBLE : 0u);
+                        memcpy(packet + 18u, tx + 6u, length - 6u);
+                        size = length + 12u;
+                        int mac = clean_station_rx(&rx, packet, &size, own, peer, tick++);
+                        assert(mac == (f + 1u < count ? CLEAN_MAC_FRAGMENT : CLEAN_MAC_DELIVER));
+                        if (f + 1u < count) assert(!size);
+                        else {
+                            assert(size == 18u + 28u + CLEAN_MSDU_BYTES && packet[17] == 1u);
+                            assert(clean_soak_receive_packet(&s, packet, size, nonce,
+                                                            (uint8_t)(3u - role)) == 1);
+                            uint32_t full = clean_soak_frame(expected, nonce, (uint8_t)role, index);
+                            uint32_t first = clean_soak_fragment_frame(tx, nonce, (uint8_t)role, index, 0u);
+                            assert(first);
+                            expected[8] = tx[8]; expected[9] = tx[9];
+                            fcs(expected + 6u, full - 6u);
+                            assert(!memcmp(packet + 18u, expected + 6u, full - 6u));
+                            /* Reconstructed transport must not masquerade as raw OTA evidence. */
+                            --s.received; packet[17] = 0u;
+                            assert(clean_soak_receive_packet(&s, packet, size, nonce,
+                                                            (uint8_t)(3u - role)) == -1);
+                            ++s.received;
+                            length = clean_soak_fragment_frame(tx, nonce, (uint8_t)role, index, f);
+                        }
+                        assert(clean_mac_retry(tx + 6u, length - 6u));
+                        memcpy(packet + 18u, tx + 6u, length - 6u);
+                        size = length + 12u;
+                        assert(clean_station_rx(&rx, packet, &size, own, peer, tick++) == CLEAN_MAC_DUPLICATE);
+                        assert(!size);
+                    }
+                    assert(rx.delivered == 1u && rx.fragments == count - 1u &&
+                           rx.duplicates == count && !rx.expired && !rx.fragment_errors);
+                }
+    puts("MAC fragment fixture: 2/16 full-MSDU OTA templates, all PHY/preamble profiles, both roles, "
+         "sequence/timer wrap, exact reassembly and every-fragment retries pass; NOT OTA");
+    uint8_t m[28u + CLEAN_MSDU_BYTES + 17u] = {0};
+    m[0] = 8u; m[1] = 5u;
+    for (uint32_t fragment = 0u; fragment < 16u; ++fragment) {
+        m[22] = (uint8_t)fragment;
+        for (uint32_t protected_frame = 0u; protected_frame < 2u; ++protected_frame) {
+            m[1] = (uint8_t)(1u | (protected_frame ? 64u : 0u));
+            uint32_t overhead = protected_frame * 16u;
+            if (fragment) {
+                assert(clean_station_tx_tid(m, 28u + overhead, 0u) == -1);
+                assert(clean_station_tx_tid(m, 29u + overhead, 0u) == 0);
+                assert(clean_station_tx_tid(m, 28u + overhead + CLEAN_MSDU_BYTES, 0u) == 0);
+                assert(clean_station_tx_tid(m, 29u + overhead + CLEAN_MSDU_BYTES, 0u) == -1);
+            }
+            m[1] |= 4u;
+            assert(clean_station_tx_tid(m, 29u + overhead, 0u) == (fragment == 15u ? -1 : 0));
+            for (uint32_t flag = 0u; flag < 3u; ++flag) {
+                uint8_t saved = m[1];
+                m[1] = (uint8_t)(saved ^ (flag == 0u ? 1u : flag == 1u ? 2u : 128u));
+                assert(clean_station_tx_tid(m, 29u + overhead, 0u) == -1);
+                m[1] = saved;
+            }
+        }
+    }
+    for (uint32_t fc = 0u; fc < 256u; ++fc) if (fc != 8u) {
+        m[0] = (uint8_t)fc; m[1] = 5u; m[22] = 0u;
+        assert(clean_station_tx_tid(m, 32u, 1u) == -1);
+    }
+}
+
 static uint32_t qos_frame(uint8_t *m, uint16_t seq, uint8_t frag, uint8_t flags,
                            uint8_t tid, uint32_t payload) {
     uint32_t n = frame(m, seq, frag, flags, payload) + 2u;
@@ -884,6 +985,7 @@ int main(void) {
     station_delivery();
     station_transmit();
     soak_protocol();
+    soak_fragment_protocol();
     qos_receive();
     station_qos_delivery();
     station_edca_tx();

@@ -639,8 +639,8 @@ soak, persistent AP station link or independent RF timing measurement.
 
 The optional sixth argument selects `ofdm6` (default), `1-long`, `2-long`,
 `5.5-long`, `11-long`, `2-short`, `5.5-short` or `11-short`. The optional
-seventh argument selects `cycle` (default), `32`, `1500`, `2304` or
-`cck-boundary`. The boundary mode repeats MSDU lengths
+seventh argument selects `cycle` (default), `32`, `1500`, `2304`,
+`cck-boundary`, `frag2` or `frag16`. The boundary mode repeats MSDU lengths
 1500/1550/1600/1650/1700/1750/1800/1850/1900/2304 bytes, stopping at the
 first fixture failure. Fixed-size selection is explicit and recorded in configuration and
 endpoint reports; the original cyclic-size coverage is not silently reduced.
@@ -653,8 +653,8 @@ bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-boundary 10
 ```
 
 The last challenge byte encodes PHY in bits 0..2 and payload selection in
-bits 3..5 (values 0..4: cycle/32/1500/2304/cck-boundary); values 5..7 and
-any higher bits are rejected. Payload seed,
+bits 3..5 (values 0..6: cycle/32/1500/2304/cck-boundary/frag2/frag16);
+value 7 and any higher bits are rejected. Payload seed,
 exact length, FCS and sequence validation cover every selection. CCK selects
 the four b basic rates; default OFDM retains its existing rate policy.
 Every accepted delivery also checks the separate receiver's decoded
@@ -674,6 +674,60 @@ This is C1 PHY/rate evidence, not C2 b-only association, C3's 1,000-frame
 per-cell qualification, calibrated RF/EVM/spectral-mask evidence, or
 independent SIFS measurements. Full-sized 1-Mbps reception is still failing
 and must not be represented as qualified.
+
+### Bounded legacy fragmentation fixture
+
+`frag2` and `frag16` send each 2,304-byte MSDU as respectively two 1,152-byte
+or sixteen 144-byte payload fragments. Each fragment is a complete MPDU with
+its own PLCP, FCS, fragment number and ACK/retry exchange; these are not F2
+transport fragments or A-MPDUs. `COUNT` still counts complete MSDUs per
+direction, not fragments. For example, after flashing matching images:
+
+```sh
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag2 100 2 ofdm6 frag2
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag16 20 2 ofdm6 frag16
+```
+
+The controller now admits bounded legacy To-DS Data fragments through its
+reliable-transmit header check. Empty fragment bodies, More Fragments on
+fragment 15, other DS layouts, Order and fragmented management/QoS frames
+remain rejected. No ordinary station sender is changed to fragment its MSDUs.
+Each fragment uses the existing per-MPDU contention/retry path: this is **not**
+a SIFS-timed fragment-burst scheduler or RF timing qualification.
+
+Before reassembly, the receiving badge checks each bound-peer fragment's
+exact challenge/index-derived bytes, original FCS, fragment identity and
+decoded PHY/channel metadata. The real station adapter performs reassembly
+and duplicate suppression. Complete MSDUs must carry the reconstructed-FCS
+marker; unfragmented controls must not. More Fragments reserves the next
+fragment and its ACK in Duration; the final fragment reserves only its ACK.
+
+The original 64-byte `MSK3` status is unchanged. An additional 100-byte `MSG1`
+record at detail offset 584 supplies `fragments_per_msdu`, `tx_mpdu_acked`,
+`rx_mpdu_checked`, `reassembled`, `fragment_last_index`, `fragment_bitmap`,
+`fragment_retry_bitmap`, `fragment_fcs` and `reassembled_fcs` in collector JSON.
+The bitmaps and per-fragment FCS describe the final received application index;
+the retry bitmap records retries observed there, while the FCS is the last
+received original MPDU FCS. Earlier indices are checked on the receiving badge,
+not retained as individual host captures. `tx_acked` retains its complete-MSDU
+meaning; `tx_attempts` and `tx_timeouts` count per-fragment attempts.
+`mac_fragments` counts incomplete accepted reassembly steps, excluding the
+final delivery and suppressed duplicates.
+The reconstructed FCS is locally recomputed over the completed MPDU, retaining
+fragment zero's Duration; it is **not** an original over-the-air full-MSDU FCS.
+Collector acceptance requires exact ACKed-MPDU/reassembly counts, all final
+fragment FCS values, complete bitmap, reconstructed FCS and clean MAC errors.
+
+Build `60f95c36` passed 100 two-fragment and 20 sixteen-fragment MSDUs per
+direction with two deliberately suppressed ACKs at each endpoint. A longer
+sixteen-fragment target failed at the existing controller TX-completion fault;
+an earlier two-fragment attempt also exhausted retries. Native templates
+cover all existing PHY/preamble selections, but this new RF evidence is only
+6 Mbps OFDM on channel 1. See the
+[complete trial/failure record](../dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
+A1/A2/A3 remain incomplete.
+
+### Historical CCK fixture results
 
 Final build `9c3deabc`, channel 1, evidence prefix
 `build/clean-rx/badge/c1-final-PHY-SIZE`:
