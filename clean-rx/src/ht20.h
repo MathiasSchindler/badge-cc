@@ -536,21 +536,65 @@ static inline int clean_ht_stimulus_command(uint32_t cmd, const volatile uint8_t
 #define CLEAN_HT_HANDOFF_CASES 5u
 
 static inline uint32_t clean_ht_handoff_length(const uint8_t nonce[14], uint32_t body) {
-    return (nonce[11] == 1u) != (body != 0u) ? 170u : 298u;
+    return (nonce[11] == 1u || (CLEAN_RX_HT_VARIABLE && nonce[11] >= 4u && !(nonce[11]&1u))) !=
+        (body != 0u) ? 170u : 298u;
+}
+
+static inline uint32_t clean_ht_handoff_length_at(const uint8_t nonce[14],
+                                                  uint32_t index, uint32_t body) {
+    if (index >= CLEAN_HT_STIMULUS_COUNT || body > 1u) return 0u;
+    if (CLEAN_RX_HT_VARIABLE && nonce[11] >= 4u && index%3u == 2u) {
+        static const uint16_t lengths[8][2] = {
+            {80u,554u},{127u,381u},{170u,298u},{298u,170u},
+            {257u,255u},{479u,554u},{80u,80u},{321u,173u}};
+        return lengths[(index/3u+(nonce[11]-4u)/2u)%8u][body ^ (nonce[11]&1u)];
+    }
+    return clean_ht_handoff_length(nonce,body);
+}
+
+static inline uint32_t clean_ht_handoff_psdu(const uint8_t nonce[14], uint32_t index) {
+    uint32_t first = clean_ht_handoff_length_at(nonce,index,0u);
+    if (!CLEAN_RX_HT_VARIABLE) return index%3u == 2u ? CLEAN_HT_HANDOFF_PSDU : first;
+    return index%3u == 2u ? 4u+((first+3u)&~3u)+4u+
+        clean_ht_handoff_length_at(nonce,index,1u) : first;
 }
 
 /* Only aggregate 2 carries the selected fault; later PPDUs remain good. */
 static inline uint32_t clean_ht_handoff_frame(uint8_t packet[CLEAN_HT_STIMULUS_STORAGE],
                                               const uint8_t nonce[14], uint32_t index) {
-    if (nonce[10] >= CLEAN_HT_HANDOFF_CASES || (nonce[11] != 1u && nonce[11] != 2u) ||
+    if (nonce[10] >= CLEAN_HT_HANDOFF_CASES ||
+        (nonce[11] != 1u && nonce[11] != 2u &&
+         !(CLEAN_RX_HT_VARIABLE && nonce[11] >= 4u && nonce[11] < 20u)) ||
         !clean_ht_stimulus_frame(packet,nonce,index)) return 0u;
-    uint32_t kind = index%3u, first = clean_ht_handoff_length(nonce,0u);
-    uint32_t second = clean_ht_handoff_length(nonce,1u);
-    uint32_t length = kind == 2u ? CLEAN_HT_HANDOFF_PSDU : first;
+    uint32_t kind = index%3u, first = clean_ht_handoff_length_at(nonce,index,0u);
+    uint32_t second = clean_ht_handoff_length_at(nonce,index,1u);
+    uint32_t length = CLEAN_RX_HT_HANDOFF_GUARD && kind == 2u ?
+        CLEAN_HT_HANDOFF_PSDU : clean_ht_handoff_psdu(nonce,index);
     uint8_t *sig = packet+CLEAN_HT_DATA_HEADER, *m = sig+6u;
+    if (CLEAN_RX_HT_VARIABLE && nonce[11] >= 4u) {
+        for (uint32_t ordinal = 0u; ordinal < (kind == 2u ? 2u : 1u); ++ordinal) {
+            uint32_t size = clean_ht_handoff_length_at(nonce,index,ordinal);
+            uint8_t *bytes = m+(kind == 2u ?
+                4u+(ordinal ? 4u+((first+3u)&~3u) : 0u) : 0u);
+            for (uint32_t i = 0u; i < size; ++i) bytes[i] = 0u;
+            bytes[0] = kind == 2u ? 0x88u : 8u;
+            for (uint32_t i = 0u; i < 6u; ++i) bytes[4u+i] = bytes[16u+i] = 255u;
+            bytes[10] = 2u;
+            for (uint32_t i = 0u; i < 5u; ++i) bytes[11u+i] = nonce[i];
+            uint32_t sequence = 2u*index+ordinal;
+            bytes[22] = (uint8_t)(sequence<<4u); bytes[23] = (uint8_t)(sequence>>4u);
+            if (kind == 2u) bytes[24] = 0x60u;
+            for (uint32_t i = 0u; i < 14u; ++i) bytes[26u+i] = nonce[i];
+            bytes[40] = 'D'; bytes[41] = '2'; bytes[42] = (uint8_t)kind;
+            bytes[43] = (uint8_t)ordinal;
+            for (uint32_t i = 44u; i < size-4u; ++i)
+                bytes[i] = (uint8_t)(nonce[i%14u]^i^sequence);
+        }
+    }
     if (kind == 2u) {
         uint32_t at = 4u+((first+3u)&~3u);
-        for (uint32_t i = 0u; i < second; ++i) m[at+4u+i] = m[564u+i];
+        if (!(CLEAN_RX_HT_VARIABLE && nonce[11] >= 4u))
+            for (uint32_t i = 0u; i < second; ++i) m[at+4u+i] = m[564u+i];
         for (uint32_t body = 0u; body < 2u; ++body) {
             uint8_t *delimiter = m+(body ? at : 0u), *bytes = delimiter+4u;
             uint32_t size = body ? second : first;
@@ -609,7 +653,9 @@ static inline uint32_t clean_ht_handoff_frame(uint8_t packet[CLEAN_HT_STIMULUS_S
 
 static inline int clean_ht_handoff_sig_valid(const volatile uint8_t *sig, uint32_t length) {
     uint8_t expected[6];
-    if (!CLEAN_RX_HT_HANDOFF_STIMULUS || length != CLEAN_HT_HANDOFF_PSDU ||
+    if (!CLEAN_RX_HT_HANDOFF_STIMULUS ||
+        (CLEAN_RX_HT_VARIABLE ? length < 104u || length > CLEAN_HT_STIMULUS_PSDU :
+         length != CLEAN_HT_HANDOFF_PSDU) ||
         !clean_ht20_ampdu_sig(expected,length,sig[0])) return 0;
     for (uint32_t i = 0u; i < 6u; ++i) if (sig[i] != expected[i]) return 0;
     return 1;

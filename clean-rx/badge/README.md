@@ -42,6 +42,12 @@ See the map's build/run instructions and evidence limits.
 Default builds preserve legacy-only association even when an AP advertises
 HT/WMM. The separate opt-in WMM build described below still omits HT.
 
+For an autonomous two-badge application rather than this USB-driven
+diagnostic, see the [direct HT20 button messenger](../messenger/README.md).
+It uses short MCS0 broadcasts, application acknowledgements and visible
+bounded retry/restart handling; it does not enable HT station association
+or qualify D2 reliability.
+
 For an independent vendor-to-clean HT receive control, see
 [the controlled receive record](../dev-doc/CONTROLLED_HT_RECEIVE.md).
 The clean collector's `--vendor-ht-rx CHALLENGE_HEX_28 MCS:0-7` validates
@@ -610,6 +616,52 @@ consume the budget; CTS and incoming ACK consumption are unchanged. A passing
 run must report exactly the requested suppression count at both endpoints.
 Config JSON retains the requested count and reports retain the actual count.
 
+Suppression is a register-staged transaction with separated SHM loads and
+consumers, using the previously RF-qualified DCF update pattern. It checks
+`remaining + dropped == limit`, bounds each counter by the configured limit,
+and bounds the limit by 16 before dropping an ACK. A violation disables DCF,
+increments the response error once and retains the first fault; it does not
+clamp/reset counters or credit a received application reply as an ACK.
+Command 9 configures the budget only at a rechecked, paused, PHY-idle policy
+boundary with phase zero, and verifies every configuration word by readback.
+
+Soak detail offset 688 contains the 32-byte `AST1` suppression report:
+ARM-expected count, SHM limit/remaining/dropped, fault/phase, before/after,
+prior dropped count, low TSF, frame control, sequence and configuration epoch.
+Phases are 0 idle, 1 checking, 2 committing and 3 fault. Faults are 1 remaining
+out of range, 2 dropped out of range, 3 sum mismatch and 4 limit out of range.
+`ack_test_healthy` additionally requires the ARM and SHM limits to agree.
+Live reports are non-atomic; successful acceptance still requires a frozen,
+complete snapshot. Reconfiguration is explicit, not automatic fault recovery.
+Command 9 rejects a faulted configuration with `0x87`; collect the evidence
+and restart the controller rather than clearing the first fault in place.
+All invariant operands, including the limit, are register-staged. The
+12-byte `SUM1` record at detail 864 retains saved response airtime, computed
+sum and sampled limit. Two independent operand stores precede the sum branch.
+Successful acceptance checks these operands against the configured budget.
+
+Soak detail offset 800 contains the last 32-byte `AKR2` received-ACK record,
+now captured for legacy as well as opt-in HT responses. JSON includes
+`ack_rx_valid`, count, TSF, PHY and the complete 14-byte `ack_rx_mpdu` with FCS.
+The collector checks FCS, ACK type, zero final-fragment Duration, own RA,
+basic response rate/preamble and a timestamp inside the last ACKed submission's
+start/finish window. Count wrap alone is not a stale-ACK failure. A TIMEOUT
+cannot pass this check. This is endpoint evidence, not independent RF/SIFS
+measurement or a capture of every earlier ACK.
+
+The 32-byte `OBS1` record at detail 832 records the last own-address ACK's
+waiting/deadline state and the most recent ARM/PSM expiry source. Its JSON
+fields use `ack_observe_*`, `ack_clear_*` and `ack_arm_*`. Expiry and ACK
+observations may be from different attempts; their deadlines must match
+before comparing them. This trace localized a CCK completion resample that
+replaced an already-established tail-based ACK clock with PHY start while
+retaining the shorter window. The resample now preserves an ended tail's
+clock; timeout allowances and late-ACK rejection remain unchanged.
+
+Both roles retain bounded RX/automatic-response service for 2.1 seconds after
+their final counts complete, allowing the peer's final-request or final-reply
+retries to be ACKed without duplicate application delivery.
+
 The loader retains its six-second default for ordinary diagnostics. Only the
 soak selects a longer bounded budget, continues USB/cancellation servicing,
 and renews the existing eight-second BOOTSEL lease every four seconds.
@@ -633,8 +685,8 @@ soak, persistent AP station link or independent RF timing measurement.
 
 The optional sixth argument selects `ofdm6` (default), `1-long`, `2-long`,
 `5.5-long`, `11-long`, `2-short`, `5.5-short` or `11-short`. The optional
-seventh argument selects `cycle` (default), `32`, `1500`, `2304` or
-`cck-boundary`. The boundary mode repeats MSDU lengths
+seventh argument selects `cycle` (default), `32`, `1500`, `2304`,
+`cck-boundary`, `frag2` or `frag16`. The boundary mode repeats MSDU lengths
 1500/1550/1600/1650/1700/1750/1800/1850/1900/2304 bytes, stopping at the
 first fixture failure. Fixed-size selection is explicit and recorded in configuration and
 endpoint reports; the original cyclic-size coverage is not silently reduced.
@@ -647,8 +699,8 @@ bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-boundary 10
 ```
 
 The last challenge byte encodes PHY in bits 0..2 and payload selection in
-bits 3..5 (values 0..4: cycle/32/1500/2304/cck-boundary); values 5..7 and
-any higher bits are rejected. Payload seed,
+bits 3..5 (values 0..6: cycle/32/1500/2304/cck-boundary/frag2/frag16);
+value 7 and any higher bits are rejected. Payload seed,
 exact length, FCS and sequence validation cover every selection. CCK selects
 the four b basic rates; default OFDM retains its existing rate policy.
 Every accepted delivery also checks the separate receiver's decoded
@@ -668,6 +720,157 @@ This is C1 PHY/rate evidence, not C2 b-only association, C3's 1,000-frame
 per-cell qualification, calibrated RF/EVM/spectral-mask evidence, or
 independent SIFS measurements. Full-sized 1-Mbps reception is still failing
 and must not be represented as qualified.
+
+### Bounded legacy fragmentation fixture
+
+`frag2` and `frag16` send each 2,304-byte MSDU as respectively two 1,152-byte
+or sixteen 144-byte payload fragments. Each fragment is a complete MPDU with
+its own PLCP, FCS, fragment number and ACK/retry exchange; these are not F2
+transport fragments or A-MPDUs. `COUNT` still counts complete MSDUs per
+direction, not fragments. For example, after flashing matching images:
+
+```sh
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag2 100 2 ofdm6 frag2
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag16 20 2 ofdm6 frag16
+```
+
+The controller now admits bounded legacy To-DS Data fragments through its
+reliable-transmit header check. Empty fragment bodies, More Fragments on
+fragment 15, other DS layouts, Order and fragmented management/QoS frames
+remain rejected. No ordinary station sender is changed to fragment its MSDUs.
+Each fragment uses the existing per-MPDU contention/retry path: this is **not**
+a SIFS-timed fragment-burst scheduler or RF timing qualification.
+
+Before reassembly, the receiving badge checks each bound-peer fragment's
+exact challenge/index-derived bytes, original FCS, fragment identity and
+decoded PHY/channel metadata. The real station adapter performs reassembly
+and duplicate suppression. Complete MSDUs must carry the reconstructed-FCS
+marker; unfragmented controls must not. More Fragments reserves the next
+fragment and its ACK in Duration; the final fragment reserves only its ACK.
+
+The original 64-byte `MSK3` status is unchanged. An additional 100-byte `MSG1`
+record at detail offset 584 supplies `fragments_per_msdu`, `tx_mpdu_acked`,
+`rx_mpdu_checked`, `reassembled`, `fragment_last_index`, `fragment_bitmap`,
+`fragment_retry_bitmap`, `fragment_fcs` and `reassembled_fcs` in collector JSON.
+The bitmaps and per-fragment FCS describe the final received application index;
+the retry bitmap records retries observed there, while the FCS is the last
+received original MPDU FCS. Earlier indices are checked on the receiving badge,
+not retained as individual host captures. `tx_acked` retains its complete-MSDU
+meaning; `tx_attempts` and `tx_timeouts` count per-fragment attempts.
+`mac_fragments` counts incomplete accepted reassembly steps, excluding the
+final delivery and suppressed duplicates.
+The reconstructed FCS is locally recomputed over the completed MPDU, retaining
+fragment zero's Duration; it is **not** an original over-the-air full-MSDU FCS.
+Collector acceptance requires exact ACKed-MPDU/reassembly counts, all final
+fragment FCS values, complete bitmap, reconstructed FCS and clean MAC errors.
+
+Build `60f95c36` passed 100 two-fragment and 20 sixteen-fragment MSDUs per
+direction with two deliberately suppressed ACKs at each endpoint. A longer
+sixteen-fragment target failed at the existing controller TX-completion fault;
+an earlier two-fragment attempt also exhausted retries. Native templates
+cover all existing PHY/preamble selections, but this new RF evidence is only
+6 Mbps OFDM on channel 1. See the
+[complete trial/failure record](../dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
+A1/A2/A3 remain incomplete.
+
+### Quiescent TX-completion timeout recovery
+
+Profile 3 now preserves fired ownership across an access-cancellation race and
+latches each Data submission's MAC/PHY completion conditions separately, before
+RX priority handling and automatic response setup. A fresh trigger clears the
+previous submission's evidence. The original TX diagnostic/mailbox is unchanged.
+
+A missing TXE done event is **not success**. If PHY start was observed and
+the MAC/PHY are quiescent without PHY error, the attempted submission can
+return `CLEAN_UNICAST_TIMEOUT` rather than terminating the controller when
+there is no response owner, or when a completed response owns raw done status.
+Response completion never establishes Data success; active/incomplete response
+ownership remains fatal. The timeout counts against the existing retry bound
+and grows CW.
+PSM cleanup independently rechecks RX/TX/ownership hazards before resetting
+template controls, preserving held RX captures. Further TX defers until cleanup.
+The caller retries the same sequence/fragment/body; protected retries retain
+their existing ciphertext/PN behavior. Other completion faults remain fatal.
+
+A separate 28-byte `MTC1` record at controller address `0x204f0` is copied to
+detail offset 492 for station/soak reports. JSON exposes
+`mac_tx_completion_report`, `mac_tx_completion_latched`,
+`mac_tx_completion_preserved`, `mac_tx_completion_raw`,
+`mac_tx_completion_request`, `mac_tx_completion_pipeline` and
+`mac_tx_completion_timeouts`. The last counter distinguishes explicit
+missing-completion TIMEOUTs from ordinary lost-ACK timeouts; it is included in,
+not added to, normal attempt/timeout accounting. Retained bits are 1 = MAC not
+busy, 2 = MAC done, 4 = PHY idle and 8 = sampling closed before response
+reuse. Only the lower three bits establish complete Data evidence; retired
+response status cannot fill missing Data bits. These are local engine observations,
+not RF timing evidence.
+
+Build `7f4875b7` passed 1,000 maximum-size MSDUs per direction in each of the
+two-/sixteen-fragment profiles, plus 5,000 mixed-size MSDUs per direction
+across sequence wrap. All passing runs deliberately suppressed two ACKs per
+endpoint and reported zero corruption, duplicate application delivery or
+ordering errors. An eight-suppressed-ACK negative trial verified eight
+failed attempts, CW 1023 and no false success/controller fault.
+That build's 100,000-per-direction mixed-size attempt stopped near 48,900
+MSDUs after a completed response blocked missing-Data-completion recovery.
+Earlier build `08ff63a8` includes that quiescent-response TIMEOUT case and passed
+1,000 sixteen-fragment MSDUs and 5,000 mixed-size MSDUs per direction.
+Its exact-challenge 100,000 retry failed immediately without eligible peer
+receptions. Its exhaustion negative correctly bounded eight attempts but
+suppressed only six eligible ACKs, not eight. These failures are retained;
+the sustained gate remains open.
+See [all trials, failed approaches and unresolved causes](../dev-doc/MAC_RELIABILITY_RECOVERY.md).
+The physical cause of the missing TXE event and a separate first-no-reception
+failure remain unresolved; this is explicit bounded recovery, not a claim that
+those underlying RF/event conditions have been eliminated.
+
+Follow-up localization fixes the badge's uninitialized TIMER0 reference,
+retired-response contamination of incomplete Data evidence, and RX-priority
+loss of an observable PHY-start pulse. Profile-3 completion now uses a
+single `airtime + 2,000 us` elapsed-time bound instead of three
+iteration-count waits. While PSM holds an RX capture, a guarded ARM observer
+can retain real Data completion only before any response reuse. Capture
+bytes and RX credits are not discarded.
+
+Soak JSON adds `progress_*`, `clock_*`, `host_submit_before_us`,
+`host_submit_after_us`, `host_report_us`, `snapshot_flags`,
+`snapshot_stop_error`, `mac_tx_phy_start_handoffs` and
+`mac_tx_completion_handoffs` and `closing_duplicates_suppressed`. The separate
+`MSP1` record at detail offset 720 is currently 80 bytes. Frozen complete
+snapshots have flags 7; live
+non-atomic snapshots have flags 6 and cannot pass acceptance. Per-fragment
+results start at `0xffffffff`, not stale success. Use a matching image and
+collector. First-send timing is command preparation, not an on-air timestamp.
+After its final reply delivery, the initiator services RX for the peer's
+existing two-second retry bound plus one 100-ms command bound, allowing a
+lost final ACK to be retried before shutdown. This does not increase retries
+or accept a duplicate application delivery.
+
+Earlier localization build `d4ae73fb` passes those closing controls in both roles and a
+5,000-per-direction mixed-size run. Its fragmented run lost the initiator's
+USB device/report and is not a pass. The preceding `3bb01fa7` exact long
+replay reached 64,003 deliveries per endpoint before ACK exhaustion, with
+9 suppressed ACKs reported on a peer configured for 2. These distinct
+remaining failures, and initial no-reception failures, keep A1/A2/A3 open;
+the detailed record above retains all trials and verified flash restoration.
+
+The A2 follow-up build `b0aedeee` adds guarded register-only suppression,
+returned-ACK validation and the CCK physical-tail ACK-clock fix described above.
+It passes the exact earlier 5.5-Mbps sum-fault replay, 5,000 cyclic-size
+MSDUs per direction, 100 two-/sixteen-fragment MSDUs per direction, both
+one-MSDU loss controls and both fully controlled eight-drop exhaustion
+negatives. Its final campaign has 21 positive paired passes and **3 positive
+paired failures**, not an overall pass. All eight PHY/preamble profiles have
+a successful final control; three role/profile combinations still fail.
+The failed CCK responders have missing MAC-done and PHY error `0x0010`,
+explicitly excluded by the existing incomplete-completion recovery guard.
+No final suppression invariant faults occur. See the
+[final A2 qualification and retained failures](../dev-doc/MAC_RELIABILITY_RECOVERY.md#final-rf-qualification-b0aedeee).
+The known 1-Mbps/full-size truncation, sustained and independent ACK/SIFS/
+full-credit gates remain open. Both original full flashes were restored and
+independently verified; Pico is unchanged.
+
+### Historical CCK fixture results
 
 Final build `9c3deabc`, channel 1, evidence prefix
 `build/clean-rx/badge/c1-final-PHY-SIZE`:

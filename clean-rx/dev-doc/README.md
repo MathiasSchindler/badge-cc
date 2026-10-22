@@ -34,6 +34,16 @@ firmware.
   independently observed missing replies, timing/rate controls, bounded
   station receive FIFO, legacy regressions, matched-amplitude HT replays
   and rejected authentication capture.
+- [Bounded legacy fragmentation qualification](LEGACY_FRAGMENTATION_QUALIFICATION.md):
+  reliable-TX fragment admission, two-/sixteen-fragment maximum-MSDU fixtures,
+  forced ACK loss, independent CRC checks, retained RF failures and A2/A3 limits.
+- [MAC completion ownership and timeout recovery](MAC_RELIABILITY_RECOVERY.md):
+  fired-request cancellation races, per-submission completion evidence,
+  response-retirement closure, qualified timer reference, PHY-start/held-RX
+  observations, labelled live fault snapshots, bounded completion waits,
+  both-role closing grace, invariant-checked register-staged ACK suppression,
+  sticky first-fault evidence, returned-ACK bytes/PHY/TSF validation,
+  native hazard controls and retained RF failures.
 
 Keep experiment commands, build IDs, trial counts, logs, unresolved behavior
 and proposed changes here. Document current user-visible behavior and

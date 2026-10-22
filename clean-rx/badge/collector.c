@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <time.h>
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
 #include "../../src/shared/bytes.h"
@@ -197,6 +198,15 @@ static void print_mac_timing(const uint8_t detail[2048]) {
     for (uint32_t i = 0u; i < sizeof(names) / sizeof(names[0]); ++i)
         printf(",\"mac_%s\":%u", names[i],
                usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 40u + 4u * i));
+    const uint8_t *completion = detail + CLEAN_TX_COMPLETION_DETAIL;
+    printf(",\"mac_tx_completion_report\":%s,\"mac_tx_completion_latched\":%u,"
+           "\"mac_tx_completion_preserved\":%u,\"mac_tx_completion_raw\":%u,"
+           "\"mac_tx_completion_request\":%u,\"mac_tx_completion_pipeline\":\"%08x\","
+           "\"mac_tx_completion_timeouts\":%u",
+           usb_report_u32(completion) == CLEAN_TX_COMPLETION_MAGIC ? "true" : "false",
+           usb_report_u32(completion + 4u), usb_report_u32(completion + 8u),
+           usb_report_u32(completion + 12u), usb_report_u32(completion + 16u),
+           usb_report_u32(completion + 20u), usb_report_u32(completion + 24u));
 }
 
 static void deadline(int signum) {
@@ -205,6 +215,16 @@ static void deadline(int signum) {
     ssize_t result = write(STDERR_FILENO, text, sizeof(text) - 1u);
     (void)result;
     _exit(124);
+}
+
+static int monotonic_us(uint64_t *value) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        perror("Monotonic clock");
+        return 0;
+    }
+    *value = (uint64_t)now.tv_sec * 1000000u + (uint64_t)now.tv_nsec / 1000u;
+    return 1;
 }
 
 static int collect(libusb_device_handle *device, const char *path, uint8_t channel,
@@ -264,7 +284,11 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         if (!valid) return 0;
     }
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_USB_TEST_ID);
+    int soak = tx == 19u || tx == 20u;
+    uint64_t submit_before = 0u, submit_after = 0u, report_at = 0u;
+    if (soak && !monotonic_us(&submit_before)) return 0;
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
+    if (soak && !monotonic_us(&submit_after)) return 0;
     int got = 0;
     for (unsigned attempt = 0u; attempt < (tx >= 19u ? CLEAN_SOAK_POLLS : 800u); ++attempt) {
         int count = libusb_control_transfer(device, 0xc0u, LIVE_USB_WIFI_REPORT, 0, 0,
@@ -277,6 +301,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         usleep(tx >= 19u ? CLEAN_SOAK_POLL_US : 10000u);
     }
     if (!got) { fputs("Report deadline\n", stderr); return 0; }
+    if (soak && !monotonic_us(&report_at)) return 0;
     if (usb_report_u32(report) != 0x57363255u || report[4] != 1u ||
         report[5] != 0u || report[6] != 64u || report[7] != 0u ||
         usb_report_u32(report + 8u) != USB_REPORT_BUILD_ID ||
@@ -753,23 +778,146 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (tx == 19u || tx == 20u) {
         clean_soak_status_t s;
         memcpy(&s, detail + CLEAN_SOAK_DETAIL, sizeof(s));
+        clean_soak_fragment_status_t fragments;
+        memcpy(&fragments, detail + CLEAN_SOAK_FRAGMENT_DETAIL, sizeof(fragments));
+        clean_soak_progress_t progress;
+        memcpy(&progress, detail + CLEAN_SOAK_PROGRESS_DETAIL, sizeof(progress));
+        clean_ack_test_status_t ack_test;
+        memcpy(&ack_test, detail + CLEAN_ACK_TEST_DETAIL, sizeof(ack_test));
+        clean_ack_rx_t ack_rx;
+        memcpy(&ack_rx, detail + CLEAN_SOAK_ACK_DETAIL, sizeof(ack_rx));
+        clean_ack_observe_t observed;
+        memcpy(&observed, detail + CLEAN_ACK_OBSERVE_DETAIL, sizeof(observed));
+        clean_ack_arith_t arith;
+        memcpy(&arith, detail + CLEAN_ACK_ARITH_DETAIL, sizeof(arith));
+        clean_unicast_status_t unicast;
+        memcpy(&unicast, detail + 1000u, sizeof(unicast));
+        uint8_t own[6];
+        clean_soak_address(own, nonce, tx == 19u ? 1u : 2u);
+        int ack_valid = clean_ack_rx_valid(&ack_rx, own, &unicast,
+            clean_soak_phy(nonce) ? 15u : 0x150u, clean_soak_rate(nonce),
+            clean_soak_short(nonce));
+        int progress_valid = progress.magic == CLEAN_SOAK_PROGRESS_MAGIC &&
+            progress.phase == CLEAN_SOAK_FINISHED && progress.ready_us &&
+            progress.first_send_us >= progress.ready_us &&
+            progress.first_result_us >= progress.first_send_us &&
+            progress.first_rx_us >= progress.ready_us &&
+            (progress.ref_after & 3u) == 2u && progress.tick_cycles_after == 12u &&
+            progress.sys_khz_q5 && !progress.snapshot_stop_error &&
+            progress.snapshot_flags == (CLEAN_SOAK_SNAPSHOT_FROZEN |
+                CLEAN_SOAK_SNAPSHOT_MAILBOX | CLEAN_SOAK_SNAPSHOT_FULL);
+        uint32_t fragment_count = clean_soak_fragments(nonce);
+        uint32_t role = tx == 19u ? 1u : 2u;
+        int fragment_valid = fragments.magic == CLEAN_SOAK_FRAGMENT_MAGIC &&
+            fragments.fragments_per_msdu == fragment_count &&
+            fragments.tx_mpdu_acked == s.target * fragment_count;
+        if (fragment_count > 1u) {
+            fragment_valid = fragment_valid && fragments.reassembled == s.target &&
+                fragments.rx_mpdu_checked >= s.target * fragment_count &&
+                fragments.last_index == s.target - 1u &&
+                fragments.fragment_bitmap == (1u << fragment_count) - 1u &&
+                !(fragments.retry_bitmap & ~fragments.fragment_bitmap);
+            uint8_t expected[CLEAN_TX_STORAGE_BYTES];
+            for (uint32_t f = 0u; f < fragment_count; ++f) {
+                uint32_t length = clean_soak_fragment_frame(expected, nonce,
+                    (uint8_t)(3u - role), fragments.last_index, f);
+                if (length && (fragments.retry_bitmap & (1u << f)) &&
+                    !clean_mac_retry(expected + 6u, length - 6u)) length = 0u;
+                fragment_valid = fragment_valid && length &&
+                    fragments.fragment_fcs[f] == usb_report_u32(expected + length - 4u);
+            }
+            uint32_t length = clean_soak_fragment_frame(expected, nonce,
+                (uint8_t)(3u - role), fragments.last_index, 0u);
+            uint8_t duration[2] = {expected[8], expected[9]};
+            length = length ? clean_soak_frame(expected, nonce,
+                (uint8_t)(3u - role), fragments.last_index) : 0u;
+            expected[8] = duration[0]; expected[9] = duration[1];
+            fragment_valid = fragment_valid && length &&
+                fragments.reassembled_fcs == clean_mac_fcs(expected + 6u, length - 10u) &&
+                usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 4u) == s.target &&
+                usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 12u) ==
+                    s.target * (fragment_count - 1u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 16u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 20u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 24u) &&
+                !usb_report_u32(detail + CLEAN_STATION_MAC_DETAIL + 28u);
+        }
         int valid = s.magic == CLEAN_SOAK_STATUS_MAGIC && !usb_report_u32(detail + 8u) &&
             s.target == usb_report_u32(nonce + 8u) && s.tx_acked == s.target &&
             s.received == s.target && !s.failure && !s.corrupt && !s.duplicates && !s.out_of_order &&
             s.rx_phy_checked == s.target && !s.rx_phy_mismatch &&
-            usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 100u) == nonce[12];
+            usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 100u) == nonce[12] &&
+            fragment_valid && progress_valid && clean_ack_test_status_valid(&ack_test) &&
+            ack_test.configured == nonce[12] && ack_valid &&
+            arith.magic == CLEAN_ACK_ARITH_MAGIC && arith.limit == ack_test.limit &&
+            arith.sum == ack_test.limit && !arith.reserved;
         printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,"
                "\"mode\":\"mac-soak\",\"role\":%u,\"valid\":%s,\"error\":%u,\"actual\":%u,"
+               "\"error_addr\":\"%08x\","
                "\"target\":%u,\"tx_acked\":%u,\"tx_attempts\":%u,\"tx_timeouts\":%u,"
                "\"deferrals\":%u,\"received\":%u,\"duplicate_deliveries\":%u,"
                "\"mac_duplicates_suppressed\":%u,\"corrupt\":%u,\"out_of_order\":%u,"
                "\"elapsed_us\":%llu,\"failure\":%u",
                serial, USB_REPORT_BUILD_ID, channel, tx == 19u ? 1u : 2u,
                valid ? "true" : "false", usb_report_u32(detail + 8u),
-               usb_report_u32(detail + 16u), s.target, s.tx_acked, s.tx_attempts,
+               usb_report_u32(detail + 16u), usb_report_u32(detail + 12u),
+               s.target, s.tx_acked, s.tx_attempts,
                s.tx_timeouts, s.deferrals, s.received, s.duplicates,
                usb_report_u32(detail + 1688u), s.corrupt, s.out_of_order,
                (unsigned long long)clean_soak_elapsed(&s), s.failure);
+        printf(",\"progress_report\":%s,\"progress_phase\":%u,\"progress_index\":%u,"
+               "\"progress_fragment\":%u,\"progress_attempts\":%u,\"progress_result\":%u,"
+               "\"ready_us\":%u,\"first_send_us\":%u,\"first_result_us\":%u,\"first_rx_us\":%u,"
+               "\"host_submit_before_us\":%llu,\"host_submit_after_us\":%llu,"
+               "\"host_report_us\":%llu",
+               progress.magic == CLEAN_SOAK_PROGRESS_MAGIC ? "true" : "false",
+               progress.phase, progress.index, progress.fragment, progress.attempts, progress.result,
+               progress.ready_us, progress.first_send_us, progress.first_result_us, progress.first_rx_us,
+               (unsigned long long)submit_before, (unsigned long long)submit_after,
+               (unsigned long long)report_at);
+        printf(",\"clock_ref_before\":%u,\"clock_tick_cycles_before\":%u,"
+               "\"clock_ref_after\":%u,\"clock_tick_cycles_after\":%u,\"clock_sys_khz_q5\":%u",
+               progress.ref_before, progress.tick_cycles_before, progress.ref_after,
+               progress.tick_cycles_after, progress.sys_khz_q5);
+        printf(",\"snapshot_flags\":%u,\"snapshot_stop_error\":%u,"
+               "\"mac_tx_phy_start_handoffs\":%u,\"mac_tx_completion_handoffs\":%u,"
+               "\"closing_duplicates_suppressed\":%u",
+               progress.snapshot_flags, progress.snapshot_stop_error, progress.phy_start_handoffs,
+               progress.completion_handoffs, progress.closing_duplicates);
+        printf(",\"ack_test_report\":%s,\"ack_test_healthy\":%s,"
+               "\"ack_test_configured\":%u,\"ack_test_limit\":%u,"
+               "\"ack_test_remaining\":%u,\"ack_test_dropped\":%u,"
+               "\"ack_test_fault\":%u,\"ack_test_phase\":%u,"
+               "\"ack_test_before\":%u,\"ack_test_after\":%u,\"ack_test_dropped_before\":%u,"
+               "\"ack_test_clock\":%u,\"ack_test_frame_control\":\"%04x\","
+               "\"ack_test_sequence\":\"%04x\",\"ack_test_epoch\":%u",
+               ack_test.magic == CLEAN_ACK_TEST_MAGIC ? "true" : "false",
+               clean_ack_test_status_valid(&ack_test) ? "true" : "false",
+               ack_test.configured, ack_test.limit, ack_test.remaining, ack_test.dropped,
+               ack_test.fault, ack_test.phase, ack_test.before, ack_test.after,
+               ack_test.dropped_before, ack_test.clock, ack_test.frame_control,
+               ack_test.sequence, ack_test.epoch);
+        printf(",\"ack_rx_valid\":%s,\"ack_rx_count\":%u,\"ack_rx_tsf\":%u,"
+               "\"ack_rx_phy\":\"%04x\",\"ack_rx_mpdu\":\"",
+               ack_valid ? "true" : "false", ack_rx.count,
+               (uint32_t)ack_rx.time_lo | ((uint32_t)ack_rx.time_hi << 16u), ack_rx.phy);
+        for (uint32_t i = 0u; i < 7u; ++i)
+            printf("%02x%02x", ack_rx.mpdu[i] & 255u, ack_rx.mpdu[i] >> 8u);
+        printf("\"");
+        printf(",\"ack_observe_report\":%s,\"ack_observe_at\":%u,"
+               "\"ack_observe_waiting\":%u,\"ack_observe_due\":%u,"
+               "\"ack_observe_started\":%u,\"ack_observe_window\":%u,"
+               "\"ack_clear_reason\":%u,\"ack_cleared_at\":%u,\"ack_clear_due\":%u,"
+               "\"ack_arm_at\":%u,\"ack_arm_started\":%u,\"ack_arm_window\":%u",
+               observed.magic == CLEAN_ACK_OBSERVE_MAGIC ? "true" : "false",
+               observed.observed_at, observed.waiting, observed.due,
+               observed.started, observed.window, observed.clear_reason,
+               observed.cleared_at, observed.clear_due,
+               observed.arm_at, observed.arm_started, observed.arm_window);
+        printf(",\"ack_arith_report\":%s,\"ack_arith_airtime\":%u,"
+               "\"ack_arith_sum\":%u,\"ack_arith_limit\":%u",
+               arith.magic == CLEAN_ACK_ARITH_MAGIC ? "true" : "false",
+               arith.airtime, arith.sum, arith.limit);
         printf(",\"fw_state\":%u,\"fw_substage\":%u,\"fw_error\":%u,"
                "\"fw_error_addr\":\"%08x\",\"fw_error_val\":\"%08x\"",
                usb_report_u32(detail + 36u), usb_report_u32(detail + 40u),
@@ -780,6 +928,16 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                clean_soak_phy_names[clean_soak_phy(nonce)], clean_soak_payload_names[nonce[13] >> 3u],
                s.rx_phy_checked,
                s.rx_phy_mismatch, s.rx_phy_last);
+        printf(",\"fragments_per_msdu\":%u,\"fragment_report_valid\":%s,"
+               "\"tx_mpdu_acked\":%u,\"rx_mpdu_checked\":%u,\"reassembled\":%u,"
+               "\"fragment_last_index\":%u,\"fragment_bitmap\":%u,\"fragment_retry_bitmap\":%u,"
+               "\"reassembled_fcs\":\"%08x\",\"fragment_fcs\":[",
+               fragment_count, fragment_valid ? "true" : "false", fragments.tx_mpdu_acked,
+               fragments.rx_mpdu_checked, fragments.reassembled, fragments.last_index,
+               fragments.fragment_bitmap, fragments.retry_bitmap, fragments.reassembled_fcs);
+        for (uint32_t f = 0u; f < fragment_count; ++f)
+            printf("%s\"%08x\"", f ? "," : "", fragments.fragment_fcs[f]);
+        putchar(']');
         print_mac_timing(detail);
         print_tx_diag(detail);
         fputs(",\"psm_diag\":[", stdout);
@@ -1162,7 +1320,7 @@ int main(int argc, char **argv) {
             for (; payload < CLEAN_SOAK_PAYLOADS; ++payload)
                 if (strcmp(argv[9], clean_soak_payload_names[payload]) == 0) break;
             if (payload == CLEAN_SOAK_PAYLOADS) {
-                fputs("MAC soak payload must be cycle, 32, 1500, 2304 or cck-boundary\n", stderr);
+                fputs("MAC soak payload must be cycle, 32, 1500, 2304, cck-boundary, frag2 or frag16\n", stderr);
                 return 2;
             }
         }

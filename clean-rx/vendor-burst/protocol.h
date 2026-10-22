@@ -338,12 +338,12 @@ static inline uint32_t ref_handoff_rx_index(const uint8_t *packet, uint32_t size
                                            const uint8_t nonce[14]) {
     if (!REF_CLEAN_HANDOFF || size < 18u+44u) return CLEAN_HT_STIMULUS_COUNT;
     uint32_t sequence = ref_u16(packet+40u)>>4u, index = sequence/2u, ordinal = sequence&1u;
-    uint32_t length = clean_ht_handoff_length(nonce,ordinal);
+    uint32_t length = clean_ht_handoff_length_at(nonce,index,ordinal);
     uint8_t expected[CLEAN_HT_STIMULUS_STORAGE];
     if (index%3u != 2u || size != 18u+length ||
         !clean_ht_handoff_frame(expected,nonce,index)) return CLEAN_HT_STIMULUS_COUNT;
     uint32_t offset = CLEAN_HT_DATA_HEADER+10u+
-        (ordinal ? 4u+((clean_ht_handoff_length(nonce,0u)+3u)&~3u) : 0u);
+        (ordinal ? 4u+((clean_ht_handoff_length_at(nonce,index,0u)+3u)&~3u) : 0u);
     if (packet[15] != nonce[12] || packet[16] != (CLEAN_RX_UNSUPPORTED_PHY|nonce[13]) ||
         packet[17] || !(ref_u16(packet+10u)&~CLEAN_OBSERVER_ADVANCE_TAG) ||
         (ref_u16(packet+10u)&~CLEAN_OBSERVER_ADVANCE_TAG) > CLEAN_OBSERVER_RECORDS ||
@@ -381,7 +381,12 @@ static inline int ref_window_valid(const uint8_t *window) {
         !count || count > REF_WINDOW_RECORDS ||
         badger_bytes_load_u32(window+12u) != REF_WINDOW_INTERVAL ||
         badger_bytes_load_u32(window+24u) > 1u ||
-        badger_bytes_load_u32(window+28u) > 15u ||
+        badger_bytes_load_u32(window+28u) > 63u ||
+        ((badger_bytes_load_u32(window+28u)&16u) &&
+         (!(badger_bytes_load_u32(window+28u)&1u) ||
+          (badger_bytes_load_u32(window+28u)&12u))) ||
+        ((badger_bytes_load_u32(window+28u)&32u) &&
+         !(badger_bytes_load_u32(window+28u)&16u)) ||
         ((badger_bytes_load_u32(window+28u)&8u) &&
          !(badger_bytes_load_u32(window+28u)&4u)) ||
         (badger_bytes_load_u32(window+28u) &&
@@ -394,11 +399,19 @@ static inline int ref_window_valid(const uint8_t *window) {
     if (!badger_bytes_load_u32(window+28u))
         for (uint32_t i = 64u; i < REF_WINDOW_HEADER_BYTES; ++i)
             if (window[i]) return 0;
-    if (!(badger_bytes_load_u32(window+28u)&4u))
+    if (!(badger_bytes_load_u32(window+28u)&20u))
         for (uint32_t i = 96u; i < REF_WINDOW_HEADER_BYTES; ++i)
             if (window[i]) return 0;
     if ((badger_bytes_load_u32(window+28u)&4u) &&
         ref_u16(window+96u) > 4u && ref_u16(window+96u) != 0xffffu) return 0;
+    if ((badger_bytes_load_u32(window+28u)&16u) && ref_u16(window+98u) > 4u) return 0;
+    if ((badger_bytes_load_u32(window+28u)&16u) &&
+        !(badger_bytes_load_u32(window+28u)&32u))
+        for (uint32_t i = 112u; i < REF_WINDOW_HEADER_BYTES; ++i)
+            if (window[i]) return 0;
+    if ((badger_bytes_load_u32(window+28u)&32u) && ref_u16(window+116u) &&
+        (ref_u16(window+120u) != 2u || !(ref_u16(window+122u)&0x1000u) ||
+         ref_u16(window+126u) < 250u)) return 0;
     for (uint32_t i = 0u; i < count; ++i) {
         const uint8_t *r = window+REF_WINDOW_HEADER_BYTES+i*REF_WINDOW_RECORD_BYTES;
         uint32_t time = badger_bytes_load_u32(r), duration = badger_bytes_load_u32(r+4u);
@@ -575,6 +588,7 @@ static inline void ref_mac(uint8_t mac[6], const uint8_t nonce[16]) {
 }
 
 static inline uint32_t ref_fixture_size(uint8_t profile) {
+    if (CLEAN_RX_HT_VARIABLE && profile >= 4u && profile < 20u) return 128u<<(profile&1u);
     return profile >= 1u && profile <= 3u ? 64u<<profile : 0u;
 }
 
@@ -768,8 +782,11 @@ static inline int ref_pair_correlated(const uint8_t log[CLEAN_OBSERVER_WORDS*2u]
     boundary |= ref_u16(early+15u) == CLEAN_HT_HANDOFF_PSDU &&
         pair_psdu == 478u && terminal == 0x100u;
 #endif
-    return ((first_length == 170u && second_length == 298u) ||
-            (first_length == 298u && second_length == 170u)) &&
+    return (CLEAN_RX_HT_VARIABLE ?
+            first_length >= 44u && first_length <= 480u &&
+            second_length >= 44u && second_length <= 554u :
+            ((first_length == 170u && second_length == 298u) ||
+             (first_length == 298u && second_length == 170u))) &&
         ref_u16(early+26u) == second_length &&
         boundary &&
         !(first_sequence&15u) && !(second_sequence&15u) &&
@@ -788,9 +805,10 @@ static inline int ref_handoff_bad_second(const uint8_t *log, const uint8_t *earl
     uint8_t expected[CLEAN_HT_STIMULUS_STORAGE], mac[6];
     mac[0] = 2u;
     for (uint32_t i = 0u; i < 5u; ++i) mac[i+1u] = nonce[i];
-    uint32_t first = clean_ht_handoff_length(nonce,0u), length = clean_ht_handoff_length(nonce,1u);
+    uint32_t first = clean_ht_handoff_length_at(nonce,2u,0u);
+    uint32_t length = clean_ht_handoff_length_at(nonce,2u,1u);
     uint32_t offset = 18u+4u+((first+3u)&~3u);
-    if (!REF_CLEAN_HANDOFF || nonce[10] != 2u ||
+    if (!REF_CLEAN_HANDOFF || nonce[10] != 2u || length > CLEAN_OBSERVER_SECOND_MAX ||
         !clean_ht_handoff_frame(expected,nonce,2u) || !ref_early_correlated(log,early,mac) ||
         ref_u16(early+24u) != 1u || ref_u16(second) != ref_u16(early) ||
         ref_u16(second+2u) != ref_u16(early+2u) || ref_u16(second+4u) != length+6u ||

@@ -32,6 +32,10 @@ See [MAC implementation and evidence](clean-rx/badge/README.md#milestone-a-mac-i
 
 ### A1. Correct medium access
 
+Bounded backoff/timeout implementation and native NAV/EIFS/overlap controls
+are recorded in [MAC reliability recovery](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md).
+Controlled RF contention and timing qualification remain open.
+
 - [ ] Complete carrier/NAV sensing, interframe spacing, random backoff,
   freezing/resumption and contention-window updates.
 - [ ] Test idle/busy/overlapping traffic, NAV expiry and retry exhaustion.
@@ -39,13 +43,58 @@ See [MAC implementation and evidence](clean-rx/badge/README.md#milestone-a-mac-i
 
 ### A2. Reliable ACKs and retransmissions
 
+Fired-request ownership and explicit, bounded recovery of quiescent
+TX-completion timeouts are implemented and hardware-tested; see
+[recovery evidence and unresolved causes](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md).
+Failed attempts remain TIMEOUTs, not successful completions.
+Completed automatic-response status is never credited as Data success.
+Follow-up localization fixes timer reference, response-retirement ownership
+and missed PHY-start observations; completion waits are elapsed-time bounded.
+Live failure snapshots are explicitly labelled, and the fixture keeps RX
+active for the peer's bounded final-reply retries.
+The A2 follow-up adds invariant-checked register-staged ACK suppression,
+sticky first-fault operands, saved ACK/FCS/PHY/TSF validation and both-role
+closing service. An observed CCK bug is fixed: completion resampling no longer
+replaces the physical-tail ACK clock with PHY start while keeping the shorter
+window. A real sum-mismatch fault with otherwise consistent retained counters
+also prompted register-only comparisons and explicit computed-sum/limit
+evidence. This does not prove the earlier spontaneous suppression cause fixed.
+See the [A2 follow-up and retained failures](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#a2-follow-up-suppression-invariants-and-cck-ack-clock-ownership).
+Final build `b0aedeee` passes 5,000 cyclic-size MSDUs per direction, 100
+two-/sixteen-fragment MSDUs per direction, the exact earlier sum-fault replay
+and both controlled eight-drop exhaustion negatives. Its campaign still has
+3 failed positive CCK controls (21 positive pairs pass): missing MAC-done
+with PHY error `0x0010`, not another suppression-count fault. A2 remains open;
+the nonzero-error completion path and independent RF timing/full-credit
+qualification are not complete.
+
 - [ ] Complete response-rate/preamble selection, turnaround, bounded retries
   and meaningful completion reporting.
-- [ ] Preserve sequence/fragment identity and protected bytes/PN on retries.
+- [x] Preserve sequence/fragment identity and protected bytes/PN on retries.
+  Native CCMP tests verify unchanged protected bytes/PN and successful
+  authentication after Retry; legacy RF fragmentation tests check retained
+  sequence/fragment/body identity. This is not protected RF timing qualification.
 - [ ] Independently verify ACK/SIFS timing, missing/late ACKs and full-credit
   behavior without silently discarding received frames.
 
 ### A3. Receive correctness and interoperability
+
+Bounded legacy fragmentation/retry implementation and paired-badge evidence
+are recorded in [fragmentation qualification](clean-rx/dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
+This is partial A2/A3 progress, not the sustained/interoperability gate below.
+Follow-up [recovery trials](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md)
+passed 1,000 maximum-size MSDUs per direction for both two- and
+sixteen-fragment profiles, including explicit completion-timeout recovery.
+Earlier sixteen-fragment and 5,000-per-direction mixed-size controls passed;
+the 100,000-per-direction gate failed. Follow-up trials localized mailbox
+stalls, mid-run ACKed-but-undelivered replies and premature final-reply
+shutdown. A later exact long replay reached 64,003 deliveries per endpoint
+before ACK exhaustion, with unexpected ACK-suppression state on its peer;
+it is not a passing 100,000-frame gate. First-no-reception behavior also
+remains unresolved. A1/A2/A3 are not complete.
+The latest build passes 5,000 mixed-size exchanges per direction and
+lost-final-ACK closing controls in both roles; its fragmented trial lost
+the initiator's USB report, so it is not a new fragmented qualification.
 
 - [ ] Complete duplicate, fragmentation, RTS/CTS and protection handling.
 - [ ] Verify malformed frames, bad FCS, saturation and DMA/credit boundaries.
@@ -126,6 +175,8 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Parse AP HT/WMM capabilities and constrain the profile on association and beacon updates.
 - [x] Implement common-MCS selection, exact rate requests, PHY configuration and airtime deadlines.
 - [x] Implement bounded mixed-format HT TX/RX at MCS0..7 and explicit legacy fallback.
+- [x] Build and hardware-test an autonomous two-badge HT20 button messenger with application acknowledgements, bounded retries and visible recovery; retain startup failures without claiming D2 reliability.
+- [x] Measure messenger timing on both badges, correct its timer timebase, and reduce ACK/display/retry latency with matched hardware comparisons; preserve failed campaigns and the display-regression fix.
 - [x] Implement non-HT WMM/EDCA, protected QoS, per-TID CCMP and bounded A-MSDU receive software.
 - [x] Implement native-tested Block ACK agreements, A-MPDU parsing and ciphertext reordering.
 - [x] Implement readback-verified atomic station/controller policy commits.
@@ -155,6 +206,10 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [x] Use a focused copy microscope to retain complete FCS-valid 298-byte continuations; preserve native count/FCS/F2 rejection.
 - [x] Separate quieting from copy replay with matched original-destination controls; isolate replay-dependent count restart and preserve native rejection.
 - [x] Isolate the mid-body replay FCS-state effect with bad-body controls; retain raw copy counts and quarantine mismatched partial FIFO exports.
+- [x] Isolate next-MPDU command semantics: repeat exact streaming 170/298-byte FIFO pairs with native length/GoodFCS; retain reliability and malformed-input gaps.
+- [x] Test bounded ordered-flush and instrumented stuck-prefix diagnostics; preserve event-10 failures and distinguish injected execution from unproven physical recovery.
+- [x] Extend the c3 boundary microscope to variable/odd MPDU lengths through 554-byte continuations; test both roles/orders and isolate the short-first native-stream-state dependency without normalizing counts or hiding losses.
+- [x] Verify remaining vendor hints: reject general SHM-only capture with matched RF aborts; implement gated short-first streaming and delimiter-status exclusion, plus native-count quarantine for every variable handoff; retain reliability failures.
 - [x] Implement gated passive-observer FIFO retention and bounded stop/drain.
 - [x] Implement acknowledged repeated early-MPDU FIFO/F2 delivery and complete packet archives; preserve final RF misses as unqualified.
 - [x] Implement full fixed-source vendor raw archives; identify monitor cutoff/timeouts and exclude them as a qualified RF-loss baseline.
@@ -168,8 +223,9 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 - [ ] **1. Qualify early-capture reliability:** qualify FIFO-backed delivery
   and resolve persistent RXE busy, pre-prefix and truncated-body losses;
   repeat loss-accounted tests with confirmed multi-body stimulus.
-- [ ] **2. Qualify aggregate handoff:** generalize the bounded streaming-safe
-  SHM reconstruction; validate copy-local count/FCS ownership and full-body FIFO publication;
+- [ ] **2. Qualify aggregate handoff:** generalize the bounded next-MPDU
+  streaming repair beyond the bounded short-first fix;
+  validate full-body ownership/FIFO publication beyond one-shot variable fixtures;
   complete loss-accounted both-role/order qualification and
   malformed/truncated-frame and abort recovery.
 - [ ] **3. Receive repeated variable-length aggregates:** remove fixed-slot

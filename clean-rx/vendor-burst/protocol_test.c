@@ -491,6 +491,28 @@ static void window_encoding(void) {
     assert(!ref_window_valid(window));
     window[28u] = 3u;
     assert(ref_window_valid(window));
+    window[28u] = 17u;
+    window[96u] = 1u;
+    assert(ref_window_valid(window));
+    window[98u] = 5u;
+    assert(!ref_window_valid(window));
+    window[98u] = 0u;
+    window[28u] = 49u;
+    assert(ref_window_valid(window));
+    window[116u] = 1u;
+    assert(!ref_window_valid(window));
+    window[120u] = 2u;
+    window[123u] = 0x10u;
+    window[126u] = 250u;
+    assert(ref_window_valid(window));
+    window[28u] = 17u;
+    assert(!ref_window_valid(window));
+    memset(window+112u,0,16u);
+    window[28u] = 33u;
+    assert(!ref_window_valid(window));
+    window[28u] = 21u;
+    assert(!ref_window_valid(window));
+    window[96u] = 0u;
     window[28u] = 4u;
     assert(!ref_window_valid(window));
     window[28u] = 5u;
@@ -838,6 +860,67 @@ static void handoff_stimulus(void) {
                 }
         }
     }
+    if (CLEAN_RX_HT_VARIABLE) {
+        static const uint16_t lengths[8][2] = {
+            {80u,554u},{127u,381u},{170u,298u},{298u,170u},
+            {257u,255u},{479u,554u},{80u,80u},{321u,173u}};
+        uint8_t variable_rx[18u+554u];
+        for (uint32_t profile = 4u; profile < 20u; ++profile)
+        for (uint32_t mode = 0u; mode < CLEAN_HT_HANDOFF_CASES; ++mode)
+        for (uint32_t index = 0u; index < CLEAN_HT_STIMULUS_COUNT; ++index) {
+            nonce[10] = (uint8_t)mode; nonce[11] = (uint8_t)profile; nonce[12] = 0u;
+            uint32_t cmd = clean_ht_handoff_frame(packet,nonce,index);
+            assert(cmd);
+            uint32_t kind = index%3u, at = 14u+(kind == 2u ? 4u : 0u);
+            uint32_t first = clean_ht_handoff_length_at(nonce,index,0u);
+            for (uint32_t body = 0u; body < (kind == 2u ? 2u : 1u); ++body) {
+                uint32_t size = clean_ht_handoff_length_at(nonce,index,body);
+                uint32_t expected = kind == 2u ?
+                    lengths[(index/3u+(profile-4u)/2u)%8u][body^(profile&1u)] :
+                    profile&1u ? 298u : 170u;
+                assert(size == expected);
+                uint8_t *bytes = packet+at;
+                assert(ref_u16(bytes+22u)>>4u == 2u*index+body);
+                assert(!memcmp(bytes+26u,nonce,14u));
+                assert(bytes[43] == body);
+                for (uint32_t i = 44u; i < size-4u; ++i)
+                    assert(bytes[i] == (uint8_t)(nonce[i%14u]^i^(2u*index+body)));
+                int bad = index == 2u && kind == 2u &&
+                    ((mode == 1u && !body) || (mode == 2u && body));
+                assert((diag_crc32(bytes,size-4u) ==
+                    badger_bytes_load_u32(bytes+size-4u)) == !bad);
+                if (kind == 2u) {
+                    uint8_t *delimiter = bytes-4u;
+                    uint32_t advertised = size+(index == 2u && mode == 4u && body ? 8u : 0u);
+                    assert(ref_u16(delimiter)>>4u == advertised && delimiter[3] == 0x4eu);
+                    assert((delimiter[2] == clean_ampdu_delimiter_crc(delimiter)) ==
+                        !(index == 2u && mode == 3u && body));
+                    memset(variable_rx,0,sizeof(variable_rx));
+                    variable_rx[10] = 1u; variable_rx[15] = nonce[12];
+                    variable_rx[16] = CLEAN_RX_UNSUPPORTED_PHY|nonce[13];
+                    memcpy(variable_rx+18u,bytes,size);
+                    assert(ref_handoff_rx_index(variable_rx,18u+size,nonce) ==
+                        (REF_CLEAN_HANDOFF && !bad ? index : CLEAN_HT_STIMULUS_COUNT));
+                    if (!body)
+                        for (uint32_t pad = first; pad < ((first+3u)&~3u); ++pad)
+                            assert(bytes[pad] == 0u);
+                }
+                at += 4u+((size+3u)&~3u);
+            }
+            uint32_t psdu = clean_ht_handoff_psdu(nonce,index);
+            assert(clean_tx_length(cmd) == 6u+psdu);
+            for (uint32_t i = 14u+psdu; i < sizeof(packet); ++i) assert(!packet[i]);
+            if (kind == 2u) {
+                assert(ref_u16(packet+9u) == psdu && ref_sig_valid(packet+8u));
+                assert(clean_ht_handoff_command(cmd,packet) == CLEAN_RX_HT_HANDOFF_STIMULUS);
+                packet[18u+first-5u] ^= 1u;
+                assert(!clean_ht_handoff_command(cmd,packet));
+            }
+        }
+        nonce[10] = 0u; nonce[11] = 20u;
+        assert(!clean_ht_handoff_frame(packet,nonce,2u));
+        puts("Variable stimulus: 1920 fixtures, both orders, eight padded length pairs, payload/FCS, negative mutations, exact command validation and FIFO correlation pass");
+    }
     nonce[10] = CLEAN_HT_HANDOFF_CASES;
     assert(!clean_ht_handoff_frame(packet,nonce,2u));
     nonce[10] = 0u; nonce[11] = 3u;
@@ -987,7 +1070,8 @@ int main(void) {
         }
     }
     nonce[11] = 4u;
-    assert(!ref_frame(frame,nonce,peer,0u) && !ref_fixture_size(4u));
+    assert(!ref_frame(frame,nonce,peer,0u));
+    assert(ref_fixture_size(4u) == (CLEAN_RX_HT_VARIABLE ? 128u : 0u));
     nonce[11] = 0u;
     uint8_t packet[18u+CLEAN_MPDU_BYTES], summary[REF_RX_SUMMARY_BYTES+8u];
     for (uint32_t i = 0u; i < sizeof(packet); ++i) packet[i] = (uint8_t)(i*13u);

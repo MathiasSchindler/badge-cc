@@ -495,16 +495,18 @@ static void cck_rates(void) {
         uint32_t rate = clean_soak_rate(nonce);
         uint8_t flags = rate == 4u ? CLEAN_RX_OFDM :
             clean_soak_short(nonce) ? CLEAN_RX_SHORT_PREAMBLE : 0u;
-        for (uint32_t fault = 0u; fault < 5u; ++fault) {
+        for (uint32_t fault = 0u; fault < 6u; ++fault) {
             clean_soak_status_t s = {.target = 10u};
             for (uint32_t index = 0u; index < 10u; ++index) {
                 uint32_t length = clean_soak_frame(packet + 12u, nonce, 1u, index) + 12u;
                 packet[15] = rate == 4u ? 0x8bu : clean_cck_rates[rate].signal;
                 packet[16] = 1u | flags;
+                packet[17] = clean_soak_fragments(nonce) > 1u ? 1u : 0u;
                 if (fault == 1u) packet[15] ^= 1u;
                 if (fault == 2u) packet[16] ^= CLEAN_RX_SHORT_PREAMBLE;
                 if (fault == 3u) packet[16] ^= CLEAN_RX_OFDM;
                 if (fault == 4u) packet[16] |= CLEAN_RX_UNSUPPORTED_PHY;
+                if (fault == 5u) packet[17] ^= 1u;
                 int result = clean_soak_receive_packet(&s, packet, length, nonce, 2u);
                 assert(result == (fault ? -1 : 1));
                 if (fault) {

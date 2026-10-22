@@ -150,6 +150,11 @@ static inline int clean_tx_tail_poll(clean_tx_tail_t *s, int active) {
     return 0;
 }
 
+static inline uint32_t clean_tx_tail_ack_start(const clean_tx_tail_t *s,
+        uint32_t started, uint32_t phy_started) {
+    return s->ended ? started : phy_started;
+}
+
 #define CLEAN_RESPONSE_FC 0x63du
 #define CLEAN_CTS_SENT 0x63eu
 #define CLEAN_SHORT_SENT 0x63fu
@@ -161,8 +166,28 @@ static inline int clean_tx_tail_poll(clean_tx_tail_t *s, int active) {
 #define CLEAN_DCF_ENABLE 0x680u
 #define CLEAN_TX_CLEANUP_REQUEST 0x6acu
 #define CLEAN_TX_CLEANUP_COUNT 0x6adu
+#define CLEAN_TX_COMPLETION 0x6aeu
+#define CLEAN_TX_PRE_RESPONSE 0x6afu
+#define CLEAN_TX_COMPLETION_CLOSED 8u
+#define CLEAN_TX_COMPLETION_ADDR 0x204f0u
+#define CLEAN_TX_COMPLETION_DETAIL 492u
+#define CLEAN_TX_COMPLETION_MAGIC 0x3143544du
+#define CLEAN_TX_START_HANDOFFS_ADDR (CLEAN_TX_COMPLETION_ADDR + 28u)
+#define CLEAN_TX_COMPLETION_HANDOFFS_ADDR (CLEAN_TX_START_HANDOFFS_ADDR + 4u)
+typedef struct {
+    uint32_t magic, latched, preserved, raw_conditions;
+    uint32_t request, pipeline;
+    uint32_t timeouts;
+} clean_tx_completion_status_t;
+_Static_assert(CLEAN_TX_COMPLETION_ADDR >= CLEAN_AUTH_FAILURE_ADDR + sizeof(clean_auth_failure_t) &&
+               CLEAN_TX_COMPLETION_ADDR + sizeof(clean_tx_completion_status_t) ==
+                   CLEAN_TX_START_HANDOFFS_ADDR &&
+               CLEAN_TX_COMPLETION_HANDOFFS_ADDR + 4u <= 0x20d00u &&
+               CLEAN_TX_COMPLETION_DETAIL >= 296u + 180u &&
+               CLEAN_TX_COMPLETION_DETAIL + sizeof(clean_tx_completion_status_t) <= 520u,
+               "Owned TX completion evidence must not overlap existing reports");
 _Static_assert(CLEAN_TX_CLEANUP_REQUEST >= CLEAN_RX_TRACE_SHM + CLEAN_RX_TRACE_WORDS &&
-               CLEAN_TX_CLEANUP_COUNT + 1u <= CLEAN_HT_EARLY_SHM,
+               CLEAN_TX_PRE_RESPONSE + 1u <= CLEAN_HT_EARLY_SHM,
                "TX cleanup state must not overlap receive evidence");
 #define CLEAN_DCF_REQUEST 0x681u
 #define CLEAN_DCF_SLOTS 0x682u
@@ -200,8 +225,114 @@ _Static_assert(CLEAN_TX_CLEANUP_REQUEST >= CLEAN_RX_TRACE_SHM + CLEAN_RX_TRACE_W
 #define CLEAN_TEST_ACK_REMAINING 0x69eu
 #define CLEAN_TEST_ACK_DROPPED 0x69fu
 #define CLEAN_TEST_ACK_MAX 16u
+#define CLEAN_ACK_TEST_SHM (CLEAN_AUTH_FAILURE_SHM + CLEAN_AUTH_FAILURE_WORDS)
+#define CLEAN_ACK_TEST_LIMIT (CLEAN_ACK_TEST_SHM + 0u)
+#define CLEAN_ACK_TEST_FAULT (CLEAN_ACK_TEST_SHM + 1u)
+#define CLEAN_ACK_TEST_PHASE (CLEAN_ACK_TEST_SHM + 2u)
+#define CLEAN_ACK_TEST_BEFORE (CLEAN_ACK_TEST_SHM + 3u)
+#define CLEAN_ACK_TEST_AFTER (CLEAN_ACK_TEST_SHM + 4u)
+#define CLEAN_ACK_TEST_DROPPED_BEFORE (CLEAN_ACK_TEST_SHM + 5u)
+#define CLEAN_ACK_TEST_CLOCK (CLEAN_ACK_TEST_SHM + 6u)
+#define CLEAN_ACK_TEST_FC (CLEAN_ACK_TEST_SHM + 7u)
+#define CLEAN_ACK_TEST_SEQUENCE (CLEAN_ACK_TEST_SHM + 8u)
+#define CLEAN_ACK_TEST_EPOCH (CLEAN_ACK_TEST_SHM + 9u)
+#define CLEAN_ACK_TEST_WORDS 10u
+#define CLEAN_ACK_TEST_ADDR (CLEAN_TX_COMPLETION_HANDOFFS_ADDR + 4u)
+#define CLEAN_ACK_TEST_DETAIL 688u
+#define CLEAN_ACK_TEST_MAGIC 0x31545341u
+typedef struct {
+    uint32_t magic;
+    uint16_t configured, limit, remaining, dropped, fault, phase;
+    uint16_t before, after, dropped_before, clock, frame_control, sequence, epoch, reserved;
+} clean_ack_test_status_t;
+_Static_assert(sizeof(clean_ack_test_status_t) == 32u &&
+               CLEAN_ACK_TEST_SHM + CLEAN_ACK_TEST_WORDS <= 0x7a0u &&
+               CLEAN_ACK_TEST_ADDR + sizeof(clean_ack_test_status_t) <= 0x20d00u &&
+               CLEAN_ACK_TEST_DETAIL >= 584u + 100u &&
+               CLEAN_ACK_TEST_DETAIL + sizeof(clean_ack_test_status_t) <= 720u,
+               "ACK suppression evidence must not overlap captures or diagnostics");
+
+static inline int clean_ack_test_status_valid(const clean_ack_test_status_t *s) {
+    return s->magic == CLEAN_ACK_TEST_MAGIC && s->configured <= CLEAN_TEST_ACK_MAX &&
+        s->limit == s->configured && s->remaining <= s->limit &&
+        s->dropped <= s->limit && s->remaining + s->dropped == s->limit &&
+        !s->fault && !s->phase && !s->reserved;
+}
+
+#define CLEAN_ACK_OBSERVE_SHM (CLEAN_ACK_TEST_SHM + CLEAN_ACK_TEST_WORDS)
+#define CLEAN_ACK_OBSERVE_NOW CLEAN_ACK_OBSERVE_SHM
+#define CLEAN_ACK_OBSERVE_WAITING (CLEAN_ACK_OBSERVE_SHM + 1u)
+#define CLEAN_ACK_OBSERVE_DUE (CLEAN_ACK_OBSERVE_SHM + 2u)
+#define CLEAN_ACK_OBSERVE_START (CLEAN_ACK_OBSERVE_SHM + 3u)
+#define CLEAN_ACK_OBSERVE_WINDOW (CLEAN_ACK_OBSERVE_SHM + 4u)
+#define CLEAN_ACK_CLEAR_REASON (CLEAN_ACK_OBSERVE_SHM + 5u)
+#define CLEAN_ACK_CLEAR_NOW (CLEAN_ACK_OBSERVE_SHM + 6u)
+#define CLEAN_ACK_CLEAR_DUE (CLEAN_ACK_OBSERVE_SHM + 7u)
+#define CLEAN_ACK_OBSERVE_WORDS 8u
+#define CLEAN_ACK_OBSERVE_ADDR (CLEAN_ACK_TEST_ADDR + sizeof(clean_ack_test_status_t))
+#define CLEAN_ACK_OBSERVE_DETAIL 832u
+#define CLEAN_ACK_OBSERVE_MAGIC 0x3153424fu
+typedef struct {
+    uint32_t magic;
+    uint16_t observed_at, waiting, due, started, window, clear_reason, cleared_at, clear_due;
+    uint32_t arm_at, arm_started, arm_window;
+} clean_ack_observe_t;
+_Static_assert(sizeof(clean_ack_observe_t) == 32u &&
+               CLEAN_ACK_OBSERVE_SHM + CLEAN_ACK_OBSERVE_WORDS <= 0x7a0u &&
+               CLEAN_ACK_OBSERVE_ADDR + sizeof(clean_ack_observe_t) <= 0x20d00u &&
+               CLEAN_ACK_OBSERVE_DETAIL + sizeof(clean_ack_observe_t) <= 1000u,
+               "ACK deadline evidence must fit before transmit status and EDCA");
+
+#define CLEAN_ACK_ARITH_SHM (CLEAN_ACK_OBSERVE_SHM + CLEAN_ACK_OBSERVE_WORDS)
+#define CLEAN_ACK_TEST_AIRTIME CLEAN_ACK_ARITH_SHM
+#define CLEAN_ACK_TEST_SUM (CLEAN_ACK_ARITH_SHM + 1u)
+#define CLEAN_ACK_TEST_LIMIT_SEEN (CLEAN_ACK_ARITH_SHM + 2u)
+#define CLEAN_ACK_ARITH_ADDR (CLEAN_ACK_OBSERVE_ADDR + sizeof(clean_ack_observe_t))
+#define CLEAN_ACK_ARITH_DETAIL 864u
+#define CLEAN_ACK_ARITH_MAGIC 0x314d5553u
+typedef struct {
+    uint32_t magic;
+    uint16_t airtime, sum, limit, reserved;
+} clean_ack_arith_t;
+_Static_assert(sizeof(clean_ack_arith_t) == 12u &&
+               CLEAN_ACK_ARITH_SHM + 3u <= 0x7a0u &&
+               CLEAN_ACK_ARITH_ADDR + sizeof(clean_ack_arith_t) <= 0x20d00u &&
+               CLEAN_ACK_ARITH_DETAIL + sizeof(clean_ack_arith_t) <= 1000u,
+               "ACK arithmetic operands must not overlap transmit status or EDCA");
+
 #define CLEAN_DCF_FIRED 2u
 #define CLEAN_DCF_DEFERRED 3u
+#define CLEAN_TX_CLEANUP_ABORT 2u
+static inline uint16_t clean_dcf_cancel_request(uint16_t request) {
+    return request == CLEAN_DCF_FIRED ? CLEAN_DCF_FIRED : 0u;
+}
+
+static inline int clean_tx_phy_start_owned(uint16_t request, uint16_t pending,
+        uint16_t response, uint16_t completion, uint16_t ifs) {
+    return request == CLEAN_DCF_FIRED && pending == 1u && response == 0u &&
+        !(completion & CLEAN_TX_COMPLETION_CLOSED) && (ifs & 0x100u);
+}
+
+static inline int clean_tx_completion_owned(uint16_t request, uint16_t pending,
+        uint16_t response, uint16_t completion, uint16_t txe, uint16_t ifs) {
+    return request == CLEAN_DCF_FIRED && !pending && !response &&
+        !(completion & CLEAN_TX_COMPLETION_CLOSED) &&
+        (txe & 0x480u) == 0x400u && !(ifs & 0x100u);
+}
+
+static inline int clean_tx_completion_waiting(uint32_t started, uint32_t now,
+        uint32_t airtime) {
+    return now - started < airtime + 2000u;
+}
+
+static inline int clean_tx_incomplete_retryable(uint32_t conditions, uint16_t request,
+        uint16_t pending, uint16_t response, uint16_t txe, uint16_t ifs) {
+    return (conditions & ~CLEAN_TX_COMPLETION_CLOSED) == 5u &&
+        request == CLEAN_DCF_FIRED && !pending &&
+        !(txe & 0x80u) && !(ifs & 0x100u) &&
+        (response == 0u ? (conditions & CLEAN_TX_COMPLETION_CLOSED) || !(txe & 0x400u) :
+                         response == 2u && (txe & 0x400u));
+}
 #define CLEAN_MAC_RADIO_ADDR 0x20210u
 #define CLEAN_MAC_RADIO_MAGIC 0x3343414du
 #define CLEAN_MAC_TRACE_ADDR 0x20250u
@@ -278,6 +409,31 @@ static inline int clean_ack_rate(uint16_t basic, uint32_t received) {
     return selected;
 }
 
+static inline int clean_ack_rx_valid(const clean_ack_rx_t *rx, const uint8_t own[6],
+        const clean_unicast_status_t *tx, uint16_t basic, uint32_t rate,
+        uint32_t short_preamble) {
+    if (rx->magic != CLEAN_ACK_RX_MAGIC || tx->magic != CLEAN_UNICAST_MAGIC ||
+        tx->result != CLEAN_UNICAST_ACKED || !tx->attempts || !tx->ack_received) return 0;
+    uint32_t received = (uint32_t)rx->time_lo | ((uint32_t)rx->time_hi << 16u);
+    if (received - tx->started_us > tx->finished_us - tx->started_us) return 0;
+    int response = clean_ack_rate(basic, rate);
+    if (response < 0 || (rx->phy & 3u) != (response >= 4 ? 1u : 0u) ||
+        !!(rx->phy & 0x80u) != (short_preamble && response > 0 && response < 4)) return 0;
+    uint32_t signal = response >= 4 ? clean_ofdm_rates[response - 4].signal :
+        clean_cck_rates[response].signal;
+    if ((rx->plcp[0] & (response >= 4 ? 15u : 255u)) != signal) return 0;
+    uint8_t ack[14];
+    for (uint32_t i = 0u; i < 7u; ++i) {
+        ack[2u*i] = (uint8_t)rx->mpdu[i];
+        ack[2u*i+1u] = (uint8_t)(rx->mpdu[i] >> 8u);
+    }
+    if (ack[0] != 0xd4u || ack[1] || ack[2] || ack[3] || !clean_mac_valid(ack, sizeof(ack)))
+        return 0;
+    for (uint32_t i = 0u; i < 6u; ++i)
+        if (ack[4u+i] != own[i]) return 0;
+    return 1;
+}
+
 static inline int clean_ack_template(uint8_t plcp[6], uint32_t rate, uint16_t *phyctl1) {
     if (rate >= 12u) return 0;
     if (rate >= 4u) {
@@ -324,7 +480,16 @@ static inline int clean_cck11_valid(const volatile uint8_t *plcp, uint32_t mpdu)
 /* Header selection only; callers must independently validate FCS and peers. */
 static inline int clean_station_tx_tid(const volatile uint8_t *m, uint32_t n,
                                        uint32_t qos_enabled) {
-    if (n < 28u || (m[22] & 15u)) return -1;
+    if (n < 28u) return -1;
+    if ((m[22] & 15u) || (m[1] & 4u)) {
+        /* A bounded legacy fragment is an independently ACKed MPDU.
+         * QoS/HT fragment scheduling is not installed by this path. */
+        uint32_t overhead = (m[1] & 64u) ? 16u : 0u;
+        if (m[0] != 8u || (m[1] & 0x83u) != 1u ||
+            n <= 28u + overhead || n > 28u + overhead + CLEAN_MSDU_BYTES ||
+            ((m[22] & 15u) == 15u && (m[1] & 4u))) return -1;
+        return 0;
+    }
     if ((m[0] & 15u) == 0u && !(m[1] & 7u)) return 6;
     if (m[0] == 8u && (m[1] & 7u) == 1u) return 0;
     if (!qos_enabled || n < 30u || (m[0] != 0x88u && m[0] != 0xc8u) ||

@@ -19,6 +19,7 @@
 #define MAC_RADIO ((volatile clean_mac_radio_status_t *)CLEAN_MAC_RADIO_ADDR)
 #define MAC_TRACE ((volatile clean_mac_trace_status_t *)CLEAN_MAC_TRACE_ADDR)
 #define DCF_TRACE ((volatile clean_dcf_trace_t *)CLEAN_DCF_TRACE_ADDR)
+#define TX_COMPLETION ((volatile clean_tx_completion_status_t *)CLEAN_TX_COMPLETION_ADDR)
 #define HT_RX ((volatile clean_ht_rx_t *)CLEAN_HT_RX_ADDR)
 #define HT_DIAG ((volatile clean_ht_diag_t *)CLEAN_HT_DIAG_ADDR)
 #if CLEAN_RX_HT_WINDOW
@@ -103,6 +104,8 @@ static clean_tx_tail_t cck_tx_tail;
 static uint32_t last_tx_identity;
 static uint8_t last_tx_valid;
 static uint8_t capture_prepared;
+static uint16_t ack_test_configured, ack_test_epoch;
+static uint32_t ack_expiry_at, ack_expiry_started, ack_expiry_window;
 static uint32_t rx_published_frames;
 #if CLEAN_RX_HT_OBSERVER_FIFO
 static uint16_t observer_capture_ids[FW_MAX_FRAMES];
@@ -672,6 +675,72 @@ static int station_policy_word(uint32_t word, uint16_t expected) {
     return actual == expected ? 1 : fail(0x85u, word, actual);
 }
 
+static int station_ack_test_configure(uint16_t count) {
+    ack_test_configured = count;
+    ++ack_test_epoch;
+    ack_expiry_at = ack_expiry_started = ack_expiry_window = 0u;
+    for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
+        shm_write16(CLEAN_ACK_OBSERVE_SHM + i, 0u);
+    for (uint32_t i = 0u; i < 3u; ++i)
+        shm_write16(CLEAN_ACK_ARITH_SHM + i, 0u);
+    for (uint32_t i = 0u; i < CLEAN_ACK_TEST_WORDS; ++i)
+        shm_write16(CLEAN_ACK_TEST_SHM + i, 0u);
+    shm_write16(CLEAN_TEST_ACK_REMAINING, count);
+    shm_write16(CLEAN_TEST_ACK_DROPPED, 0u);
+    shm_write16(CLEAN_ACK_TEST_LIMIT, count);
+    shm_write16(CLEAN_ACK_TEST_EPOCH, ack_test_epoch);
+    for (uint32_t i = 0u; i < CLEAN_ACK_TEST_WORDS; ++i)
+        if (!station_policy_word(CLEAN_ACK_TEST_SHM + i,
+                i == 0u ? count : i == 9u ? ack_test_epoch : 0u)) return 0;
+    for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
+        if (!station_policy_word(CLEAN_ACK_OBSERVE_SHM + i, 0u)) return 0;
+    for (uint32_t i = 0u; i < 3u; ++i)
+        if (!station_policy_word(CLEAN_ACK_ARITH_SHM + i, 0u)) return 0;
+    return station_policy_word(CLEAN_TEST_ACK_REMAINING, count) &&
+        station_policy_word(CLEAN_TEST_ACK_DROPPED, 0u);
+}
+
+static void snapshot_ack_test(void) {
+    volatile clean_ack_test_status_t *s =
+        (volatile clean_ack_test_status_t *)CLEAN_ACK_TEST_ADDR;
+    s->magic = 0u;
+    s->configured = ack_test_configured;
+    s->limit = shm_read16(CLEAN_ACK_TEST_LIMIT);
+    s->remaining = shm_read16(CLEAN_TEST_ACK_REMAINING);
+    s->dropped = shm_read16(CLEAN_TEST_ACK_DROPPED);
+    s->fault = shm_read16(CLEAN_ACK_TEST_FAULT);
+    s->phase = shm_read16(CLEAN_ACK_TEST_PHASE);
+    s->before = shm_read16(CLEAN_ACK_TEST_BEFORE);
+    s->after = shm_read16(CLEAN_ACK_TEST_AFTER);
+    s->dropped_before = shm_read16(CLEAN_ACK_TEST_DROPPED_BEFORE);
+    s->clock = shm_read16(CLEAN_ACK_TEST_CLOCK);
+    s->frame_control = shm_read16(CLEAN_ACK_TEST_FC);
+    s->sequence = shm_read16(CLEAN_ACK_TEST_SEQUENCE);
+    s->epoch = shm_read16(CLEAN_ACK_TEST_EPOCH);
+    s->reserved = 0u;
+    __asm__ volatile("dsb" ::: "memory");
+    s->magic = CLEAN_ACK_TEST_MAGIC;
+    volatile clean_ack_observe_t *o =
+        (volatile clean_ack_observe_t *)CLEAN_ACK_OBSERVE_ADDR;
+    o->magic = 0u;
+    volatile uint16_t *words = (volatile uint16_t *)(CLEAN_ACK_OBSERVE_ADDR + 4u);
+    for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
+        words[i] = shm_read16(CLEAN_ACK_OBSERVE_SHM + i);
+    o->arm_at = ack_expiry_at;
+    o->arm_started = ack_expiry_started;
+    o->arm_window = ack_expiry_window;
+    __asm__ volatile("dsb" ::: "memory");
+    o->magic = CLEAN_ACK_OBSERVE_MAGIC;
+    volatile clean_ack_arith_t *a = (volatile clean_ack_arith_t *)CLEAN_ACK_ARITH_ADDR;
+    a->magic = 0u;
+    a->airtime = shm_read16(CLEAN_ACK_TEST_AIRTIME);
+    a->sum = shm_read16(CLEAN_ACK_TEST_SUM);
+    a->limit = shm_read16(CLEAN_ACK_TEST_LIMIT_SEEN);
+    a->reserved = 0u;
+    __asm__ volatile("dsb" ::: "memory");
+    a->magic = CLEAN_ACK_ARITH_MAGIC;
+}
+
 static void station_apply_policy(uint32_t mac_en) {
     if (!policy_pending || !station_policy_boundary(shm_read16(0x601u))) return;
     uint32_t now = mac_now();
@@ -770,6 +839,7 @@ static void snapshot_dcf_trace(void) {
 
 static void station_publish_mac(void) {
     if (!station_mac) return;
+    snapshot_ack_test();
     volatile clean_edca_status_t *edca = (volatile clean_edca_status_t *)CLEAN_EDCA_STATUS_ADDR;
     edca->magic = CLEAN_EDCA_STATUS_MAGIC;
     edca->cw_min = station_dcf.cw_min;
@@ -872,8 +942,15 @@ static void station_service_tx(void) {
         ack_started = now;
         ack_window = cck_ack_window;
     }
-    if (now - ack_started >= ack_window)
+    if (now - ack_started >= ack_window && shm_read16(CLEAN_ACK_WAITING)) {
+        ack_expiry_at = now;
+        ack_expiry_started = ack_started;
+        ack_expiry_window = ack_window;
+        shm_write16(CLEAN_ACK_CLEAR_NOW, (uint16_t)now);
+        shm_write16(CLEAN_ACK_CLEAR_DUE, shm_read16(CLEAN_DCF_ACK_UNTIL));
+        shm_write16(CLEAN_ACK_CLEAR_REASON, 1u);
         shm_write16(CLEAN_ACK_WAITING, 0u);
+    }
     station_consume_ack();
 }
 
@@ -1163,7 +1240,7 @@ static int station_wait_access(uint32_t mac_en, uint16_t ack_sent, uint16_t cts_
                 mmio_write32(D11_MACCONTROL, mac_en & ~2u);
                 (void)mmio_read32(D11_MACCONTROL);
                 uint16_t request = shm_read16(CLEAN_DCF_REQUEST);
-                shm_write16(CLEAN_DCF_REQUEST, 0u);
+                shm_write16(CLEAN_DCF_REQUEST, clean_dcf_cancel_request(request));
                 mmio_write32(D11_MACCONTROL, mac_en);
                 if (request == CLEAN_DCF_FIRED) return 1;
             } else (void)clean_dcf_poll(&station_dcf, now, 1);
@@ -1188,7 +1265,54 @@ static int station_wait_access(uint32_t mac_en, uint16_t ack_sent, uint16_t cts_
     return fail(0x82u, D11_BASE + (station_hw ? 0x180u : 0x1cu), mac_now());
 }
 
-/* Returns 2 for a station MAC deferral, 1 for submission, 0 for a fatal error. */
+/* RX can hold the PSM across the PHY-start pulse. Hand over ARM's owned
+ * observation while the PSM is paused, without manufacturing completion. */
+static uint32_t station_observe_tx_start(uint16_t ifs, uint32_t observed_at) {
+    if (!(ifs & 0x100u) || shm_read16(CLEAN_DCF_TX_PENDING) != 1u) return 0u;
+    uint32_t control = mmio_read32(D11_MACCONTROL), handed = 0u;
+    mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(control));
+    (void)mmio_read32(D11_MACCONTROL);
+    if (clean_tx_phy_start_owned(shm_read16(CLEAN_DCF_REQUEST),
+            shm_read16(CLEAN_DCF_TX_PENDING), shm_read16(CLEAN_RESPONSE_PENDING),
+            shm_read16(CLEAN_TX_COMPLETION), ifs)) {
+        shm_write16(CLEAN_DCF_TX_LO, (uint16_t)observed_at);
+        shm_write16(CLEAN_DCF_TX_HI, (uint16_t)(observed_at >> 16u));
+        shm_write16(CLEAN_DCF_ACK_UNTIL,
+            (uint16_t)(observed_at + shm_read16(CLEAN_DCF_ACK_US)));
+        shm_write16(CLEAN_DCF_TX_PENDING, 0u);
+        ++*(volatile uint32_t *)CLEAN_TX_START_HANDOFFS_ADDR;
+        handed = 1u;
+    }
+    mmio_write32(D11_MACCONTROL, control);
+    (void)mmio_read32(D11_MACCONTROL);
+    return handed;
+}
+
+/* A held RX capture prevents PSM's idle sampler from seeing late Data done.
+ * Pause it to prove TXE has not been reused before handing over real status. */
+static uint32_t station_observe_tx_completion(void) {
+    if (shm_read16(0x601u) != PSM_STATE_CAPTURED ||
+        (shm_read16(CLEAN_TX_COMPLETION) & 7u) == 7u) return 0u;
+    uint32_t control = mmio_read32(D11_MACCONTROL), handed = 0u;
+    mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(control));
+    (void)mmio_read32(D11_MACCONTROL);
+    uint16_t completion = shm_read16(CLEAN_TX_COMPLETION);
+    if (shm_read16(0x601u) == PSM_STATE_CAPTURED &&
+        (completion & 7u) != 7u &&
+        clean_tx_completion_owned(shm_read16(CLEAN_DCF_REQUEST),
+            shm_read16(CLEAN_DCF_TX_PENDING), shm_read16(CLEAN_RESPONSE_PENDING),
+            completion, mmio_read16(D11_BASE + 0x50eu),
+            mmio_read16(D11_BASE + 0x690u))) {
+        shm_write16(CLEAN_TX_COMPLETION, completion | 7u);
+        ++*(volatile uint32_t *)CLEAN_TX_COMPLETION_HANDOFFS_ADDR;
+        handed = 1u;
+    }
+    mmio_write32(D11_MACCONTROL, control);
+    (void)mmio_read32(D11_MACCONTROL);
+    return handed;
+}
+
+/* 0: fatal, 1: complete, 2: deferred, 3: attempted but completion timed out. */
 static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uint32_t channel,
                                        uint32_t mac_tx_ctl, uint32_t reliable,
                                        uint32_t short_preamble, uint32_t ht_probe) {
@@ -1249,6 +1373,9 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     tx_diag.resume_ticks = 0u;
     tx_diag.mac_resume_us = 0u;
     tx_diag.psm_after = 0u;
+    TX_COMPLETION->latched = 0u;
+    uint32_t phy_started_by_arm = 0u;
+    uint32_t completion_by_arm = 0u;
     tx_diag.start_ticks = ARM_CYCLE_COUNTER;
     tx_diag.length = total_len;
     tx_diag.channel = (uint16_t)channel;
@@ -1400,7 +1527,11 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     MBOX->rc_dacbuf = 0x55550005u;
     (void)mmio_read16(0x18001502u);
     tx_diag.phy_debug_first = mmio_read32(D11_BASE + 0x158u);
+    uint32_t start_observed_at = mac_now();
     tx_diag.status_first = tx_status();
+    if (station_hw)
+        phy_started_by_arm = station_observe_tx_start((uint16_t)tx_diag.status_first,
+                                                      start_observed_at);
     if (station_mac || ba_listen) {
         mmio_write32(D11_MACCONTROL, mac_tx_ctl | 2u);
         (void)mmio_read32(D11_MACCONTROL);
@@ -1408,39 +1539,63 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
 
     uint16_t st_50e_seen = 0u, st_690_seen = 0u;
     uint32_t tx_conditions = 0u;
+    uint32_t raw_conditions = 0u;
     uint32_t completion_polls = 2000u + airtime;
-    for (uint32_t i = 0u; i < completion_polls; ++i) {
-        if (station_mac) station_service_tx();
-        uint16_t v = mmio_read16(0x1800150eu);
-        st_50e_seen |= v;
-        if ((v & 0x0080u) == 0u) {
-            tx_conditions |= 1u;
-            break;
+    if (station_hw) {
+        uint32_t completion_started = mac_now();
+        for (uint32_t i = 0u; i < completion_polls; ++i) {
+            station_service_tx();
+            uint16_t txe = mmio_read16(D11_BASE + 0x50eu);
+            uint16_t ifs = mmio_read16(D11_BASE + 0x690u);
+            st_50e_seen |= txe;
+            st_690_seen |= ifs;
+            if (!(txe & 0x80u)) raw_conditions |= 1u;
+            if (txe & 0x400u) raw_conditions |= 2u;
+            if (!(ifs & 0x100u)) raw_conditions |= 4u;
+            completion_by_arm |= station_observe_tx_completion();
+            if ((shm_read16(CLEAN_TX_COMPLETION) & 7u) == 7u) {
+                tx_conditions = 7u;
+                break;
+            }
+            if (!clean_tx_completion_waiting(completion_started, mac_now(), airtime)) break;
+            (void)delay_ticks(180u);
         }
-        (void)delay_ticks(180u);
-    }
-    for (uint32_t i = 0u; i < completion_polls; ++i) {
-        if (station_mac) station_service_tx();
-        uint16_t v = mmio_read16(0x1800150eu);
-        st_50e_seen |= v;
-        if ((v & 0x0400u) != 0u) {
-            tx_conditions |= 2u;
-            break;
+    } else {
+        for (uint32_t i = 0u; i < completion_polls; ++i) {
+            if (station_mac) station_service_tx();
+            uint16_t v = mmio_read16(0x1800150eu);
+            st_50e_seen |= v;
+            if (!(v & 0x80u)) raw_conditions |= 1u;
+            if (!(v & 0x80u)) {
+                tx_conditions |= 1u;
+                break;
+            }
+            (void)delay_ticks(180u);
         }
-        (void)delay_ticks(180u);
-    }
-    for (uint32_t i = 0u; i < completion_polls; ++i) {
-        if (station_mac) station_service_tx();
-        uint16_t v = mmio_read16(0x18001690u);
-        st_690_seen |= v;
-        if ((v & 0x0100u) == 0u) {
-            tx_conditions |= 4u;
-            break;
+        for (uint32_t i = 0u; i < completion_polls; ++i) {
+            if (station_mac) station_service_tx();
+            uint16_t v = mmio_read16(0x1800150eu);
+            st_50e_seen |= v;
+            if (v & 0x400u) raw_conditions |= 2u;
+            if (v & 0x400u) {
+                tx_conditions |= 2u;
+                break;
+            }
+            (void)delay_ticks(180u);
         }
-        (void)delay_ticks(180u);
+        for (uint32_t i = 0u; i < completion_polls; ++i) {
+            if (station_mac) station_service_tx();
+            uint16_t v = mmio_read16(0x18001690u);
+            st_690_seen |= v;
+            if (!(v & 0x100u)) raw_conditions |= 4u;
+            if (!(v & 0x100u)) {
+                tx_conditions |= 4u;
+                break;
+            }
+            (void)delay_ticks(180u);
+        }
     }
     MBOX->vco_status = ((uint32_t)st_50e_seen << 16u) | st_690_seen;
-    MBOX->fw_substage = tx_conditions;
     uint32_t phy_drained = 1u;
     if (station_mac) {
         /* CCK drain overlaps the PPDU; do not hold its reply for a second
@@ -1488,6 +1643,29 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     tx_diag.status_after = tx_status();
     tx_diag.phy_error = mmio_read16(D11_BASE + 0x3eeu);
     tx_diag.psm_debug = mmio_read32(D11_BASE + 0x154u);
+    if (station_hw) {
+        completion_by_arm |= station_observe_tx_completion();
+        TX_COMPLETION->latched = shm_read16(CLEAN_TX_COMPLETION);
+        TX_COMPLETION->raw_conditions = raw_conditions;
+        TX_COMPLETION->request = shm_read16(CLEAN_DCF_REQUEST);
+        TX_COMPLETION->pipeline = shm_read16(CLEAN_TX_PRE_RESPONSE) |
+            ((uint32_t)shm_read16(CLEAN_DCF_TX_PENDING) << 16u) |
+            (phy_started_by_arm << 17u) |
+            ((uint32_t)shm_read16(CLEAN_RESPONSE_PENDING) << 18u) |
+            ((uint32_t)shm_read16(CLEAN_TX_CLEANUP_REQUEST) << 20u) |
+            (completion_by_arm << 22u) |
+            ((uint32_t)shm_read16(0x601u) << 24u);
+        if ((TX_COMPLETION->latched & 7u) == 7u) tx_conditions = 7u;
+        if (!shm_read16(CLEAN_DCF_TX_PENDING)) {
+            tx_diag.mac_trigger_us = (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
+                ((uint32_t)shm_read16(CLEAN_DCF_TX_HI) << 16u);
+            ack_started = clean_tx_tail_ack_start(&cck_tx_tail, ack_started,
+                                                  tx_diag.mac_trigger_us);
+        }
+        if (tx_conditions == 7u && !(st_50e_seen & 0x400u))
+            ++TX_COMPLETION->preserved;
+    }
+    MBOX->fw_substage = tx_conditions;
 
     if (!station) {
         mmio_write16(0x18001502u, 0x0000u);
@@ -1498,11 +1676,15 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         (void)mmio_read32(D11_MACCONTROL);
         phy_tx_set_inhibit(1);
     }
-    if (station_mac && phy_drained && tx_conditions == 7u) {
+    uint32_t incomplete = station_hw && phy_drained && !tx_diag.phy_error &&
+        clean_tx_incomplete_retryable(TX_COMPLETION->latched, TX_COMPLETION->request,
+            shm_read16(CLEAN_DCF_TX_PENDING), shm_read16(CLEAN_RESPONSE_PENDING),
+            mmio_read16(D11_BASE + 0x50eu), mmio_read16(D11_BASE + 0x690u));
+    if (station_mac && phy_drained && (tx_conditions == 7u || incomplete)) {
         uint32_t control = mmio_read32(D11_MACCONTROL);
         mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(control));
         (void)mmio_read32(D11_MACCONTROL);
-        shm_write16(CLEAN_TX_CLEANUP_REQUEST, 1u);
+        shm_write16(CLEAN_TX_CLEANUP_REQUEST, incomplete ? CLEAN_TX_CLEANUP_ABORT : 1u);
         mmio_write32(D11_MACCONTROL, control);
         (void)mmio_read32(D11_MACCONTROL);
     }
@@ -1510,6 +1692,10 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     if (!phy_drained) return fail(0x82u, D11_BASE + 0x1cu, ofdm_airtime);
     if ((ht_probe || (is_ofdm && !station)) && tx_diag.phy_error != 0u)
         return fail(0x82u, D11_BASE + 0x3eeu, tx_diag.phy_error);
+    if (incomplete) {
+        ++TX_COMPLETION->timeouts;
+        return 3;
+    }
     return tx_conditions == 7u || fail(0x82u, 0x1800150eu, MBOX->vco_status);
 }
 
@@ -1523,7 +1709,6 @@ static void snapshot_rx_trace(void) {
 }
 
 static void snapshot_ack_rx(void) {
-    if (!CLEAN_RX_HT_RESPONSE) return;
     volatile clean_ack_rx_t *rx = (volatile clean_ack_rx_t *)CLEAN_ACK_RX_ADDR;
     volatile uint16_t *words = (volatile uint16_t *)(CLEAN_ACK_RX_ADDR + 4u);
     rx->magic = CLEAN_ACK_RX_MAGIC;
@@ -1685,6 +1870,8 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
 
     for (uint32_t i = 0u; i < 32u; ++i)  shm_write16(0x600u + i, 0u);
     for (uint32_t i = 0u; i < 480u; ++i) shm_write16(0x620u + i, 0u);
+    ack_test_epoch = 0u;
+    if (!station_ack_test_configure(0u)) return 0;
 #if CLEAN_RX_AMPDU_PROBE
     for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i)
         shm_write16(CLEAN_AMPDU_PROBE_SHM + i, 0u);
@@ -2150,7 +2337,7 @@ void cyw43_main(void) {
                 !clean_mac_valid(frame + 6u, tx_len - 6u) ||
                 (frame[10] & 1u) ||
                 (!ht_clocked && tx_tid < 0) ||
-                (frame[28] & 15u) || !addresses_match)) {
+                !addresses_match)) {
                 fail(0x85u, FW_TX_BUF_ADDR, tx_len);
                 break;
             }
@@ -2244,6 +2431,14 @@ void cyw43_main(void) {
                     shm_write16(CLEAN_ACK_WAITING, 0u);
                     UNICAST->result = CLEAN_UNICAST_BUSY;
                     ++MAC_RADIO->deferrals;
+                    break;
+                }
+                if (submitted == 3) {
+                    shm_write16(CLEAN_ACK_WAITING, 0u);
+                    UNICAST->result = CLEAN_UNICAST_TIMEOUT;
+                    ++MAC_RADIO->timeouts;
+                    clean_dcf_complete(&station_dcf, mac_now(), 0);
+                    station_hw_backoff();
                     break;
                 }
                 if (reliable) {
@@ -2372,6 +2567,15 @@ void cyw43_main(void) {
             shm_write16(CLEAN_SHORT_SENT, 0u);
             shm_write16(CLEAN_TX_CLEANUP_REQUEST, 0u);
             shm_write16(CLEAN_TX_CLEANUP_COUNT, 0u);
+            shm_write16(CLEAN_TX_COMPLETION, 0u);
+            shm_write16(CLEAN_TX_PRE_RESPONSE, 0u);
+            TX_COMPLETION->magic = CLEAN_TX_COMPLETION_MAGIC;
+            TX_COMPLETION->latched = TX_COMPLETION->preserved = TX_COMPLETION->raw_conditions = 0u;
+            TX_COMPLETION->request = TX_COMPLETION->pipeline = 0u;
+            TX_COMPLETION->timeouts = 0u;
+            *(volatile uint32_t *)CLEAN_TX_START_HANDOFFS_ADDR = 0u;
+            *(volatile uint32_t *)CLEAN_TX_COMPLETION_HANDOFFS_ADDR = 0u;
+            if (!station_ack_test_configure(0u)) break;
             shm_write16(CLEAN_ACK_ENABLE, 1u);
             station_enabled = 1u;
             station_mac = (uint8_t)(p[15] >= 2u);
@@ -2504,11 +2708,24 @@ void cyw43_main(void) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
             }
+            uint16_t ack_fault = shm_read16(CLEAN_ACK_TEST_FAULT);
+            uint16_t ack_phase = shm_read16(CLEAN_ACK_TEST_PHASE);
+            if (ack_fault || ack_phase > 2u) {
+                fail(0x87u, ack_fault ? CLEAN_ACK_TEST_FAULT : CLEAN_ACK_TEST_PHASE,
+                     ack_fault ? ack_fault : ack_phase);
+                break;
+            }
+            if (!station_policy_boundary(shm_read16(0x601u))) continue;
             mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
             (void)mmio_read32(D11_MACCONTROL);
+            if (!station_policy_boundary(shm_read16(0x601u)) || station_phy_busy() ||
+                shm_read16(CLEAN_ACK_TEST_PHASE)) {
+                mmio_write32(D11_MACCONTROL, mac_en);
+                (void)mmio_read32(D11_MACCONTROL);
+                continue;
+            }
             shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
-            shm_write16(CLEAN_TEST_ACK_REMAINING, (uint16_t)count);
-            shm_write16(CLEAN_TEST_ACK_DROPPED, 0u);
+            if (!station_ack_test_configure((uint16_t)count)) break;
             mmio_write32(D11_MACCONTROL, mac_en);
             MBOX->host_cmd = 2u;
             __asm__ volatile("dsb" ::: "memory");
@@ -2729,6 +2946,10 @@ void cyw43_main(void) {
 #endif
 
     if (station_hw) snapshot_dcf_trace();
+    if (station_mac) {
+        snapshot_ack_test();
+        snapshot_ack_rx();
+    }
 #if CLEAN_RX_AMPDU_PROBE
     volatile clean_ampdu_probe_trace_t *aggregate =
         (volatile clean_ampdu_probe_trace_t *)CLEAN_AMPDU_PROBE_ADDR;
