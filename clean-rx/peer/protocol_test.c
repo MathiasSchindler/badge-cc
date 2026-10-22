@@ -3,9 +3,29 @@
 #include <string.h>
 #include "protocol.h"
 #include "frame.h"
+#include "lifecycle_usb.h"
 #include "../../src/shared/bytes.h"
 
 static void frame_tests(void) {
+    live_usb_control_t control;
+    live_usb_control_init(&control, 1u, "0102030405060708");
+    control.configured = 1u; control.probe_generation = 7u;
+    control.probe_inflight = 1u; control.incoming_test = USB_REPORT_TEST_ID + 1u;
+    uint8_t report[64] = {1u}, trace[WIFI_TRACE_SIZE] = {1u};
+    assert(clean_lifecycle_snapshot(&control, 7u, report, trace, 0u));
+    report[0] = trace[0] = 2u;
+    live_usb_probe_finish(&control, 7u, report);
+    live_usb_trace_finish(&control, 7u, trace);
+    assert(control.report[0] == 1u && control.trace[0] == 1u);
+    assert(clean_lifecycle_snapshot(&control, 7u, report, trace, 1u));
+    assert(control.report[0] == 2u && control.trace[0] == 2u);
+    report[0] = trace[0] = 3u;
+    assert(!clean_lifecycle_snapshot(&control, 8u, report, trace, 1u));
+    control.configured = 0u;
+    assert(!clean_lifecycle_snapshot(&control, 7u, report, trace, 1u));
+    control.configured = 1u; control.reboot_requested = 1u;
+    assert(!clean_lifecycle_snapshot(&control, 7u, report, trace, 1u));
+    assert(control.report[0] == 2u && control.trace[0] == 2u);
     for (uint32_t mcs = 0u; mcs < 8u; ++mcs) {
         uint32_t rate = clean_peer_ht_rate(mcs);
         assert(clean_peer_rate_matches(rate, mcs));

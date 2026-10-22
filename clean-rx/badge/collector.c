@@ -15,6 +15,7 @@
 #include "../peer/frame.h"
 #include "../src/wpa2_crypto.h"
 #include "station_rx.h"
+#include "station_lifecycle.h"
 #include "../src/tx_diag.h"
 #include "../src/mac_soak.h"
 
@@ -36,10 +37,17 @@ static int ap_bssid_decode(const char *text, uint8_t bssid[6]) {
             if (digit == NULL) return 0;
             value = (value << 4u) | (unsigned)(digit - digits);
         }
+
         bssid[i] = (uint8_t)value;
         nonzero |= bssid[i];
     }
     return nonzero && !(bssid[0] & 1u);
+}
+
+static volatile sig_atomic_t lifecycle_cancel;
+static void cancel_lifecycle(int number) {
+    (void)number;
+    lifecycle_cancel = 1;
 }
 
 static int peer_challenge_decode(const char *hex, uint8_t challenge[14]) {
@@ -229,7 +237,7 @@ static int monotonic_us(uint64_t *value) {
 
 static int collect(libusb_device_handle *device, const char *path, uint8_t channel,
                    uint8_t tx, const uint8_t *challenge, const uint8_t *target,
-                   const char *serial, const char *credentials) {
+                   const char *serial, const char *credentials, uint32_t lifecycle_seconds) {
     uint8_t info[12], nonce[16], request[64], report[64], detail[WIFI_TRACE_SIZE];
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
     const uint8_t prefix[] = {'U','2','6','L',1,0,64,0};
@@ -246,6 +254,10 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (target != NULL) memcpy(nonce, target, 6u);
     nonce[15] = channel;
     nonce[14] = tx;
+    if (tx == CLEAN_LIFECYCLE_MODE) {
+        nonce[12] = (uint8_t)lifecycle_seconds;
+        nonce[13] = (uint8_t)(lifecycle_seconds >> 8u);
+    }
     if (tx==18u) {
         char ssid[34], password[65];
         uint8_t secret[64], digest[20];
@@ -291,6 +303,10 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (soak && !monotonic_us(&submit_after)) return 0;
     int got = 0;
     for (unsigned attempt = 0u; attempt < (tx >= 19u ? CLEAN_SOAK_POLLS : 800u); ++attempt) {
+        if (tx == CLEAN_LIFECYCLE_MODE && lifecycle_cancel) {
+            fputs("Station lifecycle cancelled; requesting BOOTSEL cleanup\n", stderr);
+            return 0;
+        }
         int count = libusb_control_transfer(device, 0xc0u, LIVE_USB_WIFI_REPORT, 0, 0,
                                             report, sizeof(report), 1000u);
         if (count == 64) { got = 1; break; }
@@ -330,6 +346,42 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+    if (tx == CLEAN_LIFECYCLE_MODE) {
+        clean_lifecycle_report_t r;
+        memcpy(&r, detail + CLEAN_LIFECYCLE_DETAIL, sizeof(r));
+        int valid = usb_report_u32(detail + 8u) == CLEAN_OK &&
+            r.magic == CLEAN_LIFECYCLE_MAGIC && r.state == CLEAN_LIFE_STOPPED &&
+            r.reason == CLEAN_LIFE_DEADLINE && r.cleanup == 1u &&
+            r.connections && r.connections == r.data_connections && r.echoes >= r.connections;
+        printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"mode\":\"station-lifecycle\","
+               "\"valid\":%s,\"error\":%u,\"state\":%u,\"reason\":%u,\"local_mac\":\""
+               "02:%02x:%02x:%02x:%02x:%02x\",\"epoch\":%u,\"channel\":%u,"
+               "\"connections\":%u,\"data_connections\":%u,\"disconnects\":%u,"
+               "\"failures\":%u,\"auth_failures\":%u,\"assoc_failures\":%u,"
+               "\"beacon_losses\":%u,\"departures\":%u,\"channel_changes\":%u,"
+               "\"scans\":%u,\"beacons\":%u,\"tx_attempts\":%u,\"tx_timeouts\":%u,"
+               "\"echoes\":%u,\"echo_timeouts\":%u,\"rejected_echoes\":%u,"
+               "\"last_status\":%u,\"cleanup\":%u,\"elapsed_us\":%llu,\"tx_busy\":%u,"
+               "\"session\":\"%02x%02x%02x%02x%02x%02x\",\"events\":[",
+               serial, USB_REPORT_BUILD_ID, valid ? "true" : "false",
+               usb_report_u32(detail + 8u), r.state, r.reason,
+               nonce[6], nonce[7], nonce[8], nonce[9], nonce[10], r.epoch, r.channel,
+               r.connections, r.data_connections, r.disconnects, r.failures,
+               r.auth_failures, r.assoc_failures, r.beacon_losses, r.departures,
+               r.channel_changes, r.scans, r.beacons, r.tx_attempts, r.tx_timeouts,
+               r.echoes, r.echo_timeouts, r.rejected_echoes, r.last_status, r.cleanup,
+               (unsigned long long)r.elapsed_lo | ((unsigned long long)r.elapsed_hi << 32u),
+               r.tx_busy, nonce[6], nonce[7], nonce[8], nonce[9], nonce[10], nonce[11]);
+        uint32_t first = r.events > CLEAN_LIFECYCLE_EVENTS ? r.events - CLEAN_LIFECYCLE_EVENTS : 0u;
+        for (uint32_t i = first; i < r.events; ++i) {
+            const clean_lifecycle_event_t *e = &r.event[i % CLEAN_LIFECYCLE_EVENTS];
+            printf("%s{\"at\":%u,\"state\":%u,\"reason\":%u,\"epoch\":%u,\"channel\":%u}",
+                i == first ? "" : ",", e->at, e->state, e->reason, e->epoch, e->channel);
+        }
+        puts("]}");
+        if (!valid) fputs("Station lifecycle lacks a clean stop and fresh data for every connection\n", stderr);
+        return valid;
+    }
     if (tx == CLEAN_HT_AMPDU_PROBE_TX_MODE || tx == CLEAN_HT_AMPDU_PROBE_RX_MODE) {
         clean_ampdu_probe_trace_t trace;
         memcpy(&trace,detail+CLEAN_AMPDU_PROBE_DETAIL,sizeof(trace));
@@ -1304,8 +1356,22 @@ int main(int argc, char **argv) {
         return inspect(argv[2], argv[3]) ? 0 : 1;
     uint8_t challenge[14];
     uint8_t target[6];
+    int lifecycle_mode = argc == 7 && !strcmp(argv[4], "--station-lifecycle");
+    uint32_t lifecycle_seconds = 0u;
+    if (lifecycle_mode) {
+        char *end_seconds;
+        unsigned long seconds = strtoul(argv[6], &end_seconds, 10);
+        if (!*argv[6] || *end_seconds || seconds < 1u || seconds > 600u ||
+            !ap_bssid_decode(argv[5], target)) {
+            fputs("Station lifecycle requires a unicast BSSID and duration 1..600 seconds\n", stderr);
+            return 2;
+        }
+        lifecycle_seconds = (uint32_t)seconds;
+        if (signal(SIGINT, cancel_lifecycle) == SIG_ERR ||
+            signal(SIGTERM, cancel_lifecycle) == SIG_ERR) { perror("signal"); return 1; }
+    }
     int wpa_mode=argc==7 && strcmp(argv[4],"--ap-wpa2")==0;
-    int ap_mode = wpa_mode || (argc == 6 && (strcmp(argv[4], "--ap-auth") == 0 ||
+    int ap_mode = lifecycle_mode || wpa_mode || (argc == 6 && (strcmp(argv[4], "--ap-auth") == 0 ||
                                 strcmp(argv[4], "--ap-assoc") == 0 ||
                                 strcmp(argv[4], "--ap-monitor") == 0));
     if (ap_mode && !ap_bssid_decode(argv[5], target)) {
@@ -1442,6 +1508,8 @@ int main(int argc, char **argv) {
               "--ht-ampdu-probe-tx|--ht-ampdu-probe-rx CHALLENGE_HEX_28 MCS:0-7\n",stderr);
         fputs("AP authentication only: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-auth|--ap-assoc|--ap-monitor XX:XX:XX:XX:XX:XX\n", stderr);
+        fputs("Persistent open station: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--station-lifecycle BSSID SECONDS:1-600\n", stderr);
         fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-wpa2 XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE\n",stderr);
         fputs("Continuous raw MAC: collector SERIAL EVIDENCE_BIN CHANNEL "
@@ -1455,7 +1523,7 @@ int main(int argc, char **argv) {
         if (!((argv[1][i] >= '0' && argv[1][i] <= '9') ||
               (argv[1][i] >= 'A' && argv[1][i] <= 'F'))) return 2;
     if (signal(SIGALRM, deadline) == SIG_ERR) { perror("signal"); return 1; }
-    alarm(soak ? CLEAN_SOAK_HOST_SECONDS : 15u);
+    alarm(lifecycle_mode ? lifecycle_seconds + 20u : soak ? CLEAN_SOAK_HOST_SECONDS : 15u);
     libusb_context *context = NULL;
     int status = libusb_init(&context);
     if (status != 0) { fprintf(stderr, "USB init: %s\n", libusb_error_name(status)); return 1; }
@@ -1489,9 +1557,12 @@ int main(int argc, char **argv) {
     if (ap_mode) mode = strcmp(argv[4], "--ap-assoc") == 0 ? 16u :
                         strcmp(argv[4], "--ap-monitor") == 0 ? 17u : 15u;
     if (wpa_mode) mode=18u;
+    if (lifecycle_mode) {
+        mode = CLEAN_LIFECYCLE_MODE;
+    }
     if (status == 0) ok = collect(device, argv[2], (uint8_t)channel, mode,
                                  peer_mode ? challenge : NULL, ap_mode ? target : NULL, argv[1],
-                                 wpa_mode?argv[6]:NULL);
+                                 wpa_mode?argv[6]:NULL, lifecycle_seconds);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     int rebooted = transfer(device, 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);
     if (status == 0) libusb_release_interface(device, 0);

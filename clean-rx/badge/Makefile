@@ -19,9 +19,9 @@ SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
 HEADERS := $(wildcard *.h ../src/*.h $(ROOT)/src/tools/diagnostics_logic.h \
-	../peer/frame.h ../peer/protocol.h \
+	../peer/frame.h ../peer/protocol.h ../peer/lifecycle.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
-NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test)
+NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test station_lifecycle_test)
 LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/tools/diagnostics_logic.c
@@ -82,6 +82,7 @@ test: $(NATIVE_TESTS)
 	$(BUILD)/wpa2_test
 	$(BUILD)/secret_test
 	$(BUILD)/ht20_test
+	$(BUILD)/station_lifecycle_test
 	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh
 	bash -n mac_trials.sh
 	bash -n mac_soak.sh
@@ -109,3 +110,7 @@ $(BUILD)/loader_test: $(LOADER_TEST_SOURCES) | $(BUILD)
 $(BUILD)/ht20_test: ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
 		ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
+
+$(BUILD)/station_lifecycle_test: station_lifecycle_test.c station_lifecycle.h ../peer/lifecycle.h | $(BUILD)
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
+		$< $(ROOT)/src/tools/diagnostics_logic.c -o $@

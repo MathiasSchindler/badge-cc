@@ -150,13 +150,40 @@ pass or a new 100,000-frame qualification.
 
 ## B. Sustained station operation
 
-**Status: bounded station exchanges exist; persistent operation is open.**
+**Status: B1's opt-in legacy/open lifecycle and bounded qualification pass.
+WPA2 persistence and continuous networking remain open.**
 
 ### B1. Connection lifecycle
 
-- [ ] Implement persistent discovery, authentication, association and recovery.
-- [ ] Handle beacon loss, departure, AP restart, channel changes and cancellation.
-- [ ] Verify ten consecutive cold connections and five AP-loss/recovery cycles.
+- [x] Implement persistent discovery, authentication, association and recovery
+  for the explicitly legacy/open B1 diagnostic profile.
+- [x] Handle beacon loss, departure, AP restart, channel changes and cancellation.
+  Beacon loss/restart and connected-session cancellation have RF coverage;
+  departure, channel-IE handling and all phase-cancellation gates also have
+  native regression coverage.
+- [x] Verify ten consecutive cold connections and five AP-loss/recovery cycles
+  for the legacy/open profile, with independent association/application evidence.
+
+Mode 32 adds bounded phases, channel scanning, cold-controller recovery,
+state/secret cleanup and fresh application-echo evidence. Native sanitizer
+tests cover recovery, cancellation, wrap-safe deadlines, malformed channel
+IEs and stale/corrupt echoes. A separate `clean-rx/peer` AP fixture uses
+unchanged vendor radio firmware and independently verifies association and
+application data; see [usage and qualification boundaries](clean-rx/badge/README.md#b1-persistent-open-station-lifecycle).
+The `b1-20261022/calibrated-*` campaign passed ten fresh cold connections
+(115 verified echoes total) and five real AP power-loss/reload cycles
+(six data-verified connection epochs, 68 echoes, five beacon-loss recoveries).
+Neither run hid authentication/association failures. Failed precursor runs
+remain retained: the AP fixture needed generation-bound snapshot republication
+and the badge's crystal-reference timer setup, plus a USB-SOF timing guard.
+The independent archive oracle's reserved-footer assertion was corrected to
+check the actual stored station MAC; all eleven captured pairs were rechecked.
+Cold controls still recorded seven MAC timeouts, six application echo timeouts
+and thirteen busy returns. Those counters are not erased: this is lifecycle
+qualification, not A1/A2/A3 loss-free MAC or B2 continuous-data qualification.
+A final fresh cold pair passed the corrected runner end-to-end (13 echoes);
+terminating a second, independently confirmed connected session stopped both
+collectors and returned both badges to BOOTSEL without reporting a false pass.
 
 ### B2. Continuous application data
 

@@ -3,6 +3,7 @@
 #include "frames.h"
 #include "station.h"
 #include "station_rx.h"
+#include "station_lifecycle.h"
 #include "wpa2.h"
 #include "../src/unicast.h"
 #include "../src/tx_diag.h"
@@ -48,13 +49,15 @@ static uint8_t soak_tx[CLEAN_TX_STORAGE_BYTES];
 static uint8_t soak_expected[CLEAN_TX_STORAGE_BYTES];
 static clean_soak_fragment_status_t soak_fragments;
 static clean_soak_progress_t soak_progress;
+static clean_lifecycle_t lifecycle;
 static uint32_t soak_watchdog_at;
 static uint32_t probe_started;
 static uint32_t clock_before[12], clock_after[12], sys_khz_q5;
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size);
 static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd);
 
-static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u; }
+static int lifecycle_mode(void) { return detail[2000u] == CLEAN_LIFECYCLE_MODE; }
+static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u || lifecycle_mode(); }
 static int soak_mode(void) { return detail[2000u]==19u || detail[2000u]==20u; }
 static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=31u; }
 
@@ -249,7 +252,7 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
 static int service(void *unused) {
     (void)unused;
     usb_error = live_usb_hw_poll(&control);
-    if (!usb_error && (soak_mode() || detail[2000u] == CLEAN_PEER_RX_MODE)) {
+    if (!usb_error && (soak_mode() || lifecycle_mode() || detail[2000u] == CLEAN_PEER_RX_MODE)) {
         const wifi_wire_t *wire = wifi_board_wire();
         uint32_t now = wire->now_us(wire->context);
         if (now - soak_watchdog_at >= 4000000u) {
@@ -490,16 +493,17 @@ static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
                      (const uint8_t *)&soak_progress, sizeof(soak_progress));
 }
 
-static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size) {
-    if (wpa.installed) clean_wpa_rx_expire(&wpa, l->wire->now_us(l->wire->context));
-    if (CLEAN_RX_WMM) clean_qos_rx_expire(&station_qos,
-                                        l->wire->now_us(l->wire->context));
-    if (!clean_receive(l, rx_packet, size)) return 0;
-    if (*size >= 58u) {
+static int station_refresh(clean_loader_t *l, const uint8_t mac[6], uint32_t size) {
+    if (size >= 58u) {
         clean_station_ap_t next;
         badger_bytes_copy((uint8_t *)&next, (const uint8_t *)&station_ap, sizeof(next));
-        int changed = clean_station_refresh(&next, rx_packet + 18u, *size - 18u);
+        int changed = clean_station_refresh(&next, rx_packet + 18u, size - 18u);
         if (changed < 0) {
+            if (lifecycle_mode()) {
+                clean_lifecycle_disconnect(&lifecycle, l->wire->now_us(l->wire->context),
+                    CLEAN_LIFE_UNSUPPORTED, (uint32_t)changed);
+                return 0;
+            }
             l->error = CLEAN_INPUT; l->actual = (uint32_t)changed;
             return 0;
         }
@@ -530,6 +534,14 @@ static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *si
             badger_bytes_copy((uint8_t *)&station_ap, (const uint8_t *)&next, sizeof(next));
         }
     }
+    return 1;
+}
+
+static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size) {
+    if (wpa.installed) clean_wpa_rx_expire(&wpa, l->wire->now_us(l->wire->context));
+    if (CLEAN_RX_WMM) clean_qos_rx_expire(&station_qos,
+                                        l->wire->now_us(l->wire->context));
+    if (!clean_receive(l, rx_packet, size) || !station_refresh(l, mac, *size)) return 0;
     int result = clean_station_qos_rx(&station_rx,
         CLEAN_RX_WMM && station_ap.association.wmm ? &station_qos : 0,
         rx_packet, size, mac, station_ap.bssid, l->wire->now_us(l->wire->context));
@@ -675,6 +687,55 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     wpa_wipe(&wpa,sizeof(wpa));
 }
 
+static int station_phase(clean_loader_t *l, const uint8_t mac[6],
+        clean_station_request_t *request, uint8_t association, uint16_t *aid) {
+    if (association && !receive_for(l, 10000u, 0u)) return -1;
+    if (association) {
+        station_wmm_offered = lifecycle_mode() ? 0u : (uint8_t)clean_station_wmm_offer(&station_ap);
+        if (station_wmm_offered) {
+            uint8_t unused[4] = {0};
+            if (!station_command(l, unused, sizeof(unused),
+                                 CLEAN_HT_RESPONSE_CMD | (1u << 8u))) return -1;
+        }
+    }
+    uint8_t frame[160];
+    request->pending = 0u;
+    badger_bytes_store_u32(detail + 1092u, 1u);
+    int status = -1;
+    uint32_t sent = 0u, phase_started = l->wire->now_us(l->wire->context);
+    while (sent < 4u && l->wire->now_us(l->wire->context) - phase_started < 1600000u &&
+           (!lifecycle_mode() || lifecycle.report.state ==
+               (association ? CLEAN_LIFE_ASSOCIATE : CLEAN_LIFE_AUTHENTICATE))) {
+        uint32_t length = clean_station_request_prepare(request, frame, mac,
+                                                        &station_ap, association);
+        if (!length) { l->error = CLEAN_INPUT; l->actual = request->length; return -1; }
+        if (!station_command(l, frame, sizeof(frame), 5u | clean_tx_length_bits(length) |
+            (1u << 18u) | (1u << 19u) | CLEAN_TX_ACK_REQUIRED)) return -1;
+        clean_unicast_status_t tx;
+        if (!clean_block(l, CLEAN_UNICAST_ADDR, (uint8_t *)&tx, sizeof(tx), 0u)) return -1;
+        if (tx.magic != CLEAN_UNICAST_MAGIC) {
+            l->error = CLEAN_READBACK; l->address = CLEAN_UNICAST_ADDR; return -1;
+        }
+        if (!tx.attempts && tx.result != CLEAN_UNICAST_BUSY) {
+            l->error = CLEAN_CONTROLLER; l->actual = tx.result; return -1;
+        }
+        sent += tx.attempts;
+        uint32_t at = 540u + 4u * association;
+        badger_bytes_store_u32(detail + at,
+            badger_bytes_load_u32(detail + at) + tx.attempts);
+        clean_station_request_sent(request, tx.attempts, tx.ack_received);
+        badger_bytes_store_u32(detail + 548u,
+            badger_bytes_load_u32(detail + 548u) + tx.ack_received);
+        uint32_t wait = !tx.attempts ? 10000u : tx.ack_received ? 400000u : 100000u;
+        uint32_t elapsed = l->wire->now_us(l->wire->context) - phase_started;
+        if (elapsed >= 1600000u) break;
+        if (wait > 1600000u - elapsed) wait = 1600000u - elapsed;
+        status = station_wait(l, mac, association, aid, wait);
+        if (status != -1 || l->error) break;
+    }
+    return status;
+}
+
 static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     if (nonce[14]==18u) {
         badger_bytes_zero(detail+1640u,36u);
@@ -704,58 +765,7 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     uint16_t aid = 0u;
     clean_station_request_t request = {.sequence = clean_station_u16(nonce + 11u)};
     for (uint8_t association = 0u; association < 2u; ++association) {
-        if (association && !receive_for(l,10000u,0u)) return;
-        if (association) {
-            station_wmm_offered = (uint8_t)clean_station_wmm_offer(&station_ap);
-            if (station_wmm_offered) {
-                uint8_t unused[4] = {0};
-                if (!station_command(l, unused, sizeof(unused),
-                                     CLEAN_HT_RESPONSE_CMD | (1u << 8u))) return;
-            }
-        }
-        uint8_t frame[160];
-        request.pending = 0u;
-        badger_bytes_store_u32(detail + 1092u, 1u);
-        int status = -1;
-        uint32_t sent = 0u;
-        uint32_t phase_started = l->wire->now_us(l->wire->context);
-        while (sent < 4u &&
-               l->wire->now_us(l->wire->context) - phase_started < 1600000u) {
-            uint32_t length = clean_station_request_prepare(&request, frame, mac,
-                                                            &station_ap, association);
-            if (!length) {
-                l->error = CLEAN_INPUT; l->actual = request.length; return;
-            }
-            if (!station_command(l, frame, sizeof(frame), 5u | clean_tx_length_bits(length) |
-                (1u << 18u) | (1u << 19u) | CLEAN_TX_ACK_REQUIRED)) return;
-            uint8_t status_bytes[sizeof(clean_unicast_status_t)];
-            if (!clean_block(l, CLEAN_UNICAST_ADDR, status_bytes, sizeof(status_bytes), 0u)) return;
-            if (badger_bytes_load_u32(status_bytes) != CLEAN_UNICAST_MAGIC) {
-                l->error = CLEAN_READBACK; l->address = CLEAN_UNICAST_ADDR;
-                return;
-            }
-            uint32_t at = 540u + 4u * association;
-            uint32_t attempts = badger_bytes_load_u32(status_bytes + 8u);
-            if (!attempts && badger_bytes_load_u32(status_bytes + 4u) != CLEAN_UNICAST_BUSY) {
-                l->error = CLEAN_CONTROLLER;
-                l->actual = badger_bytes_load_u32(status_bytes + 4u);
-                return;
-            }
-            sent += attempts;
-            badger_bytes_store_u32(detail + at, badger_bytes_load_u32(detail + at) +
-                                  attempts);
-            uint32_t ack = badger_bytes_load_u32(status_bytes + 12u);
-            clean_station_request_sent(&request, attempts, ack);
-            badger_bytes_store_u32(detail + 548u, badger_bytes_load_u32(detail + 548u) + ack);
-            /* A held capture or busy medium must not spend a radio retry.
-             * Drain RX on a short deadline before trying the same MPDU again. */
-            uint32_t wait = !attempts ? 10000u : ack ? 400000u : 100000u;
-            uint32_t elapsed = l->wire->now_us(l->wire->context) - phase_started;
-            if (elapsed >= 1600000u) break;
-            if (wait > 1600000u - elapsed) wait = 1600000u - elapsed;
-            status = station_wait(l, mac, association, &aid, wait);
-            if (status != -1 || l->error) break;
-        }
+        int status = station_phase(l, mac, &request, association, &aid);
         badger_bytes_store_u32(detail + 528u + 4u*association, (uint32_t)status);
         badger_bytes_store_u32(detail + 524u, association ? 3u : 2u);
         if (status != 0 || l->error) return;
@@ -773,6 +783,174 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     badger_bytes_store_u32(detail + 524u, 4u);
     if (nonce[14]==18u) station_wpa(l,mac);
     else (void)receive_for(l, 2500000u, 0u);
+}
+
+static void lifecycle_forget(void) {
+    clean_station_forget_association(&station_ap);
+    clean_mac_rx_init(&station_rx);
+    clean_qos_rx_init(&station_qos);
+    station_wmm_updates = station_wmm_offered = 0u;
+    wpa_wipe(&wpa, sizeof(wpa));
+    wpa_wipe(wpa_secret, sizeof(wpa_secret));
+    badger_bytes_zero(rx_packet, sizeof(rx_packet));
+}
+
+static void station_lifecycle_run(clean_loader_t *l, const uint8_t nonce[16]) {
+    const wifi_wire_t *wire = l->wire;
+    uint32_t started = wire->now_us(wire->context);
+    uint32_t seconds = clean_station_u16(nonce + 12u);
+    uint8_t own[6] = {2u, nonce[6], nonce[7], nonce[8], nonce[9], nonce[10]};
+    clean_station_request_t request = {.sequence = clean_station_u16(nonce + 10u)};
+    uint16_t aid = 0u, mac_sequence = request.sequence;
+    uint8_t radio = 1u;
+    (void)clean_lifecycle_init(&lifecycle, started, nonce[15]);
+    badger_bytes_copy(detail + 1972u, own, 6u);
+    badger_bytes_copy(detail + 1980u, station_target, 6u);
+    while (l->error == CLEAN_OK && wire->now_us(wire->context) - started < seconds * 1000000u) {
+        if (!clean_service(l)) break;
+        uint32_t now = wire->now_us(wire->context);
+        clean_lifecycle_report_t *r = &lifecycle.report;
+        int changed = clean_lifecycle_tick(&lifecycle, now);
+        if (r->state == CLEAN_LIFE_BACKOFF) {
+            if (radio) {
+                wifi_wire_power_off(wire); radio = 0u;
+                lifecycle_forget();
+            }
+            continue;
+        }
+        if (r->state == CLEAN_LIFE_DISCOVER && lifecycle.needs_reset) {
+            lifecycle_forget();
+            badger_bytes_zero((uint8_t *)&station_ap, sizeof(station_ap));
+            station_ap_status = 0;
+            clean_loader_init(l, wire, service, 0);
+            l->budget_us = (uint64_t)(seconds + 10u) * 1000000u;
+            if (!clean_boot(l, clean_image, (uint32_t)(clean_image_end - clean_image),
+                    r->channel, (badger_bytes_load_u32(nonce) | 1u) + 2u * r->epoch, 1u) ||
+                !clean_write(l, 0x18002024u, 0xf0u) ||
+                !clean_write(l, CLEAN_MBOX + 24u, 2u) ||
+                !clean_wait_state(l, 9u, 100000u)) break;
+            lifecycle.needs_reset = 0u; radio = 1u;
+            lifecycle.phase_at = wire->now_us(wire->context);
+            changed = 0;
+        }
+        if (r->state == CLEAN_LIFE_DISCOVER && changed) {
+            uint32_t command = 4u | (r->channel << 8u);
+            if (!clean_write(l, CLEAN_MBOX + 24u, command) ||
+                !clean_wait_command(l, command, 100000u)) break;
+            lifecycle.phase_at = wire->now_us(wire->context);
+        }
+        if (r->state == CLEAN_LIFE_AUTHENTICATE || r->state == CLEAN_LIFE_ASSOCIATE) {
+            uint8_t association = r->state == CLEAN_LIFE_ASSOCIATE;
+            int status = station_phase(l, own, &request, association, &aid);
+            now = wire->now_us(wire->context);
+            if (l->error) break;
+            if (r->state == CLEAN_LIFE_BACKOFF) continue;
+            if (status) {
+                clean_lifecycle_disconnect(&lifecycle, now,
+                    status == -2 ? CLEAN_LIFE_DEPARTURE :
+                    association ? CLEAN_LIFE_ASSOC_FAILURE : CLEAN_LIFE_AUTH_FAILURE,
+                    (uint32_t)status);
+            } else if (association) {
+                if (!clean_lifecycle_associated(&lifecycle, now, aid)) {
+                    l->error = CLEAN_INPUT; l->actual = aid; break;
+                }
+            } else (void)clean_lifecycle_authenticated(&lifecycle, now);
+            continue;
+        }
+        uint32_t size;
+        if (!clean_receive(l, rx_packet, &size)) break;
+        if (size >= 58u) {
+            const uint8_t *m = rx_packet + 18u;
+            uint32_t n = size - 18u;
+            clean_station_ap_t ap;
+            int parsed = clean_station_beacon(m, n, station_target, &ap);
+            if (parsed > 0) {
+                uint32_t channel = clean_lifecycle_channel(m, n, r->channel);
+                uint32_t interval = clean_station_u16(m + 32u);
+                if (!channel || !interval) {
+                    l->error = CLEAN_INPUT; l->actual = 3u; break;
+                }
+                if (r->state == CLEAN_LIFE_DISCOVER && channel == r->channel) {
+                    if (parsed != CLEAN_AP_OPEN) {
+                        l->error = CLEAN_INPUT; l->actual = CLEAN_LIFE_UNSUPPORTED; break;
+                    }
+                    badger_bytes_copy((uint8_t *)&station_ap, (const uint8_t *)&ap, sizeof(ap));
+                    station_ap_status = parsed;
+                    lifecycle.beacon_timeout_us = interval * 10240u;
+                    if (lifecycle.beacon_timeout_us < CLEAN_LIFECYCLE_BEACON_US)
+                        lifecycle.beacon_timeout_us = CLEAN_LIFECYCLE_BEACON_US;
+                    uint8_t config[16] = {0};
+                    badger_bytes_copy(config, own, 6u);
+                    badger_bytes_copy(config + 6u, ap.bssid, 6u);
+                    config[12] = (uint8_t)ap.basic_rates; config[13] = (uint8_t)(ap.basic_rates >> 8u);
+                    config[14] = (uint8_t)!!(ap.capability & 1024u); config[15] = 3u;
+                    if (!station_command(l, config, sizeof(config), 7u)) break;
+                    request.pending = 0u;
+                    ++request.sequence;
+                    (void)clean_lifecycle_found(&lifecycle, wire->now_us(wire->context));
+                } else if (r->state == CLEAN_LIFE_CONNECTED) {
+                    if (channel != r->channel) {
+                        r->channel = channel;
+                        clean_lifecycle_disconnect(&lifecycle, now, CLEAN_LIFE_CHANNEL_CHANGE, 0u);
+                    } else {
+                        if (!station_refresh(l, own, size)) continue;
+                        lifecycle.beacon_timeout_us = interval * 10240u;
+                        if (lifecycle.beacon_timeout_us < CLEAN_LIFECYCLE_BEACON_US)
+                            lifecycle.beacon_timeout_us = CLEAN_LIFECYCLE_BEACON_US;
+                        lifecycle.beacon_at = now;
+                        ++r->beacons;
+                    }
+                }
+            }
+        }
+        if (r->state != CLEAN_LIFE_CONNECTED) continue;
+        if (size >= 44u) {
+            int reason = clean_station_departure(rx_packet + 18u, size - 18u, own, station_target);
+            if (reason >= 0) {
+                clean_lifecycle_disconnect(&lifecycle, now, CLEAN_LIFE_DEPARTURE, (uint32_t)reason);
+                continue;
+            }
+            if (clean_lifecycle_response(rx_packet + 18u, size - 18u, own, station_target) &&
+                clean_station_rx(&station_rx, rx_packet, &size, own, station_target, now) == CLEAN_MAC_DELIVER)
+                (void)clean_lifecycle_echo(&lifecycle, now, rx_packet + 50u,
+                    CLEAN_LIFECYCLE_PAYLOAD_BYTES, nonce + 6u);
+        }
+        if (!lifecycle.pending && now - lifecycle.send_at >= 500000u) {
+            uint8_t frame[92];
+            ++lifecycle.sequence;
+            uint32_t length = clean_lifecycle_frame(frame, own, station_target, nonce + 6u,
+                r->epoch, lifecycle.sequence, mac_sequence++);
+            lifecycle.pending = 1u; lifecycle.echo_at = now; lifecycle.send_at = now;
+            if (!station_command(l, frame, sizeof(frame), 5u | clean_tx_length_bits(length) |
+                (1u << 18u) | (1u << 19u) | CLEAN_TX_ACK_REQUIRED)) break;
+            clean_unicast_status_t tx;
+            if (!clean_block(l, CLEAN_UNICAST_ADDR, (uint8_t *)&tx, sizeof(tx), 0u)) break;
+            if (tx.magic != CLEAN_UNICAST_MAGIC || tx.attempts > 1u ||
+                (tx.result != CLEAN_UNICAST_ACKED && tx.result != CLEAN_UNICAST_TIMEOUT &&
+                 tx.result != CLEAN_UNICAST_BUSY)) {
+                l->error = CLEAN_CONTROLLER; l->actual = tx.result; break;
+            }
+            r->tx_attempts += tx.attempts;
+            if (tx.result == CLEAN_UNICAST_TIMEOUT) ++r->tx_timeouts;
+            if (tx.result == CLEAN_UNICAST_BUSY) {
+                lifecycle.pending = 0u;
+                ++r->tx_busy;
+                if (++lifecycle.consecutive_echo_failures == 3u)
+                    clean_lifecycle_disconnect(&lifecycle, now, CLEAN_LIFE_DATA_LOSS, tx.result);
+            }
+        }
+    }
+    uint32_t now = wire->now_us(wire->context);
+    clean_lifecycle_stop(&lifecycle, now, l->error == CLEAN_CANCELLED ? CLEAN_LIFE_CANCEL :
+        l->error == CLEAN_INPUT && l->actual == CLEAN_LIFE_UNSUPPORTED ? CLEAN_LIFE_UNSUPPORTED :
+        l->error ? CLEAN_LIFE_RADIO_ERROR : CLEAN_LIFE_DEADLINE,
+        l->error == CLEAN_CANCELLED ? 0u : l->error);
+    lifecycle_forget();
+    wifi_wire_power_off(wire);
+    lifecycle.report.cleanup = 1u;
+    lifecycle.report.elapsed_lo = now - started;
+    lifecycle.report.elapsed_hi = 0u;
+    if (!l->error) l->stage = 8u;
 }
 
 static void run(const uint8_t nonce[16]) {
@@ -798,9 +976,10 @@ static void run(const uint8_t nonce[16]) {
     wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
-    if ((nonce[14] > CLEAN_PEER_RX_MODE && !(CLEAN_RX_AMPDU_PROBE &&
+    if ((nonce[14] > CLEAN_PEER_RX_MODE && nonce[14] != CLEAN_LIFECYCLE_MODE && !(CLEAN_RX_AMPDU_PROBE &&
             nonce[14] <= CLEAN_HT_AMPDU_PROBE_RX_MODE)) || !secret_valid ||
-        ((nonce[14] == 21u || nonce[14] == 22u || nonce[14] >= 24u) && nonce[13] >= 8u) ||
+        ((nonce[14] == 21u || nonce[14] == 22u ||
+          (nonce[14] >= 24u && nonce[14] <= 31u)) && nonce[13] >= 8u) ||
         (nonce[14] >= 26u && nonce[14] <= 28u && (!CLEAN_RX_HT_RESPONSE ||
                              clean_ht_data_length(nonce) != CLEAN_HT_ACK_MPDU)) ||
         (nonce[14] >= 24u && nonce[14] <= 28u &&
@@ -810,6 +989,12 @@ static void run(const uint8_t nonce[16]) {
     detail[2001u] = nonce[15];
     badger_bytes_copy(peer_challenge, nonce, sizeof(peer_challenge));
     badger_bytes_copy(station_target, nonce, 6u);
+    if (lifecycle_mode()) {
+        uint32_t seconds = clean_station_u16(nonce + 12u);
+        (void)clean_lifecycle_init(&lifecycle, probe_started, channel);
+        if (!seconds || seconds > 600u) l.error = CLEAN_INPUT;
+        l.budget_us = (uint64_t)(seconds + 10u) * 1000000u;
+    }
     station_ap_status = 0;
     badger_bytes_zero((uint8_t *)&station_ap, sizeof(station_ap));
     badger_bytes_store_u32(detail + 2004u, nonce[14] == 8u || nonce[14] == 10u);
@@ -863,7 +1048,8 @@ static void run(const uint8_t nonce[16]) {
                 (void)station_command(&l, parameters, sizeof(parameters), CLEAN_EDCA_CMD);
             }
         }
-        if (soak_mode()) mac_soak_run(&l, nonce);
+        if (lifecycle_mode()) station_lifecycle_run(&l, nonce);
+        else if (soak_mode()) mac_soak_run(&l, nonce);
         else (void)receive_for(&l, nonce[14] == CLEAN_PEER_RX_MODE ||
                               nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE ? 4200000u :
                               nonce[14] == 13u || nonce[14] == 17u ||
@@ -914,7 +1100,7 @@ static void run(const uint8_t nonce[16]) {
                 break;
             } while (l.error == CLEAN_OK);
         }
-        if (l.error == CLEAN_OK && station_mode()) station_run(&l, nonce);
+        if (l.error == CLEAN_OK && station_mode() && !lifecycle_mode()) station_run(&l, nonce);
         if (l.error == CLEAN_OK && !soak_mode() && nonce[14] != 0u && nonce[14] != 13u &&
             nonce[14] != 16u && nonce[14] != 17u && nonce[14]!=18u &&
             nonce[14]!=22u && nonce[14]!=23u && nonce[14]<24u) {
@@ -1008,7 +1194,7 @@ static void run(const uint8_t nonce[16]) {
                 if (l.error == CLEAN_OK) (void)receive_for(&l, 200000u, nonce[14]);
             }
         }
-        if (l.error == CLEAN_OK && clean_write(&l, CLEAN_MBOX + 24u, 3u) &&
+        if (l.error == CLEAN_OK && !lifecycle_mode() && clean_write(&l, CLEAN_MBOX + 24u, 3u) &&
             clean_wait_state(&l, 10u, 200000u)) l.stage = 8u;
     }
     if (station_mode()) clean_station_ht_report(&station_ap, nonce[15], detail);
@@ -1018,6 +1204,7 @@ static void run(const uint8_t nonce[16]) {
     int snapshot = 1;
     uint32_t snapshot_flags = l.stage == 8u ? CLEAN_SOAK_SNAPSHOT_FROZEN : 0u;
     uint32_t snapshot_stop_error = CLEAN_OK;
+    if (lifecycle_mode()) goto snapshot_done;
     if ((soak_mode() || nonce[14] == 28u) && saved_error != CLEAN_OK) {
         uint32_t state;
         snapshot = clean_read(&l, CLEAN_MBOX + 4u, &state);
@@ -1154,6 +1341,7 @@ static void run(const uint8_t nonce[16]) {
         badger_bytes_store_u32(detail + CLEAN_SOAK_PROGRESS_DETAIL +
             __builtin_offsetof(clean_soak_progress_t, snapshot_stop_error), snapshot_stop_error);
     }
+snapshot_done:
     if (saved_error != CLEAN_OK) {
         l.error = saved_error;
         l.address = saved_addr;
@@ -1170,6 +1358,15 @@ static void run(const uint8_t nonce[16]) {
     badger_bytes_store_u32(detail + 20u, l.verified);
     badger_bytes_store_u32(detail + 24u, elapsed);
     badger_bytes_store_u32(detail + 28u, channel);
+    if (lifecycle_mode()) {
+        if (lifecycle.report.state != CLEAN_LIFE_STOPPED && lifecycle.report.state != CLEAN_LIFE_FAILED)
+            clean_lifecycle_stop(&lifecycle, l.wire->now_us(l.wire->context),
+                CLEAN_LIFE_RADIO_ERROR, l.error);
+        lifecycle.report.cleanup = 1u;
+        lifecycle_forget();
+        badger_bytes_copy(detail + CLEAN_LIFECYCLE_DETAIL,
+            (const uint8_t *)&lifecycle.report, sizeof(lifecycle.report));
+    }
     wifi_probe_report_t report = {
         .stage = WIFI_PROBE_RESET, .result = WIFI_BUS_BACKPLANE_INVALID,
         .last_value = l.error, .elapsed_us = elapsed
@@ -1179,6 +1376,7 @@ static void run(const uint8_t nonce[16]) {
     live_usb_probe_finish(&control, generation, wire_report);
     live_usb_trace_finish(&control, generation, detail);
     screen(l.error ? "RADIO TEST FAILED" :
+           lifecycle_mode() ? "STATION LIFECYCLE / CHECK REPORT" :
            ht_probe_mode() ? (nonce[14] == 21u || nonce[14] == 24u ? "HT / TX SUBMITTED ONLY" :
                               "HT PROBE / CHECK RAW EVIDENCE") :
            nonce[14] == 18u ?

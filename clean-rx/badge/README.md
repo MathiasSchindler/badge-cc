@@ -6,10 +6,97 @@ project-owned USB control endpoint. Neither processor links libc, the Pico
 SDK, a downloaded vendor executable, NVRAM, or CLM. The controller still
 reads its on-chip ROM calibration tables.
 
-This is a bounded radio test, not a WiFi connection manager. It includes an
+This is a radio diagnostic, not a production WiFi connection manager. It includes an
 experimental WPA2-PSK/CCMP supplicant and protected round-trip trial, but does
 not replace the default networking targets. Host USB collection uses the
 repository's existing libusb dependency.
+
+## B1 persistent open-station lifecycle
+
+The opt-in `--station-lifecycle BSSID SECONDS` mode maintains an open,
+legacy station for 1..600 seconds. It scans channels 1..11, authenticates,
+associates, exchanges session/epoch/sequence-bound application echoes, and
+recovers after beacon loss, validated departure, channel changes or three
+consecutive failed data submissions/echoes. Authentication and association
+retain four actual attempts and a 1.6-second phase deadline. Scan dwell is
+400 ms, reconnect backoff is 250 ms, and beacon loss uses the greater of
+1.5 seconds or ten advertised beacon intervals. Each operation is bounded;
+an operation already in progress may finish after the session deadline.
+
+Recovery clears association, duplicate/reassembly, QoS and security state
+and cold-reloads the controller before scanning again. Existing one-shot
+station/WPA2 modes are unchanged. B1 does not negotiate WMM/HT or implement
+persistent WPA2; secured/unsupported networks are explicitly rejected.
+Unknown controller/PHY faults remain fatal rather than becoming retries.
+
+Build the badge and the independent vendor-radio AP fixture:
+
+```sh
+make -C clean-rx/badge all test
+make -f clean-rx/peer/Makefile ht-peer ht-peer-test
+node clean-rx/badge/lifecycle_verify.cjs --self-test
+```
+
+After backing up both full flash images, install the matching badge image
+and `build/clean-rx/peer/vendor_ht.uf2` on the station and AP respectively.
+Leave both in BOOTSEL, then run from the repository root:
+
+```sh
+bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 0
+bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 5
+```
+
+The runner never flashes or restores firmware. It boots the installed images,
+waits for AP readiness and retains both raw evidence files and endpoint logs.
+`CLEAN_RX_COLLECTOR`, `CLEAN_RX_PEER_COLLECTOR` and `CLEAN_RX_PICOTOOL` select
+matching isolated builds/tools. Cycle zero is one cold connection; five cycles
+physically power down/reload the AP five times, with three-second outages.
+The AP uses unchanged vendor firmware on channel 1 and independently checks
+its associated peer before returning the exact application payload.
+Its host CLI is
+`collector SERIAL EVIDENCE_BIN --lifecycle-ap CHALLENGE_HEX_28 SECONDS:8-120 CYCLES:0-5`.
+
+The station collector reports connections separately from data-verified
+connections, actual data TX attempts/timeouts/busy results, phase failures,
+disconnect reasons and the last 32 state transitions. Local TX completion
+and MAC ACKs never count as application data. The paired oracle additionally
+requires matching independent MAC/session/epoch evidence, exactly one
+connection per planned AP lifetime and no hidden authentication/association
+failures. SIGINT/SIGTERM requests BOOTSEL cleanup; cancellation is not reported
+as successful qualification. Always restore and full-readback-verify originals
+after a hardware campaign. Implementation and RF qualification are tracked
+separately in [the roadmap](../../todo.md#b1-connection-lifecycle).
+
+### B1 qualification record
+
+The `build/clean-rx/b1-20261022/calibrated-*` two-badge campaign passed ten
+consecutive fresh cold connections and five actual AP power-loss/reload cycles.
+Station build `b886bf0a` and independent AP build `2478041e` verified 115
+application echoes across the cold connections, then 68 echoes across six
+distinct recovery epochs with five beacon-loss recoveries. Every association
+had fresh application evidence; authentication/association phase failures
+remained zero.
+
+Earlier failed attempts are retained, not counted as passes. They exposed
+the USB framework's intentionally one-shot snapshots and the AP fixture's
+uncalibrated ROSC timer. B1 reopens only the same configured USB generation
+for progress/final snapshots, and normalizes the AP clock using the unchanged
+badge clock helper. A USB-SOF check rejects timer drift beyond 1% before AP
+startup. Other peer modes retain their previous clock setup. An archive-oracle
+assertion initially read reserved footer bytes rather than the station MAC;
+the corrected oracle rechecked all eleven retained raw pairs successfully.
+
+These are not loss-free data tests: the ten cold controls retained seven
+MAC timeouts, six echo timeouts and thirteen busy returns. Recovery retained
+its outage-related losses too. A final corrected-runner cold smoke passed with
+13 echoes, and cancellation after independently observed connected data
+stopped both collectors and returned both badges to BOOTSEL. Departure and
+channel-announcement handling have native coverage; the five recovery cycles
+kept the AP on channel 1. Persistent WPA2, negotiated HT/WMM and B2 networking remain open.
+Default, WMM/HT-response and HT/SHM badge builds and their native regression
+suites pass. Vendor firmware, shared platform code and the Pico are unchanged.
+
+## Existing radio qualification
 
 **Current qualification:** cold RX and single-frame **11 Mbps CCK OTA TX** are
 verified between a Universe badge and a Pimoroni Tufty2350, in both directions.
