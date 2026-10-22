@@ -818,7 +818,32 @@ static void authentication_failure_capture(void) {
     assert(psm_run(r, 0, DCF_BAD) == 266u);
     assert(r[CLEAN_DCF_EIFS] && r[CLEAN_DCF_REQUEST] == CLEAN_DCF_DEFERRED);
     assert(r[CLEAN_AUTH_FAILURE_SHM] == 1u);
-    puts("PSM bad authentication: bounded raw evidence, either bound address, no ACK/delivery, EIFS retained; NOT RF");
+    base[CLEAN_DCF_ENABLE] = 1u;
+    base[0x100cu] = 178u;
+    base[CLEAN_SHM_FRAME + 4u] = 0x0d08u;
+    for (uint32_t fault = 0u; fault < 10u; ++fault) {
+        memcpy(r, base, sizeof(r));
+        if (fault == 1u) r[CLEAN_ACK_ENABLE] = 0u;
+        if (fault == 2u) r[CLEAN_DCF_ENABLE] = 0u;
+        if (fault == 3u) r[0x100cu] = 39u;
+        if (fault == 4u) r[CLEAN_SHM_FRAME + 4u] = 0x80u;
+        if (fault == 5u || fault == 7u) r[0x612u] ^= 1u;
+        if (fault == 6u || fault == 7u) r[CLEAN_ACK_PEER] ^= 1u;
+        if (fault == 8u) {
+            r[CLEAN_AUTH_FAILURE_SHM] = 1u;
+            r[CLEAN_AUTH_FAILURE_SHM + 1u] = 123u;
+        }
+        if (fault == 9u) r[0x100cu] = 40u;
+        assert(psm_run(r, 0, DCF_BAD) == 266u);
+        int captured = fault == 0u || fault == 5u || fault == 6u || fault == 9u;
+        assert(r[CLEAN_AUTH_FAILURE_SHM] == (captured || fault == 8u));
+        assert(r[0x7a8u] == 1u && !r[CLEAN_ACK_SENT] && !r[CLEAN_ACK_SEEN]);
+        if (captured)
+            for (uint32_t i = 0u; i < 20u; ++i)
+                assert(r[CLEAN_AUTH_FAILURE_SHM + 8u + i] == r[CLEAN_SHM_FRAME + 1u + i]);
+        if (fault == 8u) assert(r[CLEAN_AUTH_FAILURE_SHM + 1u] == 123u);
+    }
+    puts("PSM rejected authentication/Data: bounded raw evidence, either bound address, no ACK/delivery, EIFS retained; NOT RF");
 }
 
 static void idle_watchdog(void) {

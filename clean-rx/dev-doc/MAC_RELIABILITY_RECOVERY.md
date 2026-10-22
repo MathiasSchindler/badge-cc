@@ -860,6 +860,132 @@ Every CCK campaign restored both full original 16-MiB images. The final
 images and match the SHA-256 values below. Both badges are in BOOTSEL with
 no remaining test/restore process. Pico and shared infrastructure are unchanged.
 
+## PHY bit-0x08 and missing-RX provenance follow-up
+
+The retained `0x0028` to `0x0038` failure adds **bit `0x0010`**, not
+`0x0008`. The unqualified `0x0008` was already present before the failed
+Data trigger. That distinction does not establish its meaning or make the
+attempt safe to retire: the existing unknown-bit rejection remains unchanged.
+
+Two bounded diagnostics now preserve evidence without changing completion,
+ACK eligibility, delivery, the recovery mask or the eight-attempt limit:
+
+- `phy_first_bit8` records the first sampled assertion of `0x0008`, with
+  previous/current status, TSF, TXE/IFS/PHY controls, byte count and sampled
+  request/pending/response/cleanup owners. The 20-byte record occupies
+  controller `0x205ec..0x20600`, before the A-MPDU probe, and soak detail
+  `1040..1060`, before the packet sample. Its timestamp is an ARM observation,
+  not the exact silicon assertion time; ownership/register reads are not an
+  atomic hardware trace. An absent observation is reported as JSON `null`.
+- `soak_bad_fcs` reuses the rejected-authentication record for the first
+  matching rejected Data prefix while DCF and ACK reception are enabled.
+  It requires at least 40 RXE bytes and either own RA or bound-peer TA.
+  The existing authentication capture remains active. This path still
+  discards the frame, does not ACK or deliver it, and preserves bad-FCS/EIFS
+  handling. The 60-byte snapshot occupies soak detail `1616..1676`, after
+  the complete 528-byte packet sample and before station detail at 1680.
+  `raw` is exactly 40 bytes/80 hex characters: six PLCP bytes plus the first
+  34 MPDU bytes. It cannot verify the FCS of an unseen full-length frame.
+
+Compile-time layout checks, native edge-detection tests and simulated PSM
+tests cover the `0x0004`-then-`0x0008` case, sticky/repeated status, Data
+capture length boundaries, either address match, disabled modes, first-Data
+record preservation and no ACK/delivery. Default, HT-response/WMM/EDCA and
+HT/SHM Block-ACK controller/badge builds and sanitizer suites pass.
+
+### Initial observation campaign
+
+Evidence is retained under `build/clean-rx/phy08-20261022/observe-*`.
+Of ten pairs, three positive pairs and five controlled exhaustion negatives
+pass; one positive and one controlled negative **fail**:
+
+- `negative-b1` has eight initiator attempts/timeouts but only six eligible
+  suppressed receptions, leaving receiver budget 2. Both suppression reports
+  are healthy, without a firmware/invariant fault. No matching rejected Data
+  prefix is captured. This localizes the discrepancy before eligible ACK
+  suppression; it does not distinguish missed PHY reception, earlier
+  corruption/abort or capture unavailability.
+- `stress-two1` exhausts the initial eight attempts with zero deliveries and
+  no controller fault. Again there is no matching rejected Data prefix.
+  Absence of a matching prefix is not evidence that the RF frames were good:
+  a corrupted address/type or an earlier RX abort can evade this diagnostic.
+- Repeated `stress-two2` and `stress-fivehalf` deliver 1,000 cyclic-size
+  MSDUs per direction, with one real known-status retirement in each pair.
+  The zero-injected-loss OFDM control delivers 100 per direction.
+
+The successful 2-Mbps run has 1,717/1,797 unrelated filtered captures and
+182/154 aggregate bad-FCS indications. These totals do not identify missing
+test frames. Capture hold reaches 9,386 us; ambient capture pressure is a
+hypothesis, not a demonstrated cause, and no early filter or weakened
+software FCS/NAV validation has been installed.
+
+Existing host-monotonic submission brackets and badge-relative ready/send
+times estimate that the receiver was ready approximately 1.52 seconds before
+the first send in `negative-b1` and 1.60 seconds before it in `stress-two1`.
+The passing 2-Mbps replay has a comparable 1.55-second lead. These are
+host-aligned estimates, not synchronized RF timestamps, but do not support
+attributing these failures to the launcher's one-second startup sleep.
+Failed-receiver capture-hold maxima are only 484/403 us, versus 9,386 us in
+the passing replay: a large hold maximum is not itself a failure diagnosis.
+
+The initial diagnostic captured the first *any-unknown* status instead of
+specifically `0x0008`: `0x0004` was sampled during response ownership
+(`owners=0x0200`) in the otherwise successful 2-Mbps run. That neither
+decodes the bit nor proves response causality. It also consumes that
+first-record slot, hiding any later `0x0008`; the final diagnostic therefore
+targets `0x0008` specifically. Initial raw records retain the historical
+`phy_first_unknown` field; new matching firmware/collector use
+`phy_first_bit8`.
+
+An independent binary/JSON oracle verifies all 20 initial endpoint records,
+including exact diagnostic fields and suppression/count/frozen-state gates.
+It retains both failed pairs and reports **QUALIFICATION: FAILED**.
+Both original full flashes are restored and byte-for-byte readback-verified
+after this campaign.
+
+### Targeted bit-0x08 campaign (`77bae4fe`)
+
+The nine `edge-*` pairs all pass their respective strict criteria: four
+exhaustion negatives, four 2-Mbps cyclic-size stress pairs with 2,000 MSDUs
+per direction each, and a 100-MSDU/direction zero-injected-loss OFDM control.
+Both initiation roles are repeated. The stress pairs deliver 8,000 MSDUs per
+direction in total and retire 21 actual known-status incomplete attempts.
+All 18 frozen binary endpoint records agree with JSON and the independent
+suppression/count oracle reports **QUALIFICATION: PASSED** for this campaign.
+It does not erase the two initial failed pairs or close overall qualification.
+
+No `0x0008` observation occurs in these trials. Its earlier origin and
+silicon meaning are therefore still unresolved; the guard has not been widened.
+
+The rejected-prefix diagnostic does now capture three matching fixture
+headers on the bad-FCS path, rather than only aggregate ambient errors:
+
+| Endpoint evidence | Fixture index/sequence | Expected RXE bytes | Reported RXE bytes |
+| --- | --- | --- | --- |
+| `edge-stress-a2-init` | 896 | 2338 | 62 |
+| `edge-stress-b1-init` | 1575 | 66 | 62 |
+| `edge-stress-b2-reply` | 1743 | 66 | 62 |
+
+All three prefixes contain the expected bound addresses and `MSK1` marker;
+the saved sequence equals the saved fixture index. Independent decoding
+checks their PLCP CRCs: the first declares 9,328 us, matching a 2,304-byte
+MSDU at 2 Mbps, and the others declare 240 us, matching 32-byte MSDUs.
+All report `status1=0x4042`, `status2=0x0040`.
+Thus there is concrete matching-header evidence of rejection/length
+inconsistency before ACK eligibility. It is not a full-frame CRC check or
+proof of on-air corruption versus premature/short/misreported RX completion.
+These later passing runs also do not explain the earlier six-of-eight
+negative, which has no matching rejected prefix.
+
+The next discriminating measurement is RX-end/FIFO/copied-length provenance
+for these short rejected captures, ideally with an independent RF witness.
+Changing promiscuous filtering, dropping FCS/NAV validation or accepting
+unknown PHY bits would not establish that cause and has not been done.
+
+Both `edge-SERIAL-restored.bin` full-flash readbacks match the original images
+and SHA-256 values below. Both badges are confirmed in BOOTSEL; no campaign
+or restoration process remains. Pico and shared infrastructure are untouched.
+
 ## Borrowed hardware restoration
 
 Both full 16 MiB original flashes were backed up and verified before testing.

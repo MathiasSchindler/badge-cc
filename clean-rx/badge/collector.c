@@ -994,6 +994,26 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             }
             putchar(']');
         }
+        clean_phy_edge_t edge;
+        memcpy(&edge, detail + CLEAN_PHY_EDGE_DETAIL, sizeof(edge));
+        if (edge.error)
+            printf(",\"phy_first_bit8\":{\"at\":%u,\"before\":%u,\"error\":%u,"
+                   "\"txe\":%u,\"ifs\":%u,\"phyctl\":%u,\"phyctl1\":%u,"
+                   "\"bytes\":%u,\"owners\":%u}", edge.at, edge.before, edge.error,
+                   edge.txe, edge.ifs, edge.phyctl, edge.phyctl1, edge.bytes, edge.owners);
+        else fputs(",\"phy_first_bit8\":null", stdout);
+        clean_auth_failure_t rejected;
+        memcpy(&rejected, detail + CLEAN_SOAK_BAD_FCS_DETAIL, sizeof(rejected));
+        if (rejected.magic == CLEAN_AUTH_FAILURE_MAGIC) {
+            printf(",\"soak_bad_fcs\":{\"count\":%u,\"length\":%u,\"phy\":%u,"
+                   "\"status1\":%u,\"status2\":%u,\"at\":%u,\"raw\":\"",
+                   rejected.count, rejected.length, rejected.phy,
+                   rejected.status1, rejected.status2,
+                   (uint32_t)rejected.time_lo | ((uint32_t)rejected.time_hi << 16u));
+            for (unsigned i = 0u; i < sizeof(rejected.raw); ++i)
+                printf("%02x", rejected.raw[i]);
+            fputs("\"}", stdout);
+        } else fputs(",\"soak_bad_fcs\":null", stdout);
         fputs(",\"rx_fifo_fault\":[", stdout);
         for (unsigned i = 0u; i < CLEAN_RX_FAULT_WORDS; ++i)
             printf("%s%u", i ? "," : "",

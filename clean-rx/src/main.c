@@ -96,6 +96,7 @@ static clean_dcf_t *station_contention(void) {
 }
 #define station_dcf (*station_contention())
 static uint16_t rx_discard_fcs, rx_discard_length;
+static uint16_t phy_error_previous;
 static uint8_t nav_frame[CLEAN_MPDU_BYTES], station_address[6], station_peer[6];
 static uint32_t access_started;
 static uint32_t ack_started, ack_window;
@@ -600,7 +601,31 @@ static uint32_t mac_now(void) {
     return mmio_read32(D11_BASE + (station_hw ? 0x180u : 0x1cu));
 }
 
+static void station_sample_phy_error(void) {
+    if (!station_hw) return;
+    volatile clean_phy_edge_t *p = (volatile clean_phy_edge_t *)CLEAN_PHY_EDGE_ADDR;
+    if (p->error) return;
+    uint16_t current = mmio_read16(D11_BASE + 0x3eeu);
+    if (clean_phy_bit8_added(phy_error_previous, current)) {
+        p->at = mac_now();
+        p->before = phy_error_previous;
+        p->txe = mmio_read16(D11_BASE + 0x50eu);
+        p->ifs = mmio_read16(D11_BASE + 0x690u);
+        p->phyctl = mmio_read16(D11_BASE + 0x50cu);
+        p->phyctl1 = mmio_read16(D11_BASE + 0x514u);
+        p->bytes = mmio_read16(D11_BASE + 0x56au);
+        p->owners = shm_read16(CLEAN_DCF_REQUEST) |
+            (shm_read16(CLEAN_DCF_TX_PENDING) << 4u) |
+            (shm_read16(CLEAN_RESPONSE_PENDING) << 8u) |
+            (shm_read16(CLEAN_TX_CLEANUP_REQUEST) << 12u);
+        __asm__ volatile("dsb" ::: "memory");
+        p->error = current;
+    }
+    phy_error_previous = current;
+}
+
 static void station_tx_phase(uint32_t index) {
+    station_sample_phy_error();
     volatile clean_tx_error_status_t *s =
         (volatile clean_tx_error_status_t *)CLEAN_TX_ERROR_ADDR;
     volatile clean_tx_phase_t *p = &s->phase[index];
@@ -630,6 +655,7 @@ static void station_good_rx(void) {
 }
 
 static void station_observe_errors(uint32_t now) {
+    station_sample_phy_error();
     uint16_t fcs = shm_read16(0x7a8u), length = shm_read16(0x7a9u);
     if (fcs != rx_discard_fcs || length != rx_discard_length)
         station_bad_rx(now);
@@ -942,6 +968,7 @@ static void station_consume_ack(void) {
 }
 
 static void station_service_tx(void) {
+    station_sample_phy_error();
     if (station_hw && shm_read16(CLEAN_DCF_REQUEST) == CLEAN_DCF_FIRED &&
         !cck_tx_tail.ended && !shm_read16(CLEAN_DCF_TX_PENDING))
         ack_started = (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
@@ -1945,6 +1972,9 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
     volatile uint8_t *abort_bytes = (volatile uint8_t *)abort_status;
     for (uint32_t i = 0u; i < sizeof(*abort_status); ++i) abort_bytes[i] = 0u;
     abort_status->magic = CLEAN_TX_ABORT_MAGIC;
+    volatile uint8_t *edge_bytes = (volatile uint8_t *)CLEAN_PHY_EDGE_ADDR;
+    for (uint32_t i = 0u; i < sizeof(clean_phy_edge_t); ++i) edge_bytes[i] = 0u;
+    phy_error_previous = 0u;
     volatile uint8_t *ht_bytes = (volatile uint8_t *)HT_RX;
     for (uint32_t i = 0u; i < sizeof(*HT_RX); ++i) ht_bytes[i] = 0u;
     HT_RX->magic = CLEAN_HT_RX_MAGIC;

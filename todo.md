@@ -81,6 +81,17 @@ See [CCK provenance, retirement and retained failures](clean-rx/dev-doc/MAC_RELI
 A2 remains open for the remaining PHY/RX/ACK failures and independent RF
 timing/full-credit qualification; the silicon meaning/cause of the observed
 PHY status is not established.
+The follow-up observation campaign reproduces an eight-attempt exhaustion with
+only six eligible receiver suppressions and healthy suppression bookkeeping.
+No matching rejected Data prefix is captured; ambient bad-FCS totals cannot
+be attributed to the missing test frames. New first-`0x0008` and rejected-Data
+prefix evidence narrows future captures without widening the recovery mask.
+Targeted build `77bae4fe` passes four 2,000-MSDU/direction 2-Mbps stress pairs
+and four exact exhaustion negatives, with 21 known-status retirements.
+Three matching rejected prefixes report RXE length 62 versus expected
+66/2338 bytes; their PLCP CRCs are valid. The origin of those inconsistent
+captures and the unreproduced `0x0008` remain open, as do the initial failures.
+See [PHY/RX provenance and retained failed controls](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
 
 - [ ] Complete response-rate/preamble selection, turnaround, bounded retries
   and meaningful completion reporting.

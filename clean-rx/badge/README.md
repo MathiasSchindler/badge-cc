@@ -895,6 +895,25 @@ by later known status. Use matching firmware and collector.
 Acceptance validates both timeout bounds on the abort count and exact
 MPDU-attempt accounting, including fragmented MSDUs.
 
+Additional soak evidence exposes `phy_first_bit8` (first sampled new PHY
+`0x0008`, or `null`) and `soak_bad_fcs` (a bounded matching rejected Data
+prefix, reusing the existing rejected-authentication capture). The former
+includes prior/current status, timestamp, TXE/IFS/PHY controls, byte count and
+sampled owners; it is not an atomic trace or exact silicon assertion time.
+The latter saves only 40 RXE bytes, including six PLCP bytes, as 80 hex
+characters with RX length/status/time. A zero capture count does not exclude
+corruption or an earlier RX abort, and a prefix cannot prove full-frame FCS.
+Snapshots occupy detail offsets 1040 and 1616 respectively, without changing
+existing packet/status records. No rejected frame is ACKed or delivered and
+the unknown-error guard remains intact. Use matching firmware and collector.
+See [PHY/RX provenance and retained failed controls](../dev-doc/MAC_RELIABILITY_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
+Targeted build `77bae4fe` passes four 2,000-MSDU/direction 2-Mbps stress
+pairs, four exact exhaustion negatives and a zero-injected-loss control.
+It captures three matching rejected prefixes with reported RXE length 62
+despite PLCP/header expectations of 66 or 2338 bytes. This narrows some loss
+to RX rejection/length inconsistency, not its physical cause. Bit `0x0008`
+is not reproduced, and earlier startup/negative failures remain retained.
+
 The selector is correctly `0x0826` before trigger; later `0x082c` is engine
 state. Explicit PLCP refreshing was tested and removed because it did not
 fix the failures. The first guarded candidate recovers an actual `0x0010`

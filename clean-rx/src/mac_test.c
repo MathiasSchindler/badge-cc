@@ -1057,6 +1057,13 @@ static void cck_ack_clock(void) {
 }
 
 static void cck_abort_recovery(void) {
+    assert(clean_phy_bit8_added(0x20u, 0x28u));
+    assert(clean_phy_bit8_added(0u, 0x08u));
+    assert(!clean_phy_bit8_added(0x28u, 0x38u));
+    assert(!clean_phy_bit8_added(0x28u, 0x20u));
+    assert(!clean_phy_bit8_added(0x20u, 0x30u));
+    assert(!clean_phy_bit8_added(0u, 0x04u));
+    assert(clean_phy_bit8_added(0x04u, 0x0cu));
     clean_tx_error_status_t base = {.magic=CLEAN_TX_ERROR_MAGIC, .valid=15u};
     base.phase[CLEAN_TX_FIRED] = (clean_tx_phase_t){
         .at=0xffffff00u, .phyctl=0x40u, .phyctl1=0x1002u, .owners=2u};

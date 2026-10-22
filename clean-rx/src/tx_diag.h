@@ -88,6 +88,21 @@ _Static_assert(sizeof(clean_tx_abort_status_t) == 40u &&
                CLEAN_TX_ABORT_ADDR + sizeof(clean_tx_abort_status_t) <= 0x20d00u,
                "First PHY abort must not overlap mode/challenge or frame slots");
 
+#define CLEAN_PHY_EDGE_ADDR (CLEAN_TX_ABORT_ADDR + sizeof(clean_tx_abort_status_t))
+#define CLEAN_PHY_EDGE_DETAIL 1040u
+typedef struct {
+    uint32_t at;
+    uint16_t before, error, txe, ifs, phyctl, phyctl1, bytes, owners;
+} clean_phy_edge_t;
+_Static_assert(sizeof(clean_phy_edge_t) == 20u &&
+               CLEAN_PHY_EDGE_ADDR + sizeof(clean_phy_edge_t) <= CLEAN_AMPDU_PROBE_ADDR &&
+               CLEAN_PHY_EDGE_DETAIL + sizeof(clean_phy_edge_t) <= 1088u,
+               "First PHY bit-0x08 observation must fit before probe/packet evidence");
+
+static inline int clean_phy_bit8_added(uint16_t previous, uint16_t current) {
+    return (current & ~previous & 0x08u) != 0u;
+}
+
 /* PHY error bits can survive successful packets. They are retained evidence,
  * never proof of a fresh fault or permission to credit a completion. */
 static inline int clean_tx_error_sample_needed(const volatile clean_tx_error_status_t *s,

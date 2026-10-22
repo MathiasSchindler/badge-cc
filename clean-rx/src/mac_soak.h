@@ -3,6 +3,7 @@
 
 #include "mac.h"
 #include "phy_rates.h"
+#include "unicast.h"
 
 #define CLEAN_SOAK_MAGIC 0x314b534du
 #define CLEAN_SOAK_STATUS_MAGIC 0x334b534du
@@ -26,6 +27,10 @@
 #define CLEAN_SOAK_SNAPSHOT_MAILBOX 2u
 #define CLEAN_SOAK_SNAPSHOT_FULL 4u
 #define CLEAN_SOAK_FAULT_DETAIL 1920u
+#define CLEAN_SOAK_BAD_FCS_DETAIL (1088u + CLEAN_DETAIL_PACKET_BYTES)
+_Static_assert(1088u + CLEAN_DETAIL_PACKET_BYTES <= CLEAN_SOAK_BAD_FCS_DETAIL &&
+               CLEAN_SOAK_BAD_FCS_DETAIL + sizeof(clean_auth_failure_t) <= 1680u,
+               "Rejected soak frame must fit between packet and station evidence");
 
 enum {
     CLEAN_SOAK_SETUP = 1u, CLEAN_SOAK_READY, CLEAN_SOAK_SEND,
