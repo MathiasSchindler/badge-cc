@@ -22,6 +22,7 @@ static wifi_fw_stage_t advance_stage;
 static int cancel_assets;
 static wifi_fw_assets_t assets;
 static uint32_t raw_packets;
+static uint8_t live_backplane;
 
 static void raw_receive(void *context, const uint8_t *packet, uint32_t length) {
     assert(context == &raw_packets);
@@ -118,10 +119,10 @@ static wifi_bus_result_t transfer(const wifi_wire_t *wire, const uint8_t *tx,
         assert(size <= WIFI_FW_BACKPLANE_BLOCK && address+size <= sizeof(memory));
         assert((address & 0x7fffu) + size <= 0x8000u);
         if (cmd & 0x80000000u) {
-            assert(tx_length >= size+4u && rx_length == 0u && arm_reset);
+            assert(tx_length >= size+4u && rx_length == 0u && (arm_reset || live_backplane));
             memcpy(memory+address, tx+4u, size);
         } else {
-            assert(rx_length >= size+16u && tx_length == 4u && arm_reset);
+            assert(rx_length >= size+16u && tx_length == 4u && (arm_reset || live_backplane));
             memset(rx, 0x99, rx_length);
             memcpy(rx+16u, memory+address, size);
             if (corrupt_address >= address && corrupt_address < address+size) rx[16u+corrupt_address-address] ^= 1u;
@@ -310,6 +311,23 @@ int main(void) {
     }
     initialize();
     assert(wifi_firmware_begin(&wire,&assets,&report,progress,0) && off_count==0u);
+    live_backplane = 1u;
+    uint8_t bp_source[132], bp_result[132];
+    for (uint32_t i = 0u; i < sizeof(bp_source); ++i) bp_source[i] = (uint8_t)(i * 7u);
+    assert(wifi_firmware_backplane_write(0x7fc0u, bp_source, sizeof(bp_source)));
+    assert(wifi_firmware_backplane_read(0x7fc0u, bp_result, sizeof(bp_result)));
+    assert(memcmp(bp_source, bp_result, sizeof(bp_source)) == 0);
+    assert(wifi_firmware_backplane_write32(0x10000u, 0x12345678u));
+    uint32_t bp_value;
+    assert(wifi_firmware_backplane_read32(0x10000u, &bp_value) && bp_value == 0x12345678u);
+    assert(!wifi_firmware_backplane_read(1u, bp_result, 4u) && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_backplane_read(0u, bp_result, 3u) && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_backplane_read(0u, 0, 4u) && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_backplane_write(0u, 0, 4u) && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_backplane_read(0xfffffffcu, bp_result, 8u) &&
+           report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_backplane_read32(0u, 0) && report.error == WIFI_FW_PROTOCOL);
+    live_backplane = 0u;
     uint8_t version_request[192]="ver", version_reply[192];
     uint32_t reply_size;
     ticks+=4000000u;

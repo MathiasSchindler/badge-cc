@@ -1,0 +1,17 @@
+{
+  "repository": "georgerobotics/cyw43-driver",
+  "revision": "f6d06a70f9710f5854808a8a2803e93700e6038a",
+  "files": [
+    {"path": "LICENSE", "git_blob": "537252ad20e2e990d1c5adc38390be6586b0fba7"},
+    {"path": "LICENSE.RP", "git_blob": "7339f7d1126e7875f6481c84117b0001ac43679a"},
+    {"path": "README.md", "git_blob": "29856b678bb1ab1c7e7e3fe0dd4248968467124a"},
+    {"path": "firmware/README.md", "git_blob": "a73bf8f00ca6593e67a3c2732d5d77d1488b50ed"},
+    {"path": "firmware/wb43439A0_7_95_49_00_combined.h", "git_blob": "74fd04f66a42922833d25a8c29955ec879d25ea1"},
+    {"path": "firmware/cyw43_btfw_43439.h", "git_blob": "56c2661c9477a4d0bdbf5599b9eefbe80bb30842"},
+    {
+      "path": "firmware/wifi_nvram_43439.h",
+      "revision": "cf924bb04c8984675ca0fc2178f082e404e048c3",
+      "git_blob": "c721a170af3c63724a87790177c071f61b4b2e0e"
+    }
+  ]
+}

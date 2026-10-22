@@ -62,6 +62,13 @@ int wifi_firmware_control(uint32_t command, uint8_t set, uint8_t interface,
                            const uint8_t *request, uint32_t request_size,
                            uint8_t *reply, uint32_t capacity, uint32_t *reply_size);
 void wifi_firmware_stop(void);
+/* Bounded access through the retained session's shared backplane window.
+   Memory transfers require aligned addresses and lengths, up to 4096 bytes.
+   These do not enable WLAN or transmit Ethernet frames. */
+int wifi_firmware_backplane_read32(uint32_t address, uint32_t *value);
+int wifi_firmware_backplane_write32(uint32_t address, uint32_t value);
+int wifi_firmware_backplane_read(uint32_t address, uint8_t *data, uint32_t length);
+int wifi_firmware_backplane_write(uint32_t address, const uint8_t *data, uint32_t length);
 int wifi_firmware_data_enable(void);
 /* Opt-in diagnostic alternative to Ethernet RX. Callback storage is borrowed.
  * Every non-control SDPCM packet is delivered, including during CDC commands. */

@@ -512,6 +512,56 @@ void wifi_firmware_stop(void) {
     state.raw_context = 0;
 }
 
+static int backplane_begin(uint32_t address) {
+    if (!state.ready) return 0;
+    state.report->error = WIFI_FW_OK;
+    state.report->controller_status = 0u;
+    state.operation_start = state.wire->now_us(state.wire->context);
+    if ((address & 3u) != 0u) return failed(WIFI_FW_PROTOCOL);
+    return service();
+}
+
+int wifi_firmware_backplane_read32(uint32_t address, uint32_t *value) {
+    if (!backplane_begin(address)) return 0;
+    if (value == 0) return failed(WIFI_FW_PROTOCOL);
+    return bp_read(address, 4u, value);
+}
+
+int wifi_firmware_backplane_write32(uint32_t address, uint32_t value) {
+    return backplane_begin(address) && bp_write(address, 4u, value);
+}
+
+static int backplane_memory(uint32_t address, const uint8_t *source,
+                             uint8_t *destination, uint32_t length) {
+    if (!backplane_begin(address)) return 0;
+    if (length == 0u || length > 4096u || (length & 3u) != 0u ||
+        length > 0xffffffffu - address || (source == 0 && destination == 0)) {
+        return failed(WIFI_FW_PROTOCOL);
+    }
+    for (uint32_t offset = 0u; offset < length;) {
+        uint32_t current = address + offset;
+        uint32_t chunk = length - offset;
+        if (chunk > WIFI_FW_BACKPLANE_BLOCK) chunk = WIFI_FW_BACKPLANE_BLOCK;
+        if (chunk > WINDOW_SIZE - (current & 0x7fffu)) chunk = WINDOW_SIZE - (current & 0x7fffu);
+        if (chunk > 0x1000u - (current & 0xfffu)) chunk = 0x1000u - (current & 0xfffu);
+        if (!service() || !window(current)) return 0;
+        state.report->address = current;
+        if (!transfer(source != 0, 1u, (current & 0x7fffu) | (source ? 0x8000u : 0u),
+                       source ? source + offset : 0,
+                       destination ? destination + offset : 0, chunk)) return 0;
+        offset += chunk;
+    }
+    return 1;
+}
+
+int wifi_firmware_backplane_read(uint32_t address, uint8_t *data, uint32_t length) {
+    return backplane_memory(address, 0, data, length);
+}
+
+int wifi_firmware_backplane_write(uint32_t address, const uint8_t *data, uint32_t length) {
+    return backplane_memory(address, data, 0, length);
+}
+
 int wifi_firmware_data_enable(void) {
     if (!state.ready) return 0;
     if (state.raw_receive) return failed(WIFI_FW_PROTOCOL);

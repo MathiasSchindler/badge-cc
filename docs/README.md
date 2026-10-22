@@ -39,6 +39,9 @@ transfer. No documentation page is blanket authorization to flash.
 
 ## Other badge work
 
+- [Presentation clicker](../clicker/README.md): separate 2025/2026 freestanding
+  display/input diagnostic; BLE keyboard transport and pairing are not yet
+  implemented.
 - [Boat physics demo](tools/boat.md): conservative sloshing-water prototype,
   buoyant boat, accelerometer input and hardware-gated milestones.
 - [Animated nametag](tools/nametag.md): continuous single-core prototype,
