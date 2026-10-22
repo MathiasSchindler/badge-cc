@@ -616,6 +616,52 @@ consume the budget; CTS and incoming ACK consumption are unchanged. A passing
 run must report exactly the requested suppression count at both endpoints.
 Config JSON retains the requested count and reports retain the actual count.
 
+Suppression is a register-staged transaction with separated SHM loads and
+consumers, using the previously RF-qualified DCF update pattern. It checks
+`remaining + dropped == limit`, bounds each counter by the configured limit,
+and bounds the limit by 16 before dropping an ACK. A violation disables DCF,
+increments the response error once and retains the first fault; it does not
+clamp/reset counters or credit a received application reply as an ACK.
+Command 9 configures the budget only at a rechecked, paused, PHY-idle policy
+boundary with phase zero, and verifies every configuration word by readback.
+
+Soak detail offset 688 contains the 32-byte `AST1` suppression report:
+ARM-expected count, SHM limit/remaining/dropped, fault/phase, before/after,
+prior dropped count, low TSF, frame control, sequence and configuration epoch.
+Phases are 0 idle, 1 checking, 2 committing and 3 fault. Faults are 1 remaining
+out of range, 2 dropped out of range, 3 sum mismatch and 4 limit out of range.
+`ack_test_healthy` additionally requires the ARM and SHM limits to agree.
+Live reports are non-atomic; successful acceptance still requires a frozen,
+complete snapshot. Reconfiguration is explicit, not automatic fault recovery.
+Command 9 rejects a faulted configuration with `0x87`; collect the evidence
+and restart the controller rather than clearing the first fault in place.
+All invariant operands, including the limit, are register-staged. The
+12-byte `SUM1` record at detail 864 retains saved response airtime, computed
+sum and sampled limit. Two independent operand stores precede the sum branch.
+Successful acceptance checks these operands against the configured budget.
+
+Soak detail offset 800 contains the last 32-byte `AKR2` received-ACK record,
+now captured for legacy as well as opt-in HT responses. JSON includes
+`ack_rx_valid`, count, TSF, PHY and the complete 14-byte `ack_rx_mpdu` with FCS.
+The collector checks FCS, ACK type, zero final-fragment Duration, own RA,
+basic response rate/preamble and a timestamp inside the last ACKed submission's
+start/finish window. Count wrap alone is not a stale-ACK failure. A TIMEOUT
+cannot pass this check. This is endpoint evidence, not independent RF/SIFS
+measurement or a capture of every earlier ACK.
+
+The 32-byte `OBS1` record at detail 832 records the last own-address ACK's
+waiting/deadline state and the most recent ARM/PSM expiry source. Its JSON
+fields use `ack_observe_*`, `ack_clear_*` and `ack_arm_*`. Expiry and ACK
+observations may be from different attempts; their deadlines must match
+before comparing them. This trace localized a CCK completion resample that
+replaced an already-established tail-based ACK clock with PHY start while
+retaining the shorter window. The resample now preserves an ended tail's
+clock; timeout allowances and late-ACK rejection remain unchanged.
+
+Both roles retain bounded RX/automatic-response service for 2.1 seconds after
+their final counts complete, allowing the peer's final-request or final-reply
+retries to be ACKed without duplicate application delivery.
+
 The loader retains its six-second default for ordinary diagnostics. Only the
 soak selects a longer bounded budget, continues USB/cancellation servicing,
 and renews the existing eight-second BOOTSEL lease every four seconds.
@@ -800,13 +846,29 @@ existing two-second retry bound plus one 100-ms command bound, allowing a
 lost final ACK to be retried before shutdown. This does not increase retries
 or accept a duplicate application delivery.
 
-Latest build `d4ae73fb` passes those closing controls in both roles and a
+Earlier localization build `d4ae73fb` passes those closing controls in both roles and a
 5,000-per-direction mixed-size run. Its fragmented run lost the initiator's
 USB device/report and is not a pass. The preceding `3bb01fa7` exact long
 replay reached 64,003 deliveries per endpoint before ACK exhaustion, with
 9 suppressed ACKs reported on a peer configured for 2. These distinct
 remaining failures, and initial no-reception failures, keep A1/A2/A3 open;
 the detailed record above retains all trials and verified flash restoration.
+
+The A2 follow-up build `b0aedeee` adds guarded register-only suppression,
+returned-ACK validation and the CCK physical-tail ACK-clock fix described above.
+It passes the exact earlier 5.5-Mbps sum-fault replay, 5,000 cyclic-size
+MSDUs per direction, 100 two-/sixteen-fragment MSDUs per direction, both
+one-MSDU loss controls and both fully controlled eight-drop exhaustion
+negatives. Its final campaign has 21 positive paired passes and **3 positive
+paired failures**, not an overall pass. All eight PHY/preamble profiles have
+a successful final control; three role/profile combinations still fail.
+The failed CCK responders have missing MAC-done and PHY error `0x0010`,
+explicitly excluded by the existing incomplete-completion recovery guard.
+No final suppression invariant faults occur. See the
+[final A2 qualification and retained failures](../dev-doc/MAC_RELIABILITY_RECOVERY.md#final-rf-qualification-b0aedeee).
+The known 1-Mbps/full-size truncation, sustained and independent ACK/SIFS/
+full-credit gates remain open. Both original full flashes were restored and
+independently verified; Pico is unchanged.
 
 ### Historical CCK fixture results
 

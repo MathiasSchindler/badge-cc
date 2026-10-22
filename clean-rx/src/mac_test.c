@@ -980,7 +980,84 @@ static void response_policy(void) {
     puts("Policy response tables: all 4095 basic-rate masks, legacy/HT tables, complete write-before-read, every dropped write/corrupt read, invalid-input atomicity and held-capture preservation pass; NOT SIFS qualification");
 }
 
+static void returned_ack(void) {
+    const uint8_t own[6] = {2u, 4u, 6u, 8u, 10u, 12u};
+    uint8_t ack[14] = {0xd4u};
+    memcpy(ack + 4u, own, sizeof(own));
+    fcs(ack, sizeof(ack));
+    clean_unicast_status_t tx = {.magic=CLEAN_UNICAST_MAGIC, .result=CLEAN_UNICAST_ACKED,
+        .attempts=1u, .ack_received=1u, .started_us=0xffffff00u, .finished_us=0x80u};
+    for (uint32_t rate = 0u; rate < 12u; ++rate) {
+        for (uint32_t short_preamble = 0u; short_preamble < 2u; ++short_preamble) {
+            uint16_t basic = rate < 4u ? 15u : 0x150u;
+            int response = clean_ack_rate(basic, rate);
+            clean_ack_rx_t rx = {.magic=CLEAN_ACK_RX_MAGIC, .time_lo=0xfff0u,
+                .time_hi=0xffffu, .phy=response >= 4 ? 1u : 0u};
+            if (short_preamble && response > 0 && response < 4) rx.phy |= 0x80u;
+            rx.plcp[0] = response >= 4 ? clean_ofdm_rates[response-4].signal :
+                clean_cck_rates[response].signal;
+            for (uint32_t i = 0u; i < 7u; ++i)
+                rx.mpdu[i] = (uint16_t)ack[2u*i] | ((uint16_t)ack[2u*i+1u] << 8u);
+            for (uint32_t fault = 0u; fault < 13u; ++fault) {
+                clean_ack_rx_t bad = rx;
+                clean_unicast_status_t status = tx;
+                uint8_t address[6];
+                memcpy(address, own, sizeof(address));
+                if (fault == 0u) bad.magic = 0u;
+                if (fault == 1u) status.magic = 0u;
+                if (fault == 2u) status.result = CLEAN_UNICAST_TIMEOUT;
+                if (fault == 3u) status.attempts = 0u;
+                if (fault == 4u) status.ack_received = 0u;
+                if (fault == 5u) bad.time_lo = 0xfeffu;
+                if (fault == 6u) { bad.time_hi = 0u; bad.time_lo = 0x81u; }
+                if (fault == 7u) bad.phy ^= 1u;
+                if (fault == 8u) bad.phy ^= 0x80u;
+                if (fault == 9u) bad.plcp[0] ^= 1u;
+                if (fault == 10u) bad.mpdu[6] ^= 1u;
+                if (fault == 11u) address[0] ^= 1u;
+                if (fault == 12u) bad.mpdu[1] = 1u;
+                assert(!clean_ack_rx_valid(&bad, address, &status, basic, rate, short_preamble));
+            }
+            assert(clean_ack_rx_valid(&rx, own, &tx, basic, rate, short_preamble));
+            rx.count = 65535u;
+            assert(clean_ack_rx_valid(&rx, own, &tx, basic, rate, short_preamble));
+        }
+    }
+    puts("Returned ACK: all legacy rates/preambles, FCS/RA/type/duration, exact completion window, counter/TSF wrap and timeout rejection pass; NOT independent SIFS");
+}
+
+static void cck_ack_clock(void) {
+    static const uint32_t bytes[] = {60u, 1528u, 2332u};
+    uint32_t old_expiries = 0u;
+    for (uint32_t rate = 0u; rate < 4u; ++rate) {
+        for (uint32_t short_preamble = 0u; short_preamble < 2u; ++short_preamble) {
+            if (!rate && short_preamble) continue;
+            for (uint32_t size = 0u; size < 3u; ++size) {
+                uint32_t physical = 0xffffff00u;
+                uint32_t tail_at = physical +
+                    clean_cck_airtime_us(bytes[size], rate, short_preamble) + 8u;
+                uint32_t arrival = tail_at + 10u +
+                    clean_cck_airtime_us(14u, rate, short_preamble) + 20u;
+                uint32_t window = clean_ack_timeout_us(rate, 20u);
+                clean_tx_tail_t tail = {0};
+                assert(clean_tx_tail_ack_start(&tail, 0u, physical) == physical);
+                assert(!clean_tx_tail_poll(&tail, 1));
+                assert(clean_tx_tail_poll(&tail, 0));
+                uint32_t started = clean_tx_tail_ack_start(&tail, tail_at, physical);
+                assert(started == tail_at && arrival - started < window);
+                assert(clean_tx_tail_ack_start(&tail, started, physical + 1u) == tail_at);
+                assert((tail_at + window) - started >= window);
+                old_expiries += arrival - physical >= window;
+            }
+        }
+    }
+    assert(old_expiries > 0u);
+    puts("CCK ACK clock: all rates/preambles/sizes and TSF wrap preserve the physical-tail ACK window across completion resampling; obsolete PHY-start expiry reproduced");
+}
+
 int main(void) {
+    returned_ack();
+    cck_ack_clock();
     pause_psm();
     response_policy();
     fcs_reference();

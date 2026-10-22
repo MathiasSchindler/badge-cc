@@ -104,6 +104,8 @@ static clean_tx_tail_t cck_tx_tail;
 static uint32_t last_tx_identity;
 static uint8_t last_tx_valid;
 static uint8_t capture_prepared;
+static uint16_t ack_test_configured, ack_test_epoch;
+static uint32_t ack_expiry_at, ack_expiry_started, ack_expiry_window;
 static uint32_t rx_published_frames;
 #if CLEAN_RX_HT_OBSERVER_FIFO
 static uint16_t observer_capture_ids[FW_MAX_FRAMES];
@@ -673,6 +675,72 @@ static int station_policy_word(uint32_t word, uint16_t expected) {
     return actual == expected ? 1 : fail(0x85u, word, actual);
 }
 
+static int station_ack_test_configure(uint16_t count) {
+    ack_test_configured = count;
+    ++ack_test_epoch;
+    ack_expiry_at = ack_expiry_started = ack_expiry_window = 0u;
+    for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
+        shm_write16(CLEAN_ACK_OBSERVE_SHM + i, 0u);
+    for (uint32_t i = 0u; i < 3u; ++i)
+        shm_write16(CLEAN_ACK_ARITH_SHM + i, 0u);
+    for (uint32_t i = 0u; i < CLEAN_ACK_TEST_WORDS; ++i)
+        shm_write16(CLEAN_ACK_TEST_SHM + i, 0u);
+    shm_write16(CLEAN_TEST_ACK_REMAINING, count);
+    shm_write16(CLEAN_TEST_ACK_DROPPED, 0u);
+    shm_write16(CLEAN_ACK_TEST_LIMIT, count);
+    shm_write16(CLEAN_ACK_TEST_EPOCH, ack_test_epoch);
+    for (uint32_t i = 0u; i < CLEAN_ACK_TEST_WORDS; ++i)
+        if (!station_policy_word(CLEAN_ACK_TEST_SHM + i,
+                i == 0u ? count : i == 9u ? ack_test_epoch : 0u)) return 0;
+    for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
+        if (!station_policy_word(CLEAN_ACK_OBSERVE_SHM + i, 0u)) return 0;
+    for (uint32_t i = 0u; i < 3u; ++i)
+        if (!station_policy_word(CLEAN_ACK_ARITH_SHM + i, 0u)) return 0;
+    return station_policy_word(CLEAN_TEST_ACK_REMAINING, count) &&
+        station_policy_word(CLEAN_TEST_ACK_DROPPED, 0u);
+}
+
+static void snapshot_ack_test(void) {
+    volatile clean_ack_test_status_t *s =
+        (volatile clean_ack_test_status_t *)CLEAN_ACK_TEST_ADDR;
+    s->magic = 0u;
+    s->configured = ack_test_configured;
+    s->limit = shm_read16(CLEAN_ACK_TEST_LIMIT);
+    s->remaining = shm_read16(CLEAN_TEST_ACK_REMAINING);
+    s->dropped = shm_read16(CLEAN_TEST_ACK_DROPPED);
+    s->fault = shm_read16(CLEAN_ACK_TEST_FAULT);
+    s->phase = shm_read16(CLEAN_ACK_TEST_PHASE);
+    s->before = shm_read16(CLEAN_ACK_TEST_BEFORE);
+    s->after = shm_read16(CLEAN_ACK_TEST_AFTER);
+    s->dropped_before = shm_read16(CLEAN_ACK_TEST_DROPPED_BEFORE);
+    s->clock = shm_read16(CLEAN_ACK_TEST_CLOCK);
+    s->frame_control = shm_read16(CLEAN_ACK_TEST_FC);
+    s->sequence = shm_read16(CLEAN_ACK_TEST_SEQUENCE);
+    s->epoch = shm_read16(CLEAN_ACK_TEST_EPOCH);
+    s->reserved = 0u;
+    __asm__ volatile("dsb" ::: "memory");
+    s->magic = CLEAN_ACK_TEST_MAGIC;
+    volatile clean_ack_observe_t *o =
+        (volatile clean_ack_observe_t *)CLEAN_ACK_OBSERVE_ADDR;
+    o->magic = 0u;
+    volatile uint16_t *words = (volatile uint16_t *)(CLEAN_ACK_OBSERVE_ADDR + 4u);
+    for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
+        words[i] = shm_read16(CLEAN_ACK_OBSERVE_SHM + i);
+    o->arm_at = ack_expiry_at;
+    o->arm_started = ack_expiry_started;
+    o->arm_window = ack_expiry_window;
+    __asm__ volatile("dsb" ::: "memory");
+    o->magic = CLEAN_ACK_OBSERVE_MAGIC;
+    volatile clean_ack_arith_t *a = (volatile clean_ack_arith_t *)CLEAN_ACK_ARITH_ADDR;
+    a->magic = 0u;
+    a->airtime = shm_read16(CLEAN_ACK_TEST_AIRTIME);
+    a->sum = shm_read16(CLEAN_ACK_TEST_SUM);
+    a->limit = shm_read16(CLEAN_ACK_TEST_LIMIT_SEEN);
+    a->reserved = 0u;
+    __asm__ volatile("dsb" ::: "memory");
+    a->magic = CLEAN_ACK_ARITH_MAGIC;
+}
+
 static void station_apply_policy(uint32_t mac_en) {
     if (!policy_pending || !station_policy_boundary(shm_read16(0x601u))) return;
     uint32_t now = mac_now();
@@ -771,6 +839,7 @@ static void snapshot_dcf_trace(void) {
 
 static void station_publish_mac(void) {
     if (!station_mac) return;
+    snapshot_ack_test();
     volatile clean_edca_status_t *edca = (volatile clean_edca_status_t *)CLEAN_EDCA_STATUS_ADDR;
     edca->magic = CLEAN_EDCA_STATUS_MAGIC;
     edca->cw_min = station_dcf.cw_min;
@@ -873,8 +942,15 @@ static void station_service_tx(void) {
         ack_started = now;
         ack_window = cck_ack_window;
     }
-    if (now - ack_started >= ack_window)
+    if (now - ack_started >= ack_window && shm_read16(CLEAN_ACK_WAITING)) {
+        ack_expiry_at = now;
+        ack_expiry_started = ack_started;
+        ack_expiry_window = ack_window;
+        shm_write16(CLEAN_ACK_CLEAR_NOW, (uint16_t)now);
+        shm_write16(CLEAN_ACK_CLEAR_DUE, shm_read16(CLEAN_DCF_ACK_UNTIL));
+        shm_write16(CLEAN_ACK_CLEAR_REASON, 1u);
         shm_write16(CLEAN_ACK_WAITING, 0u);
+    }
     station_consume_ack();
 }
 
@@ -1583,7 +1659,8 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         if (!shm_read16(CLEAN_DCF_TX_PENDING)) {
             tx_diag.mac_trigger_us = (uint32_t)shm_read16(CLEAN_DCF_TX_LO) |
                 ((uint32_t)shm_read16(CLEAN_DCF_TX_HI) << 16u);
-            ack_started = tx_diag.mac_trigger_us;
+            ack_started = clean_tx_tail_ack_start(&cck_tx_tail, ack_started,
+                                                  tx_diag.mac_trigger_us);
         }
         if (tx_conditions == 7u && !(st_50e_seen & 0x400u))
             ++TX_COMPLETION->preserved;
@@ -1632,7 +1709,6 @@ static void snapshot_rx_trace(void) {
 }
 
 static void snapshot_ack_rx(void) {
-    if (!CLEAN_RX_HT_RESPONSE) return;
     volatile clean_ack_rx_t *rx = (volatile clean_ack_rx_t *)CLEAN_ACK_RX_ADDR;
     volatile uint16_t *words = (volatile uint16_t *)(CLEAN_ACK_RX_ADDR + 4u);
     rx->magic = CLEAN_ACK_RX_MAGIC;
@@ -1794,6 +1870,8 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
 
     for (uint32_t i = 0u; i < 32u; ++i)  shm_write16(0x600u + i, 0u);
     for (uint32_t i = 0u; i < 480u; ++i) shm_write16(0x620u + i, 0u);
+    ack_test_epoch = 0u;
+    if (!station_ack_test_configure(0u)) return 0;
 #if CLEAN_RX_AMPDU_PROBE
     for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i)
         shm_write16(CLEAN_AMPDU_PROBE_SHM + i, 0u);
@@ -2497,6 +2575,7 @@ void cyw43_main(void) {
             TX_COMPLETION->timeouts = 0u;
             *(volatile uint32_t *)CLEAN_TX_START_HANDOFFS_ADDR = 0u;
             *(volatile uint32_t *)CLEAN_TX_COMPLETION_HANDOFFS_ADDR = 0u;
+            if (!station_ack_test_configure(0u)) break;
             shm_write16(CLEAN_ACK_ENABLE, 1u);
             station_enabled = 1u;
             station_mac = (uint8_t)(p[15] >= 2u);
@@ -2629,11 +2708,24 @@ void cyw43_main(void) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
             }
+            uint16_t ack_fault = shm_read16(CLEAN_ACK_TEST_FAULT);
+            uint16_t ack_phase = shm_read16(CLEAN_ACK_TEST_PHASE);
+            if (ack_fault || ack_phase > 2u) {
+                fail(0x87u, ack_fault ? CLEAN_ACK_TEST_FAULT : CLEAN_ACK_TEST_PHASE,
+                     ack_fault ? ack_fault : ack_phase);
+                break;
+            }
+            if (!station_policy_boundary(shm_read16(0x601u))) continue;
             mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
             (void)mmio_read32(D11_MACCONTROL);
+            if (!station_policy_boundary(shm_read16(0x601u)) || station_phy_busy() ||
+                shm_read16(CLEAN_ACK_TEST_PHASE)) {
+                mmio_write32(D11_MACCONTROL, mac_en);
+                (void)mmio_read32(D11_MACCONTROL);
+                continue;
+            }
             shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
-            shm_write16(CLEAN_TEST_ACK_REMAINING, (uint16_t)count);
-            shm_write16(CLEAN_TEST_ACK_DROPPED, 0u);
+            if (!station_ack_test_configure((uint16_t)count)) break;
             mmio_write32(D11_MACCONTROL, mac_en);
             MBOX->host_cmd = 2u;
             __asm__ volatile("dsb" ::: "memory");
@@ -2854,6 +2946,10 @@ void cyw43_main(void) {
 #endif
 
     if (station_hw) snapshot_dcf_trace();
+    if (station_mac) {
+        snapshot_ack_test();
+        snapshot_ack_rx();
+    }
 #if CLEAN_RX_AMPDU_PROBE
     volatile clean_ampdu_probe_trace_t *aggregate =
         (volatile clean_ampdu_probe_trace_t *)CLEAN_AMPDU_PROBE_ADDR;

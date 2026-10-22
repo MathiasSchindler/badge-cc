@@ -995,23 +995,30 @@ static void ack_capture_evidence(void) {
         assert(r[CLEAN_ACK_RX_SHM + 4u+i] == base[CLEAN_SHM_FRAME + 4u+i]);
     for (uint32_t i = 0u; i < 3u; ++i)
         assert(r[CLEAN_ACK_RX_SHM + 11u+i] == base[CLEAN_SHM_FRAME + 1u+i]);
-    for (uint32_t fault = 0u; fault < 6u; ++fault) {
+    for (uint32_t fault = 0u; fault < 5u; ++fault) {
         memcpy(r, base, sizeof(r));
         if (fault == 0u) r[CLEAN_ACK_WAITING] = 0u;
         if (fault == 1u) r[CLEAN_ACK_ENABLE] = 0u;
         if (fault == 2u) r[CLEAN_SHM_FRAME + 6u] ^= 1u;
         if (fault == 3u) r[0x100cu] = 19u;
         if (fault == 4u) r[0x100cu] = 21u;
-        if (fault == 5u) r[CLEAN_QOS_RESPONSE_POLICY] = 0u;
         (void)ack_run(r, 1);
         assert(!r[CLEAN_ACK_RX_SHM]);
     }
+    memcpy(r, base, sizeof(r));
+    r[CLEAN_QOS_RESPONSE_POLICY] = 0u;
+    assert(ack_run(r, 1) == 266u && r[CLEAN_ACK_RX_SHM] == 1u);
     memcpy(r, base, sizeof(r));
     r[CLEAN_DCF_ENABLE] = 1u;
     r[CLEAN_DCF_ACK_UNTIL] = base[0x1119u];
     assert(psm_run(r, 1, DCF_GOOD) == 266u);
     assert(!r[CLEAN_ACK_RX_SHM] && !r[CLEAN_ACK_SEEN]);
-    puts("PSM ACK evidence: exact bytes/PHY/TSF, expected-ACK/address/length/policy/deadline gates pass; NOT RF");
+    assert(r[CLEAN_ACK_CLEAR_REASON] == 2u &&
+           r[CLEAN_ACK_CLEAR_NOW] == base[0x1119u] &&
+           r[CLEAN_ACK_CLEAR_DUE] == base[0x1119u] &&
+           r[CLEAN_ACK_OBSERVE_NOW] == base[0x1119u] &&
+           !r[CLEAN_ACK_OBSERVE_WAITING]);
+    puts("PSM ACK evidence: exact bytes/PHY/TSF, legacy/HT, expected-ACK/address/length/deadline gates pass; NOT RF");
 }
 
 static void receive_trace(void) {
@@ -1383,6 +1390,85 @@ static void acknowledgements(void) {
         base_regs[CLEAN_SHM_FRAME + 9u + i] = (uint16_t)(0x2002u + i);
         base_regs[CLEAN_ACK_PEER + i] = base_regs[CLEAN_SHM_FRAME + 9u + i];
     }
+    memcpy(regs, base_regs, sizeof(regs));
+    regs[CLEAN_SHM_FRAME + 4u] = 0x0108u;
+    regs[CLEAN_SHM_FRAME + 1u] = 10u;
+    regs[CLEAN_ACK_TEST_LIMIT] = 2u;
+    regs[CLEAN_TEST_ACK_REMAINING] = 1u;
+    regs[CLEAN_TEST_ACK_DROPPED] = 2u;
+    regs[CLEAN_DCF_ENABLE] = 1u;
+    regs[CLEAN_SHM_FRAME + 15u] = 0xabcdu;
+    regs[0x1119u] = 0xfa00u;
+    assert(ack_run(regs, 1) == 198u);
+    assert(regs[CLEAN_ACK_TEST_FAULT] == 3u && regs[CLEAN_ACK_ERROR]);
+    assert(regs[CLEAN_TEST_ACK_REMAINING] == 1u && regs[CLEAN_TEST_ACK_DROPPED] == 2u);
+    assert(regs[CLEAN_ACK_TEST_BEFORE] == 1u &&
+           regs[CLEAN_ACK_TEST_DROPPED_BEFORE] == 2u && regs[CLEAN_ACK_TEST_PHASE] == 3u);
+    assert(regs[CLEAN_ACK_TEST_SUM] == 3u && regs[CLEAN_ACK_TEST_LIMIT_SEEN] == 2u);
+    assert(!regs[CLEAN_DCF_ENABLE]);
+    regs[CLEAN_TEST_ACK_REMAINING] = 0u;
+    regs[CLEAN_SHM_FRAME + 15u] = 123u;
+    regs[CLEAN_SHM_FRAME + 4u] = 0x0908u;
+    regs[0x1119u] = 0xfb00u;
+    assert(ack_run(regs, 1) == 198u && regs[CLEAN_ACK_TEST_FAULT] == 3u);
+    assert(regs[CLEAN_ACK_TEST_SEQUENCE] == 0xabcdu && regs[CLEAN_ACK_ERROR] == 1u &&
+           regs[CLEAN_ACK_TEST_FC] == 0x0108u && regs[CLEAN_ACK_TEST_CLOCK] == 0xfa00u);
+    assert(regs[CLEAN_ACK_TEST_SUM] == 3u && regs[CLEAN_ACK_TEST_LIMIT_SEEN] == 2u);
+    assert(instruction(ACK_TEST_DECREMENT) == WORD(0x1d0u,0x1782u,0x1801u,0x1782u));
+    assert(instruction(ACK_TEST_STORE) ==
+           WORD(0x3f0u,0x1782u,0x1800u,CLEAN_TEST_ACK_REMAINING));
+    assert(instruction(ACK_TEST_COUNT_STORE) ==
+           WORD(0x3f0u,0x1783u,0x1800u,CLEAN_TEST_ACK_DROPPED));
+    assert(ACK_TEST_BEFORE >= ACK_TEST_LOAD + 2u);
+    assert(ACK_TEST_COUNT >= ACK_TEST_RELOAD_DROPPED + 2u);
+    assert(ACK_TEST_LIMIT_VALID >= ACK_TEST_LOAD_LIMIT + 2u);
+    assert(ACK_TEST_SUM_VALID >= ACK_TEST_SUM + 3u);
+    assert(instruction(ACK_TEST_SUM_VALID) ==
+           WORD(0xd1u,0x1783u,0x1781u,ACK_TEST_SUM_FAULT));
+    for (uint32_t fault = 0u; fault < 4u; ++fault) {
+        memcpy(regs, base_regs, sizeof(regs));
+        regs[CLEAN_SHM_FRAME + 4u] = 0x0108u;
+        regs[CLEAN_SHM_FRAME + 1u] = 10u;
+        regs[CLEAN_ACK_TEST_LIMIT] = fault == 3u ? 17u : 2u;
+        regs[CLEAN_TEST_ACK_REMAINING] = fault == 0u ? 65535u : 0u;
+        regs[CLEAN_TEST_ACK_DROPPED] = fault == 1u ? 65535u : 0u;
+        assert(ack_run(regs, 1) == 198u);
+        assert(regs[CLEAN_ACK_TEST_FAULT] == fault + 1u && regs[CLEAN_ACK_ERROR]);
+        assert(!regs[CLEAN_ACK_SENT] && !regs[0x1081u] && !regs[CLEAN_RESPONSE_PENDING]);
+    }
+    clean_ack_test_status_t sample = {.magic = CLEAN_ACK_TEST_MAGIC,
+        .configured = 2u, .limit = 2u, .remaining = 1u, .dropped = 1u};
+    assert(clean_ack_test_status_valid(&sample));
+    for (uint32_t fault = 0u; fault < 9u; ++fault) {
+        clean_ack_test_status_t bad = sample;
+        if (fault == 0u) bad.magic = 0u;
+        if (fault == 1u) bad.configured = 17u;
+        if (fault == 2u) bad.limit = 3u;
+        if (fault == 3u) bad.remaining = 3u;
+        if (fault == 4u) bad.dropped = 3u;
+        if (fault == 5u) bad.remaining = 0u;
+        if (fault == 6u) bad.fault = 1u;
+        if (fault == 7u) bad.phase = 2u;
+        if (fault == 8u) bad.reserved = 1u;
+        assert(!clean_ack_test_status_valid(&bad));
+    }
+    for (uint32_t limit = 0u; limit <= CLEAN_TEST_ACK_MAX; ++limit) {
+        memcpy(regs, base_regs, sizeof(regs));
+        regs[CLEAN_SHM_FRAME + 4u] = 0x0108u;
+        regs[CLEAN_SHM_FRAME + 1u] = 10u;
+        regs[CLEAN_ACK_TEST_LIMIT] = regs[CLEAN_TEST_ACK_REMAINING] = (uint16_t)limit;
+        for (uint32_t i = 0u; i < limit + 8u; ++i) {
+            ack_run(regs, 1);
+            assert(!regs[CLEAN_ACK_ERROR] && !regs[CLEAN_ACK_TEST_FAULT] &&
+                   !regs[CLEAN_ACK_TEST_PHASE]);
+            uint32_t dropped = i < limit ? i + 1u : limit;
+            assert(regs[CLEAN_TEST_ACK_DROPPED] == dropped &&
+                   regs[CLEAN_TEST_ACK_REMAINING] == limit - dropped &&
+                   regs[CLEAN_ACK_SENT] == (i < limit ? 0u : i - limit + 1u));
+            assert(regs[CLEAN_ACK_TEST_SUM] == limit &&
+                   regs[CLEAN_ACK_TEST_LIMIT_SEEN] == limit);
+        }
+    }
     static const uint8_t cck[4] = {10u,20u,55u,110u};
     for (uint32_t rate = 0u; rate < 12u; ++rate) {
         memcpy(regs, base_regs, sizeof(regs));
@@ -1402,7 +1488,7 @@ static void acknowledgements(void) {
         regs[0x100e] = rate >= 4u ? 0x2000u : 0u;
         regs[CLEAN_SHM_FRAME + 1u] = rate >= 4u ?
             (uint16_t)(0xf0u | clean_ofdm_rates[rate - 4u].signal) : cck[rate];
-        regs[CLEAN_TEST_ACK_REMAINING] = CLEAN_TEST_ACK_MAX;
+        regs[CLEAN_ACK_TEST_LIMIT] = regs[CLEAN_TEST_ACK_REMAINING] = CLEAN_TEST_ACK_MAX;
         regs[CLEAN_SHM_FRAME + 9u] ^= 1u;
         assert(ack_run(regs, 1) == 198u && !regs[CLEAN_TEST_ACK_DROPPED]);
         assert(regs[CLEAN_TEST_ACK_REMAINING] == CLEAN_TEST_ACK_MAX);
@@ -1413,9 +1499,10 @@ static void acknowledgements(void) {
             assert(regs[CLEAN_TEST_ACK_DROPPED] == dropped);
             assert(!regs[0x1081u] && !regs[CLEAN_RESPONSE_PENDING]);
         }
-        regs[CLEAN_TEST_ACK_DROPPED] = 0u;
         ack_run(regs, 1);
         assert(regs[CLEAN_ACK_SENT] == 1u && !regs[CLEAN_ACK_ERROR]);
+        assert(regs[CLEAN_TEST_ACK_DROPPED] == CLEAN_TEST_ACK_MAX &&
+               !regs[CLEAN_TEST_ACK_REMAINING] && !regs[CLEAN_ACK_TEST_PHASE]);
         assert(regs[CLEAN_ACK_KINDS] == 1u);
         assert(regs[0x108a] == phy && regs[0x1086] == (rate >= 4u ? 0x41u : 0x40u));
         assert(regs[0x10b5] == 16u && regs[0x10b4] == 0x0826u);
@@ -1425,13 +1512,15 @@ static void acknowledgements(void) {
         assert(regs[CLEAN_RESPONSE_PENDING] == 2u);
         regs[CLEAN_RESPONSE_POLICY] = 1u;
         regs[CLEAN_CTS_ALLOWED] = 1u;
-        regs[CLEAN_TEST_ACK_REMAINING] = 1u;
+        regs[CLEAN_ACK_TEST_LIMIT] = regs[CLEAN_TEST_ACK_REMAINING] = 1u;
+        regs[CLEAN_TEST_ACK_DROPPED] = 0u;
         regs[CLEAN_SHM_FRAME + 4u] = 0xb4u;
         regs[CLEAN_SHM_FRAME + 5u] = 1000u;
         regs[0x100cu] = 26u;
         assert(ack_run(regs, 1) == 266u && regs[CLEAN_CTS_SENT] == 1u);
         assert(regs[CLEAN_TEST_ACK_REMAINING] == 1u && !regs[CLEAN_TEST_ACK_DROPPED]);
         regs[CLEAN_CTS_SENT] = regs[CLEAN_TEST_ACK_REMAINING] = 0u;
+        regs[CLEAN_ACK_TEST_LIMIT] = 0u;
         regs[CLEAN_RESPONSE_POLICY] = 0u;
         regs[CLEAN_SHM_FRAME + 4u] = 0x08b0u;
         regs[CLEAN_SHM_FRAME + 5u] = 0u;

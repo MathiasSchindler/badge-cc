@@ -506,6 +506,200 @@ the qualified 1,564,612-us first-failure readiness lead.
 The sustained/interoperability gate, initial no-reception failures,
 unexpected suppression state and USB disappearance remain open.
 
+## A2 follow-up: suppression invariants and CCK ACK clock ownership
+
+Evidence is retained under `build/clean-rx/a2-20261022/`, with matched
+controller, UF2 and collector builds. Earlier failures above remain failures.
+
+### Guarding deliberate ACK loss
+
+A native reproduction initializes limit 2, remaining 1 and dropped 2.
+The earlier implementation suppresses another ACK without an error.
+`suppression-repro.log` retains that failing assertion. This establishes a
+missing fail-closed invariant, not the spontaneous cause of the historical
+9-versus-2 suppression count.
+
+Suppression now checks the configured maximum and
+`remaining + dropped == limit` before changing a counter. A violation retains
+the first frame/sequence, before/after and prior dropped count, disables DCF
+and increments the ACK error once. It does not clamp/reset counters, clear a
+received capture or credit a reply as an ACK. Configuration is readback-checked
+and deferred to a paused, rechecked PHY-idle boundary with no active
+transaction. A faulted configuration is collected and the controller restarted;
+command 9 reports error `0x87` rather than indefinitely deferring a fault.
+
+The first RF build, `17038141`, passes ten positive paired controls
+(20 endpoint records): zero loss in both roles, two-loss OFDM in both roles,
+one-MSDU final-ACK loss in both roles, 100 two-/sixteen-fragment MSDUs,
+and separate 5,000-per-direction cyclic-size controls with zero/two deliberate
+losses. Both long controls cross sequence wrap. Attempts/timeouts are
+5,039/39 and 5,090/90 for zero loss, and 5,101/101 and 5,046/46 for two losses.
+All passing endpoints have exact counts, healthy budgets, frozen complete
+snapshots, zero application corruption/duplicate delivery/order errors and
+valid saved returned ACKs. `guard-oracle.log` independently checks ACK CRC32,
+RA, timestamp window, PHY, budget, attempt accounting and binary/JSON agreement.
+This is endpoint evidence, not independent SIFS measurement.
+
+Its exhaustion controls both stop after eight actual attempts/timeouts with
+no false success. `exhaust-reverse` receives/suppresses eight eligible
+fragments; `exhaust-forward` receives/suppresses only seven and is not a
+controlled eight-lost-ACK pass. Its fourteen CCK controls fail, usually after
+one delivered frame, despite exhausting the requested two-loss budget.
+
+### Proven CCK clock overwrite
+
+Unmodified `4392ca2`, rebuilt locally as `9c5df18d`, also fails 2-Mbps
+100-frame controls with zero and two losses. Thus the CCK failure is not
+introduced by the new suppression checks. Historical CCK passes predate the
+completion/timer changes; they do not qualify this baseline.
+The baseline scratch logger mistakenly prints `exit=0` after a date command
+substitution; the endpoint JSON and `*-run.log` explicitly report failure.
+The logger was corrected before the observation/final campaigns.
+
+Instrumentation build `a7602957` separates ARM expiry from PSM deadline
+expiry and samples the last own-address, exact-length GoodFCS ACK before
+the waiting gate. Its 11-Mbps-short failure records:
+
+- PHY start 196,698 us (low word 90).
+- Full PSM window 1,636 us; deadline low word 1,726.
+- ARM clears waiting at 197,955 us (low word 1,347), using start 196,698
+  and the shortened, post-tail window of 398 us.
+- The ACK arrives at low word 1,449, **277 us before the actual deadline**,
+  but waiting is already zero.
+
+`station_service_tx()` correctly moves the ACK clock to the observed CCK
+physical tail and shortens the window to 398 us. The later completion-status
+resample then overwrites that clock with PHY **start**, without restoring
+the full window. This causes premature expiry, particularly at slower rates
+or larger payloads. The repair preserves an ended tail's ACK clock when
+resampling the diagnostic PHY start. It does not extend the ACK allowance,
+resurrect an expired wait or change TIMEOUT to ACKED.
+
+Native tests cover all legal CCK rate/preamble combinations, 32/1,500/2,304-byte
+payloads, TSF wrap, repeated completion resampling and exact timeout boundaries.
+Build `27d2a2a6` passes fresh 100-frame 1-Mbps/1,500-byte controls in both roles,
+2-Mbps cyclic-size controls in both roles, and several higher-rate controls.
+The exact old challenge still fails twice with an initial reception/completion
+stall; this is not a clean matched before/after success. Other controls retain
+completion failures and a sixteen-fragment run stalls at 370 delivered MSDUs per
+endpoint, without a suppression fault. These are not reclassified as fixed.
+
+### A real first-fault capture narrows the arithmetic path
+
+`clock-rate-5.5-long` on `27d2a2a6` catches fault 3 on badge B, followed by
+controller error `0x87`. Its frozen first-fault report retains limit 2,
+remaining 0, dropped 2, before/after 0, prior dropped 2, Retry Data `0x0908`,
+sequence 0 and epoch 3. The retained counters satisfy the invariant despite
+the sum-mismatch branch. The initial guard had staged the counters but still
+compared the freshly computed GPR sum directly with SHM. It did not retain
+the computed sum or the limit actually read by that comparison, so the exact
+transient operand/dependency fault is not proven.
+
+The final implementation also stages the limit in a GPR, temporarily saving
+and restoring response airtime. All comparisons are register-only. Both the
+computed sum and register limit are stored independently before the branch,
+following the earlier RF-qualified DCF arithmetic/store/trace/branch pattern.
+The raw operands are retained as a separate record; a recurrence can now
+distinguish a bad computed value, bad sampled limit and unexpected branch.
+Native tests enforce the instruction operands and separations, four guard
+reasons, sticky first-fault frame/clock, unchanged invalid counters, CTS bypass,
+all legacy response rates and existing 100,000-rearm behavior.
+
+### Evidence records and acceptance
+
+- `AST1`: SRAM `0x20514`, 32 bytes, soak detail 688. Expected/limit/remaining/
+  dropped, fault/phase, before/after/prior dropped, low TSF, frame control,
+  sequence and epoch. Phases 0 idle, 1 checking, 2 committing, 3 fault.
+  Faults 1 remaining out of range, 2 dropped out of range, 3 sum mismatch,
+  4 invalid limit. First-fault operands remain sticky until controller restart.
+- `AKR2`: soak detail 800, 32 bytes. The existing ACK record now captures legacy
+  as well as HT ACKs. Acceptance checks the complete 14-byte ACK/FCS, own RA,
+  type/Duration, basic response rate/preamble and timestamp within the last
+  ACKed submission. Counter/TSF wrap is covered; TIMEOUT never passes.
+- `OBS1`: SRAM `0x20534`, 32 bytes, soak detail 832. Last ACK's low TSF,
+  waiting flag, deadline, PHY start and full window; most recent expiry reason
+  (1 ARM, 2 PSM), expiry/deadline low words, and full ARM clock/start/window.
+  Observation and expiry can belong to different attempts; compare their
+  deadlines before associating them. Live samples are not atomic.
+- `SUM1`: SRAM `0x20554`, 12 bytes, soak detail 864. Saved response airtime,
+  computed GPR sum, sampled GPR limit and reserved zero. Sum is meaningful
+  after the sum step, not on an earlier range fault. Successful acceptance
+  requires this record's sum/limit to equal the configured budget too.
+
+Both endpoints now retain bounded 2.1-second final RX/automatic-response
+service, covering final-request as well as final-reply retries. Endpoint ACK
+bytes and timestamps are not an independent RF reference. Independent
+ACK/SIFS, controlled full-credit/late-ACK RF evidence, initial access stalls,
+the interrupted long gate and sustained interoperability remain open.
+
+### Final RF qualification (`b0aedeee`)
+
+`arith-*` retains all 26 trials: 21 passing positive pairs, **3 failed positive
+pairs**, and two fully controlled exhaustion negatives. All 52 endpoint
+records are present. The campaign exits 1 because of those three real failures.
+The known 1-Mbps/full-size receive-truncation case is not retested here:
+1-Mbps controls use 1,500-byte payloads, not cyclic 2,304-byte payloads.
+
+| Control | Result |
+| --- | --- |
+| Exact earlier 5.5-Mbps sum-fault challenge, 100 cyclic MSDUs/direction, drop 2 | Pass; 102/103 attempts, 2/3 timeouts; computed sum/limit 2/2, no fault |
+| Fresh eight-PHY matrix, both role assignments, 100 MSDUs/direction, drop 2 | 13/16 paired trials pass; all eight profiles have a successful final-build control |
+| Zero-suppression OFDM, 100 cyclic MSDUs/direction, both roles | Both pass |
+| One-MSDU OFDM, drop 1, both roles | Both pass; exactly two attempts/one timeout per endpoint |
+| Two-fragment OFDM, 100 MSDUs/direction, drop 2 | Pass; 203/213 attempts, 3/13 timeouts |
+| Sixteen-fragment OFDM, 100 MSDUs/direction, drop 2 | Pass; 1,624/1,613 attempts, 24/13 timeouts |
+| Cyclic-size OFDM, 5,000 MSDUs/direction, drop 2 | Pass; 5,038/5,081 attempts, 38/81 timeouts |
+| Exhaust first fragment with drop 8, both roles | Both controlled negatives: exactly eight eligible fragments suppressed and eight actual attempts/timeouts; CW 1023, no false success |
+
+Every passing endpoint has exact counts, zero corruption/duplicate delivery/
+ordering errors, valid returned ACK bytes/FCS/PHY/timestamps, healthy budget
+and arithmetic records, frozen complete snapshots, reset CW 15 and zero
+explicit engine-completion timeouts. Neither ARM handoff executes in these
+final passing controls. The closing controls each handle one duplicate during
+initiator closing; responder closing duplicates are zero, so the new
+responder-specific retry case is not independently RF-demonstrated.
+
+The final failures are `arith-rate-2-long`, `arith-rate-5.5-long` and
+`arith-reverse-11-long`. Their responder stops with error `0x82` at
+`0x1800150e`, accumulated completion-window status `0x00c1052f` and retained
+completion `5`: MAC-done was not observed. The final current status is
+`0x0001002f` (not currently TX-busy), while the PHY-error sample is `0x0010`.
+Do not mistake the accumulated busy bit for current TX-busy, or attribute the
+failure to the access/backoff wait. The incomplete-completion recovery requires
+zero PHY error, so this nonzero sample explicitly excludes these attempts.
+Its exact PHY-error meaning/provenance remains unqualified; ignoring it to
+manufacture retryability would be unsafe.
+
+These three trials deliver at most one application frame per endpoint and
+have no suppression fault or over-budget drop count. Thus neither deliberate
+loss bookkeeping nor the repaired ACK clock explains away all remaining
+failures. The prior `27d2a2a6` 1,000-MSDU fragmented attempt still fails at 370;
+the final 100-MSDU fragmented pass is not a new 1,000- or 100,000-frame pass.
+The older 64,003-delivery anomaly is not replayed to completion.
+
+`final-oracle.log` independently checks all 52 binary/JSON records, expected
+challenge/addresses, ACK CRC32 with corruption negatives, exact attempts,
+budgets, register operands, PHY/preamble, timestamp windows, frozen progress/
+completion records and both exhaustion controls. It also reconstructs all
+36 retained last-index fragment CRCs and four reassembled CRCs using independent
+CRC32, including ERP signal extension, Duration and Retry state. It explicitly
+reports **QUALIFICATION: FAILED**, not a passing aggregate campaign.
+Default controller/badge, HT-response/WMM/EDCA and opt-in SHM Block-ACK builds
+and native sanitizer suites pass. Native tests additionally cover every
+suppression limit 0..16 with eight further ACKs after exhaustion.
+
+A2 is not complete: the nonzero-PHY-error completion failures and independent
+ACK/SIFS/missing-or-late-ACK/full-credit RF gates remain. Retry identity and
+protected-byte/PN preservation have native coverage and legacy fragmented RF
+regression evidence; they are not protected RF timing qualification.
+
+Both full 16-MiB original flashes were restored after each campaign.
+Final `*-arith-restored.bin` readbacks compare byte-for-byte with the established
+originals and match SHA256
+`02ff81bb2e453010f8517eb2df0391d569d285ed4ac97bfa275d4493c044b7ac` (A) and
+`2db102857596e0e680415be45b21ffb703a149c24ba9ee0b4950d008bf7ab3b3` (B).
+Both badges are left in BOOTSEL. Pico and shared infrastructure are untouched.
+
 ## Borrowed hardware restoration
 
 Both full 16 MiB original flashes were backed up and verified before testing.

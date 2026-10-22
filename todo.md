@@ -52,10 +52,28 @@ Follow-up localization fixes timer reference, response-retirement ownership
 and missed PHY-start observations; completion waits are elapsed-time bounded.
 Live failure snapshots are explicitly labelled, and the fixture keeps RX
 active for the peer's bounded final-reply retries.
+The A2 follow-up adds invariant-checked register-staged ACK suppression,
+sticky first-fault operands, saved ACK/FCS/PHY/TSF validation and both-role
+closing service. An observed CCK bug is fixed: completion resampling no longer
+replaces the physical-tail ACK clock with PHY start while keeping the shorter
+window. A real sum-mismatch fault with otherwise consistent retained counters
+also prompted register-only comparisons and explicit computed-sum/limit
+evidence. This does not prove the earlier spontaneous suppression cause fixed.
+See the [A2 follow-up and retained failures](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#a2-follow-up-suppression-invariants-and-cck-ack-clock-ownership).
+Final build `b0aedeee` passes 5,000 cyclic-size MSDUs per direction, 100
+two-/sixteen-fragment MSDUs per direction, the exact earlier sum-fault replay
+and both controlled eight-drop exhaustion negatives. Its campaign still has
+3 failed positive CCK controls (21 positive pairs pass): missing MAC-done
+with PHY error `0x0010`, not another suppression-count fault. A2 remains open;
+the nonzero-error completion path and independent RF timing/full-credit
+qualification are not complete.
 
 - [ ] Complete response-rate/preamble selection, turnaround, bounded retries
   and meaningful completion reporting.
-- [ ] Preserve sequence/fragment identity and protected bytes/PN on retries.
+- [x] Preserve sequence/fragment identity and protected bytes/PN on retries.
+  Native CCMP tests verify unchanged protected bytes/PN and successful
+  authentication after Retry; legacy RF fragmentation tests check retained
+  sequence/fragment/body identity. This is not protected RF timing qualification.
 - [ ] Independently verify ACK/SIFS timing, missing/late ACKs and full-credit
   behavior without silently discarding received frames.
 

@@ -17,6 +17,7 @@
 #define CLEAN_SOAK_FRAGMENT_DETAIL (CLEAN_SOAK_DETAIL + 64u)
 #define CLEAN_SOAK_FRAGMENT_MAGIC 0x3147534du
 #define CLEAN_SOAK_PROGRESS_DETAIL 720u
+#define CLEAN_SOAK_ACK_DETAIL 800u
 #define CLEAN_SOAK_PROGRESS_MAGIC 0x3150534du
 #define CLEAN_SOAK_NO_RESULT 0xffffffffu
 #define CLEAN_SOAK_RETRY_US 2000000u
@@ -40,8 +41,9 @@ typedef struct {
 } clean_soak_progress_t;
 
 _Static_assert(sizeof(clean_soak_progress_t) == 80u &&
-               CLEAN_SOAK_PROGRESS_DETAIL + sizeof(clean_soak_progress_t) <= 800u,
-               "Soak progress must fit before station diagnostic records");
+               CLEAN_SOAK_PROGRESS_DETAIL + sizeof(clean_soak_progress_t) <= CLEAN_SOAK_ACK_DETAIL &&
+               CLEAN_SOAK_ACK_DETAIL + 32u <= 1000u,
+               "Soak progress and ACK bytes must fit before transmit status");
 
 _Static_assert(CLEAN_SOAK_FAULT_DETAIL + 2u * CLEAN_RX_FAULT_WORDS <= 1960u,
                "RX fault report must not overlap fixture inputs");

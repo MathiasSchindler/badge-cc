@@ -782,6 +782,21 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         memcpy(&fragments, detail + CLEAN_SOAK_FRAGMENT_DETAIL, sizeof(fragments));
         clean_soak_progress_t progress;
         memcpy(&progress, detail + CLEAN_SOAK_PROGRESS_DETAIL, sizeof(progress));
+        clean_ack_test_status_t ack_test;
+        memcpy(&ack_test, detail + CLEAN_ACK_TEST_DETAIL, sizeof(ack_test));
+        clean_ack_rx_t ack_rx;
+        memcpy(&ack_rx, detail + CLEAN_SOAK_ACK_DETAIL, sizeof(ack_rx));
+        clean_ack_observe_t observed;
+        memcpy(&observed, detail + CLEAN_ACK_OBSERVE_DETAIL, sizeof(observed));
+        clean_ack_arith_t arith;
+        memcpy(&arith, detail + CLEAN_ACK_ARITH_DETAIL, sizeof(arith));
+        clean_unicast_status_t unicast;
+        memcpy(&unicast, detail + 1000u, sizeof(unicast));
+        uint8_t own[6];
+        clean_soak_address(own, nonce, tx == 19u ? 1u : 2u);
+        int ack_valid = clean_ack_rx_valid(&ack_rx, own, &unicast,
+            clean_soak_phy(nonce) ? 15u : 0x150u, clean_soak_rate(nonce),
+            clean_soak_short(nonce));
         int progress_valid = progress.magic == CLEAN_SOAK_PROGRESS_MAGIC &&
             progress.phase == CLEAN_SOAK_FINISHED && progress.ready_us &&
             progress.first_send_us >= progress.ready_us &&
@@ -832,7 +847,10 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             s.received == s.target && !s.failure && !s.corrupt && !s.duplicates && !s.out_of_order &&
             s.rx_phy_checked == s.target && !s.rx_phy_mismatch &&
             usb_report_u32(detail + CLEAN_STATION_TRACE_DETAIL + 100u) == nonce[12] &&
-            fragment_valid && progress_valid;
+            fragment_valid && progress_valid && clean_ack_test_status_valid(&ack_test) &&
+            ack_test.configured == nonce[12] && ack_valid &&
+            arith.magic == CLEAN_ACK_ARITH_MAGIC && arith.limit == ack_test.limit &&
+            arith.sum == ack_test.limit && !arith.reserved;
         printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,"
                "\"mode\":\"mac-soak\",\"role\":%u,\"valid\":%s,\"error\":%u,\"actual\":%u,"
                "\"error_addr\":\"%08x\","
@@ -866,6 +884,40 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                "\"closing_duplicates_suppressed\":%u",
                progress.snapshot_flags, progress.snapshot_stop_error, progress.phy_start_handoffs,
                progress.completion_handoffs, progress.closing_duplicates);
+        printf(",\"ack_test_report\":%s,\"ack_test_healthy\":%s,"
+               "\"ack_test_configured\":%u,\"ack_test_limit\":%u,"
+               "\"ack_test_remaining\":%u,\"ack_test_dropped\":%u,"
+               "\"ack_test_fault\":%u,\"ack_test_phase\":%u,"
+               "\"ack_test_before\":%u,\"ack_test_after\":%u,\"ack_test_dropped_before\":%u,"
+               "\"ack_test_clock\":%u,\"ack_test_frame_control\":\"%04x\","
+               "\"ack_test_sequence\":\"%04x\",\"ack_test_epoch\":%u",
+               ack_test.magic == CLEAN_ACK_TEST_MAGIC ? "true" : "false",
+               clean_ack_test_status_valid(&ack_test) ? "true" : "false",
+               ack_test.configured, ack_test.limit, ack_test.remaining, ack_test.dropped,
+               ack_test.fault, ack_test.phase, ack_test.before, ack_test.after,
+               ack_test.dropped_before, ack_test.clock, ack_test.frame_control,
+               ack_test.sequence, ack_test.epoch);
+        printf(",\"ack_rx_valid\":%s,\"ack_rx_count\":%u,\"ack_rx_tsf\":%u,"
+               "\"ack_rx_phy\":\"%04x\",\"ack_rx_mpdu\":\"",
+               ack_valid ? "true" : "false", ack_rx.count,
+               (uint32_t)ack_rx.time_lo | ((uint32_t)ack_rx.time_hi << 16u), ack_rx.phy);
+        for (uint32_t i = 0u; i < 7u; ++i)
+            printf("%02x%02x", ack_rx.mpdu[i] & 255u, ack_rx.mpdu[i] >> 8u);
+        printf("\"");
+        printf(",\"ack_observe_report\":%s,\"ack_observe_at\":%u,"
+               "\"ack_observe_waiting\":%u,\"ack_observe_due\":%u,"
+               "\"ack_observe_started\":%u,\"ack_observe_window\":%u,"
+               "\"ack_clear_reason\":%u,\"ack_cleared_at\":%u,\"ack_clear_due\":%u,"
+               "\"ack_arm_at\":%u,\"ack_arm_started\":%u,\"ack_arm_window\":%u",
+               observed.magic == CLEAN_ACK_OBSERVE_MAGIC ? "true" : "false",
+               observed.observed_at, observed.waiting, observed.due,
+               observed.started, observed.window, observed.clear_reason,
+               observed.cleared_at, observed.clear_due,
+               observed.arm_at, observed.arm_started, observed.arm_window);
+        printf(",\"ack_arith_report\":%s,\"ack_arith_airtime\":%u,"
+               "\"ack_arith_sum\":%u,\"ack_arith_limit\":%u",
+               arith.magic == CLEAN_ACK_ARITH_MAGIC ? "true" : "false",
+               arith.airtime, arith.sum, arith.limit);
         printf(",\"fw_state\":%u,\"fw_substage\":%u,\"fw_error\":%u,"
                "\"fw_error_addr\":\"%08x\",\"fw_error_val\":\"%08x\"",
                usb_report_u32(detail + 36u), usb_report_u32(detail + 40u),

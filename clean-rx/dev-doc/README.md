@@ -41,7 +41,9 @@ firmware.
   fired-request cancellation races, per-submission completion evidence,
   response-retirement closure, qualified timer reference, PHY-start/held-RX
   observations, labelled live fault snapshots, bounded completion waits,
-  final-reply retry grace, native hazard controls and retained RF failures.
+  both-role closing grace, invariant-checked register-staged ACK suppression,
+  sticky first-fault evidence, returned-ACK bytes/PHY/TSF validation,
+  native hazard controls and retained RF failures.
 
 Keep experiment commands, build IDs, trial counts, logs, unresolved behavior
 and proposed changes here. Document current user-visible behavior and

@@ -465,7 +465,7 @@ static void mac_soak_run(clean_loader_t *l, const uint8_t nonce[16]) {
             if (l->error == CLEAN_OK && role == 2u && !soak_send(l, &s, nonce, role, index))
                 break;
         }
-        if (role == 1u && l->error == CLEAN_OK &&
+        if (l->error == CLEAN_OK &&
             s.tx_acked == s.target && s.received == s.target) {
             /* The final reply may need retransmission if its ACK was lost.
              * Keep RX/automatic ACKs alive for the peer's existing retry bound. */
@@ -1108,7 +1108,15 @@ static void run(const uint8_t nonce[16]) {
                     clean_block(&l, CLEAN_TX_START_HANDOFFS_ADDR,
                         detail + CLEAN_SOAK_PROGRESS_DETAIL +
                             __builtin_offsetof(clean_soak_progress_t, phy_start_handoffs),
-                        8u, 0u);
+                        8u, 0u) &&
+                    clean_block(&l, CLEAN_ACK_TEST_ADDR, detail + CLEAN_ACK_TEST_DETAIL,
+                                sizeof(clean_ack_test_status_t), 0u) &&
+                    clean_block(&l, CLEAN_ACK_RX_ADDR, detail + CLEAN_SOAK_ACK_DETAIL,
+                                sizeof(clean_ack_rx_t), 0u) &&
+                    clean_block(&l, CLEAN_ACK_OBSERVE_ADDR, detail + CLEAN_ACK_OBSERVE_DETAIL,
+                                sizeof(clean_ack_observe_t), 0u) &&
+                    clean_block(&l, CLEAN_ACK_ARITH_ADDR, detail + CLEAN_ACK_ARITH_DETAIL,
+                                sizeof(clean_ack_arith_t), 0u);
         }
     }
     if (snapshot && station_mode() && !badger_bytes_load_u32(detail + 596u))
