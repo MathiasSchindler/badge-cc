@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -21,9 +22,55 @@ SOURCES = (
     "src/usb/report.c",
     "src/usb/control.c",
     "src/usb/hardware.c",
+    "src/lora/sx1262.c",
+    "src/lora/rp2350.c",
     "src/main.c",
     "src/rp2350/picobin.S",
 )
+MONITOR_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
+    "src/main_monitor.c",
+    "src/lora/receiver.c",
+    "src/lora/activity.c",
+    "src/lora/packet_record.c",
+    "src/wifi/wifi_station.c",
+    "src/wifi/wifi_gspi.c",
+    "src/wifi/wifi_control.c",
+    "src/net/network.c",
+    "src/net/http.c",
+    "src/app/dashboard.c",
+)
+LINK_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
+    "src/main_link_test.c", "src/lora/receiver.c", "src/lora/link_test.c",
+    "src/lora/packet_record.c",
+)
+
+
+def dashboard_assets(output):
+    script = (ROOT / "src" / "app" / "dashboard.js").read_text(encoding="ascii")
+    core, separator, ui = script.partition("if (typeof document !== 'undefined') {")
+    if not separator:
+        raise ValueError("dashboard UI entry point missing")
+    assets = {"dashboard_core": core, "dashboard_script": separator + ui}
+    if any(len(text.encode("ascii")) > 15360 for text in assets.values()):
+        raise ValueError("dashboard script asset exceeds HTTP response capacity")
+    (output / "dashboard_script_generated.h").write_text(
+        "".join("static const uint8_t " + name + "[] =\n" +
+                "\n".join(json.dumps(line + "\n") for line in text.splitlines()) +
+                ";\n" for name, text in assets.items()), encoding="ascii")
+
+
+def monitor_assets(args, output):
+    if not args.confirm_waveshare:
+        raise ValueError("--app monitor requires --confirm-waveshare before compiling radio initialization")
+    if args.credentials is None or args.wifi_firmware is None or args.wifi_nvram is None:
+        raise ValueError("--app monitor requires --credentials, --wifi-firmware and --wifi-nvram")
+    dashboard_assets(output)
+    spec = importlib.util.spec_from_file_location("pico2w_wifi_assets", ROOT / "tools" / "wifi_assets.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.prepare_assets(output, args.wifi_firmware.resolve(), args.wifi_nvram.resolve(),
+                                 args.credentials.resolve())
 
 
 def run(command):
@@ -74,12 +121,19 @@ def validate_image(image):
 
 
 def firmware(args):
-    output = BUILD / "owned" if args.toolchain == "owned" else BUILD
+    output = BUILD / args.app if args.app in ("monitor", "link-test") else BUILD
+    if args.app == "link-test" and not args.confirm_waveshare:
+        raise ValueError("--app link-test requires --confirm-waveshare; enables bounded LoRa TX")
+    if args.toolchain == "owned":
+        output = output / "owned"
     output.mkdir(parents=True, exist_ok=True)
     for name in ("pico2w.uf2", "manifest.json"):
         (output / name).unlink(missing_ok=True)
+    assets = monitor_assets(args, output) if args.app == "monitor" else {}
     inputs = sorted(path for path in (ROOT / "src").rglob("*") if path.is_file())
     inputs.append(Path(__file__).resolve())
+    if args.app == "monitor":
+        inputs.append(ROOT / "tools" / "wifi_assets.py")
     digest = hashlib.sha256()
     for path in inputs:
         digest.update(path.relative_to(ROOT).as_posix().encode("ascii") + b"\0")
@@ -89,8 +143,11 @@ def firmware(args):
     if args.toolchain == "owned":
         for name, tool in args.owned.items():
             tool_hashes[name] = hashlib.sha256(Path(tool).read_bytes()).hexdigest()
+    asset_identity = {name: value for name, value in assets.items()
+                      if name not in ("assets_header", "assets_source", "credentials_header")}
     identity = hashlib.sha256(
-        (source_hash + args.toolchain + json.dumps(tool_hashes, sort_keys=True)).encode("ascii")
+        (source_hash + args.toolchain + args.app +
+         json.dumps(asset_identity, sort_keys=True) + json.dumps(tool_hashes, sort_keys=True)).encode("ascii")
     ).hexdigest()
     build_id = int(identity[:8], 16)
     (output / "build_id.h").write_text(
@@ -104,8 +161,11 @@ def firmware(args):
         "-Isrc/include", "-Isrc", "-I" + str(output),
     ]
     objects = []
-    for name in SOURCES:
-        source = ROOT / name
+    sources = [ROOT / name for name in (MONITOR_SOURCES if args.app == "monitor" else
+                                       LINK_SOURCES if args.app == "link-test" else SOURCES)]
+    if args.app == "monitor":
+        sources.append(output / "wifi_assets_generated.c")
+    for source in sources:
         target = output / (source.stem + ".o")
         if args.toolchain == "owned":
             intermediates = output / source.stem
@@ -159,6 +219,9 @@ def firmware(args):
         "family_id": f"{FAMILY:08x}",
         "undefined_symbols": [],
         "toolchain": args.toolchain,
+        "application": args.app,
+        "credentials_embedded": args.app == "monitor",
+        "wifi_assets": assets,
         "owned_tools_sha256": tool_hashes,
         "compiler": "badge-compiler native tools" if args.toolchain == "owned" else
                     subprocess.check_output([args.cc, "--version"], text=True).splitlines()[0],
@@ -166,16 +229,40 @@ def firmware(args):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
     print(f"PASS: {len(image)} flash bytes; no unresolved symbols; verified boot layout")
     print(f"UF2: {output / 'pico2w.uf2'} (build {build_id:08x}); not flashed")
+    if args.app == "monitor":
+        print("PRIVATE IMAGE: embeds Wi-Fi credentials and vendor firmware; do not publish.")
 
 
 def tests(args):
     BUILD.mkdir(exist_ok=True)
-    executable = BUILD / ("usb_test.exe" if os.name == "nt" else "usb_test")
-    run([args.host_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
-         "-Isrc/include", "-Isrc", str(ROOT / "tests" / "usb_test.c"),
-         str(ROOT / "src" / "usb" / "control.c"),
-         str(ROOT / "src" / "usb" / "report.c"), "-o", str(executable)])
-    run([str(executable)])
+    dashboard_assets(BUILD)
+    suites = {
+        "usb_test": ("src/usb/control.c", "src/usb/report.c"),
+        "lora_test": ("src/lora/sx1262.c",),
+        "network_test": ("src/net/network.c", "src/net/http.c"),
+        "dashboard_test": ("src/app/dashboard.c", "src/net/http.c"),
+        "activity_test": ("src/lora/activity.c",),
+        "link_test": ("src/lora/link_test.c", "src/usb/report.c"),
+        "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c",
+                          "src/lora/packet_record.c", "src/usb/report.c"),
+        "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "tools/lorawan.c", "src/usb/report.c"),
+        "usb_hardware_test": ("src/usb/control.c", "src/usb/report.c"),
+    }
+    for name, sources in suites.items():
+        executable = BUILD / (name + (".exe" if os.name == "nt" else ""))
+        run([args.host_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
+             "-Isrc/include", "-Isrc", "-I" + str(BUILD), str(ROOT / "tests" / (name + ".c")),
+             *(str(ROOT / path) for path in sources), "-o", str(executable)])
+        run([str(executable)])
+    if os.name == "nt":
+        executable = BUILD / "picoctl_windows_test.exe"
+        run([args.host_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
+             "-municode", "-Isrc/include", str(ROOT / "tests" / "picoctl_windows_test.c"),
+             str(ROOT / "tools" / "picoctl_protocol.c"), str(ROOT / "tools" / "meshtastic.c"), str(ROOT / "tools" / "lorawan.c"),
+             str(ROOT / "src" / "usb" / "report.c"),
+             "-lsetupapi", "-lcfgmgr32", "-lwinusb", "-lbcrypt", "-lole32",
+             "-o", str(executable)])
+        run([str(executable)])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"])
 
 
@@ -189,6 +276,11 @@ def main():
     parser.add_argument("--host-cc", default="cc")
     parser.add_argument("--toolchain", choices=("llvm", "owned"), default="llvm")
     parser.add_argument("--owned-tools", type=Path, help="directory containing native badge compiler tools")
+    parser.add_argument("--app", choices=("probe", "monitor", "link-test"), default="probe")
+    parser.add_argument("--credentials", type=Path, help="private UTF-8 two-line SSID/passphrase file")
+    parser.add_argument("--wifi-firmware", type=Path, help="explicit original pinned CYW43439 data header")
+    parser.add_argument("--wifi-nvram", type=Path, help="explicit original pinned board configuration header")
+    parser.add_argument("--confirm-waveshare", action="store_true", help="confirm Waveshare SX1262-868M wiring")
     args = parser.parse_args()
     try:
         tools = []

@@ -5,6 +5,16 @@
 static usb_control_t control;
 volatile int32_t pico2w_error;
 volatile uint32_t pico2w_stage;
+volatile int32_t pico2w_lora_error;
+static int32_t probe_usb_error;
+
+static int32_t probe_service(void) {
+    probe_usb_error = usb_hw_poll(&control);
+    if (probe_usb_error != 0) return probe_usb_error;
+    if (!control.configured || !control.lora_running || control.reboot_requested)
+        return SX1262_CANCELLED;
+    return 0;
+}
 
 static void halt(int32_t error) __attribute__((noreturn));
 static void halt(int32_t error) {
@@ -29,6 +39,16 @@ void bare_main(void) {
     pico2w_stage = 3u;
     while (1) {
         error = usb_hw_poll(&control);
+        if (error == 0 && !control.reboot_requested && control.lora_requested) {
+            sx1262_result_t result;
+            control.lora_requested = 0u;
+            control.lora_running = 1u;
+            probe_usb_error = 0;
+            sx1262_probe(&result, probe_service);
+            pico2w_lora_error = result.error;
+            usb_control_lora_result(&control, &result);
+            error = probe_usb_error;
+        }
         if (error != 0 || control.reboot_requested) {
             pico2w_error = error;
             pico2w_stage = 4u;

@@ -1,7 +1,10 @@
 #include "hardware.h"
 
+#ifndef REG
 #define REG(address) (*(volatile uint32_t *)(uintptr_t)(address))
+#endif
 #define USB(offset) REG(0x50110000u + (offset))
+#define USB_CLEAR(offset) REG(0x50113000u + (offset))
 #define DPRAM(offset) REG(0x50100000u + (offset))
 #define EP0_IN DPRAM(0x80u)
 #define EP0_OUT DPRAM(0x84u)
@@ -32,16 +35,33 @@ static int pause_ticks(uint32_t ticks) {
     return 0;
 }
 
+static int system_clock_init(void) {
+    /* RP2350-E12 requires clk_sys >= 1.1 * clk_usb, including on A2 silicon. */
+    REG(0x4001003cu) &= ~1u;
+    if (!wait_mask(&REG(0x40010044u), 3u, 1u)) return 0;
+    REG(0x40022000u) = 1u << 14u;
+    REG(0x40023000u) = 1u << 14u;
+    if (!wait_mask(&REG(0x40020008u), 1u << 14u, 1u << 14u)) return 0;
+    REG(0x40050000u) = 1u;
+    REG(0x40050008u) = 120u;
+    REG(0x40050004u) = 0x0cu;
+    if (!wait_mask(&REG(0x40050000u), 1u << 31u, 1u << 31u)) return 0;
+    REG(0x4005000cu) = (6u << 16u) | (2u << 12u);
+    REG(0x40050004u) = 4u;
+    REG(0x40010040u) = 1u << 16u;
+    REG(0x4001003cu) &= ~(7u << 5u);
+    REG(0x4001003cu) |= 1u;
+    return wait_mask(&REG(0x40010044u), 3u, 2u);
+}
+
 int32_t usb_hw_init(void) {
     stats.resets = stats.setups = stats.completions = stats.hardware_errors = 0u;
-    /* Leave the executing core's clock alone. */
-    uint32_t sys = REG(0x4001003cu);
-    if ((sys & 1u) && ((sys >> 5u) & 7u) == 1u) return -2001;
     if ((REG(0x40048004u) & (1u << 12u)) == 0u) {
         REG(0x4004800cu) = 196u;
         REG(0x40048000u) = 0x00fabaa0u;
     }
     if (!wait_mask(&REG(0x40048004u), 1u << 31u, 1u << 31u)) return -2002;
+    if (!system_clock_init()) return -2001;
     REG(0x40022000u) = (1u << 28u) | (1u << 15u);
     REG(0x40010060u) = 0u;
     REG(0x40023000u) = 1u << 15u;
@@ -83,7 +103,7 @@ static void apply_action(usb_control_t *control) {
     if (control->action == USB_ACTION_IN) {
         volatile uint8_t *data = (volatile uint8_t *)0x50100100u;
         for (uint16_t i = 0u; i < control->length; ++i) data[i] = control->data[i];
-        arm_buffer(&EP0_IN, FULL | DATA1 | control->length);
+        arm_buffer(&EP0_IN, FULL | (control->in_pid ? DATA1 : 0u) | control->length);
     } else if (control->action == USB_ACTION_OUT) {
         arm_buffer(&EP0_OUT, DATA1 | control->length);
     } else if (control->action == USB_ACTION_ADDRESS) {
@@ -100,20 +120,20 @@ static int abort_ep0(void) {
     USB(0x60u) = 3u;
     if (!wait_mask(&USB(0x64u), 3u, 3u)) return 0;
     EP0_IN = EP0_OUT = 0u;
-    USB(0x58u) = 3u;
+    USB_CLEAR(0x58u) = 3u;
     USB(0x68u) = 0u;
     USB(0x60u) = 0u;
-    USB(0x64u) = 3u;
+    USB_CLEAR(0x64u) = 3u;
     return 1;
 }
 
 int32_t usb_hw_poll(usb_control_t *control) {
     uint32_t status = USB(0x50u);
     if (status & (1u << 19u)) {
-        USB(0x50u) = 1u << 19u;
+        USB_CLEAR(0x50u) = 1u << 19u;
         USB(0x00u) = 0u;
         EP0_IN = EP0_OUT = 0u;
-        USB(0x58u) = 3u;
+        USB_CLEAR(0x58u) = 3u;
         USB(0x68u) = 0u;
         usb_control_reset(control);
         ++stats.resets;
@@ -121,7 +141,7 @@ int32_t usb_hw_poll(usb_control_t *control) {
     if (status & (1u << 17u)) {
         /* Commit a completed status ACK before the next SETUP aborts EP0. */
         if (control->phase == USB_PHASE_STATUS_IN && (USB(0x58u) & 1u) != 0u) {
-            USB(0x58u) = 1u;
+            USB_CLEAR(0x58u) = 1u;
             ++stats.completions;
             usb_control_complete(control, 1u, 0, (uint16_t)(EP0_IN & 0x3ffu));
             apply_action(control);
@@ -130,21 +150,21 @@ int32_t usb_hw_poll(usb_control_t *control) {
         volatile uint8_t *source = (volatile uint8_t *)0x50100000u;
         for (uint32_t i = 0u; i < sizeof(setup); ++i) setup[i] = source[i];
         if (!abort_ep0()) return -2010;
-        USB(0x50u) = 1u << 17u;
+        USB_CLEAR(0x50u) = 1u << 17u;
         ++stats.setups;
         usb_control_setup(control, setup);
         apply_action(control);
     }
     uint32_t done = USB(0x58u) & 3u;
     if (done & 1u) {
-        USB(0x58u) = 1u;
+        USB_CLEAR(0x58u) = 1u;
         uint16_t length = (uint16_t)(EP0_IN & 0x3ffu);
         ++stats.completions;
         usb_control_complete(control, 1u, 0, length);
         apply_action(control);
     }
     if (done & 2u) {
-        USB(0x58u) = 2u;
+        USB_CLEAR(0x58u) = 2u;
         uint16_t length = (uint16_t)(EP0_OUT & 0x3ffu);
         uint8_t data[USB_PACKET_SIZE];
         if (length > sizeof(data)) return -2011;
@@ -157,7 +177,7 @@ int32_t usb_hw_poll(usb_control_t *control) {
     uint32_t errors = status & 0x8f800000u;
     if (errors != 0u) {
         ++stats.hardware_errors;
-        USB(0x50u) = errors;
+        USB_CLEAR(0x50u) = errors;
         return -2012;
     }
     return 0;
