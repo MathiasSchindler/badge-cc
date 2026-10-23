@@ -709,6 +709,10 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
         badger_bytes_copy(detail+CLEAN_WPA_REKEY_DETAIL+sizeof(words),wpa.probe_token,16u);
         badger_bytes_store_u32(detail+CLEAN_WPA_REKEY_DETAIL+60u,wpa.group_verified);
         badger_bytes_store_u32(detail+CLEAN_WPA_REKEY_DETAIL+64u,wpa.pairwise_verified);
+        if (station_ap.rsn_length<=48u) {
+            badger_bytes_store_u32(detail+CLEAN_WPA_REKEY_DETAIL+68u,station_ap.rsn_length);
+            badger_bytes_copy(detail+CLEAN_WPA_REKEY_DETAIL+72u,station_ap.rsn,station_ap.rsn_length);
+        }
     }
     badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+16u,wpa.amsdu_rx);
     badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+20u,wpa.amsdu_subframes);

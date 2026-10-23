@@ -81,7 +81,8 @@ static int collect_protected(libusb_device_handle *device, const char *path,
     }
     wpa_wipe(text,sizeof(text));
     nonce[5]=(uint8_t)seconds;
-    nonce[14]=group?CLEAN_GROUP_AP_MODE:CLEAN_PROTECTED_AP_MODE; nonce[15]=(uint8_t)channel;
+    nonce[14]=group==2?CLEAN_REKEY_AP_MODE:group?CLEAN_GROUP_AP_MODE:CLEAN_PROTECTED_AP_MODE;
+    nonce[15]=(uint8_t)channel;
     wpa_secret_binding(secret,nonce,nonce[15],digest); memcpy(nonce+6u,digest,8u);
     if (ok) ok=transfer(device,0x40u,LIVE_USB_CLEAN_SECRET,secret,sizeof(secret));
     wpa_wipe(secret,sizeof(secret)); wpa_wipe(digest,sizeof(digest));
@@ -129,7 +130,10 @@ static int collect_protected(libusb_device_handle *device, const char *path,
         usb_report_u32(trace+40u)==4u && ap.wpa_auth==0x80u && ap.channel==channel;
     int valid=finished && configured && ap.state==2u && !ap.error &&
         ap.authorized && ap.received && ap.received==ap.echoed &&
-        (!group || (ap.broadcast_tx && ap.multicast_tx));
+        (!group || (ap.broadcast_tx && ap.multicast_tx)) &&
+        (group!=2 || (!ap.auth_error && ap.auth_state==3u &&
+            ap.group_rekeys==3u && ap.pairwise_rekeys==3u &&
+            ap.group_probed==3u && ap.pairwise_verified==3u));
     printf("{\"test\":\"%s\",\"serial\":\"%s\",\"build\":\"%08x\",\"valid\":%s,"
            "\"state\":%u,\"error\":%u,\"operation\":%u,\"configuration_verified\":%s,"
            "\"channel\":%u,\"nmode\":%u,\"wsec\":%u,\"wpa_auth\":%u,"
@@ -140,7 +144,13 @@ static int collect_protected(libusb_device_handle *device, const char *path,
            ap.channel,usb_report_u32(trace+36u),usb_report_u32(trace+40u),ap.wpa_auth,
            ap.authorized?"true":"false",ap.received,ap.echoed,ap.broadcast_tx,ap.multicast_tx,
            ap.gtk_rekey_status,ap.ptk_rekey_status);
-    print_mac(ap.mac); fputs("\",\"peer\":\"",stdout); print_mac(ap.peer); puts("\"}");
+    print_mac(ap.mac); fputs("\",\"peer\":\"",stdout); print_mac(ap.peer);
+    printf("\",\"auth_state\":%u,\"auth_error\":%u,\"group_rekeys\":%u,"
+        "\"pairwise_rekeys\":%u,\"m2\":%u,\"m4\":%u,\"g2\":%u,"
+        "\"controller_status\":%d,\"unicast_rate\":%u,\"group_rate\":%u,"
+        "\"group_probed\":%u,\"pairwise_verified\":%u}\n",
+        ap.auth_state,ap.auth_error,ap.group_rekeys,ap.pairwise_rekeys,ap.m2,ap.m4,ap.g2,
+        ap.controller_status,ap.unicast_rate,ap.group_rate,ap.group_probed,ap.pairwise_verified);
     if (!valid) fputs("Protected AP qualification failed; raw evidence retained\n",stderr);
     return valid;
 }
@@ -351,7 +361,8 @@ int main(int argc, char **argv) {
     int monitor = argc == 4 && !strcmp(argv[3], "--monitor-probe");
     int network = argc == 6 && !strcmp(argv[3], "--network-ap");
     int qualification = argc == 7 && !strcmp(argv[3], "--qualification-ap");
-    int group = argc == 7 && !strcmp(argv[3], "--protected-traffic-ap");
+    int rekey = argc == 7 && !strcmp(argv[3], "--protected-rekey-ap");
+    int group = rekey?2:(argc == 7 && !strcmp(argv[3], "--protected-traffic-ap"));
     int protected = group || (argc == 7 && !strcmp(argv[3], "--protected-ap"));
     int ap = protected || network || qualification || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
     uint32_t ap_seconds = 0u, ap_cycles = 0u, ap_channel = 0u;
@@ -361,6 +372,7 @@ int main(int argc, char **argv) {
         fputs("B3 AP: collector SERIAL EVIDENCE_BIN --qualification-ap CHALLENGE_HEX_28 SECONDS:8-120 CHANNEL:1,6,11\n",stderr);
         fputs("E1 AP: collector SERIAL EVIDENCE_BIN --protected-ap CHANNEL:1,6,11 SECONDS:12-120 PRIVATE_CREDENTIAL_OUT\n",stderr);
         fputs("E2 traffic AP: replace --protected-ap with --protected-traffic-ap (does not force rekeys)\n",stderr);
+        fputs("E2 controlled AP: --protected-rekey-ap (host-owned authenticator)\n",stderr);
         return 2;
     }
     if ((tx || ap) && !protected) {

@@ -632,27 +632,51 @@ resetting either epoch's PNs. New-key data confirms completion and wipes the
 old PTK. Deadlines/retry budgets remain bounded. Concurrent group/pairwise
 exchanges fail explicitly rather than sharing inconsistent pending keys.
 
-The existing E1 one-echo mode is unchanged. For a bounded 35-second unicast/
-broadcast/multicast control using the matching station and Pico AP images:
+The existing E1 one-echo mode is unchanged. The explicit mode-8 fixture owns
+the authenticator on the RP2350: the PMK is not provisioned to the vendor
+authenticator. The vendor AP still owns association and CCMP packet handling.
+The host generates fresh ANonces/GTKs from a private OS-random seed, validates
+M2/M4/G2, installs each fresh key once, and authorizes only after valid M4.
+It drives three pairwise and three group exchanges, alternating **PTK first**,
+four seconds apart while traffic continues. Retries use cached EAPOL content
+and the current data-key envelope; they do not reinstall keys or extend the
+exchange deadline. Failure and teardown wipe private state.
+
+This fixture is intentionally a single-station PSK-CCMP profile for the bundled
+vendor firmware, including its observed RSN capabilities (`0x000c`). It pins
+unicast/group rates to 1 Mbps and verifies the firmware readbacks, retaining
+their override flags in evidence. The station independently pins the on-air
+RSN and exports it for the oracle; a changed profile does not silently pass.
+
+Build and test the matching station/Pico images, then install their test UF2s
+only after backing up the full original flash as described for E1:
 
 ```sh
-CLEAN_RX_COLLECTOR=build/clean-rx/e2-20261023/badge/collector \
-CLEAN_RX_AP_COLLECTOR=build/clean-rx/e2-20261023/peer-pico/collector \
+make -C clean-rx/badge BUILD="$PWD/build/clean-rx/e2-finish/badge" all test
+make -f clean-rx/peer/Makefile HT_PEER_BUILD=build/clean-rx/e2-finish/peer-pico \
+  HT_PEER_PICO=1 ht-peer ht-peer-test
+
+CLEAN_RX_COLLECTOR=build/clean-rx/e2-finish/badge/collector \
+CLEAN_RX_AP_COLLECTOR=build/clean-rx/e2-finish/peer-pico/collector \
 bash clean-rx/badge/wpa2_trial.sh 6572BE3E4636AF51 08DA26F86E57F5EA \
-  build/clean-rx/e2-20261023/hardware/NEW_PREFIX --peer-ap 1 --group-traffic
+  build/clean-rx/e2-finish/hardware/NEW_PREFIX --peer-ap 1 --rekey
 ```
 
 This selects station `--ap-wpa2-rekey` (mode **34**, not B1's mode 32) and
-peer `--protected-traffic-ap` (mode 7). The AP sends independently counted
-broadcast/multicast challenges as well as unicast echoes. It probes
+peer `--protected-rekey-ap` (mode 8). The AP sends independently counted
+broadcast/multicast challenges and unicast echoes. Its evidence includes
+validated M2/M4/G2 counts, installed epochs, group challenges submitted after
+each GTK rotation, and protected station traffic received after each PTK
+rotation. The next exchange is gated on that AP-side traffic evidence.
+
+The separate `--group-traffic` runner option uses AP mode 7. It probes
 `wpa_gtk_rekey`/`wpa_ptk_rekey`; supported controls are set to five/nine seconds
 and read back, while `BCME_UNSUPPORTED` (-23) is explicitly recorded. Other
 control errors abort the fixture. Unsupported controls do not imply that a
 rekey happened.
 
 The runner's `--group-traffic` is deliberately **traffic-only**, not an E2
-milestone pass. Run the stronger verifier without its traffic-only override
-when the AP actually supports forced rotations:
+milestone pass. `--rekey` invokes the stronger verifier without that override:
 
 ```sh
 node clean-rx/badge/wpa2_rekey_verify.cjs PREFIX STATION_SERIAL AP_SERIAL
@@ -661,18 +685,45 @@ node clean-rx/badge/wpa2_rekey_verify.cjs PREFIX STATION_SERIAL AP_SERIAL
 Full acceptance requires three group and three pairwise rekeys, each with
 subsequent protected challenge proof, plus matching raw endpoint identities,
 security configuration, session tokens, counts, duration and successful exits.
+Mode 8 additionally binds the AP's raw rekey/traffic counters, pinned rates,
+authenticator status and the station's exact observed RSN. Plaintext
+application-frame observations fail full acceptance.
 The report distinguishes installed epochs from traffic-verified epochs.
 Native tests exercise these protocols but are not substitutes for RF proof.
 The runner does not flash or restore; preserve full original device flash
 and verify restoration separately, as for E1.
 
-**2026-10-23 hardware result:** `traffic04` passed the 35-second group-traffic
+**Earlier 2026-10-23 traffic-only result:** `traffic04` passed the 35-second group-traffic
 control: 348 protected unicast echoes, 17 broadcast and 52 multicast receptions.
 Station `7904df1d` and Pico AP `b91f9a24` also passed a separate fresh E1
 connection. Both full original flash images were restored/readback-verified.
 Both AP rekey controls actually returned -23; there were **zero RF rekeys**.
-Full E2 qualification remains open until an authenticator can force and
-independently prove three group plus three pairwise rotations during traffic.
+That archive remains traffic-only and still fails the full E2 gate.
+
+**Final 2026-10-23 E2 hardware qualification:** the host-owned authenticator
+closed the forced-rekey gate with station `3b5748a1` and Pico AP `b40abc4f`.
+Each retained run lasts at least 35 seconds and completes three group plus
+three pairwise rotations, with all six new epochs traffic-proven:
+
+| Archive under `build/clean-rx/e2-finish/hardware/` | Channel | Protected echoes | Broadcast RX | Multicast RX |
+| --- | ---: | ---: | ---: | ---: |
+| `rekey10` | 1 | 338 | 67 | 2 |
+| `rekey11` | 6 | 339 | 68 | 10 |
+| `rekey12` | 11 | 338 | 68 | 10 |
+
+The AP independently received/echoed the same 1,015 unicast challenges and
+submitted 203 broadcasts and 203 multicasts. The multicast losses are real;
+this is not a lossless-link claim. There were no terminal WPA/transport
+errors or plaintext application observations. `rekey11-e1` also passes a
+fresh vendor-authenticator E1 connection with these final builds. Both full
+original flash images were restored/readback-compared after every campaign.
+
+Earlier group-first fixture attempts completed a GTK rotation but timed out
+before pairwise completion amid receive/FCS losses. They remain failed
+archives; the passing RF scope is the PTK-first schedule above, not arbitrary
+exchange ordering. Native authenticator/supplicant tests separately exercise
+group-first rotation and lost G2/M4 recovery, MIC/backend/timeout failure
+wiping, and install-once behavior. Native results are explicitly NOT RF.
 
 **E1 hardware qualification, 2026-10-23:** campaign `matrix03` passed all
 16 fresh protected connections (10 on channel 1, three each on 6/11), with
@@ -700,7 +751,8 @@ stack; the earlier E1 decrypt-call-chain estimate was approximately 4.3 KiB.
 Limitations: this bounded fixture stops and wipes keys after its result.
 There is no protected DHCP/IP stack, persistent application link, roaming,
 WPA3, enterprise authentication or PMF. E2 adds group decryption and rekey
-protocols above, but forced-rekey RF qualification remains open. Other suites
+protocols and the bounded legacy RF qualification above; it does not qualify
+HT/BA rekeying, multi-station operation or arbitrary authenticators. Other suites
 and malformed key exchanges fail closed. General CSMA/CA, reliable unicast and RF/SIFS ACK
 timing remain unqualified. This new crypto is experimental, not independently
 audited or production-security-qualified.

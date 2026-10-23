@@ -10,6 +10,7 @@ typedef struct {
     wifi_link_ops_t backend;
     uint32_t channel;
     const uint8_t *pmk;
+    uint8_t host_auth;
 } clean_qualification_t;
 
 static inline int clean_qualification_channel(uint32_t channel) {
@@ -26,6 +27,11 @@ static inline int clean_qualification_control(void *context, uint32_t command,
     uint8_t adjusted[68];
     if (command == 268u && set && interface == 1u && q->pmk) {
         if (size != 68u) return 0;
+        if (q->host_auth) {
+            /* The explicit host-auth profile owns the PMK, not the dongle. */
+            if (received) *received=0u;
+            return 1;
+        }
         badger_bytes_zero(adjusted,sizeof(adjusted));
         adjusted[0] = 32u;
         badger_bytes_copy(adjusted + 4u,q->pmk,32u);

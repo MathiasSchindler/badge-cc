@@ -1177,7 +1177,7 @@ group traffic, E3/B2 hour-long operation, or negotiated HT qualification.
   and replay state, including GTK replacement and permitted overlap.
 - [x] Implement the group-key handshake and pairwise rekey with bounded
   retries, correct key activation and no PN reset under retransmission.
-- [ ] Verify real broadcast/multicast traffic and at least three forced group
+- [x] Verify real broadcast/multicast traffic and at least three forced group
   rekeys and three pairwise rekeys during traffic, without plaintext leakage,
   duplicate delivery, incorrect key reuse or unrecovered link loss.
 
@@ -1246,8 +1246,8 @@ also passed M1/M2/M3/M4 and a fresh protected echo with these same builds.
 Both AP interval probes actually returned `BCME_UNSUPPORTED` (-23).
 No group or pairwise RF rekey occurred. Running the full E2 oracle without
 `--traffic-only` was explicitly verified to reject this archive because
-GTK rekey control is unavailable. **E2's final RF checkbox remains open**:
-three forced rotations of each kind still require a controllable authenticator.
+GTK rekey control is unavailable. At that point E2's final RF checkbox remained
+open: three forced rotations of each kind required a controllable authenticator.
 The native rotations above are not substituted for this hardware requirement.
 
 Full 16 MiB badge and 4 MiB Pico originals were restored/readback-compared
@@ -1256,6 +1256,69 @@ hashes match the originals recorded under E1 above. The final campaigns
 restore only the preflight-bounded flashed prefix, then read and compare the
 entire flash; a full-image restore is retained as an explicit failure fallback.
 The other badge was untouched. No commit or push was performed.
+
+**2026-10-23 forced-rekey follow-up:** AP mode 8 now provides an explicit,
+host-owned single-station authenticator rather than relying on the unsupported
+vendor interval variables. Association/CCMP remain in the vendor AP, but its
+PMK submission is deliberately suppressed for this profile. A private
+OS-random seed drives fresh ANonces and GTKs; the RP2350 validates response
+MICs/replay and installs GTK/PTK once after G2/M4. Port authorization follows
+the first validated M4. Cached EAPOL retries use bounded budgets without
+regenerating nonces or reinstalling keys. Terminal failure/teardown wipes
+private state. The wire key layout follows the documented Broadcom
+`wl_wsec_key` structure; no proprietary forcing API or firmware patch is used.
+
+Initial hardware probes found `wpaie` GET unsupported and AP BSS-info without
+RSN IEs. Those probes were removed, not replaced with a success-shaped
+fallback. The explicit PSK-CCMP fixture uses the bundled firmware's observed
+22-byte RSN (`0x000c` capabilities); M3's initial mismatch correctly failed
+the supplicant's pinned-RSN check. The station now archives its public
+observed RSN separately, and the full oracle requires that exact profile.
+Unicast/group rate readbacks retain the vendor `0xc0000000` override flags
+while verifying a 1 Mbps rate, following the existing rate-mask convention.
+
+Group-first hardware attempts (`rekey06`, `rekey08`) completed one GTK
+rotation but timed out before a pairwise M2 amid substantial receive/FCS
+loss. A PTK-first alternating fixture passed `rekey09`. That diagnostic
+pass predates the final stronger oracle: it is not substituted for the
+final runs. The cause of the group-first RF failure is not established,
+and that ordering remains outside the qualified RF scope. Native tests
+exercise group-first rotation, old-key encrypted M3 retry after lost M4,
+lost G2, per-epoch data proof, single installation and backend/MIC/timeout
+failure wiping using the actual station state machine.
+
+The final oracle additionally binds AP M2/M4/G2 and installed-epoch counters,
+group challenge submission after each new GTK, protected station reception
+after each new PTK, authenticator/controller status and pinned-rate readbacks.
+Both endpoints must independently prove progress; plaintext application-frame
+observations fail full acceptance. `--rekey` selects this mode and the full
+gate; `--group-traffic` stays explicitly non-qualifying.
+
+Final station `3b5748a1` and Pico AP `b40abc4f` passed all three retained
+35-second RF runs under `build/clean-rx/e2-finish/hardware/`:
+
+| Run | Channel | Unicast echoes | Broadcast RX | Multicast RX | Group / pairwise rekeys |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `rekey10` | 1 | 338 | 67 | 2 | 3 / 3 |
+| `rekey11` | 6 | 339 | 68 | 10 | 3 / 3 |
+| `rekey12` | 11 | 338 | 68 | 10 | 3 / 3 |
+
+Every installed station epoch has subsequent protected traffic proof. The AP
+independently confirms nine G2s, twelve M2/M4 pairs including the three initial
+connections, nine post-GTK group probes and nine post-PTK protected receptions.
+It receives/echoes the same 1,015 unicast challenges and submits 203 frames of
+each group class; only 22 multicast receptions occur, so no lossless-link
+claim is made. Zero plaintext application observations and zero terminal
+WPA/transport errors occur. `rekey11-e1` passes a separate fresh E1 RF
+regression with these exact builds.
+
+Full 16 MiB badge and 4 MiB Pico backups/readbacks compare identically after
+every follow-up RF campaign. An initial restoration-helper CLI ordering error
+was corrected immediately and the originals then fully verified before any
+further test. The other badge remains untouched. Station, Pico AP and default
+badge AP builds/native tests all pass with ASan/UBSan. E2's bounded legacy RF
+checkbox is now complete; this does not close E3, HT/BA, multi-station,
+arbitrary-order/authenticator, persistent-link or hour-soak qualification.
 
 ### E3. Sustained protected operation
 

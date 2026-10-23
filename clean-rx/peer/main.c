@@ -5,6 +5,7 @@
 #include "network.h"
 #include "qualification.h"
 #include "protected_ap.h"
+#include "authenticator.h"
 #include "build_id.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -26,6 +27,8 @@ static uint8_t evidence[CLEAN_PEER_TRACE_BYTES];
 static wifi_link_t link;
 static clean_network_t network;
 static uint8_t protected_pmk[32], protected_secret_valid;
+static uint8_t protected_seed[32];
+static clean_auth_t authenticator;
 static int service(void *context, const wifi_fw_report_t *report);
 #if CLEAN_PEER_PICO
 int32_t pr_clock_sys(void);
@@ -69,6 +72,43 @@ static int protected_rekey_control(const uint8_t *name, uint32_t length,
         size>=4u && badger_bytes_load_u32(reply)==seconds;
 }
 
+static int auth_send(void *context, const uint8_t *frame, uint32_t n) {
+    (void)context;
+    return wifi_firmware_send_frame(1u,frame,n);
+}
+
+static int auth_install(void *context, const uint8_t *key, uint8_t id,
+        const uint8_t *peer) {
+    (void)context;
+    /* wl_wsec_key wire layout: 32-byte key area, AES-CCM algo and peer MAC. */
+    uint8_t request[164], reply[32]; uint32_t received=0u;
+    badger_bytes_zero(request,sizeof(request));
+    badger_bytes_store_u32(request,id); badger_bytes_store_u32(request+4u,16u);
+    badger_bytes_copy(request+8u,key,16u); badger_bytes_store_u32(request+112u,4u);
+    if (peer) badger_bytes_copy(request+156u,peer,6u);
+    else badger_bytes_store_u32(request+116u,2u);
+    int ok=link_control(0,45u,1u,1u,request,sizeof(request),reply,sizeof(reply),&received);
+    wpa_wipe(request,sizeof(request)); wpa_wipe(reply,sizeof(reply)); return ok;
+}
+
+static int auth_authorize(void *context, const uint8_t *peer) {
+    (void)context;
+    uint8_t reply[32]; uint32_t received=0u;
+    return link_control(0,121u,1u,1u,peer,6u,reply,sizeof(reply),&received);
+}
+
+static int auth_rate(const uint8_t *name, uint32_t length, uint32_t *rate) {
+    uint8_t request[32], reply[32]; uint32_t n=0u;
+    badger_bytes_zero(request,sizeof(request)); badger_bytes_copy(request,name,length);
+    badger_bytes_store_u32(request+length,2u);
+    if (!link_control(0,263u,1u,1u,request,length+4u,reply,sizeof(reply),&n)) return 0;
+    badger_bytes_zero(request+length,4u);
+    if (!link_control(0,262u,0u,1u,request,sizeof(request),reply,sizeof(reply),&n) || n<4u)
+        return 0;
+    *rate=badger_bytes_load_u32(reply);
+    return (*rate&~0xc0000000u)==2u;
+}
+
 static void protected_ap(const uint8_t nonce[16], const uint8_t report[64]) {
     clean_protected_ap_report_t ap;
     badger_bytes_zero((uint8_t *)&ap,sizeof(ap));
@@ -77,13 +117,30 @@ static void protected_ap(const uint8_t nonce[16], const uint8_t report[64]) {
     ap.operation=1u;
     int ok=protected_secret_valid;
     wifi_link_ops_t backend={.context=0,.control=link_control};
-    clean_qualification_t q={.backend=backend,.channel=ap.channel,.pmk=protected_pmk};
+    int host_auth=nonce[14]==CLEAN_REKEY_AP_MODE;
+    clean_qualification_t q={.backend=backend,.channel=ap.channel,.pmk=protected_pmk,
+        .host_auth=(uint8_t)host_auth};
     wifi_link_ops_t ops={.context=&q,.control=clean_qualification_control};
     wifi_link_init(&link,&ops,WIFI_LINK_AP,nonce,ap.mac);
     wpa_wipe(link.password,sizeof(link.password));
     if (ok) { ap.operation=2u; ok=wifi_link_configure(&link); }
     if (ok) { ap.operation=3u; ok=clean_qualification_verify(&q,evidence+28u); }
+    if (ok && host_auth) {
+        static const uint8_t rsn[22]={
+            48u,20u,1u,0u,0u,15u,172u,4u,1u,0u,0u,15u,172u,4u,
+            1u,0u,0u,15u,172u,2u,12u,0u};
+        ap.operation=12u;
+        clean_auth_ops_t auth_ops={.send=auth_send,.install=auth_install,
+            .authorize=auth_authorize};
+        clean_auth_init(&authenticator,&auth_ops,protected_pmk,protected_seed,
+            ap.mac,rsn,sizeof(rsn));
+        ok=!authenticator.error;
+        static const uint8_t unicast[]="2g_rate", group[]="2g_mrate";
+        if (ok) ok=auth_rate(unicast,sizeof(unicast),&ap.unicast_rate) &&
+            auth_rate(group,sizeof(group),&ap.group_rate);
+    }
     wpa_wipe(protected_pmk,sizeof(protected_pmk)); protected_secret_valid=0u;
+    wpa_wipe(protected_seed,sizeof(protected_seed));
     if (ok && nonce[14]==CLEAN_GROUP_AP_MODE) {
         static const uint8_t gtk[]="wpa_gtk_rekey", ptk[]="wpa_ptk_rekey";
         ap.operation=11u;
@@ -102,8 +159,11 @@ static void protected_ap(const uint8_t nonce[16], const uint8_t report[64]) {
     badger_bytes_store_u32(evidence+20u,nonce[14]);
     const wifi_wire_t *wire=wifi_board_wire();
     uint32_t started=wire->now_us(wire->context), published=started, polled=started-100000u;
-    uint32_t group_at=started;
+    uint32_t group_at=started, rekey_at=started, rotations=0u;
     uint8_t data_enabled=0u;
+    if (ok && host_auth) {
+        ok=wifi_firmware_data_enable(); data_enabled=(uint8_t)ok;
+    }
     badger_bytes_copy(evidence+CLEAN_PROTECTED_AP_DETAIL,(const uint8_t *)&ap,sizeof(ap));
     if (ok) ok=clean_lifecycle_snapshot(&control,generation,report,evidence,0u);
     while (ok && wire->now_us(wire->context)-started<(uint32_t)nonce[5]*1000000u) {
@@ -115,6 +175,11 @@ static void protected_ap(const uint8_t nonce[16], const uint8_t report[64]) {
             if (!ok) break;
             ap.authorized=link.report.authorized;
             if (link.report.peer_count) badger_bytes_copy(ap.peer,link.report.peer,6u);
+            if (host_auth && link.report.associated && authenticator.state==CLEAN_AUTH_IDLE) {
+                ap.operation=13u;
+                ok=clean_auth_start(&authenticator,ap.peer,0,now);
+                if (!ok) break;
+            }
         }
         if (ap.authorized && !data_enabled) {
             ap.operation=6u;
@@ -122,19 +187,38 @@ static void protected_ap(const uint8_t nonce[16], const uint8_t report[64]) {
             if (!ok) break;
             data_enabled=1u;
         }
-        if (data_enabled && ap.authorized) {
+        if (host_auth) {
+            ap.operation=14u;
+            ok=clean_auth_poll(&authenticator,now);
+            if (!ok) break;
+            if (authenticator.state==CLEAN_AUTH_READY && rotations<6u &&
+                ap.echoed && now-rekey_at>=4000000u &&
+                authenticator.group_rekeys==ap.group_probed &&
+                authenticator.pairwise_rekeys==ap.pairwise_verified) {
+                ok=clean_auth_start(&authenticator,ap.peer,(int)(rotations&1u),now);
+                if (!ok) break;
+                ++rotations; rekey_at=now;
+            }
+        }
+        if (data_enabled && (ap.authorized || host_auth)) {
             ap.operation=7u;
             static uint8_t frame[1514];
             uint8_t interface; uint32_t length;
             int received=wifi_firmware_read_frame(frame,&length,&interface);
             if (received<0) { ok=0; break; }
+            if (received && interface==1u && host_auth &&
+                !clean_auth_receive(&authenticator,frame,length,now)) { ok=0; break; }
             if (received && interface==1u &&
+                ap.authorized &&
                 clean_protected_ap_echo(frame,length,ap.mac,ap.peer)) {
                 ++ap.received; badger_bytes_copy(ap.token,frame+22u,16u);
+                if (host_auth && authenticator.state==CLEAN_AUTH_READY &&
+                    authenticator.pairwise_rekeys>ap.pairwise_verified)
+                    ++ap.pairwise_verified;
                 ap.operation=8u;
                 if (!wifi_firmware_send_frame(1u,frame,38u)) { ok=0; break; }
                 ++ap.echoed;
-                if (nonce[14]==CLEAN_GROUP_AP_MODE && now-group_at>=500000u) {
+                if (nonce[14]!=CLEAN_PROTECTED_AP_MODE && now-group_at>=500000u) {
                     static const uint8_t broadcast[6]={255u,255u,255u,255u,255u,255u};
                     static const uint8_t multicast[6]={1u,0u,94u,0u,0u,1u};
                     ap.operation=10u;
@@ -144,18 +228,33 @@ static void protected_ap(const uint8_t nonce[16], const uint8_t report[64]) {
                     badger_bytes_copy(frame,multicast,6u);
                     if (!wifi_firmware_send_frame(1u,frame,38u)) { ok=0; break; }
                     ++ap.multicast_tx; group_at=now;
+                    if (host_auth && authenticator.state==CLEAN_AUTH_READY &&
+                        authenticator.group_rekeys>ap.group_probed) ++ap.group_probed;
                 }
             }
         }
         if (now-published>=100000u) {
+            if (host_auth) {
+                ap.auth_state=authenticator.state; ap.auth_error=authenticator.error;
+                ap.group_rekeys=authenticator.group_rekeys;
+                ap.pairwise_rekeys=authenticator.pairwise_rekeys;
+                ap.m2=authenticator.m2; ap.m4=authenticator.m4; ap.g2=authenticator.g2;
+            }
             badger_bytes_copy(evidence+CLEAN_PROTECTED_AP_DETAIL,(const uint8_t *)&ap,sizeof(ap));
             ok=clean_lifecycle_snapshot(&control,generation,report,evidence,1u);
             published=now;
         }
     }
     ap.state=ok?2u:3u;
+    if (host_auth) {
+        ap.auth_state=authenticator.state; ap.auth_error=authenticator.error;
+        ap.group_rekeys=authenticator.group_rekeys; ap.pairwise_rekeys=authenticator.pairwise_rekeys;
+        ap.m2=authenticator.m2; ap.m4=authenticator.m4; ap.g2=authenticator.g2;
+        clean_auth_clear(&authenticator);
+    }
     if (ok) ap.operation=9u;
     if (!ok) ap.error=firmware.error?firmware.error:0x100u;
+    ap.controller_status=(int32_t)firmware.controller_status;
     badger_bytes_copy(evidence+CLEAN_PROTECTED_AP_DETAIL,(const uint8_t *)&ap,sizeof(ap));
     wpa_wipe(&link,sizeof(link));
 }
@@ -487,6 +586,7 @@ static void probe(const uint8_t nonce[16]) {
     wifi_firmware_stop();
     wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
     wpa_wipe(protected_pmk,sizeof(protected_pmk)); protected_secret_valid=0u;
+    wpa_wipe(protected_seed,sizeof(protected_seed)); clean_auth_clear(&authenticator);
     if (!usb_error && !control.reboot_requested) {
         if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE ||
             nonce[14] == CLEAN_QUALIFICATION_AP_MODE || clean_protected_ap_mode(nonce[14])) {
@@ -522,8 +622,10 @@ void bare_main(void) {
         generation = live_usb_probe_take(&control, nonce);
         if (!usb_error && generation) {
             /* Consume before clock/firmware polling can stall a not-ready report. */
+            badger_bytes_copy(protected_seed,control.clean_secret+32u,32u);
             protected_secret_valid=(uint8_t)clean_protected_ap_take_secret(protected_pmk,
                 control.clean_secret,&control.clean_secret_ready,nonce);
+            if (!protected_secret_valid) wpa_wipe(protected_seed,sizeof(protected_seed));
             if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE ||
                 nonce[14] == CLEAN_QUALIFICATION_AP_MODE || clean_protected_ap_mode(nonce[14]))
                 usb_error = nametag_clock_reference();

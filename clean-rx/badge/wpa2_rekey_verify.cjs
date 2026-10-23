@@ -17,11 +17,11 @@ function validate(s,a,rs,ra,timing,station,ap,trafficOnly) {
     assert.equal(s.serial,station); assert.equal(a.serial,ap);
     assert.match(s.build,/^[0-9a-f]{8}$/); assert.match(a.build,/^[0-9a-f]{8}$/);
     assert.equal(rs.length,2048); assert.equal(ra.length,320);
-    assert.equal(rs[2000],34); assert.equal(ra[30],7);
+    assert.equal(rs[2000],34); assert.ok(ra[30]===7 || ra[30]===8);
     assert.equal(rs.readUInt32LE(1520),0x324b4552);
     assert.equal(rs.readUInt32LE(1640),0x32575043);
     assert.equal(ra.readUInt32LE(152),0x31415045);
-    assert.equal(ra.readUInt32LE(84),7);
+    assert.equal(ra.readUInt32LE(84),ra[30]);
     assert.equal(ra.readUInt32LE(8).toString(16).padStart(8,'0'),a.build);
     assert.equal(a.test,'e2-ap-result');
     for (const [field,at] of Object.entries(stationFields))
@@ -59,12 +59,34 @@ function validate(s,a,rs,ra,timing,station,ap,trafficOnly) {
     assert.ok(s.m2_sent>=1 && s.m3_validated>=1 && s.m4_sent>=1);
     assert.ok(s.group_verified<=s.group_rekeys && s.pairwise_verified<=s.pairwise_rekeys);
     if (!trafficOnly) {
+        if (ra[30]===8) {
+            for (const [field,at] of Object.entries({auth_state:232,auth_error:236,
+                group_rekeys:240,pairwise_rekeys:244,m2:248,m4:252,g2:256,
+                controller_status:260,unicast_rate:264,group_rate:268,
+                group_probed:272,pairwise_verified:276}))
+                assert.equal(ra.readUInt32LE(at),a[field],`authenticator raw ${field}`);
+            assert.equal(a.auth_state,3); assert.equal(a.auth_error,0);
+            assert.equal(a.controller_status,0);
+            assert.equal((a.unicast_rate&0x3fffffff)>>>0,2);
+            assert.equal((a.group_rate&0x3fffffff)>>>0,2);
+            assert.equal(a.group_rekeys,s.group_rekeys);
+            assert.equal(a.pairwise_rekeys,s.pairwise_rekeys);
+            assert.equal(a.g2,a.group_rekeys);
+            assert.equal(a.m2,a.pairwise_rekeys+1);
+            assert.equal(a.m4,a.m2);
+            assert.equal(a.group_probed,a.group_rekeys);
+            assert.equal(a.pairwise_verified,a.pairwise_rekeys);
+            assert.equal(rs.readUInt32LE(1588),22);
+            assert.equal(s.pinned_rsn,'30140100000fac040100000fac040100000fac020c00');
+            assert.equal(rs.subarray(1592,1614).toString('hex'),s.pinned_rsn);
+        }
         assert.equal(a.gtk_rekey_status,0,'AP GTK rekey control unavailable');
         assert.equal(a.ptk_rekey_status,0,'AP PTK rekey control unavailable');
         assert.ok(s.group_rekeys>=3 && s.pairwise_rekeys>=3,'three rekeys per type required');
         assert.equal(s.group_verified,s.group_rekeys,'missing protected group epoch proof');
         assert.equal(s.pairwise_verified,s.pairwise_rekeys,'missing protected pairwise epoch proof');
         assert.ok(s.m2_sent>s.pairwise_rekeys && s.m4_sent>s.pairwise_rekeys);
+        assert.equal(s.plaintext_drops,0,'plaintext application traffic observed');
     }
     for (const endpoint of ['station','ap'])
         assert.match(timing,new RegExp(`^${endpoint}_exit=0$`,'m'));
@@ -128,6 +150,28 @@ function selfTest() {
     assert.throws(()=>check(true));
     s.protected_duration_us=35000000; rs.writeUInt32LE(35000000,1560);
     rs[2000]=32; assert.throws(()=>check(true)); rs[2000]=34;
+    ra[30]=8; ra.writeUInt32LE(8,84);
+    Object.assign(a,{auth_state:3,auth_error:0,group_rekeys:3,pairwise_rekeys:3,
+        m2:4,m4:4,g2:3,controller_status:0,unicast_rate:0xc0000002,group_rate:0xc0000002,
+        group_probed:3,pairwise_verified:3});
+    const authFields={auth_state:232,auth_error:236,group_rekeys:240,
+        pairwise_rekeys:244,m2:248,m4:252,g2:256,controller_status:260,
+        unicast_rate:264,group_rate:268,group_probed:272,pairwise_verified:276};
+    for (const [field,at] of Object.entries(authFields)) ra.writeUInt32LE(a[field],at);
+    s.pinned_rsn='30140100000fac040100000fac040100000fac020c00';
+    rs.writeUInt32LE(22,1588); Buffer.from(s.pinned_rsn,'hex').copy(rs,1592);
+    assert.equal(check().milestone_qualified,true);
+    for (const at of [...Object.values(authFields),1588,1592,1612]) {
+        const raw=at<1000?ra:rs, offset=at;
+        raw[offset]^=1; assert.throws(()=>check()); raw[offset]^=1;
+    }
+    for (const [field,at,value] of [['group_probed',272,2],['pairwise_verified',276,2],
+        ['unicast_rate',264,22],['auth_state',232,1],['auth_error',236,5]]) {
+        const old=a[field]; a[field]=value; ra.writeUInt32LE(value,at);
+        assert.throws(()=>check()); a[field]=old; ra.writeUInt32LE(old,at);
+    }
+    s.plaintext_drops=1; rs.writeUInt32LE(1,1556); assert.throws(()=>check());
+    s.plaintext_drops=0; rs.writeUInt32LE(0,1556);
     console.log('E2 oracle: raw identity/security/token/counter/duration tampering and missing per-epoch proof rejected; traffic-only never qualifies rekeys');
 }
 

@@ -4,8 +4,10 @@
 
 #define CLEAN_PROTECTED_AP_MODE 6u
 #define CLEAN_GROUP_AP_MODE 7u
+#define CLEAN_REKEY_AP_MODE 8u
 static inline int clean_protected_ap_mode(uint32_t mode) {
-    return mode==CLEAN_PROTECTED_AP_MODE || mode==CLEAN_GROUP_AP_MODE;
+    return mode==CLEAN_PROTECTED_AP_MODE || mode==CLEAN_GROUP_AP_MODE ||
+        mode==CLEAN_REKEY_AP_MODE;
 }
 #define CLEAN_PROTECTED_AP_MAGIC 0x31415045u
 #define CLEAN_PROTECTED_AP_DETAIL 88u
@@ -15,6 +17,11 @@ typedef struct {
     uint32_t operation;
     uint32_t broadcast_tx, multicast_tx;
     int32_t gtk_rekey_status, ptk_rekey_status;
+    uint32_t auth_state, auth_error, group_rekeys, pairwise_rekeys;
+    uint32_t m2, m4, g2;
+    int32_t controller_status;
+    uint32_t unicast_rate, group_rate;
+    uint32_t group_probed, pairwise_verified;
 } clean_protected_ap_report_t;
 _Static_assert(CLEAN_PROTECTED_AP_DETAIL+sizeof(clean_protected_ap_report_t)<=256u,
                "Protected AP evidence must fit the peer trace");

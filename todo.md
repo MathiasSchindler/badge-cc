@@ -400,11 +400,11 @@ See [E1 commands and boundaries](clean-rx/badge/README.md#e1-protected-pico-ap-m
 
 ### E2. Group traffic and rekey
 
-**Status: implemented and native-tested; forced-rekey RF qualification remains open.**
+**Status: complete for the bounded, single-station legacy RF fixture.**
 
 - [x] Complete GTK broadcast/multicast, key selection, replay and replacement.
 - [x] Complete bounded group/pairwise rekey without retransmission PN resets.
-- [ ] Verify real group traffic and three group plus three pairwise rekeys
+- [x] Verify real group traffic and three group plus three pairwise rekeys
   during traffic without plaintext leakage or unrecovered failure.
 
 Four GTK slots have independent per-TID/non-QoS replay windows and RSC floors,
@@ -422,8 +422,24 @@ Hardware campaign `traffic04` passed the full 35-second traffic control:
 fresh E1 regression connection. Both full original flash images were restored
 and readback-verified. The Pico AP returned `BCME_UNSUPPORTED` (-23) for both
 forced-rekey controls, so zero RF rekeys occurred; the stronger E2 gate
-correctly rejects this as full qualification. A controllable authenticator
-is still required for the three-group/three-pairwise RF acceptance test.
+correctly rejects that archive as full qualification.
+
+The follow-up adds an explicit host-owned authenticator (AP mode 8), bypassing
+those unsupported interval controls without weakening the oracle. Final
+`e2-finish/hardware/rekey10`, `rekey11` and `rekey12` pass the full RF gate on
+channels 1/6/11 with station `3b5748a1` and Pico AP `b40abc4f`: each 35-second
+run completes three group and three pairwise rekeys, with subsequent protected
+traffic proving every epoch at the station and independent AP key/traffic
+evidence. Together they deliver 1,015 protected unicast echoes, 203 broadcasts
+and 22 multicasts. No plaintext application traffic or terminal WPA/transport
+error was observed. A fresh E1 regression also passes with the final builds.
+Every full original flash image was restored and readback-compared.
+
+Qualification is specifically the readback-verified 1 Mbps, PTK-first,
+alternating rekey fixture; earlier group-first RF attempts timed out and
+remain retained failures, not a qualified ordering. Native tests cover both
+exchange orders and lost-response recovery. This is not a lossless-link,
+HT/BA, multi-station, arbitrary-authenticator, persistent-link or E3-soak claim.
 
 ### E3. Sustained protected operation
 

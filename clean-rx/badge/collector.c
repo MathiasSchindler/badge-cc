@@ -1335,6 +1335,10 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             putchar('"');
             printf(",\"group_verified\":%u,\"pairwise_verified\":%u",
                    usb_report_u32(r+60u),usb_report_u32(r+64u));
+            uint32_t rn=usb_report_u32(r+68u);
+            fputs(",\"pinned_rsn\":\"",stdout);
+            if (rn<=48u) for (uint32_t i=0u;i<rn;++i) printf("%02x",r[72u+i]);
+            putchar('"');
         }
         puts("}");
         if (!associated) fputs("No validated successful association exchange\n", stderr);

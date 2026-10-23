@@ -84,6 +84,10 @@ int main(void) {
         fake.fail=268u;
         wifi_link_init(&link,&ops,WIFI_LINK_AP,nonce,mac);
         assert(!wifi_link_configure(&link));
+        q.host_auth=1u; memset(fake.pmk,0,sizeof(fake.pmk));
+        wifi_link_init(&link,&ops,WIFI_LINK_AP,nonce,mac);
+        assert(wifi_link_configure(&link) && clean_qualification_verify(&q,evidence));
+        for (uint32_t j=0u;j<32u;++j) assert(!fake.pmk[j]);
     }
     uint8_t frame[38]={0}, peer[6]={2u,9u,8u,7u,6u,5u};
     memcpy(frame,mac,6u); memcpy(frame+6u,peer,6u);
