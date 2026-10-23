@@ -75,6 +75,9 @@ The opt-in [remote health node](docs/remote-health.md) automatically starts
 Wi-Fi/DHCP/HTTP and private-profile LoRa diagnostics on power-up, reporting
 Wi-Fi failures via rate-limited LoRa health packets and radio errors via
 Wi-Fi. It transmits startup/change reports and five-minute heartbeats.
+Both nodes can run the [Wi-Fi-managed LoRa laboratory](docs/radio-experiments.md)
+to change frequency/SF/BW/coding rate/preamble, queue bounded test batches,
+compare received results and explicitly restore baseline without physical access.
 
 ### Native Windows control and deployment
 

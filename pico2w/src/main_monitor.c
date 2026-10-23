@@ -12,7 +12,9 @@ _Static_assert(LORA_PACKET_RECORD_SIZE == USB_LORA_PACKET_SIZE, "packet record s
 #include "build_id.h"
 #ifdef PICO2W_REMOTE
 #include "app/health.h"
+#include "app/experiment.h"
 static health_t health;
+static experiment_t experiment;
 static uint8_t radio_busy = 1u;
 static uint32_t radio_retry_ms, wifi_retry_ms;
 static void remote_service(void);
@@ -161,14 +163,15 @@ static void remote_service(void) {
     if (receiver.state == SX1262_RX_RUNNING) {
         uint32_t rearms = receiver.counters.rearms;
         int32_t error = sx1262_receiver_poll(&receiver, uptime_ms);
-        if (!error && rearms != receiver.counters.rearms) error = link_test_configure(&receiver);
+        if (!error && rearms != receiver.counters.rearms) error = experiment_configure(&experiment, &receiver);
         if (error) pico2w_lora_error = error;
     } else if (uptime_ms - radio_retry_ms >= HEALTH_MIN_MS) {
         radio_retry_ms = uptime_ms;
-        pico2w_lora_error = link_test_configure(&receiver);
+        pico2w_lora_error = experiment_configure(&experiment, &receiver);
     }
     const sx1262_rx_packet_t *p = sx1262_receiver_packet(&receiver, 0u);
     if (p && p->sequence != health.rx_sequence) {
+        experiment_observe(&experiment, p, uptime_ms);
         health.rx_sequence = p->sequence;
         if (!(p->flags & SX1262_RX_CRC_ERROR) && p->length == LINK_PACKET_SIZE &&
             (usb_load_u32(p->payload) == LINK_PACKET_MAGIC || usb_load_u32(p->payload) == HEALTH_MAGIC) &&
@@ -188,10 +191,12 @@ static void remote_service(void) {
     snapshot.radio_error = pico2w_lora_error;
     health.uptime_ms = uptime_ms;
     health_update(&health, &snapshot);
-    if (health_due(&health, uptime_ms)) {
+    experiment_tick(&experiment, &health, &receiver, uptime_ms);
+    if (!experiment.queued && !experiment_wait(&experiment,uptime_ms) && health_due(&health, uptime_ms)) {
         uint8_t payload[LINK_PACKET_SIZE];
         health_payload(&health, uptime_ms, payload);
-        health.tx_error = link_radio_send(&receiver, payload, &health.restore_error);
+        experiment_charge(&experiment,uptime_ms);
+        health.tx_error = link_profile_send(&receiver, &experiment.profile, payload, &health.restore_error);
         if (!health.tx_error) { ++health.sent; health.last_success_ms = uptime_ms; }
         if (health.tx_error || health.restore_error) health.pending = 1u;
         pico2w_lora_error = health.restore_error;
@@ -207,7 +212,17 @@ static int path_is(const char *a, const char *b) {
 
 static uint32_t remote_http(void *context, const http_request_t *request,
                             uint8_t *response, uint32_t capacity) {
-    if (request->post || path_is(request->path, "/") || path_is(request->path, "/api/health"))
+    if (path_is(request->path,"/") || path_is(request->path,"/radio.js") ||
+        path_is(request->path,"/api/radio") || path_is(request->path,"/api/radio/config") ||
+        path_is(request->path,"/api/radio/reset") || path_is(request->path,"/api/radio/send") ||
+        path_is(request->path,"/api/radio/cancel")) {
+        radio_busy=1u;
+        uint32_t size=experiment_http(&experiment,&health,&receiver,request,response,capacity);
+        pico2w_lora_error=receiver.state==SX1262_RX_RUNNING ? 0 : receiver.last_error;
+        radio_busy=0u;
+        return size;
+    }
+    if (request->post || path_is(request->path, "/api/health"))
         return health_http(&health, request, response, capacity);
     return dashboard_http(context, request, response, capacity);
 }
@@ -291,6 +306,7 @@ void bare_main(void) {
     usb_control_init(&control, PICO2W_BUILD_ID, id);
 #ifdef PICO2W_REMOTE
     health_init(&health, id, uptime_ms);
+    experiment_init(&experiment);
 #endif
     control.lora_disabled = 1u;
     control.packet_source = packet_source;
@@ -316,7 +332,7 @@ void bare_main(void) {
         &receiver, SX1262_RX_BOARD_WAVESHARE_PICO_LORA_SX1262_868M);
     if (pico2w_lora_error == 0) {
 #ifdef PICO2W_REMOTE
-        pico2w_lora_error = link_test_configure(&receiver);
+        pico2w_lora_error = experiment_configure(&experiment, &receiver);
 #else
         pico2w_lora_error = configure_radio(0, &dashboard.config);
 #endif

@@ -1,9 +1,15 @@
 # Autonomous Wi-Fi / LoRa health node
 
+**Current firmware also supports Wi-Fi-managed radio configuration and
+bounded tests on both nodes.** See [radio experiments](radio-experiments.md)
+for the current dashboards, supported parameters and API. Historical
+qualification entries below name the older fixed-profile images explicitly.
+
 The opt-in `remote` application starts from flash when powered by a normal
 USB supply. No laptop, BOOTSEL press, filesystem or host server is needed.
-The user-authorized deployment target is **76EDD29A5E2CD5B4** only; the local
-Pico **7C4918BAB9492C77** retains link-test firmware `ee949855`.
+The initial deployment target was **76EDD29A5E2CD5B4** only.
+The subsequent radio-experiment implementation was authorized on both
+Picos, including **7C4918BAB9492C77**.
 
 ## Independent diagnostic paths
 
@@ -55,8 +61,9 @@ Only use it where this frequency, power and operation are permitted.
 - Unlike the finite link test, the autonomous node does not stop after
   six packets: it must keep sending five-minute health heartbeats.
 - Every attempt restores private-profile continuous receive mode.
-  Profile changes and activity surveys are deliberately locked out so
-  remote diagnostics remain on the agreed radio setting.
+  The original fixed-profile image locked out profile changes and surveys.
+  Current experiment firmware allows validated profile changes over Wi-Fi;
+  surveys remain unavailable, and health reports follow the selected profile.
 
 Startup success/failure is a delayed best-effort LoRa report, not a
 guaranteed delivery. A failed radio cannot send its own status. Wi-Fi
@@ -83,6 +90,13 @@ Only flash the remote node unless another board is separately authorized.
 Building/tests alone do not open USB hardware or transmit.
 
 ## Listen locally and test the remote receiver
+
+The explicit `ee949855` / `link-send` commands in this section document the
+original mixed-firmware setup. With current firmware on both nodes, use
+the [radio experiment dashboards](radio-experiments.md) for test sends;
+USB `listen` still works with the current manifest's build ID (or omit
+`--build-id` to discover it). `link-status`/`link-send` are only for the older
+finite link-test application, not the Wi-Fi-managed application.
 
 Rebuild the Windows `picoctl` host utility to obtain health packet decoding;
 the original Pico's installed firmware needs no update:
@@ -211,7 +225,52 @@ return `-2007` rather than pretending USB setup succeeded.
   one successful health transmission and no transmit/restore errors.
 - The original board remains on `ee949855`; no flash changes were made to it.
 
-The user chose to leave both boards attached locally after this check.
-**A repeat charger-powered, other-room trial is still pending.** This
-fix has a passing true power-cycle test on laptop power, not yet a
-passing room-to-room or specific-charger qualification.
+The user initially chose to leave both boards attached locally after this
+check; charger-powered operation was not yet qualified at that point.
+
+### Successful charger-powered test, 2026-10-23, about 16:44-16:47 CEST
+
+The user then placed the new Pico in another part of the room on a USB
+charger. Only the original `7C4918BAB9492C77` remained attached to the laptop.
+The remote `76EDD29A5E2CD5B4`, running `f814ee57`, automatically joined
+Wi-Fi and obtained `192.168.178.80`. Its health page was reachable and showed
+healthy Wi-Fi/DHCP, radio receive state, and no transmit/restore errors.
+Remote uptime around 77 seconds and reset counters confirmed a new boot.
+
+| Direction | Verified observation | Receiver RSSI | Receiver SNR |
+| --- | --- | --- | --- |
+| Charger-powered remote to USB local | New local packet #9: remote startup health sequence 1, uptime 60,000 ms, correct chip ID/IP and no reported errors | -60 dBm | 12.75 dB |
+| USB local to charger-powered remote | Local test sequence 5: correct sender `7C4918BAB9492C77`, 36-byte payload/application CRC checked through remote HTTP; peer timestamp also updated | -62 dBm | 11.75 dB |
+
+The local receiver's packet counter increased from 8 to 9 after the move;
+older ring entries printed when opening the listener were not counted as
+fresh remote reception. The reverse-direction packet was explicitly
+triggered once using `link-send` and verified at the destination, not
+inferred from TxDone. Both radios reported zero CRC errors.
+
+This qualifies autonomous startup from the tested USB charger, Wi-Fi/HTTP,
+and successful LoRa delivery in both directions at the user's new placement,
+using 869.850 MHz/SF7/BW125 and nominal 0 dBm. No measured distance,
+wall penetration, maximum range or sustained packet-loss rate is established.
+The original board has now used five of its six per-boot test attempts.
+It remains in receive mode; the remote remains autonomous on the charger.
+
+### One-room / one-floor placement, 2026-10-23, about 17:08 CEST
+
+The user moved the remote one room and one floor away. It cold-booted
+successfully on its USB supply and remained reachable at `192.168.178.80`
+with healthy Wi-Fi, DHCP and radio state; remote uptime was about 70 seconds.
+
+| Direction | Verified observation | Receiver RSSI | Receiver SNR |
+| --- | --- | --- | --- |
+| Remote to local | New local packet #14: startup health sequence 1 at remote uptime 60,000 ms; correct remote ID, IP and healthy status | -69 dBm | 12.5 dB |
+| Local to remote | Test sequence 6, correct sender ID and application CRC verified through remote HTTP at remote uptime about 103 seconds | -73 dBm | 12.25 dB |
+
+Both used the same 869.850 MHz/SF7/BW125/private-sync profile and nominal
+0 dBm. The remote reported zero CRC errors. Older stored packets were
+not counted as measurements at the new placement.
+This confirms delivery in both directions for this short test, not a
+measured distance, maximum range or sustained loss-rate qualification.
+The local board has now used all six per-boot transmit attempts and will
+reject more `link-send` requests until a controlled restart. Its receiver
+remains active; the remote's autonomous heartbeat schedule is unaffected.

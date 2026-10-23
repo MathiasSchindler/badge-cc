@@ -12,6 +12,7 @@ static sx1262_receiver_t receiver;
 static link_test_t link;
 static uint32_t frames;
 static uint8_t ops[128];
+static const link_profile_t *custom;
 
 uint32_t sx1262_hw_time_us(void) { clock_us += 1000; return clock_us; }
 void sx1262_hw_release(void) { ++release_count; }
@@ -35,19 +36,30 @@ int32_t sx1262_transfer(const uint8_t *out, uint8_t *in, uint32_t length,
     switch (out[0]) {
     case 0x95: { const uint8_t want[] = {0x95,4,7,0,1}; assert(!memcmp(out,want,sizeof(want))); break; }
     case 0x8e: assert(length == 3 && out[1] == 0 && out[2] == 4); break;
-    case 0x8c: assert(length == 7 && out[2] == 8 && out[4] == 36 && out[5] == 1 && out[6] == 0); break;
+    case 0xc0: in[1]=0x52; break;
+    case 0x8b:
+        assert(custom && length==5 && out[1]==custom->radio.spreading_factor &&
+               out[3]==custom->coding_rate &&
+               out[2]==(custom->radio.bandwidth_khz==125?4:custom->radio.bandwidth_khz==250?5:6) &&
+               out[4]==((custom->radio.bandwidth_khz==125&&custom->radio.spreading_factor>=11) ||
+                        (custom->radio.bandwidth_khz==250&&custom->radio.spreading_factor==12))); break;
+    case 0x8c: assert(length == 7 && out[2] == (custom ? custom->preamble : 8) &&
+                     (out[4] == 36 || (custom && out[4] == 255)) && out[5] == 1 && out[6] == 0); break;
     case 0x0e: assert(out[1] == 0 && length == 38); memcpy(air,out+2,36); break;
     case 0x83:
-        assert(length == 4 && out[1] == 0 && out[2] == 0x25 && out[3] == 0x80);
+        assert(length == 4);
+        assert((((uint32_t)out[1]<<16)|((uint32_t)out[2]<<8)|out[3]) ==
+               (custom ? link_profile_timeout_ms(custom)*64u : 9600u));
         ++tx_count; break;
     case 0x12:
         if (timeout_irq) in[2] = 2;
         else if (!never_done) in[3] = 1;
         break;
     case 0x17: in[3] = device_error; break;
-    case 0x1d: assert(length == 5 && out[1] == 8 && out[2] == 0xd8); in[4] = 0x81; break;
+    case 0x1d: assert(length == 5 && out[1] == 8 && (out[2] == 0xd8 || (custom && out[2]==0x89))); in[4] = 0x81; break;
     case 0x0d:
         assert((out[1] == 8 && out[2] == 0xd8 && out[3] == 0x9f) ||
+               (custom && out[1]==8 && out[2]==0x89 && out[3]==(custom->radio.bandwidth_khz==500?0x81:0x85)) ||
                (out[1] == 7 && out[2] == 0x40 && out[3] == 0x14 && out[4] == 0x24));
         break;
     default: assert(out[0] == 0x80 || out[0] == 0x08 || out[0] == 0x02 || out[0] == 0x82);
@@ -59,6 +71,7 @@ static void fresh(void) {
     memset(&link,0,sizeof(link)); memset(&receiver,0,sizeof(receiver));
     clock_us = tx_count = config_count = release_count = frames = 0;
     fail_opcode = timeout_irq = never_done = device_error = 0; config_error = 0;
+    custom=0;
     assert(!link_test_configure(&receiver));
     assert(receiver.active.frequency_hz == LINK_FREQUENCY_HZ && !tx_count);
 }
@@ -97,6 +110,28 @@ int main(void) {
     assert(link_test_send(&link,&receiver,20000,id,nonce) == SX1262_RX_STATE_ERROR && before == frames);
     fresh(); fail_opcode = 0x0d;
     assert(link_test_configure(&receiver) == SX1262_SPI_ERROR && receiver.state == SX1262_RX_FAULT);
+    fresh();
+    link_profile_t profile;
+    link_profile_default(&profile); custom=&profile;
+    assert(!link_profile_validate(&profile));
+    assert(link_profile_airtime_us(&profile)==77056u && link_profile_timeout_ms(&profile)==128u);
+    assert(!link_profile_configure(&receiver,&profile));
+    profile.radio.frequency_hz=868300000u; profile.radio.bandwidth_khz=500;
+    assert(!link_profile_validate(&profile));
+    int32_t restore=123;
+    assert(!link_profile_configure(&receiver,&profile) && !link_profile_send(&receiver,&profile,air,&restore) && !restore);
+    profile.radio.frequency_hz=869850000u;
+    assert(link_profile_validate(&profile));
+    profile.radio.bandwidth_khz=125; profile.radio.spreading_factor=12;
+    profile.preamble=32; profile.coding_rate=4;
+    assert(!link_profile_validate(&profile) && link_profile_airtime_us(&profile)==3547136u);
+    assert(!link_profile_send(&receiver,&profile,air,&restore) && !restore);
+    never_done=1;
+    assert(link_profile_send(&receiver,&profile,air,&restore)==LINK_TX_TIMEOUT);
+    assert(!restore && receiver.state==SX1262_RX_RUNNING);
+    before=frames;
+    profile.radio.frequency_hz=868000000;
+    assert(link_profile_configure(&receiver,&profile)==SX1262_RX_CONFIG_ERROR && frames==before);
     puts("PASS: explicit LoRa TX, fixed 0 dBm/timeout/profile, payload CRC/challenge, spacing/budget, failures and RX restore");
     return 0;
 }

@@ -17,6 +17,19 @@ typedef struct {
     int32_t error, restore_error;
 } link_test_t;
 
+typedef struct {
+    sx1262_rx_config_t radio;
+    uint32_t coding_rate, preamble;
+} link_profile_t;
+
+void link_profile_default(link_profile_t *profile);
+int32_t link_profile_validate(const link_profile_t *profile);
+uint32_t link_profile_airtime_us(const link_profile_t *profile);
+uint32_t link_profile_timeout_ms(const link_profile_t *profile);
+int32_t link_profile_configure(sx1262_receiver_t *rx, const link_profile_t *profile);
+int32_t link_profile_send(sx1262_receiver_t *rx, const link_profile_t *profile,
+                          const uint8_t payload[LINK_PACKET_SIZE], int32_t *restore_error);
+
 int32_t link_test_configure(sx1262_receiver_t *rx);
 /* Fixed 36-byte/0 dBm/150 ms TX, then private-profile RX restore.
    Caller must enforce airtime spacing; not linked into receive-only monitor. */

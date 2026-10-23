@@ -43,7 +43,7 @@ LINK_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
     "src/main_link_test.c", "src/lora/receiver.c", "src/lora/link_test.c",
     "src/lora/packet_record.c",
 )
-REMOTE_SOURCES = MONITOR_SOURCES + ("src/lora/link_test.c", "src/app/health.c")
+REMOTE_SOURCES = MONITOR_SOURCES + ("src/lora/link_test.c", "src/app/health.c", "src/app/experiment.c")
 
 
 def dashboard_assets(output):
@@ -247,6 +247,8 @@ def tests(args):
         "activity_test": ("src/lora/activity.c",),
         "link_test": ("src/lora/link_test.c", "src/usb/report.c"),
         "health_test": ("src/app/health.c", "src/usb/report.c", "src/net/http.c"),
+        "experiment_test": ("src/app/experiment.c", "src/app/health.c", "src/lora/link_test.c",
+                            "src/usb/report.c", "src/net/http.c"),
         "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c",
                           "src/lora/packet_record.c", "src/usb/report.c"),
         "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "tools/lorawan.c", "src/usb/report.c"),
