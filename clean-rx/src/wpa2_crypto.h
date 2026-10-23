@@ -22,6 +22,7 @@ void wpa_secret_binding(const uint8_t secret[64], const uint8_t bssid[6],
                          uint8_t channel, uint8_t out[20]);
 void wpa_hmac(const uint8_t *key, uint32_t kn, const uint8_t *p, uint32_t n, uint8_t out[20]);
 int wpa_pmk(const uint8_t *password, uint32_t n, const uint8_t *ssid, uint32_t sn, uint8_t pmk[32]);
+int wpa_psk(const uint8_t *credential, uint32_t n, const uint8_t *ssid, uint32_t sn, uint8_t pmk[32]);
 void wpa_ptk(const uint8_t pmk[32], const uint8_t ap[6], const uint8_t sta[6],
              const uint8_t anonce[32], const uint8_t snonce[32], uint8_t ptk[48]);
 void wpa_aes_init(wpa_aes_t *a, const uint8_t key[16]);

@@ -76,7 +76,7 @@ $(BUILD)/collector: collector.c frames.h station.h ../src/wpa2_crypto.c ../src/m
 		$< ../peer/network.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
-test: $(NATIVE_TESTS)
+test: $(NATIVE_TESTS) $(BUILD)/collector
 	$(BUILD)/loader_test
 	$(BUILD)/loader_strict_test
 	$(BUILD)/wpa2_test
@@ -86,6 +86,7 @@ test: $(NATIVE_TESTS)
 	node network_verify.cjs --self-test
 	node lifecycle_verify.cjs --self-test
 	node qualification_verify.cjs --self-test
+	node wpa2_verify.cjs --self-test $(BUILD)/collector
 	bash -n lifecycle_probe.sh
 	bash -n qualification_probe.sh
 	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh
@@ -93,6 +94,7 @@ test: $(NATIVE_TESTS)
 	bash -n mac_soak.sh
 	bash -n ht_probe.sh
 	bash -n wpa2_trial.sh
+	bash -n wpa2_matrix.sh
 
 $(NATIVE_TESTS): $(HEADERS) $(ROOT)/src/tools/diagnostics_logic.c $(BUILD)/build_id.h | $(BUILD)
 

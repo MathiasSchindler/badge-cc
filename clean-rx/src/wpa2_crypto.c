@@ -91,7 +91,7 @@ void wpa_hmac(const uint8_t *key, uint32_t kn, const uint8_t *p, uint32_t n, uin
 }
 
 int wpa_pmk(const uint8_t *password, uint32_t n, const uint8_t *ssid, uint32_t sn, uint8_t pmk[32]) {
-    if (n < 8u || n > 63u || !sn || sn > 32u) return 0;
+    if (n < 8u || n > 63u || !sn || sn > 32u) { wpa_wipe(pmk,32u); return 0; }
     uint8_t salt[36], u[20], t[20];
     badger_bytes_zero(salt,sizeof(salt));
     badger_bytes_copy(salt,ssid,sn);
@@ -106,6 +106,24 @@ int wpa_pmk(const uint8_t *password, uint32_t n, const uint8_t *ssid, uint32_t s
         badger_bytes_copy(pmk+(block-1u)*20u,t,block==1u?20u:12u);
     }
     wpa_wipe(salt,sizeof(salt)); wpa_wipe(u,sizeof(u)); wpa_wipe(t,sizeof(t));
+    return 1;
+}
+
+static int hex_digit(uint8_t c) {
+    if (c>='0' && c<='9') return c-'0';
+    if (c>='a' && c<='f') return c-'a'+10;
+    if (c>='A' && c<='F') return c-'A'+10;
+    return -1;
+}
+
+int wpa_psk(const uint8_t *credential, uint32_t n, const uint8_t *ssid,
+             uint32_t sn, uint8_t pmk[32]) {
+    if (n!=64u) return wpa_pmk(credential,n,ssid,sn,pmk);
+    wpa_wipe(pmk,32u);
+    if (!sn || sn>32u) return 0;
+    for (uint32_t i=0u;i<64u;++i) if (hex_digit(credential[i])<0) return 0;
+    for (uint32_t i=0u;i<32u;++i)
+        pmk[i]=(uint8_t)((hex_digit(credential[2u*i])<<4u)|hex_digit(credential[2u*i+1u]));
     return 1;
 }
 

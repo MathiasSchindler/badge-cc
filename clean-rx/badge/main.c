@@ -626,7 +626,11 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     uint8_t tx[512];
     uint32_t pending = 0u;
     uint8_t pending_key = 0u;
-    while (!l->error && !wpa.error && l->wire->now_us(l->wire->context)-started<3000000u) {
+    while (!l->error && !wpa.error) {
+        uint32_t retry_length;
+        int retry=clean_wpa_poll(&wpa,l->wire->now_us(l->wire->context),tx,&retry_length);
+        if (retry<0) break;
+        if (retry) { pending=retry_length; pending_key=1u; }
         uint32_t size;
         if (!station_receive(l,mac,&size)) break;
         if (size>=18u) {
@@ -641,7 +645,7 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
                 clean_station_forget_association(&station_ap);
                 badger_bytes_store_u32(detail+568u,(uint32_t)reason);
                 badger_bytes_store_u32(detail+524u,5u);
-                wpa.error=WPA_FORMAT; break;
+                (void)clean_wpa_abort(&wpa,WPA_ASSOCIATION); break;
             }
             uint32_t length;
             int result=clean_wpa_receive(&wpa,m,size-18u,tx,&length);
@@ -675,7 +679,8 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
             last_probe=tick;
         }
     }
-    if (!wpa.error && wpa.stage!=WPA_PROTECTED) wpa.error=l->error?WPA_TRANSPORT:WPA_TIMEOUT;
+    if (!wpa.error && wpa.stage!=WPA_PROTECTED)
+        (void)clean_wpa_abort(&wpa,l->error?WPA_TRANSPORT:WPA_TIMEOUT);
     badger_bytes_store_u32(detail+1640u,0x32575043u);
     badger_bytes_store_u32(detail+1644u,wpa.stage);
     badger_bytes_store_u32(detail+1648u,wpa.error);
@@ -685,6 +690,7 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     badger_bytes_store_u32(detail+1664u,wpa.m4);
     badger_bytes_store_u32(detail+1668u,wpa.protected_rx);
     badger_bytes_store_u32(detail+1672u,wpa.gtk_info);
+    badger_bytes_store_u32(detail+1676u,wpa.retransmissions);
     badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+16u,wpa.amsdu_rx);
     badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+20u,wpa.amsdu_subframes);
     clean_station_qos_report_at(&wpa.rx_mac,&wpa.rx_qos,detail,CLEAN_STATION_PROTECTED_DETAIL);

@@ -2,12 +2,14 @@
 #define CLEAN_PEER_QUALIFICATION_H
 #include "../../src/radio/wifi_link.h"
 #include "../../src/shared/bytes.h"
+#include "../src/wpa2_crypto.h"
 
 #define CLEAN_QUALIFICATION_AP_MODE 5u
 
 typedef struct {
     wifi_link_ops_t backend;
     uint32_t channel;
+    const uint8_t *pmk;
 } clean_qualification_t;
 
 static inline int clean_qualification_channel(uint32_t channel) {
@@ -21,7 +23,17 @@ static inline int clean_qualification_control(void *context, uint32_t command,
         uint8_t *reply, uint32_t capacity, uint32_t *received) {
     clean_qualification_t *q = context;
     if (!q || !q->backend.control || !clean_qualification_channel(q->channel)) return 0;
-    uint8_t adjusted[10];
+    uint8_t adjusted[68];
+    if (command == 268u && set && interface == 1u && q->pmk) {
+        if (size != 68u) return 0;
+        badger_bytes_zero(adjusted,sizeof(adjusted));
+        adjusted[0] = 32u;
+        badger_bytes_copy(adjusted + 4u,q->pmk,32u);
+        int ok = q->backend.control(q->backend.context,command,set,interface,
+            adjusted,sizeof(adjusted),reply,capacity,received);
+        wpa_wipe(adjusted,sizeof(adjusted));
+        return ok;
+    }
     if (command == 2u && set && !interface) {
         static const uint8_t name[] = {'n','m','o','d','e',0u};
         badger_bytes_copy(adjusted,name,sizeof(name));
@@ -56,6 +68,6 @@ static inline int clean_qualification_verify(clean_qualification_t *q, uint8_t e
     return badger_bytes_load_u32(evidence) == q->channel &&
         badger_bytes_load_u32(evidence + 4u) == q->channel &&
         badger_bytes_load_u32(evidence + 8u) == clean_qualification_nmode(q->channel) &&
-        !badger_bytes_load_u32(evidence + 12u);
+        badger_bytes_load_u32(evidence + 12u) == (q->pmk ? 4u : 0u);
 }
 #endif

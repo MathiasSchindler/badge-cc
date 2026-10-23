@@ -1,6 +1,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <fcntl.h>
+#include "protected_ap.h"
 #include "protocol.h"
 #include "frame.h"
 #include "lifecycle.h"
@@ -52,6 +54,83 @@ static int write_evidence(const char *path, const uint8_t report[64],
 
 static void print_mac(const uint8_t mac[6]) {
     for (uint32_t i = 0u; i < 6u; ++i) printf("%s%02x", i ? ":" : "", mac[i]);
+}
+
+static int collect_protected(libusb_device_handle *device, const char *path,
+        uint8_t nonce[16], uint32_t channel, uint32_t seconds,
+        const char *credentials, const char *serial) {
+    uint8_t secret[64], digest[20], request[64], report[64], trace[CLEAN_PEER_TRACE_BYTES];
+    char password[33], ssid[24], text[64];
+    FILE *rng=fopen("/dev/urandom","rb");
+    if (!rng) { perror("AP credential randomness"); return 0; }
+    int ok=fread(secret,1u,sizeof(secret),rng)==sizeof(secret);
+    if (fclose(rng)) ok=0;
+    if (!ok) { wpa_wipe(secret,sizeof(secret)); fputs("AP randomness read failed\n",stderr); return 0; }
+    for (uint32_t i=0u;i<16u;++i) snprintf(password+2u*i,3u,"%02x",secret[i]);
+    int sn=snprintf(ssid,sizeof(ssid),"U26LAB-%02x%02x%02x%02x",nonce[0],nonce[1],nonce[2],nonce[3]);
+    ok=sn==15 && wpa_psk((const uint8_t *)password,32u,(const uint8_t *)ssid,15u,secret);
+    int size=snprintf(text,sizeof(text),"%s\n%s\n",ssid,password);
+    wpa_wipe(password,sizeof(password));
+    int fd=open(credentials,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+    if (fd<0) { perror("Create private AP credentials"); ok=0; }
+    else {
+        if (!ok || size<=0 || size>=(int)sizeof(text) || write(fd,text,(size_t)size)!=size) {
+            fputs("Write AP credentials failed\n",stderr); ok=0;
+        }
+        if (close(fd)) { perror("Close AP credentials"); ok=0; }
+    }
+    wpa_wipe(text,sizeof(text));
+    nonce[5]=(uint8_t)seconds; nonce[14]=CLEAN_PROTECTED_AP_MODE; nonce[15]=(uint8_t)channel;
+    wpa_secret_binding(secret,nonce,nonce[15],digest); memcpy(nonce+6u,digest,8u);
+    if (ok) ok=transfer(device,0x40u,LIVE_USB_CLEAN_SECRET,secret,sizeof(secret));
+    wpa_wipe(secret,sizeof(secret)); wpa_wipe(digest,sizeof(digest));
+    if (!ok) return 0;
+    usb_report_request_for_test(request,USB_REPORT_BUILD_ID,nonce,3u);
+    if (!transfer(device,0x40u,LIVE_USB_FW_SUBMIT,request,sizeof(request))) return 0;
+    clean_protected_ap_report_t ap;
+    memset(&ap,0,sizeof(ap));
+    int announced=0, finished=0, observed=0;
+    for (uint32_t i=0u;i<(seconds+20u)*20u;++i) {
+        if (ap_cancel) { fputs("Protected AP cancelled; requesting BOOTSEL\n",stderr); return 0; }
+        int n=libusb_control_transfer(device,0xc0u,LIVE_USB_FW_REPORT,0u,0u,report,64u,1000u);
+        if (n==LIBUSB_ERROR_PIPE) { usleep(50000u); continue; }
+        if (n!=64 || !clean_peer_report_valid(report,nonce,USB_REPORT_BUILD_ID) ||
+            !read_trace(device,report,trace)) {
+            fputs("Protected AP report binding/read failed\n",stderr); return 0;
+        }
+        memcpy(&ap,trace+CLEAN_PROTECTED_AP_DETAIL,sizeof(ap));
+        observed=1;
+        if (usb_report_u32(trace)!=CLEAN_PEER_MAGIC ||
+            usb_report_u32(trace+20u)!=CLEAN_PROTECTED_AP_MODE ||
+            ap.magic!=CLEAN_PROTECTED_AP_MAGIC) {
+            fputs("Protected AP evidence layout invalid\n",stderr); return 0;
+        }
+        if (!announced && ap.state==1u) {
+            printf("{\"test\":\"e1-ap-ready\",\"channel\":%u,\"ssid\":\"%s\",\"bssid\":\"",channel,ssid);
+            print_mac(ap.mac); puts("\"}");
+            if (fflush(stdout)) { perror("Protected AP readiness flush"); return 0; }
+            announced=1;
+        }
+        if (ap.state!=1u) { finished=1; break; }
+        usleep(50000u);
+    }
+    if (!observed) { fputs("Protected AP produced no evidence before deadline\n",stderr); return 0; }
+    if (!write_evidence(path,report,trace)) return 0;
+    int configured=usb_report_u32(trace+28u)==channel && usb_report_u32(trace+32u)==channel &&
+        usb_report_u32(trace+36u)==clean_qualification_nmode(channel) &&
+        usb_report_u32(trace+40u)==4u && ap.wpa_auth==0x80u && ap.channel==channel;
+    int valid=finished && configured && ap.state==2u && !ap.error &&
+        ap.authorized && ap.received && ap.received==ap.echoed;
+    printf("{\"test\":\"e1-ap-result\",\"serial\":\"%s\",\"build\":\"%08x\",\"valid\":%s,"
+           "\"state\":%u,\"error\":%u,\"operation\":%u,\"configuration_verified\":%s,"
+           "\"channel\":%u,\"nmode\":%u,\"wsec\":%u,\"wpa_auth\":%u,"
+           "\"authorized\":%s,\"received\":%u,\"echoed\":%u,\"bssid\":\"",
+           serial,USB_REPORT_BUILD_ID,valid?"true":"false",ap.state,ap.error,ap.operation,configured?"true":"false",
+           ap.channel,usb_report_u32(trace+36u),usb_report_u32(trace+40u),ap.wpa_auth,
+           ap.authorized?"true":"false",ap.received,ap.echoed);
+    print_mac(ap.mac); fputs("\",\"peer\":\"",stdout); print_mac(ap.peer); puts("\"}");
+    if (!valid) fputs("Protected AP qualification failed; raw evidence retained\n",stderr);
+    return valid;
 }
 
 static int collect_ap(libusb_device_handle *device, const char *path,
@@ -161,7 +240,7 @@ static int collect_network(libusb_device_handle *device, const char *path,
 
 static int collect(libusb_device_handle *device, const char *path, const uint8_t *challenge,
                    int monitor, uint32_t ap_seconds, uint32_t ap_cycles, int network,
-                   uint32_t ap_channel, const char *serial) {
+                   uint32_t ap_channel, const char *serial, const char *protected_credentials) {
     uint8_t info[12], nonce[16], request[64], report[64], trace[CLEAN_PEER_TRACE_BYTES];
     const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
@@ -175,6 +254,8 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     int ok = fread(nonce, 1u, sizeof(nonce), random) == sizeof(nonce);
     if (fclose(random)) ok = 0;
     if (!ok) { fputs("Cannot read a fresh peer nonce\n", stderr); return 0; }
+    if (protected_credentials)
+        return collect_protected(device,path,nonce,ap_channel,ap_seconds,protected_credentials,serial);
     nonce[14] = monitor ? 2u : 0u;
     if (challenge) {
         memcpy(nonce, challenge, 14u);
@@ -257,15 +338,17 @@ int main(int argc, char **argv) {
     int monitor = argc == 4 && !strcmp(argv[3], "--monitor-probe");
     int network = argc == 6 && !strcmp(argv[3], "--network-ap");
     int qualification = argc == 7 && !strcmp(argv[3], "--qualification-ap");
-    int ap = network || qualification || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
+    int protected = argc == 7 && !strcmp(argv[3], "--protected-ap");
+    int ap = protected || network || qualification || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
     uint32_t ap_seconds = 0u, ap_cycles = 0u, ap_channel = 0u;
     if ((argc != 3 && !tx && !monitor && !ap) || strlen(argv[1]) != 16u) {
         fputs("Usage: collector SERIAL EVIDENCE_BIN [--tx-multicast CHALLENGE_HEX_28 | --monitor-probe | --lifecycle-ap CHALLENGE_HEX_28 SECONDS:8-120 CYCLES:0-5]\n", stderr);
         fputs("Continuous AP: collector SERIAL EVIDENCE_BIN --network-ap CHALLENGE_HEX_28 SECONDS:10-3900\n",stderr);
         fputs("B3 AP: collector SERIAL EVIDENCE_BIN --qualification-ap CHALLENGE_HEX_28 SECONDS:8-120 CHANNEL:1,6,11\n",stderr);
+        fputs("E1 AP: collector SERIAL EVIDENCE_BIN --protected-ap CHANNEL:1,6,11 SECONDS:12-120 PRIVATE_CREDENTIAL_OUT\n",stderr);
         return 2;
     }
-    if (tx || ap) {
+    if ((tx || ap) && !protected) {
         if (strlen(argv[4]) != 28u) return 2;
         for (uint32_t i = 0u; i < 14u; ++i) {
             unsigned value = 0u;
@@ -285,7 +368,13 @@ int main(int argc, char **argv) {
         if (!*argv[5] || *end || seconds < (network?10u:8u) || seconds > (network?3900u:120u)) {
             fputs("AP duration must be lifecycle 8..120 or network 10..3900 seconds\n", stderr); return 2;
         }
-        unsigned long cycles = network ? 0u : strtoul(argv[6], &end, 10);
+        unsigned long cycles = network || protected ? 0u : strtoul(argv[6], &end, 10);
+        if (protected) {
+            unsigned long channel=strtoul(argv[4],&end,10);
+            if (!*argv[4] || *end || channel>11u || !clean_qualification_channel((uint32_t)channel) ||
+                seconds<12u) { fputs("E1 AP requires channel 1/6/11 and 12..120 seconds\n",stderr); return 2; }
+            ap_channel=(uint32_t)channel;
+        }
         if (qualification) {
             if (!*argv[6] || *end || !clean_qualification_channel((uint32_t)cycles) ||
                 cycles > 11u) {
@@ -293,7 +382,7 @@ int main(int argc, char **argv) {
             }
             ap_channel = (uint32_t)cycles; cycles = 0u;
         }
-        if (!network && !qualification && (!*argv[6] || *end || cycles > 5u ||
+        if (!network && !qualification && !protected && (!*argv[6] || *end || cycles > 5u ||
             (cycles && seconds < 11u * cycles + 10u))) {
             fputs("Lifecycle AP requires 0..5 outages and time for all cycles\n", stderr); return 2;
         }
@@ -321,8 +410,9 @@ int main(int argc, char **argv) {
     if (!status && configuration != 1) status = libusb_set_configuration(device, 1);
     if (!status) status = libusb_claim_interface(device, 0);
     int ok = 0;
-    if (!status) ok = collect(device, argv[2], tx || ap ? challenge : NULL,
-                             monitor, ap_seconds, ap_cycles, network, ap_channel, argv[1]);
+    if (!status) ok = collect(device, argv[2], tx || (ap && !protected) ? challenge : NULL,
+                             monitor, ap_seconds, ap_cycles, network, ap_channel, argv[1],
+                             protected?argv[6]:NULL);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     if (fflush(stdout)) { perror("Vendor peer JSON flush"); ok = 0; }
     int rebooted = transfer(device, 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);

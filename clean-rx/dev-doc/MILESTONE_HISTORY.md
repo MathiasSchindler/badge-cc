@@ -1053,15 +1053,123 @@ WPA2-Enterprise/EAP and obsolete cipher compatibility are separate projects.
 
 ### E1. Robust four-way handshake
 
-- [ ] Harden timers, bounded retransmissions, duplicate handling, replay
+- [x] Harden timers, bounded retransmissions, duplicate handling, replay
   counters and AP compatibility while retaining MIC/ANonce/RSN validation.
-- [ ] Support the documented passphrase and raw 256-bit PSK provisioning
+- [x] Support the documented passphrase and raw 256-bit PSK provisioning
   formats without logging secrets or retaining stale provisioning state.
-- [ ] Verify wrong credentials, malformed key data, altered MIC/nonce/RSN,
+- [x] Verify wrong credentials, malformed key data, altered MIC/nonce/RSN,
   unexpected transitions and duplicate M3 without key reinstallation.
-- [ ] Complete 10 consecutive fresh protected connections against the
+- [x] Complete 10 consecutive fresh protected connections against the
   controlled AP, followed by the additional AP configurations from B3.
   Record association failures separately from handshake failures.
+
+#### E1 implementation and qualification, 2026-10-23
+
+The portable supplicant now owns an eight-second absolute deadline and four
+500-ms local retransmissions per M2/M4 phase. Polling continues even while a
+controller submission is pending. Duplicate input cannot extend either budget.
+M1 retransmissions may advance replay with the same ANonce; M3 retransmissions
+must authenticate and preserve normalized key contents even when their replay
+counter advances. Neither reinstalls PTK/GTK nor resets TX/RX packet numbers.
+Zero or changed nonces, unsupported/malformed pinned RSN, stale replay, changed
+keys, malformed key data and wrong MICs fail explicitly. Timeout/transport/
+departure failures wipe software keys and fragment plaintext.
+
+Passphrase and case-insensitive raw 64-hex-digit PSK inputs use the same owned,
+private, two-line file reader. Invalid inputs wipe the PMK output. A fresh
+OS-random SNonce and request/BSSID/channel binding retain one-use provisioning.
+The exclusive mode-600 `--derive-psk` command lets the actual hardware runner
+alternate both provisioning paths without logging secret values.
+
+Native ASan/UBSan tests cover independent vectors, min/max lengths, every bad
+raw-hex position, timer wrap, absent M1, lost M3/M4, duplicate retry budgets,
+equal/advanced/stale counters, MIC/nonce/RSN/GTK rejection, and unchanged keys/
+PNs under accepted M3 retransmissions. Host tests invoke the real collector
+for private-file formats, malformed/NUL input, permissions and exclusive output.
+The archive oracle checks independent AP/station raw counters and identities;
+its matrix tests reject missing, reused and wrong-target sessions.
+
+The Pico vendor peer adds opt-in protected mode 6 without changing shared
+vendor/platform sources. It reads back channel, nmode, CCMP and WPA2-PSK auth,
+provisions a raw PMK rather than a public-nonce-derived password, and echoes
+only an exact, authorized, addressed 38-byte application challenge.
+
+Initial hardware campaign `build/clean-rx/e1-20261023/hardware/matrix01-*`
+rejected all 13 initial fixture trials before AP readiness. The new AP consumed
+its secret too late: not-ready USB report polling intentionally stalls, and
+the shared USB stall path wipes unconsumed provisioning. This was not an
+over-the-air handshake failure. Consumption now occurs immediately on taking
+the submitted request, before clock calibration or firmware loading can poll
+USB. A native test exercises the actual provisioning/submit/not-ready-stall
+sequence and proves early consumption, one-use binding and invalid-input
+wiping. AP operation codes localize subsequent configuration/data failures.
+Both borrowed originals were fully restored, read back and compared after
+that failed campaign.
+
+The qualification matrix separately requires ten controlled channel-1
+connections, then three channel-6 and three channel-11 connections, alternating
+passphrase/raw PSK. Three additional wrong-password controls must never
+authorize or exchange protected traffic. One failed row fails the campaign;
+retained successful rows are not spliced across campaigns.
+
+Campaign `matrix02-*` then reached authentication, association and M2 in all
+16 positive trials, but every M3 failed the old GTK parser's reserved-byte
+check (`gtk_kde` examples `f60218`, `fe0218`, `2d0218`). The independently
+authenticated/unwrapped KDE had the correct 24-byte length and key-ID byte
+`02`; only its reserved byte was nonzero. The public
+[hostap reference receiver](https://w1.fi/cgit/hostap/plain/src/rsn_supp/wpa.c)
+(`wpa_supplicant_pairwise_gtk`) masks the key ID and skips the reserved byte
+rather than rejecting it. The parser now ignores reserved bits/bytes only
+after MIC and wrap-integrity verification, preserving length/uniqueness,
+pinned RSN and GTK checks. Duplicate M3 is reauthenticated/unwrapped and
+compared against the installed GTK/key ID, not a ciphertext fingerprint, so
+changing ignored reserved fields cannot cause a false reinstall or failure.
+Native tests reproduce byte `f6`, all reserved flag bits, and authenticated
+changed GTK/key-ID rejection with unchanged PNs on accepted retransmissions.
+All three wrong-password controls associated and submitted M2, then rejected
+a new ANonce without authorizing or exchanging protected data. The oracle
+accepts that explicit terminal rejection, not only timeout/MIC/departure.
+Both originals were again fully restored/read back/compared after `matrix02`.
+
+Campaign `build/clean-rx/e1-20261023/hardware/matrix03-*` passed all 19 trials:
+ten consecutive controlled channel-1 protected connections, followed by three
+channel-6 and three channel-11 protected connections, then one wrong-password
+control per profile. All 16 positives independently verified their protected
+echo and AP authorization; eight used passphrases and eight raw PSKs.
+All three negatives associated/submitted M2 but installed no key, sent no M4,
+and exchanged no protected data at either endpoint. The matrix retained five
+timer-generated retry events (not necessarily all submitted on air).
+No association/handshake/transport failure occurred in a positive trial.
+Station build `5265041c` and Pico AP `93bf26c0` were consistent throughout.
+The exact AP image and matching collector were preserved in
+`build/clean-rx/e1-20261023/qualified03-peer/`.
+
+The strengthened oracle re-read every raw pair and reproduced the successful
+matrix byte-for-byte. Native negative tests reject missing/reused sessions,
+wrong devices, changed builds, mismatched raw counters/configuration and
+invalid private credential files, including exact maximum-length files.
+The AP collector's no-report timeout now explicitly fails without writing
+uninitialized archive buffers; this is a host error-path guard, not a radio
+or handshake change.
+
+Both borrowed full originals were restored and compared after `matrix03`:
+badge `08DA26F86E57F5EA`, 16 MiB, SHA-256
+`02ff81bb2e453010f8517eb2df0391d569d285ed4ac97bfa275d4493c044b7ac`;
+Pico `6572BE3E4636AF51`, 4 MiB, SHA-256
+`f26bc587c863623426a4d0eeb0624c8f01e8fb150de7fe4c2ac28fe43c00e486`.
+The other badge was not modified. E1 is qualified for these bounded legacy
+connections; the E2/E3/B3 mesh/persistence and A/B2 reliability gates remain open.
+
+The final host-only missing-report guard changed the aggregate AP build ID to
+`e08283ff`, without changing radio/handshake behavior. The additional
+`hardware/control04-*` trial passed with station `5265041c`: one M2/M3/M4,
+one independently verified protected echo, no timer-generated retries.
+Its final full 16 MiB/4 MiB readbacks matched the same original hashes above;
+both devices were restored again after this last control.
+
+These are bounded legacy-client connections against one vendor AP
+implementation. They do not close B3's mesh/persistence requirements, E2 rekey/
+group traffic, E3/B2 hour-long operation, or negotiated HT qualification.
 
 ### E2. Group traffic and rekey
 

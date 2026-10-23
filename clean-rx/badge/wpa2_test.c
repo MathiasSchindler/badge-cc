@@ -56,6 +56,35 @@ static void crypto(void) {
     expected(out,"1d93b7dfbc04e28d2d14d3bc9c52566b62f5880acd9bff233bc207a89a734849a4d9906338d8966a61703bae214a0c83");
 }
 
+static void provisioning(void) {
+    uint8_t pmk[32], passphrase[63], ssid[32], raw[64];
+    memset(passphrase,'p',sizeof(passphrase)); memset(ssid,'s',sizeof(ssid));
+    const char *known="f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e";
+    assert(wpa_psk((const uint8_t *)"password",8u,(const uint8_t *)"IEEE",4u,pmk));
+    expected(pmk,known);
+    memcpy(raw,known,64u);
+    assert(wpa_psk(raw,64u,ssid,32u,pmk)); expected(pmk,known);
+    for (uint32_t i=0u;i<64u;++i) if (raw[i]>='a' && raw[i]<='f') raw[i]-=32u;
+    assert(wpa_psk(raw,64u,ssid,32u,pmk)); expected(pmk,known);
+    for (uint32_t i=0u;i<64u;++i) {
+        uint8_t saved=raw[i]; raw[i]='g'; memset(pmk,0xa5,32u);
+        assert(!wpa_psk(raw,64u,ssid,32u,pmk));
+        for (uint32_t j=0u;j<32u;++j) assert(!pmk[j]);
+        raw[i]=saved;
+    }
+    assert(wpa_psk(passphrase,63u,ssid,32u,pmk));
+    const uint32_t lengths[]={0u,7u,65u};
+    for (uint32_t i=0u;i<3u;++i) {
+        memset(pmk,0xa5,32u);
+        assert(!wpa_psk(raw,lengths[i],ssid,32u,pmk));
+        for (uint32_t j=0u;j<32u;++j) assert(!pmk[j]);
+    }
+    assert(!wpa_psk(raw,64u,ssid,0u,pmk));
+    assert(!wpa_psk(raw,64u,ssid,33u,pmk));
+    for (uint32_t j=0u;j<32u;++j) assert(!pmk[j]);
+    puts("E1 provisioning: passphrase/raw PSK vectors, mixed hex, length boundaries and invalid-input wiping pass");
+}
+
 static const uint8_t rsn[22]={48u,20u,1u,0u,0u,15u,172u,4u,1u,0u,0u,15u,172u,4u,1u,0u,0u,15u,172u,2u,0u,0u};
 
 static void binding(void) {
@@ -79,14 +108,23 @@ static void binding(void) {
     assert(!wpa_equal(digest,changed,8u));
 }
 
-static uint32_t wrap(const uint8_t key[16], const uint8_t plain[48], uint8_t out[56]) {
-    wpa_aes_t aes; wpa_aes_init(&aes,key); memset(out,0xa6,8u); memcpy(out+8u,plain,48u);
+static uint32_t wrap_size(const uint8_t key[16], const uint8_t *plain, uint32_t size, uint8_t *out) {
+    assert(size>=16u && size<=256u && !(size&7u));
+    uint32_t count=size/8u;
+    wpa_aes_t aes; wpa_aes_init(&aes,key); memset(out,0xa6,8u); memcpy(out+8u,plain,size);
     uint8_t block[16];
-    for (unsigned j=0u;j<6u;++j) for (unsigned i=1u;i<=6u;++i) {
+    for (unsigned j=0u;j<6u;++j) for (unsigned i=1u;i<=count;++i) {
         memcpy(block,out,8u); memcpy(block+8u,out+8u*i,8u); wpa_aes_encrypt(&aes,block,block);
-        memcpy(out,block,8u); out[7]^=(uint8_t)(6u*j+i); memcpy(out+8u*i,block+8u,8u);
+        memcpy(out,block,8u);
+        uint32_t t=count*j+i;
+        for (uint32_t b=0u;b<4u;++b) out[7u-b]^=(uint8_t)(t>>(8u*b));
+        memcpy(out+8u*i,block+8u,8u);
     }
-    return 56u;
+    return size+8u;
+}
+
+static uint32_t wrap(const uint8_t key[16], const uint8_t plain[48], uint8_t out[56]) {
+    return wrap_size(key,plain,48u,out);
 }
 
 static uint32_t incoming(clean_wpa_t *s, uint8_t m[512], int m3) {
@@ -137,7 +175,7 @@ static void key_data_failures(clean_wpa_t before) {
         s=before; n=incoming(&s,m,1);
         assert(wpa_unwrap(s.ptk+16u,m+32u+99u,56u,plain));
         if (fault==0u) plain[21]^=1u;
-        if (fault==1u) plain[28]=0x80u;
+        if (fault==1u) plain[23]=21u;
         if (fault==2u) plain[47]=1u;
         if (fault==3u) plain[1]=255u;
         if (fault==4u) plain[22]=1u;
@@ -145,6 +183,22 @@ static void key_data_failures(clean_wpa_t before) {
         assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && !s.installed);
         assert(s.error==(fault==0u?WPA_RSN:fault==1u || fault==4u?WPA_GTK:WPA_FORMAT));
         for (unsigned i=0u;i<48u;++i) assert(!s.ptk[i]);
+    }
+    for (uint32_t duplicate=0u;duplicate<2u;++duplicate) {
+        s=before; n=incoming(&s,m,1);
+        assert(wpa_unwrap(s.ptk+16u,m+32u+99u,56u,plain));
+        uint8_t repeated[72]={0};
+        memcpy(repeated,plain,46u);
+        uint32_t bytes=duplicate?24u:22u;
+        memcpy(repeated+46u,plain+(duplicate?22u:0u),bytes);
+        repeated[46u+bytes]=221u;
+        uint8_t *e=m+32u;
+        e[98]=(uint8_t)wrap_size(s.ptk+16u,repeated,sizeof(repeated),e+99u);
+        e[3]=(uint8_t)(95u+e[98]); n=36u+99u+e[98];
+        sign_key(&s,m,n);
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 &&
+               s.error==(duplicate?WPA_GTK:WPA_RSN) && !s.installed);
+        for (uint32_t i=0u;i<16u;++i) assert(!s.gtk[i]);
     }
     s=before; n=incoming(&s,m,1); s.ptk[0]^=1u;
     assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_MIC);
@@ -644,15 +698,110 @@ static void handshake(void) {
     protected_aggregates(s);
     s.tx_pn[0]=5u; s.rx_pn[0][0]=9u;
     assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && s.tx_pn[0]==5u && s.rx_pn[0][0]==9u);
-    s=before; m[32u+81u]^=1u; badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    clean_wpa_t installed=s;
+    m[48]=3u; sign_key(&s,m,n);
+    assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && s.tx_pn[0]==5u &&
+           s.rx_pn[0][0]==9u && s.replay[7]==3u &&
+           !memcmp(s.ptk,installed.ptk,48u) && !memcmp(s.gtk,installed.gtk,16u));
+    m[48]=2u; sign_key(&s,m,n);
+    assert(clean_wpa_receive(&s,m,n,tx,&size)==-1 && s.error==WPA_REPLAY);
+    s=installed; n=incoming(&s,m,1); m[48]=4u;
+    m[32u+99u]^=1u; sign_key(&s,m,n);
+    assert(clean_wpa_receive(&s,m,n,tx,&size)==-1 && s.error==WPA_UNWRAP && !s.installed);
+    uint8_t plain[48];
+    for (uint32_t change=0u;change<4u;++change) {
+        s=installed; n=incoming(&s,m,1); m[48]=4u;
+        assert(wpa_unwrap(s.ptk+16u,m+32u+99u,56u,plain));
+        if (change==0u) plain[29]=0xf6u;
+        if (change==1u) plain[28]|=0xf8u;
+        if (change==2u) plain[30]^=1u;
+        if (change==3u) plain[28]^=1u;
+        wrap(s.ptk+16u,plain,m+32u+99u); sign_key(&s,m,n);
+        if (change<2u) {
+            assert(clean_wpa_receive(&s,m,n,tx,&size)==1 &&
+                s.tx_pn[0]==5u && s.rx_pn[0][0]==9u &&
+                !memcmp(s.ptk,installed.ptk,48u) && !memcmp(s.gtk,installed.gtk,16u));
+        } else assert(clean_wpa_receive(&s,m,n,tx,&size)==-1 &&
+                      s.error==WPA_REPLAY && !s.installed);
+    }
+    s=installed; n=incoming(&s,m,1); m[32u+81u]^=1u;
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_receive(&s,m,n,tx,&size)==-1 && s.error==WPA_MIC && !s.installed);
+    s=installed; s.stage=WPA_PROTECTED;
+    n=incoming(&s,m,1); m[48]=3u; sign_key(&s,m,n);
+    assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && s.stage==WPA_PROTECTED &&
+           s.tx_pn[0]==5u && s.rx_pn[0][0]==9u);
+    assert(!clean_wpa_poll(&s,0u,tx,&size));
+    assert(!clean_wpa_poll(&s,CLEAN_WPA_DEADLINE_US,tx,&size));
+    assert(clean_wpa_abort(&s,WPA_TRANSPORT)==-1 && !s.installed && s.error==WPA_TRANSPORT);
+    for (uint32_t i=0u;i<48u;++i) assert(!s.ptk[i]);
+    s=before; n=incoming(&s,m,1); m[32u+81u]^=1u;
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
     assert(clean_wpa_receive(&s,m,n,tx,&size)==-1 && s.error==WPA_MIC && !s.installed);
     s=before; n=incoming(&s,m,1); m[48]=1u;
     badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
     assert(clean_wpa_receive(&s,m,n,tx,&size)==-1 && s.error==WPA_REPLAY);
 }
 
+static void handshake_timers(void) {
+    uint8_t secret[64], mac[6]={2u,6u,7u,8u,9u,10u}, ap[6]={2u,1u,2u,3u,4u,5u};
+    memset(secret,1,32u); memset(secret+32u,3,32u);
+    clean_wpa_t s;
+    uint8_t m[512], tx[512], first[512]; uint32_t length, n;
+    const uint32_t start=0xffff0000u;
+    clean_wpa_init(&s,secret,mac,ap,rsn,22u);
+    assert(!clean_wpa_poll(&s,start,tx,&length));
+    assert(!clean_wpa_poll(&s,start+CLEAN_WPA_DEADLINE_US-1u,tx,&length));
+    assert(clean_wpa_poll(&s,start+CLEAN_WPA_DEADLINE_US,tx,&length)==-1 && s.error==WPA_TIMEOUT);
+    for (uint32_t i=0u;i<32u;++i) assert(!s.pmk[i] && !s.snonce[i]);
+    for (uint32_t phase=0u;phase<2u;++phase) {
+        clean_wpa_init(&s,secret,mac,ap,rsn,22u);
+        assert(!clean_wpa_poll(&s,start,tx,&length));
+        n=incoming(&s,m,0); assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+        if (phase) {
+            n=incoming(&s,m,1); assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+            s.tx_pn[0]=42u; s.rx_pn[0][0]=17u; s.stage=WPA_M4_SENT;
+        }
+        memcpy(first,tx,length);
+        for (uint32_t i=1u;i<=CLEAN_WPA_MAX_RETRIES;++i) {
+            assert(!clean_wpa_poll(&s,start+i*CLEAN_WPA_RETRY_US-1u,tx,&length));
+            assert(clean_wpa_poll(&s,start+i*CLEAN_WPA_RETRY_US,tx,&length)==1);
+            assert(length==(phase?141u:163u) && !memcmp(first+38u,tx+38u,length-42u));
+            assert(s.retransmissions==i && s.installed==phase);
+            if (phase) assert(s.tx_pn[0]==42u && s.rx_pn[0][0]==17u);
+            /* Incoming duplicates must not reset the local retry budget. */
+            assert(clean_wpa_receive(&s,m,n,tx,&length)==1 && s.retries==i);
+        }
+        assert(clean_wpa_poll(&s,start+(CLEAN_WPA_MAX_RETRIES+1u)*CLEAN_WPA_RETRY_US,
+                              tx,&length)==-1 && s.error==WPA_TIMEOUT && !s.installed);
+        for (uint32_t i=0u;i<48u;++i) assert(!s.ptk[i]);
+    }
+    clean_wpa_init(&s,secret,mac,ap,rsn,22u);
+    assert(!clean_wpa_poll(&s,start,tx,&length));
+    n=incoming(&s,m,0); assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+    uint8_t ptk[48]; memcpy(ptk,s.ptk,48u);
+    m[48]=2u; badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==1 && !memcmp(ptk,s.ptk,48u) && tx[54]==2u);
+    m[48]=1u; badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_REPLAY);
+    clean_wpa_init(&s,secret,mac,ap,rsn,22u);
+    n=incoming(&s,m,0); assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+    m[49]^=1u; badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_NONCE && !s.installed);
+    clean_wpa_init(&s,secret,mac,ap,rsn,22u);
+    n=incoming(&s,m,0); memset(m+49u,0,32u);
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_NONCE);
+    uint8_t bad_rsn[22]; memcpy(bad_rsn,rsn,22u); bad_rsn[19]=1u;
+    clean_wpa_init(&s,secret,mac,ap,bad_rsn,22u);
+    assert(s.error==WPA_RSN && !s.installed);
+    memset(secret+32u,0,32u);
+    clean_wpa_init(&s,secret,mac,ap,rsn,22u); assert(s.error==WPA_NONCE);
+    puts("E1 handshake: M1/M3/M4 loss, bounded retries/deadline, timer wrap, duplicate budgets, advanced/stale replay, nonce/RSN rejection and PN preservation pass");
+}
+
 int main(void) {
-    crypto(); aggregate_crypto(); binding(); handshake();
+    crypto(); provisioning(); aggregate_crypto(); binding(); handshake(); handshake_timers();
     puts("WPA2: independent crypto vectors, handshake, MIC/replay and no reinstall pass");
     puts("WPA2: authenticated 16-fragment RX, 2304-byte bounds, PN carry/continuity, expiry and plaintext wiping pass");
     return 0;

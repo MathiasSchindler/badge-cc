@@ -4,6 +4,7 @@
 #include "protocol.h"
 #include "frame.h"
 #include "lifecycle_usb.h"
+#include "protected_ap.h"
 #include "../../src/shared/bytes.h"
 
 static void frame_tests(void) {
@@ -123,7 +124,54 @@ static void monitor_tests(void) {
     assert(!clean_peer_monitor_supported(trace));
 }
 
+static void protected_secret_tests(void) {
+    live_usb_control_t usb;
+    uint8_t secret[64], pmk[32], nonce[16]={1u}, digest[20], taken[16], request[64];
+    nonce[5]=16u; nonce[14]=CLEAN_PROTECTED_AP_MODE; nonce[15]=6u;
+    memset(secret,0xa5,sizeof(secret));
+    wpa_secret_binding(secret,nonce,nonce[15],digest); memcpy(nonce+6u,digest,8u);
+    const uint8_t provision[8]={0x40u,LIVE_USB_CLEAN_SECRET,0u,0u,0u,0u,64u,0u};
+    const uint8_t submit[8]={0x40u,LIVE_USB_FW_SUBMIT,0u,0u,0u,0u,64u,0u};
+    const uint8_t poll[8]={0xc0u,LIVE_USB_FW_REPORT,0u,0u,0u,0u,64u,0u};
+    for (uint32_t early=0u;early<2u;++early) {
+        live_usb_control_init(&usb,123u,"0102030405060708"); usb.configured=1u;
+        live_usb_control_setup(&usb,provision);
+        live_usb_control_complete(&usb,0u,secret,sizeof(secret));
+        live_usb_control_complete(&usb,1u,0,0u);
+        assert(usb.clean_secret_ready);
+        usb_report_request_for_test(request,123u,nonce,3u);
+        live_usb_control_setup(&usb,submit);
+        live_usb_control_complete(&usb,0u,request,sizeof(request));
+        live_usb_control_complete(&usb,1u,0,0u);
+        assert(live_usb_probe_take(&usb,taken));
+        if (early) {
+            assert(clean_protected_ap_take_secret(pmk,usb.clean_secret,&usb.clean_secret_ready,taken));
+            live_usb_control_setup(&usb,poll);
+            assert(usb.phase==USB_PHASE_STALL);
+            assert(!memcmp(pmk,secret,32u));
+        } else {
+            live_usb_control_setup(&usb,poll);
+            assert(usb.phase==USB_PHASE_STALL);
+            assert(!clean_protected_ap_take_secret(pmk,usb.clean_secret,&usb.clean_secret_ready,taken));
+            for (uint32_t i=0u;i<32u;++i) assert(!pmk[i]);
+        }
+        assert(!usb.clean_secret_ready);
+        for (uint32_t i=0u;i<64u;++i) assert(!usb.clean_secret[i]);
+        assert(!clean_protected_ap_take_secret(pmk,usb.clean_secret,&usb.clean_secret_ready,taken));
+        for (uint32_t i=0u;i<32u;++i) assert(!pmk[i]);
+    }
+    for (uint32_t fault=0u;fault<4u;++fault) {
+        memcpy(usb.clean_secret,secret,64u); usb.clean_secret_ready=1u;
+        memcpy(taken,nonce,16u);
+        taken[fault==0u?6u:fault==1u?14u:fault==2u?15u:5u]^=1u;
+        assert(!clean_protected_ap_take_secret(pmk,usb.clean_secret,&usb.clean_secret_ready,taken));
+        for (uint32_t i=0u;i<32u;++i) assert(!pmk[i]);
+    }
+    puts("E1 AP secret: real provisioning/submit/not-ready-stall sequence, early consumption, single-use binding and failed-input wiping pass");
+}
+
 int main(void) {
+    protected_secret_tests();
     frame_tests();
     monitor_tests();
     uint8_t control[CLEAN_PEER_CONTROL_BYTES], set;

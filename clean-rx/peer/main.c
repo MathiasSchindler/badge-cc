@@ -4,6 +4,7 @@
 #include "lifecycle_usb.h"
 #include "network.h"
 #include "qualification.h"
+#include "protected_ap.h"
 #include "build_id.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -24,6 +25,7 @@ static uint32_t run_limit = 16000000u;
 static uint8_t evidence[CLEAN_PEER_TRACE_BYTES];
 static wifi_link_t link;
 static clean_network_t network;
+static uint8_t protected_pmk[32], protected_secret_valid;
 static int service(void *context, const wifi_fw_report_t *report);
 #if CLEAN_PEER_PICO
 int32_t pr_clock_sys(void);
@@ -47,6 +49,79 @@ static int link_control(void *context, uint32_t command, uint8_t set, uint8_t in
                                     reply, capacity, received);
     link.report.controller_status = firmware.controller_status;
     return ok;
+}
+
+static void protected_ap(const uint8_t nonce[16], const uint8_t report[64]) {
+    clean_protected_ap_report_t ap;
+    badger_bytes_zero((uint8_t *)&ap,sizeof(ap));
+    ap.magic=CLEAN_PROTECTED_AP_MAGIC; ap.state=1u; ap.channel=nonce[15];
+    for (uint32_t i=0u;i<6u;++i) ap.mac[i]=clean_peer_mac_byte(nonce,i);
+    ap.operation=1u;
+    int ok=protected_secret_valid;
+    wifi_link_ops_t backend={.context=0,.control=link_control};
+    clean_qualification_t q={.backend=backend,.channel=ap.channel,.pmk=protected_pmk};
+    wifi_link_ops_t ops={.context=&q,.control=clean_qualification_control};
+    wifi_link_init(&link,&ops,WIFI_LINK_AP,nonce,ap.mac);
+    wpa_wipe(link.password,sizeof(link.password));
+    if (ok) { ap.operation=2u; ok=wifi_link_configure(&link); }
+    if (ok) { ap.operation=3u; ok=clean_qualification_verify(&q,evidence+28u); }
+    wpa_wipe(protected_pmk,sizeof(protected_pmk)); protected_secret_valid=0u;
+    if (ok) {
+        ap.operation=4u;
+        static const uint8_t name[]={'w','p','a','_','a','u','t','h',0u};
+        uint8_t request[32], reply[32]; uint32_t size=0u;
+        badger_bytes_zero(request,sizeof(request));
+        badger_bytes_copy(request,name,sizeof(name));
+        ok=link_control(0,262u,0u,1u,request,sizeof(request),reply,sizeof(reply),&size) &&
+            size>=4u && (ap.wpa_auth=badger_bytes_load_u32(reply))==0x80u;
+    }
+    badger_bytes_store_u32(evidence+20u,CLEAN_PROTECTED_AP_MODE);
+    const wifi_wire_t *wire=wifi_board_wire();
+    uint32_t started=wire->now_us(wire->context), published=started, polled=started-100000u;
+    uint8_t data_enabled=0u;
+    badger_bytes_copy(evidence+CLEAN_PROTECTED_AP_DETAIL,(const uint8_t *)&ap,sizeof(ap));
+    if (ok) ok=clean_lifecycle_snapshot(&control,generation,report,evidence,0u);
+    while (ok && wire->now_us(wire->context)-started<(uint32_t)nonce[5]*1000000u) {
+        if (!service(0,0)) { ok=0; break; }
+        uint32_t now=wire->now_us(wire->context);
+        if (now-polled>=100000u) {
+            ap.operation=5u;
+            ok=wifi_link_poll(&link); polled=now;
+            if (!ok) break;
+            ap.authorized=link.report.authorized;
+            if (link.report.peer_count) badger_bytes_copy(ap.peer,link.report.peer,6u);
+        }
+        if (ap.authorized && !data_enabled) {
+            ap.operation=6u;
+            ok=wifi_firmware_data_enable();
+            if (!ok) break;
+            data_enabled=1u;
+        }
+        if (data_enabled && ap.authorized) {
+            ap.operation=7u;
+            static uint8_t frame[1514];
+            uint8_t interface; uint32_t length;
+            int received=wifi_firmware_read_frame(frame,&length,&interface);
+            if (received<0) { ok=0; break; }
+            if (received && interface==1u &&
+                clean_protected_ap_echo(frame,length,ap.mac,ap.peer)) {
+                ++ap.received; badger_bytes_copy(ap.token,frame+22u,16u);
+                ap.operation=8u;
+                if (!wifi_firmware_send_frame(1u,frame,38u)) { ok=0; break; }
+                ++ap.echoed;
+            }
+        }
+        if (now-published>=100000u) {
+            badger_bytes_copy(evidence+CLEAN_PROTECTED_AP_DETAIL,(const uint8_t *)&ap,sizeof(ap));
+            ok=clean_lifecycle_snapshot(&control,generation,report,evidence,1u);
+            published=now;
+        }
+    }
+    ap.state=ok?2u:3u;
+    if (ok) ap.operation=9u;
+    if (!ok) ap.error=firmware.error?firmware.error:0x100u;
+    badger_bytes_copy(evidence+CLEAN_PROTECTED_AP_DETAIL,(const uint8_t *)&ap,sizeof(ap));
+    wpa_wipe(&link,sizeof(link));
 }
 
 static void network_ap(const uint8_t nonce[16], const uint8_t report[64]) {
@@ -333,14 +408,18 @@ static void probe(const uint8_t nonce[16]) {
     badger_bytes_store_u32(evidence + 12u, assets->clm_crc);
     badger_bytes_store_u32(evidence + 16u, CLEAN_PEER_RECORDS);
     badger_bytes_store_u32(evidence + 20u, nonce[14] == 2u ? 2u : 1u);
-    run_limit = nonce[14] == CLEAN_NETWORK_AP_MODE ?
+    run_limit = nonce[14] == CLEAN_PROTECTED_AP_MODE ? ((uint32_t)nonce[5]+20u)*1000000u :
+        nonce[14] == CLEAN_NETWORK_AP_MODE ?
         ((uint32_t)(nonce[12] | (uint32_t)nonce[13] << 8u) + 25u) * 1000000u :
-        (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_QUALIFICATION_AP_MODE) ?
+        (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_QUALIFICATION_AP_MODE ||
+         nonce[14] == CLEAN_PROTECTED_AP_MODE) ?
         ((uint32_t)nonce[13] + 20u) * 1000000u : 16000000u;
     int ready = wifi_firmware_begin(wifi_board_wire(), assets, &firmware, service, 0);
     uint8_t report[64];
     wifi_firmware_report(report, USB_REPORT_BUILD_ID, nonce, &firmware);
-    if (ready && nonce[14] == CLEAN_NETWORK_AP_MODE) {
+    if (ready && nonce[14] == CLEAN_PROTECTED_AP_MODE) {
+        protected_ap(nonce,report);
+    } else if (ready && nonce[14] == CLEAN_NETWORK_AP_MODE) {
         network_ap(nonce, report);
     } else if (ready && (nonce[14] == CLEAN_LIFECYCLE_AP_MODE ||
                         nonce[14] == CLEAN_QUALIFICATION_AP_MODE)) {
@@ -370,9 +449,11 @@ static void probe(const uint8_t nonce[16]) {
         }
     }
     wifi_firmware_stop();
+    wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
+    wpa_wipe(protected_pmk,sizeof(protected_pmk)); protected_secret_valid=0u;
     if (!usb_error && !control.reboot_requested) {
         if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE ||
-            nonce[14] == CLEAN_QUALIFICATION_AP_MODE) {
+            nonce[14] == CLEAN_QUALIFICATION_AP_MODE || nonce[14] == CLEAN_PROTECTED_AP_MODE) {
             if (!clean_lifecycle_snapshot(&control, generation, report, evidence, 1u))
                 usb_error = -102;
         } else {
@@ -404,8 +485,11 @@ void bare_main(void) {
         uint8_t nonce[16];
         generation = live_usb_probe_take(&control, nonce);
         if (!usb_error && generation) {
+            /* Consume before clock/firmware polling can stall a not-ready report. */
+            protected_secret_valid=(uint8_t)clean_protected_ap_take_secret(protected_pmk,
+                control.clean_secret,&control.clean_secret_ready,nonce);
             if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE ||
-                nonce[14] == CLEAN_QUALIFICATION_AP_MODE)
+                nonce[14] == CLEAN_QUALIFICATION_AP_MODE || nonce[14] == CLEAN_PROTECTED_AP_MODE)
                 usb_error = nametag_clock_reference();
             if (usb_error) break;
             run_started = recovery_at = *(volatile uint32_t *)0x400b000cu;
@@ -414,10 +498,14 @@ void bare_main(void) {
             wifi_board_select_pio(1u);
             if (measure_clock(nonce[14] == CLEAN_LIFECYCLE_AP_MODE ||
                               nonce[14] == CLEAN_NETWORK_AP_MODE ||
-                              nonce[14] == CLEAN_QUALIFICATION_AP_MODE)) probe(nonce);
+                              nonce[14] == CLEAN_QUALIFICATION_AP_MODE ||
+                              nonce[14] == CLEAN_PROTECTED_AP_MODE)) probe(nonce);
         }
     }
     wifi_firmware_stop();
+    wpa_wipe(protected_pmk,sizeof(protected_pmk));
+    wpa_wipe(control.clean_secret,sizeof(control.clean_secret));
+    protected_secret_valid=control.clean_secret_ready=0u;
     if (!usb_error && control.reboot_requested) {
         uint32_t started = *(volatile uint32_t *)0x400b000cu;
         while (!usb_error && *(volatile uint32_t *)0x400b000cu - started < 10000u)

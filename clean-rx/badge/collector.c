@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <fcntl.h>
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
 #include "../../src/shared/bytes.h"
@@ -236,6 +237,58 @@ static int monotonic_us(uint64_t *value) {
     return 1;
 }
 
+static int read_credentials(const char *path, char ssid[34], uint8_t pmk[32]) {
+    char password[66];
+    wpa_wipe(pmk,32u);
+    FILE *file=fopen(path,"r");
+    if (!file) { perror("Credentials"); return 0; }
+    struct stat permissions;
+    if (fstat(fileno(file),&permissions)!=0) {
+        perror("Credential permissions"); fclose(file); return 0;
+    }
+    if (!S_ISREG(permissions.st_mode) || (permissions.st_mode&0077u) ||
+        permissions.st_uid!=geteuid()) {
+        fputs("Credentials must be an owned, private regular file (chmod 600)\n",stderr);
+        fclose(file); return 0;
+    }
+    int valid=fgets(ssid,34u,file)!=NULL && fgets(password,sizeof(password),file)!=NULL &&
+              fgetc(file)==EOF;
+    if (fclose(file)) valid=0;
+    uint32_t sn=valid?(uint32_t)strcspn(ssid,"\n"):0u;
+    uint32_t pn=valid?(uint32_t)strcspn(password,"\n"):0u;
+    valid=valid && sn<=32u && pn<=64u && ssid[sn]=='\n' && password[pn]=='\n' &&
+          wpa_psk((const uint8_t *)password,pn,(const uint8_t *)ssid,sn,pmk);
+    wpa_wipe(password,sizeof(password));
+    if (!valid) {
+        wpa_wipe(pmk,32u);
+        fputs("Expected SSID and an 8-63-byte passphrase or 64 hexadecimal PSK digits, one line each\n",stderr);
+    }
+    return valid;
+}
+
+static int derive_psk(const char *input, const char *output) {
+    char ssid[34], text[100];
+    uint8_t pmk[32];
+    if (!read_credentials(input,ssid,pmk)) return 0;
+    uint32_t sn=(uint32_t)strcspn(ssid,"\n");
+    memcpy(text,ssid,sn+1u);
+    for (uint32_t i=0u;i<32u;++i) snprintf(text+sn+1u+2u*i,3u,"%02x",pmk[i]);
+    text[sn+65u]='\n';
+    wpa_wipe(pmk,sizeof(pmk));
+    int fd=open(output,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);
+    int ok=fd>=0;
+    if (!ok) perror("Create private raw PSK file");
+    else {
+        if (write(fd,text,sn+66u)!=(ssize_t)(sn+66u)) {
+            perror("Write raw PSK file"); ok=0;
+        }
+        if (close(fd)) { perror("Close raw PSK file"); ok=0; }
+        if (!ok && unlink(output)) perror("Remove incomplete raw PSK file");
+    }
+    wpa_wipe(text,sizeof(text));
+    return ok;
+}
+
 static int collect(libusb_device_handle *device, const char *path, uint8_t channel,
                    uint8_t tx, const uint8_t *challenge, const uint8_t *target,
                    const char *serial, const char *credentials, uint32_t lifecycle_seconds) {
@@ -260,31 +313,10 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         nonce[13] = (uint8_t)(lifecycle_seconds >> 8u);
     }
     if (tx==18u) {
-        char ssid[34], password[65];
+        char ssid[34];
         uint8_t secret[64], digest[20];
-        FILE *file=fopen(credentials,"r");
-        if (!file) { perror("Credentials"); return 0; }
-        struct stat permissions;
-        if (fstat(fileno(file),&permissions)!=0) {
-            perror("Credential permissions"); fclose(file); return 0;
-        }
-        if (!S_ISREG(permissions.st_mode) || (permissions.st_mode&0077u) ||
-            permissions.st_uid!=geteuid()) {
-            fputs("Credentials must be an owned, private regular file (chmod 600)\n",stderr);
-            fclose(file); return 0;
-        }
-        int valid=fgets(ssid,sizeof(ssid),file)!=NULL && fgets(password,sizeof(password),file)!=NULL &&
-                  fgetc(file)==EOF;
-        if (fclose(file)) valid=0;
-        uint32_t sn=valid?(uint32_t)strcspn(ssid,"\n"):0u;
-        uint32_t pn=valid?(uint32_t)strcspn(password,"\n"):0u;
-        valid=valid && sn<=32u && pn<=63u && ssid[sn]=='\n' && password[pn]=='\n' &&
-              wpa_pmk((const uint8_t *)password,pn,(const uint8_t *)ssid,sn,secret);
-        wpa_wipe(password,sizeof(password));
-        if (!valid) {
-            wpa_wipe(secret,sizeof(secret));
-            fputs("Expected SSID and an 8-63-byte passphrase, one line each\n",stderr); return 0;
-        }
+        int valid=read_credentials(credentials,ssid,secret);
+        if (!valid) { wpa_wipe(secret,sizeof(secret)); return 0; }
         FILE *rng=fopen("/dev/urandom","rb");
         if (!rng) { perror("SNonce random source"); wpa_wipe(secret,sizeof(secret)); return 0; }
         valid=fread(secret+32u,1u,32u,rng)==32u;
@@ -1149,7 +1181,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                "\"own_rx_candidates\":%u,\"association_candidate_bytes\":%u,"
                "\"eapol_m1_received\":%s,\"eapol_m1_count\":%u,"
                "\"wpa_stage\":%u,\"wpa_error\":%u,\"m2_sent\":%u,\"m3_validated\":%u,"
-               "\"m4_sent\":%u,\"protected_echoes\":%u,\"gtk_kde\":\"%06x\","
+               "\"m4_sent\":%u,\"protected_echoes\":%u,\"gtk_kde\":\"%06x\",\"handshake_retries\":%u,"
                "\"mac_rx_report\":%s,\"mac_delivered\":%u,\"mac_duplicates\":%u,"
                "\"mac_fragments\":%u,\"mac_malformed\":%u,\"mac_unsupported\":%u,"
                "\"mac_expired\":%u,\"mac_fragment_errors\":%u,"
@@ -1184,6 +1216,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                tx==18u?usb_report_u32(detail+1656u):0u,tx==18u?usb_report_u32(detail+1660u):0u,
                tx==18u?usb_report_u32(detail+1664u):0u,tx==18u?usb_report_u32(detail+1668u):0u,
                tx==18u?usb_report_u32(detail+1672u):0u,
+               tx==18u?usb_report_u32(detail+1676u):0u,
                usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL)==CLEAN_STATION_MAC_MAGIC?"true":"false",
                usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+4u),
                usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+8u),
@@ -1374,6 +1407,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
 }
 
 int main(int argc, char **argv) {
+    if (argc==4 && !strcmp(argv[1],"--derive-psk")) return derive_psk(argv[2],argv[3])?0:1;
     if (argc == 4 && strcmp(argv[1], "--inspect-peer") == 0)
         return inspect_peer(argv[2], argv[3]) ? 0 : 1;
     if (argc == 4 && strcmp(argv[1], "--inspect") == 0)

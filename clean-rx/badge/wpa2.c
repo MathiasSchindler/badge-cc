@@ -21,8 +21,19 @@ static int failure(clean_wpa_t *s, uint8_t error) {
     }
     wpa_wipe(s->rx_mpdu,sizeof(s->rx_mpdu)); wpa_wipe(s->fragment_pn,sizeof(s->fragment_pn));
     wpa_wipe(s->qos_fragment_pn,sizeof(s->qos_fragment_pn));
+    wpa_wipe(s->snonce,sizeof(s->snonce)); wpa_wipe(s->anonce,sizeof(s->anonce));
     s->installed=0u;
     return -1;
+}
+
+int clean_wpa_abort(clean_wpa_t *s, uint8_t error) {
+    return failure(s,error?error:WPA_TRANSPORT);
+}
+
+static int nonzero(const uint8_t *p, uint32_t n) {
+    uint8_t bits=0u;
+    for (uint32_t i=0u;i<n;++i) bits|=p[i];
+    return bits!=0u;
 }
 
 void clean_wpa_init(clean_wpa_t *s, const uint8_t secret[64], const uint8_t mac[6],
@@ -30,19 +41,24 @@ void clean_wpa_init(clean_wpa_t *s, const uint8_t secret[64], const uint8_t mac[
     wpa_wipe(s,sizeof(*s));
     badger_bytes_copy(s->pmk,secret,32u); badger_bytes_copy(s->snonce,secret+32u,32u);
     badger_bytes_copy(s->mac,mac,6u); badger_bytes_copy(s->bssid,ap,6u);
-    if (rn>sizeof(s->rsn) || rn<20u) { (void)failure(s,WPA_RSN); return; }
+    if (rn>sizeof(s->rsn) || rn<20u || rsn[0]!=48u || rsn[1]!=rn-2u ||
+        clean_station_rsn(rsn+2u,rn-2u)!=CLEAN_AP_PSK_CCMP) {
+        (void)failure(s,WPA_RSN); return;
+    }
+    if (!nonzero(s->snonce,32u)) { (void)failure(s,WPA_NONCE); return; }
     badger_bytes_copy(s->rsn,rsn,rn); s->rsn_length=rn;
 }
 
-static uint32_t response(clean_wpa_t *s, const uint8_t *incoming, int m4, uint8_t frame[512]) {
+static uint32_t response(clean_wpa_t *s, uint8_t version, const uint8_t replay[8],
+                          int m4, uint8_t frame[512]) {
     uint8_t *m=frame+6u, *e=m+32u;
     badger_bytes_zero(frame,512u);
     clean_station_header(m,8u,s->sequence++,s->mac,s->bssid);
     m[1]=1u; badger_bytes_copy(m+24u,snap,8u);
-    e[0]=incoming[0]; e[1]=3u;
+    e[0]=version; e[1]=3u;
     uint32_t n=m4?99u:121u;
     e[3]=(uint8_t)(n-4u); e[4]=2u; e[5]=m4?3u:1u; e[6]=10u;
-    badger_bytes_copy(e+9u,incoming+9u,8u);
+    badger_bytes_copy(e+9u,replay,8u);
     if (!m4) {
         badger_bytes_copy(e+17u,s->snonce,32u); e[98]=22u;
         badger_bytes_copy(e+99u,station_rsn,22u);
@@ -52,6 +68,22 @@ static uint32_t response(clean_wpa_t *s, const uint8_t *incoming, int m4, uint8_
     badger_bytes_store_u32(m+32u+n,diag_crc32(m,32u+n));
     (void)clean_ofdm_plcp_rate(frame,36u+n,0u);
     return 42u+n;
+}
+
+int clean_wpa_poll(clean_wpa_t *s, uint32_t now, uint8_t frame[512], uint32_t *length) {
+    *length=0u;
+    if (s->error) return -1;
+    s->clock=now;
+    if (!s->timer_started) {
+        s->timer_started=1u; s->started=s->retry_at=now;
+    }
+    if (s->stage==WPA_PROTECTED) return 0;
+    if (now-s->started>=CLEAN_WPA_DEADLINE_US) return failure(s,WPA_TIMEOUT);
+    if (s->stage==WPA_WAIT_M1 || now-s->retry_at<CLEAN_WPA_RETRY_US) return 0;
+    if (s->retries>=CLEAN_WPA_MAX_RETRIES) return failure(s,WPA_TIMEOUT);
+    ++s->retries; ++s->retransmissions; s->retry_at=now;
+    *length=response(s,s->eapol_version,s->replay,s->installed,frame);
+    return 1;
 }
 
 int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
@@ -74,28 +106,30 @@ int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
     uint32_t info=be16(e+5u);
     if (info==0x8au) {
         if (!clean_station_eapol_m1(m,n,s->mac,s->bssid)) return failure(s,WPA_FORMAT);
-        if (s->stage!=WPA_WAIT_M1 && (s->stage!=WPA_WAIT_M3 ||
-            !wpa_equal(e+9u,s->replay,8u) || !wpa_equal(e+17u,s->anonce,32u)))
-            return failure(s,WPA_REPLAY);
+        if (!nonzero(e+17u,32u)) return failure(s,WPA_NONCE);
+        if (s->stage!=WPA_WAIT_M1) {
+            if (s->stage!=WPA_WAIT_M3 ||
+                (!wpa_equal(e+9u,s->replay,8u) && !greater(e+9u,s->replay,8u)))
+                return failure(s,WPA_REPLAY);
+            if (!wpa_equal(e+17u,s->anonce,32u)) return failure(s,WPA_NONCE);
+        }
         if (s->stage==WPA_WAIT_M1) {
             badger_bytes_copy(s->replay,e+9u,8u); badger_bytes_copy(s->anonce,e+17u,32u);
             wpa_ptk(s->pmk,s->bssid,s->mac,s->anonce,s->snonce,s->ptk);
             s->stage=WPA_WAIT_M3;
+            s->retries=0u; s->retry_at=s->clock;
         }
-        ++s->m1; *length=response(s,e,0,frame); return 1;
+        badger_bytes_copy(s->replay,e+9u,8u); s->eapol_version=e[0];
+        ++s->m1; *length=response(s,e[0],e+9u,0,frame); return 1;
     }
     if (info!=0x13cau || s->stage==WPA_WAIT_M1) return failure(s,WPA_FORMAT);
-    uint8_t hash[20];
-    wpa_sha1(e,en,hash);
-    if (s->installed) {
-        if (!wpa_equal(hash,s->m3_hash,20u)) return failure(s,WPA_REPLAY);
-        ++s->m3; *length=response(s,e,1,frame); return 1;
-    }
-    if (!greater(e+9u,s->replay,8u)) return failure(s,WPA_REPLAY);
+    if (!greater(e+9u,s->replay,8u) &&
+        !(s->installed && wpa_equal(e+9u,s->replay,8u))) return failure(s,WPA_REPLAY);
     if (!wpa_equal(e+17u,s->anonce,32u)) return failure(s,WPA_NONCE);
     uint8_t copy[363], mic[20], plain[256];
     badger_bytes_copy(copy,e,en); badger_bytes_zero(copy+81u,16u);
-    wpa_hmac(s->ptk,16u,copy,en,mic); wpa_wipe(copy,sizeof(copy));
+    wpa_hmac(s->ptk,16u,copy,en,mic);
+    wpa_wipe(copy,sizeof(copy));
     int valid=wpa_equal(mic,e+81u,16u); wpa_wipe(mic,sizeof(mic));
     if (!valid) return failure(s,WPA_MIC);
     uint32_t wrapped=en-99u;
@@ -116,7 +150,7 @@ int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
         } else if (plain[at]==221u && len>=6u && plain[at+2u]==0u &&
                    plain[at+3u]==15u && plain[at+4u]==172u && plain[at+5u]==1u) {
             s->gtk_info=len | (len>=8u?((uint32_t)plain[at+6u]<<8u)|((uint32_t)plain[at+7u]<<16u):0u);
-            if (gtk++ || len!=24u || (plain[at+6u]&0xf8u) || plain[at+7u]) {
+            if (gtk++ || len!=24u) {
                 error=WPA_GTK; break;
             }
             gtk_id=plain[at+6u]&3u; badger_bytes_copy(candidate,plain+at+8u,16u);
@@ -128,11 +162,19 @@ int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
         wpa_wipe(candidate,sizeof(candidate));
         return failure(s,error?error:!rsn?WPA_RSN:WPA_GTK);
     }
+    if (s->installed) {
+        int unchanged=s->gtk_id==gtk_id && wpa_equal(s->gtk,candidate,16u);
+        wpa_wipe(candidate,sizeof(candidate));
+        if (!unchanged) return failure(s,WPA_REPLAY);
+        badger_bytes_copy(s->replay,e+9u,8u); s->eapol_version=e[0];
+        ++s->m3; *length=response(s,e[0],e+9u,1,frame); return 1;
+    }
     badger_bytes_copy(s->gtk,candidate,16u); wpa_wipe(candidate,sizeof(candidate)); s->gtk_id=gtk_id;
-    badger_bytes_copy(s->replay,e+9u,8u); badger_bytes_copy(s->m3_hash,hash,20u);
+    badger_bytes_copy(s->replay,e+9u,8u);
     s->installed=1u; s->stage=WPA_KEYS; ++s->m3;
+    s->retries=0u; s->retry_at=s->clock; s->eapol_version=e[0];
     wpa_wipe(s->pmk,sizeof(s->pmk));
-    *length=response(s,e,1,frame);
+    *length=response(s,e[0],e+9u,1,frame);
     return 1;
 }
 

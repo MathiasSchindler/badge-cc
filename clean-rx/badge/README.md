@@ -478,8 +478,9 @@ build/clean-rx/badge/collector SERIAL evidence.bin CHANNEL \
 
 The credential file must be owned by the current user, have no group/other
 permissions (`chmod 600`), and contain exactly two LF-terminated lines: SSID
-(1..32 bytes), then passphrase (8..63 bytes). Raw 64-hex-digit PSKs are not
-accepted. The host derives the PMK using PBKDF2-HMAC-SHA1/4096 and provisions
+(1..32 bytes), then passphrase (8..63 bytes) or a raw PSK (exactly 64
+case-insensitive hexadecimal digits). The host derives passphrase PMKs using
+PBKDF2-HMAC-SHA1/4096, decodes raw PSKs without a second derivation, and provisions
 the PMK plus a fresh OS-random SNonce through clean-image-only USB command
 `0x67`. A hash binds the one-use provisioning to the BSSID, channel and request.
 The radio/badge programs remain freestanding C with no cryptographic library
@@ -488,7 +489,15 @@ or vendor radio executable.
 The supplicant derives KCK/KEK/TK, sends EAPOL messages 2/4, authenticates
 message 3, checks its ANonce/replay counter/RSN IE, unwraps its GTK using
 RFC3394 AES, and installs software CCMP state. Duplicate message 3 resends
-message 4 without reinstalling keys or resetting packet numbers. EAPOL MICs
+message 4 without reinstalling keys or resetting packet numbers. An advanced
+M3 replay counter is accepted only with a valid MIC and unchanged ANonce,
+RSN, GTK and key ID; stale counters and changed keys are rejected. Retransmitted M1
+may advance replay with the same ANonce without deriving a second PTK.
+An all-zero ANonce/SNonce, changed ANonce, malformed/unsupported pinned RSN,
+or failed MIC is an explicit failure with software keys wiped. GTK KDE reserved
+bits/bytes are ignored on reception, while their raw metadata remains visible;
+KDE length, uniqueness, authenticated key contents and key ID remain checked.
+EAPOL MICs
 cover the declared EAPOL length, not trailing MAC-payload padding. Physical
 SDIO staging is rounded to four bytes without changing the transmitted frame
 length or FCS. Old authentication retries are drained before association,
@@ -501,6 +510,17 @@ validated authentication/association responses. Merely building message 2,
 sending message 4, or observing the AP's authorization does not pass.
 `m2_sent`/`m4_sent` count completed controller submissions, not ACK confirmations.
 The TFT reports the verified protected exchange or an explicit failure.
+
+E1 uses a wrap-safe eight-second absolute deadline, including the initial M1
+wait. M2 and M4 each have at most four locally timed retransmissions at 500 ms
+intervals. Incoming duplicates do not reset that budget or the absolute
+deadline. `clean_wpa_poll` must run before RX/TX service, including while a
+controller transmission is pending. `handshake_retries` records timer-generated
+retries, which may be superseded by incoming traffic before submission.
+The existing submission counters also include responses to AP retransmissions.
+A MAC ACK is not authorization: only the protected echo
+completes the connection. Changed keys/restarts require a fresh connection and
+fresh OS-random SNonce; this is not E2 pairwise rekey support.
 
 Station policy command completion is now an applied/readback-verified commit
 barrier, not acknowledgement of deferred queueing.
@@ -532,7 +552,7 @@ reports. It does not flash either badge. The AP fixture exports a
 temporary passphrase only with explicit `--credentials-out`; neither collector
 logs passwords, PMKs, PTKs or GTKs.
 
-**Hardware qualification:** retained build `0ebad503` completed all four EAPOL
+**Earlier hardware qualification:** retained build `0ebad503` completed all four EAPOL
 messages and a protected round trip in three of five fresh positive trials,
 independently confirmed by the vendor AP (30, 38 and 37 stable peer observations).
 The other two trials failed before the key exchange because no association
@@ -543,6 +563,70 @@ still occurs in separate trials; this is not a reliable general station.
 An intermediate trial also rejected GTK key data; broader AP compatibility
 is unqualified. `gtk_kde` reports only KDE length/flags/reserved-byte metadata,
 never key bytes.
+
+### E1 protected Pico AP matrix
+
+Build the station normally and the Pico vendor peer with its explicit target:
+
+```sh
+make -C clean-rx/badge BUILD="$PWD/build/clean-rx/e1/badge" all test
+make -f clean-rx/peer/Makefile HT_PEER_BUILD=build/clean-rx/e1/peer-pico \
+  HT_PEER_PICO=1 ht-peer ht-peer-test
+```
+
+Back up each entire original flash before installing either image. Load the
+station image on the badge and the peer image on the Pico, leaving both in
+BOOTSEL. Restore both originals afterward and compare complete flash readbacks;
+the runners below deliberately do not flash or restore devices.
+
+```sh
+export CLEAN_RX_COLLECTOR=build/clean-rx/e1/badge/collector
+export CLEAN_RX_AP_COLLECTOR=build/clean-rx/e1/peer-pico/collector
+bash clean-rx/badge/wpa2_matrix.sh AP_SERIAL STATION_SERIAL NEW_PREFIX
+node clean-rx/badge/wpa2_verify.cjs --matrix NEW_PREFIX STATION_SERIAL AP_SERIAL
+
+# One fresh protected connection, optionally using --raw-psk or --wrong-password:
+bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL NEW_PREFIX \
+  --peer-ap 6 --raw-psk
+```
+
+The matrix requires ten consecutive controlled channel-1 connections, followed
+by three each on channels 6 and 11, alternating passphrase/raw-PSK provisioning.
+Three further fresh networks check wrong passwords, one per channel. Failed
+trials remain failures: there is no retry-until-pass or archive splicing.
+Each trial records both raw reports, target serials, build IDs, independent
+peer identities, channel/nmode/CCMP/WPA2-auth readbacks, protected RX/TX counts,
+and process exit codes. The oracle rejects stale sessions and mismatched raw
+evidence. Channel 11 enables mixed-HT on the AP only; the station stays legacy.
+This is one AP implementation, not three independent stacks.
+
+The new peer `--protected-ap CHANNEL SECONDS PRIVATE_CREDENTIAL_OUT` mode
+generates an independent random temporary passphrase and transfers its PMK
+through the one-use USB secret endpoint. Its password is not derived from the
+public request nonce. Provisioning is consumed before clock/firmware polling:
+a not-ready USB report intentionally stalls and wipes any unconsumed secret.
+Mode 6 reports the last operation on failure instead of guessing a setup stage.
+Temporary credential files are private and removed on normal completion or
+cancellation. `collector --derive-psk INPUT OUTPUT` converts a private credential
+file into a new, exclusive mode-600 raw-PSK file without printing secrets.
+
+E1's bounded connections do not qualify GTK traffic, group/pairwise rekey,
+mesh nodes, roaming, negotiated HT, or the still-open B2/E3 hour-long soak.
+
+**E1 hardware qualification, 2026-10-23:** campaign `matrix03` passed all
+16 fresh protected connections (10 on channel 1, three each on 6/11), with
+16 independently verified protected echoes. Eight connections used passphrases
+and eight raw PSKs. All three fresh wrong-password controls rejected without
+authorization, M4, or protected traffic. Station build `5265041c` and Pico AP
+build `93bf26c0` were bound to the retained raw archives; the exact qualified
+AP image/collector remain in `build/clean-rx/e1-20261023/qualified03-peer/`.
+The strict matrix and native tests pass. Full original badge/Pico flash
+readbacks matched after the campaign; the other badge was untouched.
+
+After adding a host-only guard against archiving an absent AP report, the
+final AP build `e08283ff` passed the additional `control04` protected RF
+exchange with station `5265041c`. Both full originals were again restored
+and readback-verified.
 
 Native ASan/UBSan tests cover independent SHA1/HMAC/PBKDF2/PTK/AES/CCMP
 known-answer vectors, unwrap integrity, padded/truncated EAPOL, wrong MIC/key,

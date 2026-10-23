@@ -371,16 +371,32 @@ the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualifica
 
 ## E. Complete WPA2 operation
 
-**Status: software-CCMP protected exchanges exist; full lifecycle is open.**
+**Status: E1 bounded handshake qualification passes; group traffic, rekey and
+sustained protected operation remain open.**
 Scope is WPA2-Personal/CCMP, not Enterprise/EAP or obsolete ciphers.
 
 ### E1. Robust four-way handshake
 
-- [ ] Complete bounded timers/retries and duplicate/replay/MIC/nonce/RSN handling.
-- [ ] Support passphrase and raw 256-bit PSK provisioning without stale secrets.
-- [ ] Verify wrong credentials and malformed/duplicate handshake traffic without
+- [x] Complete bounded timers/retries and duplicate/replay/MIC/nonce/RSN handling.
+- [x] Support passphrase and raw 256-bit PSK provisioning without stale secrets.
+- [x] Verify wrong credentials and malformed/duplicate handshake traffic without
   key reinstallation.
-- [ ] Verify ten consecutive protected connections and the B3 AP configurations.
+- [x] Verify ten consecutive protected connections and the B3 AP configurations.
+
+The E1 implementation has an absolute eight-second handshake deadline, four
+500-ms local retries per M2/M4 phase, authenticated advanced-counter M3
+retransmissions without reinstalling keys/resetting PNs, and failure wiping.
+Passphrases and raw 64-hex-digit PSKs share private, one-use provisioning.
+Native crypto/protocol/file-parser/oracle tests pass. The protected Pico AP
+matrix requires ten channel-1 connections, then three each on channels 6/11
+and three wrong-password controls. Campaign `matrix03` passed all 16 positive
+connections, with 16 independently verified protected echoes, and all three
+wrong-password controls. It alternated eight passphrases/eight raw PSKs and
+checked raw target identities, configuration readbacks, build consistency and
+fresh sessions. Both originals were fully restored/readback-verified.
+This qualifies bounded E1 connections against one vendor AP implementation,
+not mesh nodes, roaming, group/rekey traffic or the B2/E3 hour-long soak.
+See [E1 commands and boundaries](clean-rx/badge/README.md#e1-protected-pico-ap-matrix).
 
 ### E2. Group traffic and rekey
 
