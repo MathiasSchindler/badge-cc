@@ -99,6 +99,10 @@ int wmain(int argc, wchar_t **argv) {
     assert(parse(6, link_status_args, &options));
     assert(!parse(7, link_status_args, &options));
     assert(!parse(4, link_status_args, &options));
+    link_status_args[1] = L"link-send";
+    assert(parse(6, link_status_args, &options));
+    assert(!parse(7, link_status_args, &options));
+    assert(!parse(4, link_status_args, &options));
     link_args[5] = L"invalid";
     assert(!parse(8, link_args, &options));
     link_args[5] = L"6D64320DF2BB57D8"; link_args[1] = L"status";

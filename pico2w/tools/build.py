@@ -43,6 +43,7 @@ LINK_SOURCES = tuple(name for name in SOURCES if name != "src/main.c") + (
     "src/main_link_test.c", "src/lora/receiver.c", "src/lora/link_test.c",
     "src/lora/packet_record.c",
 )
+REMOTE_SOURCES = MONITOR_SOURCES + ("src/lora/link_test.c", "src/app/health.c")
 
 
 def dashboard_assets(output):
@@ -121,7 +122,7 @@ def validate_image(image):
 
 
 def firmware(args):
-    output = BUILD / args.app if args.app in ("monitor", "link-test") else BUILD
+    output = BUILD / args.app if args.app in ("monitor", "link-test", "remote") else BUILD
     if args.app == "link-test" and not args.confirm_waveshare:
         raise ValueError("--app link-test requires --confirm-waveshare; enables bounded LoRa TX")
     if args.toolchain == "owned":
@@ -129,10 +130,10 @@ def firmware(args):
     output.mkdir(parents=True, exist_ok=True)
     for name in ("pico2w.uf2", "manifest.json"):
         (output / name).unlink(missing_ok=True)
-    assets = monitor_assets(args, output) if args.app == "monitor" else {}
+    assets = monitor_assets(args, output) if args.app in ("monitor", "remote") else {}
     inputs = sorted(path for path in (ROOT / "src").rglob("*") if path.is_file())
     inputs.append(Path(__file__).resolve())
-    if args.app == "monitor":
+    if args.app in ("monitor", "remote"):
         inputs.append(ROOT / "tools" / "wifi_assets.py")
     digest = hashlib.sha256()
     for path in inputs:
@@ -151,7 +152,8 @@ def firmware(args):
     ).hexdigest()
     build_id = int(identity[:8], 16)
     (output / "build_id.h").write_text(
-        f"#define PICO2W_BUILD_ID 0x{build_id:08x}u\n", encoding="ascii")
+        f"#define PICO2W_BUILD_ID 0x{build_id:08x}u\n" +
+        ("#define PICO2W_REMOTE 1\n" if args.app == "remote" else ""), encoding="ascii")
     common = ["--no-default-config", "--target=arm-none-eabi", "-mcpu=cortex-m33", "-mthumb"]
     cflags = [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Oz",
@@ -161,9 +163,10 @@ def firmware(args):
         "-Isrc/include", "-Isrc", "-I" + str(output),
     ]
     objects = []
-    sources = [ROOT / name for name in (MONITOR_SOURCES if args.app == "monitor" else
+    sources = [ROOT / name for name in (REMOTE_SOURCES if args.app == "remote" else
+                                       MONITOR_SOURCES if args.app == "monitor" else
                                        LINK_SOURCES if args.app == "link-test" else SOURCES)]
-    if args.app == "monitor":
+    if args.app in ("monitor", "remote"):
         sources.append(output / "wifi_assets_generated.c")
     for source in sources:
         target = output / (source.stem + ".o")
@@ -220,7 +223,7 @@ def firmware(args):
         "undefined_symbols": [],
         "toolchain": args.toolchain,
         "application": args.app,
-        "credentials_embedded": args.app == "monitor",
+        "credentials_embedded": args.app in ("monitor", "remote"),
         "wifi_assets": assets,
         "owned_tools_sha256": tool_hashes,
         "compiler": "badge-compiler native tools" if args.toolchain == "owned" else
@@ -229,7 +232,7 @@ def firmware(args):
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
     print(f"PASS: {len(image)} flash bytes; no unresolved symbols; verified boot layout")
     print(f"UF2: {output / 'pico2w.uf2'} (build {build_id:08x}); not flashed")
-    if args.app == "monitor":
+    if args.app in ("monitor", "remote"):
         print("PRIVATE IMAGE: embeds Wi-Fi credentials and vendor firmware; do not publish.")
 
 
@@ -243,6 +246,7 @@ def tests(args):
         "dashboard_test": ("src/app/dashboard.c", "src/net/http.c"),
         "activity_test": ("src/lora/activity.c",),
         "link_test": ("src/lora/link_test.c", "src/usb/report.c"),
+        "health_test": ("src/app/health.c", "src/usb/report.c", "src/net/http.c"),
         "receiver_test": ("src/lora/sx1262.c", "src/lora/receiver.c",
                           "src/lora/packet_record.c", "src/usb/report.c"),
         "picoctl_test": ("tools/picoctl_protocol.c", "tools/meshtastic.c", "tools/lorawan.c", "src/usb/report.c"),
@@ -276,7 +280,7 @@ def main():
     parser.add_argument("--host-cc", default="cc")
     parser.add_argument("--toolchain", choices=("llvm", "owned"), default="llvm")
     parser.add_argument("--owned-tools", type=Path, help="directory containing native badge compiler tools")
-    parser.add_argument("--app", choices=("probe", "monitor", "link-test"), default="probe")
+    parser.add_argument("--app", choices=("probe", "monitor", "link-test", "remote"), default="probe")
     parser.add_argument("--credentials", type=Path, help="private UTF-8 two-line SSID/passphrase file")
     parser.add_argument("--wifi-firmware", type=Path, help="explicit original pinned CYW43439 data header")
     parser.add_argument("--wifi-nvram", type=Path, help="explicit original pinned board configuration header")

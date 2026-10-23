@@ -14,6 +14,7 @@
 #include "meshtastic.h"
 #include "lorawan.h"
 #include "../src/lora/link_test.h"
+#include "../src/app/health.h"
 
 static const GUID usb_guid = {0xa5dcbf10, 0x6530, 0x11d2,
                              {0x90, 0x1f, 0x00, 0xc0, 0x4f, 0xb9, 0x51, 0xed}};
@@ -73,6 +74,7 @@ static void usage(void) {
          "picoctl survey --serial HEX16 [--build-id HEX8] [--from MHZ] [--to MHZ]\n"
          "picoctl link-test --serial HEX16 --peer HEX16 --build-id HEX8\n"
          "picoctl link-status --serial HEX16 --build-id HEX8\n"
+         "picoctl link-send --serial HEX16 --build-id HEX8\n"
          "picoctl bootsel --serial HEX16\n"
          "picoctl upload --serial HEX16 --build-id HEX8 --uf2 PATH --sha256 HEX64 --picotool PATH [--wait-ip]\n"
          "picoctl check-image --uf2 PATH --sha256 HEX64\n"
@@ -98,7 +100,7 @@ static int parse(int argc, wchar_t **argv, options_t *o) {
         wcscmp(o->command, L"listen") && wcscmp(o->command, L"survey") &&
         wcscmp(o->command, L"bootsel") && wcscmp(o->command, L"upload") &&
         wcscmp(o->command, L"check-image") && wcscmp(o->command, L"link-test") &&
-        wcscmp(o->command, L"link-status"))
+        wcscmp(o->command, L"link-status") && wcscmp(o->command, L"link-send"))
         return failure(L"Unknown command.");
     unsigned seen = 0;
     for (int i = 2; i < argc; ++i) {
@@ -189,9 +191,9 @@ static int parse(int argc, wchar_t **argv, options_t *o) {
         return 1;
     }
     if (seen & 4096u) return failure(L"--peer is only valid for link-test.");
-    if (!wcscmp(o->command, L"link-status"))
+    if (!wcscmp(o->command, L"link-status") || !wcscmp(o->command, L"link-send"))
         return seen == (1u | 2u) && !o->wait_ip && !o->hex ? 1 :
-               failure(L"link-status requires only --serial and --build-id.");
+               failure(L"link-status/link-send require only --serial and --build-id.");
     if (!wcscmp(o->command, L"listen")) {
         if (!o->has_serial) return failure(L"Explicit --serial is required.");
         if (seen & ~(1u | 2u | 32u | 64u | 128u | 256u | 512u) || o->wait_ip)
@@ -537,6 +539,18 @@ static void print_packet(const picoctl_packet_t *p, const mesh_channel_t *channe
     if (p->flags & 0x80u) {
         fputs("CRC ERROR: payload failed the radio's CRC, not decoded", stdout);
         hex = 1;
+    } else if (p->length == LINK_PACKET_SIZE && usb_load_u32(p->payload) == HEALTH_MAGIC &&
+               usb_load_u32(p->payload + 32u) == usb_crc32(p->payload, 32u)) {
+        uint32_t bits = usb_load_u32(p->payload + 20u), ip = usb_load_u32(p->payload + 24u);
+        printf("HEALTH from=%08lx%08lx sequence=%lu uptime_ms=%lu wifi_stage=%lu wifi_error=%lu "
+               "dhcp=%lu network_error=%lu connected=%lu radio_state=%lu radio_error=%ld ip=%lu.%lu.%lu.%lu",
+               (unsigned long)usb_load_u32(p->payload+8u), (unsigned long)usb_load_u32(p->payload+4u),
+               (unsigned long)usb_load_u32(p->payload+12u), (unsigned long)usb_load_u32(p->payload+16u),
+               (unsigned long)(bits & 15u), (unsigned long)((bits >> 4u)&255u),
+               (unsigned long)((bits >> 12u)&15u), (unsigned long)((bits >> 16u)&255u),
+               (unsigned long)((bits >> 24u)&1u), (unsigned long)((bits >> 25u)&3u),
+               (long)(int32_t)usb_load_u32(p->payload+28u), (unsigned long)(ip>>24u),
+               (unsigned long)((ip>>16u)&255u), (unsigned long)((ip>>8u)&255u), (unsigned long)(ip&255u));
     } else if (p->profile == 1u) {
         mesh_describe(p->payload, p->length, channels, count, line, sizeof(line));
         fputs(line, stdout);
@@ -786,6 +800,49 @@ static int link_packet_read(usb_t *usb, uint32_t build, uint32_t after, picoctl_
                         record, sizeof(record))) return 0;
     if (!picoctl_packet(record, build, packet)) return failure(L"Invalid link packet USB record.");
     return 1;
+}
+
+static int link_single(const options_t *o) {
+    usb_t usb = {INVALID_HANDLE_VALUE, NULL};
+    int ok = 0;
+    if (discover(o, 0, 0, &usb) != 1) return failure(L"Selected link-test runtime not found.");
+    uint8_t r[64], nonce[16];
+    if (!identify(&usb, o, 1) || !link_status_read(&usb, o->build, r)) goto cleanup;
+    if (usb_load_u32(r + 24u) >= LINK_MAX_ATTEMPTS) {
+        failure(L"Per-boot transmit budget exhausted."); goto cleanup;
+    }
+    puts("Sending one bounded 0 dBm LoRa challenge after 20-second safety wait; this does NOT confirm delivery.");
+    Sleep(LINK_INTERVAL_MS);
+    if (BCryptGenRandom(NULL, nonce, sizeof(nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+        failure(L"Challenge generation failed."); goto cleanup;
+    }
+    usb_report_request(r, o->build, nonce);
+    usb_store_u32(r+12u, 3u);
+    usb_store_u32(r+60u, usb_crc32(r,60u));
+    if (!transfer(&usb,0x40,0x5b,0,r,sizeof(r))) goto cleanup;
+    ULONGLONG deadline = GetTickCount64()+3000;
+    while (GetTickCount64() < deadline) {
+        Sleep(20);
+        if (!transfer(&usb,0xc0,0x55,0,r,sizeof(r))) goto cleanup;
+        if (usb_load_u32(r) != USB_RESPONSE_MAGIC || usb_load_u32(r+8) != o->build ||
+            usb_load_u32(r+12) != 3u || memcmp(r+16,nonce,16) ||
+            usb_load_u32(r+60) != usb_crc32(r,60)) {
+            failure(L"Transmit response integrity mismatch."); goto cleanup;
+        }
+        if (usb_load_u32(r+32) == 2u) {
+            fprintf(stderr,"LoRa transmission failed: %ld\n",(long)(int32_t)usb_load_u32(r+36));
+            goto cleanup;
+        }
+        if (usb_load_u32(r+32) == 1u) {
+            if (!link_status_read(&usb,o->build,r)) goto cleanup;
+            printf("{\"serial\":\"%s\",\"tx_done\":true,\"delivery_confirmed\":false,\"restored_rx\":true}\n",o->serial);
+            ok = 1; goto cleanup;
+        }
+    }
+    failure(L"Timed out waiting for TxDone.");
+cleanup:
+    usb_close(&usb);
+    return ok;
 }
 
 static int link_exchange(usb_t *sender, usb_t *receiver_usb, const options_t *o,
@@ -1100,6 +1157,7 @@ int wmain(int argc, wchar_t **argv) {
     if (!wcscmp(options.command, L"survey")) return survey_spectrum(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"link-test")) return link_pair(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"link-status")) return link_status(&options) ? 0 : 1;
+    if (!wcscmp(options.command, L"link-send")) return link_single(&options) ? 0 : 1;
     if (!wcscmp(options.command, L"bootsel")) {
         if (!enter_bootsel(&options)) return 1;
         printf("{\"serial\":\"%s\",\"bootsel_observed\":true}\n", options.serial);

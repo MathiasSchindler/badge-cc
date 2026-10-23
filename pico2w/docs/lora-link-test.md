@@ -110,7 +110,7 @@ monitor, which must be explicitly reflashed if desired.
   using `0x55`, with the same nonce and build, success/failure and error.
 - Received raw frames use the existing `0x59` packet ring protocol.
 
-## Physical qualification: blocked on new-board SPI contact
+## Initial trial, 2026-10-22: blocked on new-board SPI contact
 
 On 2026-10-22 both selected boards were identified as RP2350 A2/QFN60,
 4 MiB flash, and both flashed images were verified. Backups were explicitly
@@ -139,3 +139,41 @@ If a device is already in BOOTSEL, use an explicitly selected picotool
 application reboot, not another flash, to start the installed image.
 Run both `link-status` checks before the paired test. A reliable soldered
 header/Pico 2 WH is preferable to pressure contacts for repeatable testing.
+
+## Successful bidirectional trial, 2026-10-23
+
+The user attached two Pico 2 WH boards with SX1262 HATs and authorized
+the bounded transmit/receive test. The new board `76EDD29A5E2CD5B4`
+replaced the earlier modular-contact board `6D64320DF2BB57D8`; it was
+flashed and verified with LLVM image `ee949855`. The original board
+`7C4918BAB9492C77` runs the same image. Both enumerated over USB and
+initialized their SX1262 receivers without error.
+
+The native host paired test passed with fresh 36-byte challenge payloads,
+verified sender identities, sequences and application CRCs, using
+869.850 MHz, SF7/BW125, private sync and nominal 0 dBm:
+
+| Direction | Verified packets | Receiver RSSI | Receiver SNR |
+| --- | --- | --- | --- |
+| `76EDD29A5E2CD5B4` to `7C4918BAB9492C77` | 3/3 | -11 dBm | 12.25-13 dB |
+| `7C4918BAB9492C77` to `76EDD29A5E2CD5B4` | 3/3 | -10 dBm | 12.75-14 dB |
+
+Post-test identity/status checks confirmed each board had three transmit
+attempts, three completed transmissions, three received packets and zero
+CRC errors. Both were left in the private-profile receive state with no
+automatic transmissions. Neither is running the Wi-Fi/LongFast monitor.
+
+This establishes working over-the-air transmission and reception in both
+directions for this short local test. The very strong reported RSSI
+does not constitute calibrated power, range or receiver-linearity
+measurement; greater antenna separation is preferable for subsequent
+tests. No distance, obstruction or sustained reliability qualification
+was performed.
+
+To repeat on this pair with the installed build:
+
+```powershell
+.\pico2w\build\host\picoctl.exe link-test --serial 76EDD29A5E2CD5B4 --peer 7C4918BAB9492C77 --build-id ee949855
+```
+
+Three of the six per-boot attempts on each board remain after this test.

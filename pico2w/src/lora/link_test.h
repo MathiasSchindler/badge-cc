@@ -18,6 +18,10 @@ typedef struct {
 } link_test_t;
 
 int32_t link_test_configure(sx1262_receiver_t *rx);
+/* Fixed 36-byte/0 dBm/150 ms TX, then private-profile RX restore.
+   Caller must enforce airtime spacing; not linked into receive-only monitor. */
+int32_t link_radio_send(sx1262_receiver_t *rx, const uint8_t payload[LINK_PACKET_SIZE],
+                        int32_t *restore_error);
 int32_t link_test_send(link_test_t *test, sx1262_receiver_t *rx, uint32_t now_ms,
                        const uint32_t chip_id[2], const uint8_t nonce[16]);
 void link_test_payload(uint8_t *payload, const uint32_t chip_id[2],

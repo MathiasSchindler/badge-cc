@@ -16,7 +16,7 @@
 static usb_stats_t stats;
 
 static uint32_t timer_ticks(void) {
-    return REG(0x400b000cu);
+    return REG(0x400b0028u);
 }
 
 static int wait_mask(volatile uint32_t *reg, uint32_t mask, uint32_t wanted) {
@@ -54,6 +54,25 @@ static int system_clock_init(void) {
     return wait_mask(&REG(0x40010044u), 3u, 2u);
 }
 
+static int timer_init(void) {
+    /* Cold boots need an explicit 1 MHz TIMER0; BOOTSEL's inherited timer
+       state is not part of the application contract. TIMER1 belongs to LoRa. */
+    REG(0x40010030u) = (REG(0x40010030u) & ~3u) | 2u;
+    if (!wait_mask(&REG(0x40010038u), 15u, 4u)) return 0;
+    REG(0x40010034u) = 1u << 16u;
+    REG(0x40022000u) = 1u << 23u;
+    REG(0x40023000u) = 1u << 23u;
+    if (!wait_mask(&REG(0x40020008u), 1u << 23u, 1u << 23u)) return 0;
+    REG(0x40108018u) = 0u;
+    REG(0x4010801cu) = 12u;
+    REG(0x40108018u) = 1u;
+    if (!wait_mask(&REG(0x40108018u), 3u, 3u)) return 0;
+    REG(0x400b0038u) = 0u;
+    REG(0x400b0030u) = 0u;
+    REG(0x400b002cu) = 0u;
+    return pause_ticks(10u);
+}
+
 int32_t usb_hw_init(void) {
     stats.resets = stats.setups = stats.completions = stats.hardware_errors = 0u;
     if ((REG(0x40048004u) & (1u << 12u)) == 0u) {
@@ -61,6 +80,7 @@ int32_t usb_hw_init(void) {
         REG(0x40048000u) = 0x00fabaa0u;
     }
     if (!wait_mask(&REG(0x40048004u), 1u << 31u, 1u << 31u)) return -2002;
+    if (!timer_init()) return -2007;
     if (!system_clock_init()) return -2001;
     REG(0x40022000u) = (1u << 28u) | (1u << 15u);
     REG(0x40010060u) = 0u;

@@ -71,6 +71,10 @@ Tests never connect to an AP or open USB/SPI hardware.
 The separate opt-in [SX1262 link test](docs/lora-link-test.md) adds bounded,
 host-triggered low-power LoRa transmissions for testing two HAT-equipped
 Picos. It does not enable transmission in the probe or monitor.
+The opt-in [remote health node](docs/remote-health.md) automatically starts
+Wi-Fi/DHCP/HTTP and private-profile LoRa diagnostics on power-up, reporting
+Wi-Fi failures via rate-limited LoRa health packets and radio errors via
+Wi-Fi. It transmits startup/change reports and five-minute heartbeats.
 
 ### Native Windows control and deployment
 

@@ -80,6 +80,13 @@ static int32_t transmit(sx1262_receiver_t *rx, const uint8_t *payload) {
     return error ? error : LINK_TX_TIMEOUT;
 }
 
+int32_t link_radio_send(sx1262_receiver_t *rx, const uint8_t payload[LINK_PACKET_SIZE],
+                        int32_t *restore_error) {
+    int32_t error = transmit(rx, payload);
+    *restore_error = link_test_configure(rx);
+    return error;
+}
+
 int32_t link_test_send(link_test_t *test, sx1262_receiver_t *rx, uint32_t now_ms,
                        const uint32_t chip_id[2], const uint8_t nonce[16]) {
     if (test->attempts >= LINK_MAX_ATTEMPTS || now_ms - test->last_attempt_ms < LINK_INTERVAL_MS)
@@ -89,8 +96,7 @@ int32_t link_test_send(link_test_t *test, sx1262_receiver_t *rx, uint32_t now_ms
     ++test->attempts;
     test->last_attempt_ms = now_ms;
     link_test_payload(payload, chip_id, test->attempts, nonce);
-    test->error = transmit(rx, payload);
+    test->error = link_radio_send(rx, payload, &test->restore_error);
     if (!test->error) ++test->transmitted;
-    test->restore_error = link_test_configure(rx);
     return test->error ? test->error : test->restore_error;
 }
