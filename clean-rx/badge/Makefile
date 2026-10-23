@@ -84,7 +84,10 @@ test: $(NATIVE_TESTS)
 	$(BUILD)/ht20_test
 	$(BUILD)/station_lifecycle_test
 	node network_verify.cjs --self-test
+	node lifecycle_verify.cjs --self-test
+	node qualification_verify.cjs --self-test
 	bash -n lifecycle_probe.sh
+	bash -n qualification_probe.sh
 	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh
 	bash -n mac_trials.sh
 	bash -n mac_soak.sh

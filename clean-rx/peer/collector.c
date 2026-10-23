@@ -5,6 +5,7 @@
 #include "frame.h"
 #include "lifecycle.h"
 #include "network_json.h"
+#include "qualification.h"
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
 #include "../../src/shared/bytes.h"
@@ -54,7 +55,8 @@ static void print_mac(const uint8_t mac[6]) {
 }
 
 static int collect_ap(libusb_device_handle *device, const char *path,
-        const uint8_t nonce[16], uint8_t report[64], uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
+        const uint8_t nonce[16], uint8_t report[64], uint8_t trace[CLEAN_PEER_TRACE_BYTES],
+        const char *serial) {
     int announced = 0;
     uint32_t elapsed = 0u;
     clean_lifecycle_ap_report_t ap;
@@ -63,7 +65,7 @@ static int collect_ap(libusb_device_handle *device, const char *path,
         if (!read_trace(device, report, trace)) return 0;
         memcpy(&ap, trace + CLEAN_LIFECYCLE_AP_DETAIL, sizeof(ap));
         if (usb_report_u32(trace) != CLEAN_PEER_MAGIC ||
-            usb_report_u32(trace + 20u) != CLEAN_LIFECYCLE_AP_MODE ||
+            usb_report_u32(trace + 20u) != nonce[14] ||
             ap.magic != CLEAN_LIFECYCLE_AP_MAGIC) {
             fputs("Invalid lifecycle AP evidence layout\n", stderr); return 0;
         }
@@ -90,14 +92,22 @@ static int collect_ap(libusb_device_handle *device, const char *path,
         }
     }
     if (!write_evidence(path, report, trace)) return 0;
-    int valid = ap.state == 2u && !ap.error && ap.cycles == nonce[12] &&
+    int configured = nonce[14] != CLEAN_QUALIFICATION_AP_MODE ||
+        (ap.channel == nonce[15] && usb_report_u32(trace + 28u) == nonce[15] &&
+         usb_report_u32(trace + 32u) == nonce[15] &&
+         usb_report_u32(trace + 36u) == clean_qualification_nmode(nonce[15]) &&
+         !usb_report_u32(trace + 40u));
+    int valid = configured && ap.state == 2u && !ap.error && ap.cycles == nonce[12] &&
         ap.received && ap.received == ap.echoed && ap.associations >= ap.cycles + 1u &&
         ap.associations <= 16u;
-    printf("{\"test\":\"b1-ap-result\",\"build\":\"%08x\",\"valid\":%s,"
+    printf("{\"test\":\"b1-ap-result\",\"serial\":\"%s\",\"build\":\"%08x\",\"valid\":%s,"
            "\"state\":%u,\"error\":%u,\"cycles\":%u,\"data_epochs\":%u,"
-           "\"received\":%u,\"echoed\":%u,\"bssid\":\"",
-           USB_REPORT_BUILD_ID, valid ? "true" : "false", ap.state, ap.error, ap.cycles,
-           ap.associations, ap.received, ap.echoed);
+           "\"received\":%u,\"echoed\":%u,\"channel\":%u,\"nmode\":%u,"
+           "\"configuration_verified\":%s,\"bssid\":\"",
+           serial, USB_REPORT_BUILD_ID, valid ? "true" : "false", ap.state, ap.error, ap.cycles,
+           ap.associations, ap.received, ap.echoed, ap.channel,
+           usb_report_u32(trace + 36u),
+           nonce[14] == CLEAN_QUALIFICATION_AP_MODE && configured ? "true" : "false");
     print_mac(ap.mac); fputs("\",\"peer\":\"", stdout); print_mac(ap.peer);
     fputs("\",\"session\":\"", stdout);
     for (uint32_t i = 0u; i < 6u; ++i) printf("%02x", ap.session[i]);
@@ -150,7 +160,8 @@ static int collect_network(libusb_device_handle *device, const char *path,
 }
 
 static int collect(libusb_device_handle *device, const char *path, const uint8_t *challenge,
-                   int monitor, uint32_t ap_seconds, uint32_t ap_cycles, int network) {
+                   int monitor, uint32_t ap_seconds, uint32_t ap_cycles, int network,
+                   uint32_t ap_channel, const char *serial) {
     uint8_t info[12], nonce[16], request[64], report[64], trace[CLEAN_PEER_TRACE_BYTES];
     const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
@@ -173,6 +184,10 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
         nonce[12] = network ? (uint8_t)ap_seconds : (uint8_t)ap_cycles;
         nonce[13] = network ? (uint8_t)(ap_seconds >> 8u) : (uint8_t)ap_seconds;
         nonce[14] = network ? CLEAN_NETWORK_AP_MODE : CLEAN_LIFECYCLE_AP_MODE;
+        if (ap_channel) {
+            nonce[14] = CLEAN_QUALIFICATION_AP_MODE;
+            nonce[15] = (uint8_t)ap_channel;
+        }
     }
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, 3u);
     if (!transfer(device, 0x40u, LIVE_USB_FW_SUBMIT, request, sizeof(request))) return 0;
@@ -192,7 +207,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
         return 0;
     }
     if (network) return collect_network(device,path,nonce,report,trace);
-    if (ap_seconds) return collect_ap(device, path, nonce, report, trace);
+    if (ap_seconds) return collect_ap(device, path, nonce, report, trace,serial);
     if (!read_trace(device, report, trace)) return 0;
     if (!clean_peer_trace_valid(trace) ||
         usb_report_u32(trace + 20u) != (monitor ? 2u : 1u)) {
@@ -241,11 +256,13 @@ int main(int argc, char **argv) {
     int tx = argc == 5 && !strcmp(argv[3], "--tx-multicast");
     int monitor = argc == 4 && !strcmp(argv[3], "--monitor-probe");
     int network = argc == 6 && !strcmp(argv[3], "--network-ap");
-    int ap = network || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
-    uint32_t ap_seconds = 0u, ap_cycles = 0u;
+    int qualification = argc == 7 && !strcmp(argv[3], "--qualification-ap");
+    int ap = network || qualification || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
+    uint32_t ap_seconds = 0u, ap_cycles = 0u, ap_channel = 0u;
     if ((argc != 3 && !tx && !monitor && !ap) || strlen(argv[1]) != 16u) {
         fputs("Usage: collector SERIAL EVIDENCE_BIN [--tx-multicast CHALLENGE_HEX_28 | --monitor-probe | --lifecycle-ap CHALLENGE_HEX_28 SECONDS:8-120 CYCLES:0-5]\n", stderr);
         fputs("Continuous AP: collector SERIAL EVIDENCE_BIN --network-ap CHALLENGE_HEX_28 SECONDS:10-3900\n",stderr);
+        fputs("B3 AP: collector SERIAL EVIDENCE_BIN --qualification-ap CHALLENGE_HEX_28 SECONDS:8-120 CHANNEL:1,6,11\n",stderr);
         return 2;
     }
     if (tx || ap) {
@@ -269,7 +286,14 @@ int main(int argc, char **argv) {
             fputs("AP duration must be lifecycle 8..120 or network 10..3900 seconds\n", stderr); return 2;
         }
         unsigned long cycles = network ? 0u : strtoul(argv[6], &end, 10);
-        if (!network && (!*argv[6] || *end || cycles > 5u ||
+        if (qualification) {
+            if (!*argv[6] || *end || !clean_qualification_channel((uint32_t)cycles) ||
+                cycles > 11u) {
+                fputs("B3 AP channel must be 1, 6 or 11\n",stderr); return 2;
+            }
+            ap_channel = (uint32_t)cycles; cycles = 0u;
+        }
+        if (!network && !qualification && (!*argv[6] || *end || cycles > 5u ||
             (cycles && seconds < 11u * cycles + 10u))) {
             fputs("Lifecycle AP requires 0..5 outages and time for all cycles\n", stderr); return 2;
         }
@@ -298,7 +322,7 @@ int main(int argc, char **argv) {
     if (!status) status = libusb_claim_interface(device, 0);
     int ok = 0;
     if (!status) ok = collect(device, argv[2], tx || ap ? challenge : NULL,
-                             monitor, ap_seconds, ap_cycles, network);
+                             monitor, ap_seconds, ap_cycles, network, ap_channel, argv[1]);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     if (fflush(stdout)) { perror("Vendor peer JSON flush"); ok = 0; }
     int rebooted = transfer(device, 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);

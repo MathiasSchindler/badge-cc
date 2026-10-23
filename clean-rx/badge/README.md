@@ -176,6 +176,82 @@ five beacon-loss recoveries coincided with application loss (3 station,
 overflow, but this profile is **not yet B2 soak-qualified**. Both originals
 were restored and full-readback-verified after testing.
 
+## B3 reproducible AP-configuration qualification
+
+The opt-in B3 runner repeats fresh legacy/open station connections against
+three configurations of the controlled vendor AP:
+
+| Channel | AP nmode | Security | Coverage |
+| --- | --- | --- | --- |
+| 1 | 0 | Open | Controlled legacy baseline |
+| 6 | 0 | Open | Different channel/configuration |
+| 11 | 1 | Open | Mixed-HT AP, legacy station association |
+
+These are **one AP implementation**, not three independent firmware stacks.
+An HT-capable AP does not mean the station negotiated HT.
+Sustained software-WPA2 awaits the E milestones. Separate mesh nodes and
+roaming are not covered; the matrix always reports `b3_qualified:false`
+until that broader acceptance has independent evidence.
+
+The Pico 2 W can be the independent vendor-firmware AP. Its GSPI pins match
+the existing board transport (23/24/25/29); no display driver is linked.
+The Pico build additionally establishes the reference clock and the existing
+Pico 120-MHz SYS clock **before USB enumeration**. Badge peer builds retain
+their original startup behavior. Build matching images/collectors separately:
+
+```sh
+make -C clean-rx/badge all test
+make -f clean-rx/peer/Makefile HT_PEER_BUILD=build/clean-rx/pico-peer \
+  HT_PEER_PICO=1 ht-peer ht-peer-test
+```
+
+After backing up full flash, install the clean badge image on the station
+and `build/clean-rx/pico-peer/vendor_ht.uf2` on the Pico. Leave both in BOOTSEL:
+
+```sh
+CLEAN_RX_PEER_COLLECTOR=build/clean-rx/pico-peer/collector \
+  bash clean-rx/badge/qualification_probe.sh STATION_SERIAL PICO_SERIAL NEW_PREFIX 3
+```
+
+The final parameter is 1..10 cold rounds per configuration, default 3.
+One round is only a control; at least three passing rounds per configuration
+are required for `open_configurations_qualified:true`. Each trial runs the
+station for ten seconds and AP for sixteen seconds. The runner never flashes,
+restores firmware, changes unrelated APs or reads credentials. Always restore
+and full-readback-verify both originals after a campaign.
+
+AP mode 5 is exposed as
+`collector SERIAL EVIDENCE_BIN --qualification-ap CHALLENGE_HEX_28 SECONDS:8-120 CHANNEL:1,6,11`.
+It adapts the existing AP configuration callback: selects nmode while DOWN,
+overrides the helper's channel-1 command, then independently reads back hardware
+channel, target channel, nmode and wsec before publishing readiness.
+Neither vendor firmware nor shared platform/AP setup code is modified.
+The low-level paired runner is also available:
+
+```sh
+bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL PICO_SERIAL NEW_PREFIX 0 --qualification 6
+node clean-rx/badge/qualification_verify.cjs MATRIX_PREFIX 3 STATION_SERIAL PICO_SERIAL
+```
+
+Both endpoint archives, JSON/JSONL, stderr and boot logs are retained.
+The oracle binds serials, raw AP build ID, BSSID, channel/PHY/security
+readbacks, station/AP MACs, application session/epoch and independent
+association/data counts. Reused sessions, missing/mislabeled profiles and
+failed or incomplete trials reject the matrix. Failed campaigns are retained,
+not repaired by splicing in successful rows from another campaign.
+Both collector processes are cancelled on interruption. Bounded BOOTSEL
+enumeration retries handle the transition between consecutive cold trials.
+
+The `b3-20261023/hardware/qualified02-*` Pico campaign passed all nine
+connections and 162 verified echoes with station build `80e8c0bd` and Pico
+AP `eebb2313`. There were no authentication/association failures or disconnects.
+Six MAC timeouts, four echo timeouts and seven BUSY returns remain in the
+evidence; these are bounded connection/data controls, not loss-free MAC or
+B2 soak qualification. An earlier campaign was interrupted by the USB hub
+disappearing, including the untouched second badge. After the user reconnected
+the hub, both originals were restored and fully verified before retesting.
+The final campaign also restored both full originals and returned them to BOOTSEL.
+
 ## Existing radio qualification
 
 **Current qualification:** cold RX and single-frame **11 Mbps CCK OTA TX** are

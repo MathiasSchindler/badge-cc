@@ -374,7 +374,51 @@ Default, WMM/HT-response and HT/SHM builds/native regressions passed.
 
 ### B3. Reproducible station qualification
 
-- [ ] Repeat connection/data tests against the controlled vendor AP and at
+**2026-10-23 implementation and open-configuration qualification:** the
+Pico 2 W (`6572BE3E4636AF51`) now runs the unchanged vendor radio firmware
+as an independent AP. Mode 5 configures channel 1/nmode 0, channel 6/nmode 0
+and channel 11/nmode 1, all open. A callback adapter sets nmode while DOWN
+and replaces the shared AP helper's channel-1 command without changing shared
+or vendor code. Hardware/target channel, nmode and wsec are queried before
+readiness. Native tests exercise the actual shared AP configuration through
+that adapter, including mode-setting failures and wrong/short readbacks.
+
+The Pico variant (`HT_PEER_PICO=1`) initializes reference and 120-MHz SYS
+clocks before USB, reusing the existing Pico clock helper unchanged. The
+first generic badge-peer attempt (`control01-*`) did not enumerate on the
+Pico; this is not an RF failure. After the clock fix, channel 1 and 11 controls
+passed (`control02-*`), but a between-trial BOOTSEL re-enumeration race skipped
+channel 6. Bounded, logged reboot retries fixed that host-runner race.
+
+The first three-round campaign (`qualified01-*`) completed five verified
+sessions before all three USB boards disappeared, including the untouched
+second badge. Restoration initially failed because the hub was unavailable.
+After the user reconnected it, both original images were restored, fully
+read back and compared before any further flashing. Preserve the interrupted
+matrix and the initial restoration failures; it is not a qualified campaign.
+
+The fresh `build/clean-rx/b3-20261023/hardware/qualified02-*` campaign passed
+all nine cold connections: channel-1 echoes 14/18/15, channel-6 echoes 20/20/20
+and channel-11 echoes 18/18/19, **162 total**. Clean badge build `80e8c0bd`
+ran on `08DA26F86E57F5EA`; Pico AP build `eebb2313` independently confirmed
+the same station, fresh session/epoch and application data in each trial.
+Readback-verified configurations and both raw endpoint archives passed the
+paired oracle. Authentication/association failures and disconnects were zero;
+six MAC timeouts, four echo timeouts and seven BUSY returns were retained.
+
+The matrix reports `open_configurations_qualified:true`,
+`ap_implementations:1`, **`b3_qualified:false`**. These are three configurations
+of one AP implementation; do not claim three AP stacks, sustained WPA2,
+separate mesh-node coverage, negotiated HT, roaming or B2 soak qualification.
+Existing bounded WPA2 controls do not replace E's persistence/rekey acceptance.
+See [commands and boundaries](../badge/README.md#b3-reproducible-ap-configuration-qualification).
+
+Final full readbacks matched the original SHA-256 values:
+badge `02ff81bb2e453010f8517eb2df0391d569d285ed4ac97bfa275d4493c044b7ac`,
+Pico `f26bc587c863623426a4d0eeb0624c8f01e8fb150de7fe4c2ac28fe43c00e486`.
+Both were restored and returned to BOOTSEL; the second badge was not flashed.
+
+- [x] Repeat connection/data tests against the controlled vendor AP and at
   least two additional AP implementations/configurations available for testing.
 - [ ] Verify open operation and, after E, sustained WPA2 operation. Include
   separate nodes of the local mesh without claiming roaming support merely

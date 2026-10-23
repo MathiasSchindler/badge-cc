@@ -221,9 +221,21 @@ and full-readback-verified; the Pico was not modified.
 
 ### B3. Reproducible station qualification
 
-- [ ] Verify the controlled AP and two additional AP implementations/configurations.
+- [x] Verify the controlled AP and two additional AP configurations: the
+  vendor-firmware Pico 2 W on channels 1/6 (legacy/open) and 11 (mixed-HT/open).
+  This covers three configurations of one AP implementation, not three stacks.
 - [ ] Verify open and software-WPA2 operation, including separate mesh nodes;
   do not equate association with roaming support.
+
+The reproducible B3 matrix passed three fresh connections per configuration:
+9/9 independently data-verified sessions and 162 application echoes.
+Channel, PHY mode and disabled security are read back from the AP; the oracle
+checks raw evidence, target identities, fresh sessions and counts. Six MAC
+timeouts, four echo timeouts and seven BUSY returns remain visible; this does
+not close A or the failed B2 soak. Software-WPA2 persistence (after E),
+separate mesh nodes, additional AP implementations and roaming remain unqualified.
+See [B3 usage and boundaries](clean-rx/badge/README.md#b3-reproducible-ap-configuration-qualification)
+and [hardware evidence](clean-rx/dev-doc/MILESTONE_HISTORY.md#b3-reproducible-station-qualification).
 
 ## C. Complete 802.11b operation
 

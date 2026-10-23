@@ -3,6 +3,7 @@
 #include "lifecycle.h"
 #include "lifecycle_usb.h"
 #include "network.h"
+#include "qualification.h"
 #include "build_id.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -24,6 +25,9 @@ static uint8_t evidence[CLEAN_PEER_TRACE_BYTES];
 static wifi_link_t link;
 static clean_network_t network;
 static int service(void *context, const wifi_fw_report_t *report);
+#if CLEAN_PEER_PICO
+int32_t pr_clock_sys(void);
+#endif
 
 static void recovery_service(void) {
     if (!session_active) return;
@@ -103,15 +107,21 @@ static void network_ap(const uint8_t nonce[16], const uint8_t report[64]) {
 static void lifecycle_ap(const uint8_t nonce[16], const uint8_t report[64]) {
     clean_lifecycle_ap_report_t ap;
     badger_bytes_zero((uint8_t *)&ap, sizeof(ap));
-    ap.magic = CLEAN_LIFECYCLE_AP_MAGIC; ap.channel = 1u;
+    ap.magic = CLEAN_LIFECYCLE_AP_MAGIC;
+    ap.channel = nonce[14] == CLEAN_QUALIFICATION_AP_MODE ? nonce[15] : 1u;
     for (uint32_t i = 0u; i < 6u; ++i) ap.mac[i] = clean_peer_mac_byte(nonce, i);
-    badger_bytes_store_u32(evidence + 20u, CLEAN_LIFECYCLE_AP_MODE);
+    badger_bytes_store_u32(evidence + 20u, nonce[14]);
     const wifi_wire_t *wire = wifi_board_wire();
     uint32_t started = wire->now_us(wire->context), phase_at = started, published_at = started;
     ap.startup_us = started - run_started;
     uint8_t up = 0u, ready = 0u;
     int ok = nonce[13] >= 8u && nonce[13] <= 120u && nonce[12] <= 5u;
     wifi_link_ops_t ops = {.context = 0, .control = link_control};
+    clean_qualification_t qualification = {.backend = ops, .channel = ap.channel};
+    if (nonce[14] == CLEAN_QUALIFICATION_AP_MODE) {
+        if (!clean_qualification_channel(ap.channel)) ok = 0;
+        ops.context = &qualification; ops.control = clean_qualification_control;
+    }
     while (ok && service(0, 0) &&
            wire->now_us(wire->context) - started < (uint32_t)nonce[13] * 1000000u) {
         uint32_t now = wire->now_us(wire->context);
@@ -132,6 +142,10 @@ static void lifecycle_ap(const uint8_t nonce[16], const uint8_t report[64]) {
             wifi_link_init(&link, &ops, WIFI_LINK_OPEN_AP, nonce, ap.mac);
             ap.operation = 2u;
             if (!wifi_link_configure(&link) || !wifi_firmware_data_enable()) {
+                ok = 0; break;
+            }
+            if (nonce[14] == CLEAN_QUALIFICATION_AP_MODE &&
+                !clean_qualification_verify(&qualification,evidence + 28u)) {
                 ok = 0; break;
             }
             up = 1u; phase_at = wire->now_us(wire->context);
@@ -321,13 +335,15 @@ static void probe(const uint8_t nonce[16]) {
     badger_bytes_store_u32(evidence + 20u, nonce[14] == 2u ? 2u : 1u);
     run_limit = nonce[14] == CLEAN_NETWORK_AP_MODE ?
         ((uint32_t)(nonce[12] | (uint32_t)nonce[13] << 8u) + 25u) * 1000000u :
-        nonce[14] == CLEAN_LIFECYCLE_AP_MODE ? ((uint32_t)nonce[13] + 20u) * 1000000u : 16000000u;
+        (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_QUALIFICATION_AP_MODE) ?
+        ((uint32_t)nonce[13] + 20u) * 1000000u : 16000000u;
     int ready = wifi_firmware_begin(wifi_board_wire(), assets, &firmware, service, 0);
     uint8_t report[64];
     wifi_firmware_report(report, USB_REPORT_BUILD_ID, nonce, &firmware);
     if (ready && nonce[14] == CLEAN_NETWORK_AP_MODE) {
         network_ap(nonce, report);
-    } else if (ready && nonce[14] == CLEAN_LIFECYCLE_AP_MODE) {
+    } else if (ready && (nonce[14] == CLEAN_LIFECYCLE_AP_MODE ||
+                        nonce[14] == CLEAN_QUALIFICATION_AP_MODE)) {
         lifecycle_ap(nonce, report);
     } else if (ready && nonce[14] == 1u) {
         transmit(nonce);
@@ -355,7 +371,8 @@ static void probe(const uint8_t nonce[16]) {
     }
     wifi_firmware_stop();
     if (!usb_error && !control.reboot_requested) {
-        if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE) {
+        if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE ||
+            nonce[14] == CLEAN_QUALIFICATION_AP_MODE) {
             if (!clean_lifecycle_snapshot(&control, generation, report, evidence, 1u))
                 usb_error = -102;
         } else {
@@ -367,6 +384,9 @@ static void probe(const uint8_t nonce[16]) {
 
 void bare_main(void) {
     if (badger_schedule_bootsel(8000u)) while (1) __asm__ volatile ("wfi");
+#if CLEAN_PEER_PICO
+    if (nametag_clock_reference() || pr_clock_sys()) while (1) __asm__ volatile ("wfi");
+#endif
     uint32_t id[2];
     char serial[17], half[9];
     if (badger_rom_chip_id(id)) while (1) __asm__ volatile ("wfi");
@@ -384,7 +404,8 @@ void bare_main(void) {
         uint8_t nonce[16];
         generation = live_usb_probe_take(&control, nonce);
         if (!usb_error && generation) {
-            if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE)
+            if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE ||
+                nonce[14] == CLEAN_QUALIFICATION_AP_MODE)
                 usb_error = nametag_clock_reference();
             if (usb_error) break;
             run_started = recovery_at = *(volatile uint32_t *)0x400b000cu;
@@ -392,7 +413,8 @@ void bare_main(void) {
             wifi_board_init();
             wifi_board_select_pio(1u);
             if (measure_clock(nonce[14] == CLEAN_LIFECYCLE_AP_MODE ||
-                              nonce[14] == CLEAN_NETWORK_AP_MODE)) probe(nonce);
+                              nonce[14] == CLEAN_NETWORK_AP_MODE ||
+                              nonce[14] == CLEAN_QUALIFICATION_AP_MODE)) probe(nonce);
         }
     }
     wifi_firmware_stop();
