@@ -27,6 +27,9 @@ int wifi_control_parse_raw(const uint8_t *packet, uint32_t length, wifi_control_
 int wifi_control_version(const wifi_control_packet_t *packet, uint16_t id, char output[192]);
 uint32_t wifi_data_frame(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
                          uint8_t interface, const uint8_t *frame, uint32_t length);
+/* Explicit oversized-TX diagnostic; does not change Ethernet RX or the normal MTU. */
+uint32_t wifi_data_frame_diagnostic(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
+                                    uint8_t interface, const uint8_t *frame, uint32_t length);
 int wifi_data_decode(const wifi_control_packet_t *packet, uint8_t *interface,
                      const uint8_t **frame, uint32_t *length);
 

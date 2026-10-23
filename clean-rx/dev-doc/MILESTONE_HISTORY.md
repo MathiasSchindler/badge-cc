@@ -603,6 +603,148 @@ all borrowed flash was restored and independently compared in full:
 (B), and `f26bc587c863623426a4d0eeb0624c8f01e8fb150de7fe4c2ac28fe43c00e486`
 (Pico). All were left in BOOTSEL; the laptop networking was not changed.
 
+#### C1 transmit/reference localization follow-up
+
+The `build/clean-rx/c1-localize/hardware/` archives retain a further bounded
+investigation. The raw-source experiment used the exact soak frame with
+three unacknowledged raw attempts, outside live-station DCF/ACK ownership.
+Both `raw-controls` and `timed-raw-controls` failed their positive controls:
+no fixture captures at 1 Mbps / 1,500, 1 Mbps / 1,600 or 2 Mbps / 1,600.
+Successful source command completion and zero PHY errors therefore do not
+localize the fault. The temporary raw-source code was removed.
+
+Unpolled timed reference build `49f21eee` ends at 32 raw packets. Its
+last-arrival timestamp includes cleanup-drained packets and is not evidence
+of ten seconds of continuous reception. This matches the earlier vendor
+forwarding/servicing limitations documented in
+[the HT20 investigation](HT20_IMPLEMENTATION.md). New trace counters separate
+pre-cleanup arrival/count from the final totals.
+
+The `polled-station-controls` trials use known live-station TX and reference
+build `8386a305`, issuing GET_MONITOR every 100 ms:
+
+| Stimulus | Complete payload/FCS-valid MPDUs | Raw packets | Control polls | Last raw arrival before cleanup |
+| --- | --- | --- | --- | --- |
+| 1 Mbps / 1,500-byte MSDU | 3 | 46 | 21 | 2,065,299 us |
+| 1 Mbps / 1,600-byte MSDU | 0 | 46 | 30 | 2,977,410 us |
+| 2 Mbps / 1,600-byte MSDU | 8 | 46 | 24 | 2,936,788 us |
+
+**All three capture operations fail with firmware timeout 6.** These partial
+frame observations are not successful qualification. The 2-Mbps captures
+prove this reference can forward a complete 1,628-byte MPDU, excluding a
+simple size-only cap at that boundary. They do not establish a complete
+long 1-Mbps waveform or exclude a duration-sensitive reference limitation.
+Source ACK exhaustion is expected with a passive reference. Control polling
+is now explicit `--cck-monitor-poll`; it is not silently enabled by default
+and is not presented as a transport repair.
+
+The `vendor-phy-readback` trial on badge B (`cf0cf940`) attempts read-only
+GET_PHYREG command 94 at seven addresses after vendor radio-up/channel-1
+setup. Every query is explicitly rejected with controller status -23,
+error 8 and reply length zero. No register values or LCN20 semantics can be
+inferred. The proposed eight-byte register/band request layout remains
+unverified. The final collector reports `phy_readback_supported=false` and
+fails its exit status when any readback is missing, rejected or malformed;
+native tests cover complete/error/incomplete and invalid-value traces.
+
+The final `vendor-phy-final` repetition (`63f667fc`) reproduces all seven
+rejections and verifies collector exit 1 with an explicit unsupported-readback
+diagnostic. Badge B is again fully restored and compared. Final peer firmware
+build/native ASan/UBSan tests, badge native regressions and `git diff --check`
+pass; those checks do not qualify the failing RF cells.
+
+No speculative PHY writes, longer PSM waits, shared vendor transport changes
+or relaxed frame checks are retained. The core cause and safe repair remain
+unresolved, and **C1 stays open**. Both badges were freshly backed up before
+borrowing, then restored and compared across the complete 16-MiB flash after
+every campaign. The PHY-only trial borrowed only badge B; the Pico was not
+modified. All remain in BOOTSEL, and laptop networking was unchanged.
+
+#### C1 Pico vendor reference campaign
+
+The user requested using the attached Pico 2 W as an independent official-
+firmware source or receiver. This campaign uses the unchanged vendor radio
+firmware asset (CRC `e627c344`) behind a diagnostic RP2350 host application.
+It does not claim the host application itself is the official Pico SDK stack.
+The source configures a normal channel-1 open AP, verifies fixed multicast
+rate and long-preamble readback, then submits eight nonce-bound broadcast
+Ethernet frames. Production packet-engine stats/stop requests again return
+unsupported status -23, and monitor enable/readback alone is not RX proof.
+
+Archives are under `build/clean-rx/pico-reference/hardware/`. Initial
+`controls`/`timed-controls` HT trials are not passing controls: the first
+hits the generic six-second host loader deadline; the second retains seven
+valid terminal fixtures but has no gated HT packet metadata. The raw CCK
+fixture requires no HT gates. Its dedicated ten-second loader budget covers
+cold initialization, the existing 4.2-second collection window and shutdown,
+without altering PHY timeout or non-fixture behavior. The initial
+`cck-boundary` records fail the old MCS-only input guard before RX; these are
+retained as preflight failures, not RF evidence. Native input-guard tests now
+cover legal HT/CCK and malformed CCK configurations.
+
+`cck-small-controls` passes all eight fresh 84-byte MPDUs at both 1/2 Mbps.
+Complete on-device address/payload/sequence/FCS and decoded rate/channel/
+long-preamble checks pass. `cck-long-controls` repeats 8/8 at 84/1536 bytes
+at both rates, 0/8 at 1636 bytes at 1 Mbps and 8/8 at 2 Mbps.
+
+The separate `vendor-to-vendor` trial uses Pico source `24397e6e` and badge B
+vendor monitor `c96649f9`, not a clean receiver. It retains four complete
+frames each at 84/1536 bytes at both rates and at 1636 bytes at 2 Mbps,
+with payload/FCS verification, but none at 1636 bytes at 1 Mbps. All eight
+monitor operations finish their setup/collection/cleanup successfully, but
+forwarding again stops at 30 pre-cleanup raw packets (32 final). These
+partial captures are not a reliable loss-rate baseline, and opaque vendor
+metadata does not independently decode rate.
+
+Source counters in `cck-counter-controls` (`b5cc8393`) use the public
+version-10/848-byte ABI already verified by the vendor-burst fixture. At
+Ethernet sizes 62/1514/1614, both rates advance `txframe` and `txfrmsnt` by
+eight, with no `txerror`, `txnobuf`, `txphyerr` or `txfail` increases.
+At size 1714 both data-TX counters remain zero, although host submissions
+return successfully. That size is **not a valid RF stimulus**. The final
+source treats missing data-TX accounting as protocol failure rather than
+reporting success-shaped submission-only evidence. Counter ABI rejection
+also fails explicitly; unrelated AP beacons/control frames are not counted
+as fixture data.
+
+The final `fine-boundary` source build `8f3e01dc` and clean receiver
+`8bf5afb9` test exact MPDU lengths:
+
+| Ethernet bytes | Plain MPDU bytes, including FCS | 1-Mbps fresh captures | 2-Mbps fresh captures | Vendor data-TX accounting |
+| --- | --- | --- | --- | --- |
+| 1558 | 1580 | 8/8 | 8/8 | 8 frames, zero TX errors at both rates |
+| 1562 | 1584 | 4/8 | 8/8 | 8 frames, zero TX errors at both rates |
+| 1566 | 1588 | 0/8 | 8/8 | 8 frames, zero TX errors at both rates |
+| 1606 | 1628 | 0/8 | 8/8 | 8 frames, zero TX errors at both rates |
+| 1714 | 1736 expected, not captured | 0, invalid stimulus | 0, invalid stimulus | Zero data-TX frames; explicit source error 7 and exit 1 |
+
+Successful clean captures require complete validation, not a matching
+prefix, fragment or PLCP length alone. The 1584-byte 1-Mbps mask is `0x8e`;
+there are no duplicate fixture deliveries. Global discard counters include
+ambient traffic and cannot be attributed to missing fixture frames.
+The 1628-byte test matches the failing clean-soak MPDU size, despite the
+AP fixture's additional LLC/SNAP overhead changing its Ethernet payload
+length. No accepted full-size frame is silently replaced by fragmentation.
+
+This removes dependence on the clean transmitter for reproducing the
+receive boundary and establishes a useful independent vendor source for
+passing cells. It does **not** establish a complete 1628-byte waveform at
+1 Mbps: the vendor receiver also misses it and vendor TX counters cannot
+prove physical EOF. It therefore does not yet identify a unique clean-RX
+bug, a safe LCN20 register repair or full C1 qualification. C1 stays open.
+
+Every borrowed Pico/badge was freshly backed up in full and restored with
+complete-flash SHA-256 comparison after each campaign (4 MiB Pico, 16 MiB
+per badge). Original hashes remain those recorded above; all devices are
+left in BOOTSEL. No laptop networking, credentials, vendor radio binary,
+speculative PHY register or production Ethernet MTU was changed.
+
+Final Pico/clean-badge/vendor-badge builds pass. Peer and badge native
+ASan/UBSan regressions, shared vendor transport/default-MTU tests, new CLI
+invalid-rate/alignment/upper-bound checks and `git diff --check` pass.
+The two final zero-data-TX controls are checked to exit 1. These are
+bounded fixture results, not C3's 1,000-frame-per-cell qualification.
+
 ### C2. Basic-rate and mixed-network compatibility
 
 - [ ] Negotiate appropriate supported/basic rates, including a usable

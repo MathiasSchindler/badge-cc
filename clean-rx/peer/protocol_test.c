@@ -3,6 +3,7 @@
 #include <string.h>
 #include "protocol.h"
 #include "frame.h"
+#include "cck_monitor.h"
 #include "lifecycle_usb.h"
 #include "protected_ap.h"
 #include "../../src/shared/bytes.h"
@@ -73,6 +74,163 @@ static void frame_tests(void) {
         }
 }
 
+static void cck_frame_tests(void) {
+    static const uint32_t sizes[] = {62u, 1514u, 1614u, 1714u, 2014u};
+    uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u};
+    uint8_t ethernet[CLEAN_PEER_ETHERNET_STORAGE], mpdu[CLEAN_PEER_ETHERNET_STORAGE + 24u];
+    uint8_t metadata[18] = {0};
+    for (uint32_t rate = 1u; rate <= 2u; ++rate)
+        for (uint32_t s = 0u; s < sizeof(sizes)/sizeof(sizes[0]); ++s) {
+            assert(clean_peer_cck_configure(nonce, rate, sizes[s]));
+            assert(clean_peer_cck(nonce) && clean_peer_ethernet_length(nonce) == sizes[s]);
+            assert(clean_peer_rx_config_valid(nonce));
+            metadata[15] = rate == 1u ? 10u : 20u;
+            metadata[16] = 1u;
+            assert(clean_peer_cck_metadata(metadata, 1u, nonce));
+            for (uint32_t i = 15u; i < 18u; ++i)
+                for (uint32_t bit = 0u; bit < 8u; ++bit) {
+                    metadata[i] ^= 1u << bit;
+                    assert(!clean_peer_cck_metadata(metadata, 1u, nonce));
+                    metadata[i] ^= 1u << bit;
+                }
+            assert(!clean_peer_cck_metadata(metadata, 6u, nonce));
+            for (uint32_t qos = 0u; qos < 2u; ++qos)
+                for (uint32_t sequence = 0u; sequence < CLEAN_PEER_FRAME_COUNT; ++sequence) {
+                    uint32_t header = qos ? 26u : 24u, length = sizes[s] + header - 2u;
+                    memset(mpdu, 0, sizeof(mpdu));
+                    clean_peer_ethernet(ethernet, nonce, (uint8_t)sequence);
+                    mpdu[0] = qos ? 0x88u : 0x08u; mpdu[1] = 2u;
+                    memcpy(mpdu + 4u, ethernet, 6u);
+                    memcpy(mpdu + 10u, ethernet + 6u, 6u);
+                    memcpy(mpdu + 16u, ethernet + 6u, 6u);
+                    const uint8_t snap[6] = {0xaau,0xaau,3u,0u,0u,0u};
+                    memcpy(mpdu + header, snap, sizeof(snap));
+                    memcpy(mpdu + header + 6u, ethernet + 12u, sizes[s] - 12u);
+                    badger_bytes_store_u32(mpdu + length - 4u, diag_crc32(mpdu, length - 4u));
+                    uint8_t trace[CLEAN_PEER_TRACE_BYTES] = {0};
+                    uint8_t envelope[CLEAN_PEER_ETHERNET_STORAGE + 64u] = {0};
+                    memcpy(envelope + 40u, mpdu, length);
+                    clean_cck_monitor_packet(trace, nonce, envelope, length + 40u);
+                    assert(usb_report_u32(trace + 56u) == 1u);
+                    assert(usb_report_u32(trace + 64u) == (1u << sequence));
+                    assert(usb_report_u32(trace + 72u) == length);
+                    memset(trace, 0, sizeof(trace));
+                    clean_cck_monitor_packet(trace, nonce, envelope, length + 39u);
+                    assert(!usb_report_u32(trace + 56u) && usb_report_u32(trace + 44u) == 1u);
+                    nonce[5] ^= 1u;
+                    memset(trace, 0, sizeof(trace));
+                    clean_cck_monitor_packet(trace, nonce, envelope, length + 40u);
+                    assert(!usb_report_u32(trace + 56u) && !usb_report_u32(trace + 128u));
+                    nonce[5] ^= 1u;
+                    assert(clean_peer_mpdu_sequence(mpdu, length, nonce) == (int)sequence);
+                    assert(clean_peer_mpdu_sequence(mpdu, length - 1u, nonce) == -1);
+                    assert(clean_peer_mpdu_sequence(mpdu, length + 1u, nonce) == -1);
+                    for (uint32_t i = header + 8u; i < length - 4u; i += 167u) {
+                        mpdu[i] ^= 1u;
+                        badger_bytes_store_u32(mpdu + length - 4u, diag_crc32(mpdu, length - 4u));
+                        assert(clean_peer_mpdu_sequence(mpdu, length, nonce) == -1);
+                        mpdu[i] ^= 1u;
+                    }
+                    badger_bytes_store_u32(mpdu + length - 4u, diag_crc32(mpdu, length - 4u) ^ 1u);
+                    assert(clean_peer_mpdu_sequence(mpdu, length, nonce) == -1);
+                }
+        }
+    assert(!clean_peer_cck_configure(nonce, 0u, 62u));
+    assert(!clean_peer_cck_configure(nonce, 3u, 62u));
+    assert(!clean_peer_cck_configure(nonce, 1u, 58u));
+    assert(!clean_peer_cck_configure(nonce, 1u, 2018u));
+    assert(!clean_peer_cck_configure(nonce, 1u, 64u));
+    nonce[11] = nonce[12] = 0u;
+    assert(!clean_peer_ethernet_length(nonce));
+    assert(!clean_peer_rx_config_valid(nonce));
+    for (uint32_t rate = 0u; rate < 256u; ++rate) {
+        nonce[13] = (uint8_t)rate;
+        assert(clean_peer_rx_config_valid(nonce) == (rate < 8u));
+    }
+}
+
+static void counter_tests(void) {
+    uint8_t reply[1024] = {10u,0u,0x50u,3u}, output[32] = {0};
+    uint8_t before[32] = {0}, after[32] = {0};
+    assert(!clean_peer_tx_accounted(before,after,8u));
+    badger_bytes_store_u32(after,8u); badger_bytes_store_u32(after+28u,8u);
+    assert(clean_peer_tx_accounted(before,after,8u));
+    assert(!clean_peer_tx_accounted(before,after,0u));
+    for (uint32_t i = 2u; i <= 6u; ++i) {
+        badger_bytes_store_u32(after+4u*i,1u);
+        assert(clean_peer_tx_accounted(before,after,8u) == (i == 5u));
+        badger_bytes_store_u32(after+4u*i,0u);
+    }
+    badger_bytes_store_u32(before,0xffffffffu);
+    badger_bytes_store_u32(after,7u);
+    assert(clean_peer_tx_accounted(before,after,8u));
+    static const uint32_t offsets[] = {4u,8u,16u,32u,56u,196u,432u,472u};
+    for (uint32_t i = 0u; i < CLEAN_PEER_COUNTER_COUNT; ++i)
+        badger_bytes_store_u32(reply+offsets[i],0xabcdef00u+i);
+    assert(clean_peer_counter_decode(reply,848u,output));
+    for (uint32_t i = 0u; i < CLEAN_PEER_COUNTER_COUNT; ++i)
+        assert(usb_report_u32(output+4u*i) == 0xabcdef00u+i);
+    assert(!clean_peer_counter_decode(reply,847u,output));
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        reply[i] ^= 1u;
+        assert(!clean_peer_counter_decode(reply,sizeof(reply),output));
+        reply[i] ^= 1u;
+    }
+}
+
+static void phy_tests(void) {
+    uint8_t request[CLEAN_PEER_CONTROL_BYTES], set, trace[CLEAN_PEER_TRACE_BYTES] = {0};
+    uint32_t command;
+    static const uint16_t addresses[] = {0x42c, 0x465, 0x464, 0x466, 0x430, 0x431, 0x432};
+    badger_bytes_store_u32(trace, CLEAN_PEER_MAGIC);
+    badger_bytes_store_u32(trace + 16u, CLEAN_PEER_RECORDS);
+    badger_bytes_store_u32(trace + 20u, 3u);
+    badger_bytes_store_u32(trace + 24u, CLEAN_PEER_RECORDS);
+    for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {
+        memset(request, 255, sizeof(request));
+        assert(clean_peer_prepare_phy(i, request, &command, &set) == 8u);
+        assert(command == 94u && !set);
+        assert(usb_report_u32(request) == addresses[i]);
+        for (uint32_t j = 4u; j < sizeof(request); ++j) assert(!request[j]);
+        uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
+        badger_bytes_store_u32(r, i);
+        badger_bytes_store_u32(r + 4u, 1u);
+        badger_bytes_store_u32(r + 16u, 4u);
+        badger_bytes_store_u32(r + 20u, 2590u + i);
+    }
+
+    assert(!clean_peer_prepare_phy(CLEAN_PEER_RECORDS, request, &command, &set));
+    assert(clean_peer_phy_supported(trace));
+    for (uint32_t mode = 0u; mode <= 4u; ++mode) {
+        badger_bytes_store_u32(trace + 20u, mode);
+        assert(clean_peer_trace_valid(trace) == (mode >= 1u && mode <= 3u));
+        assert(clean_peer_phy_supported(trace) == (mode == 3u));
+    }
+    badger_bytes_store_u32(trace + 20u, 3u);
+    badger_bytes_store_u32(trace + 24u, CLEAN_PEER_RECORDS - 1u);
+    assert(!clean_peer_phy_supported(trace));
+    badger_bytes_store_u32(trace + 24u, CLEAN_PEER_RECORDS);
+    for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {
+        uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
+        badger_bytes_store_u32(r + 4u, 0u);
+        badger_bytes_store_u32(r + 8u, 8u);
+        badger_bytes_store_u32(r + 12u, (uint32_t)-23);
+        assert(clean_peer_trace_valid(trace) && !clean_peer_phy_supported(trace));
+        badger_bytes_store_u32(r + 4u, 1u);
+        badger_bytes_store_u32(r + 8u, 0u);
+        badger_bytes_store_u32(r + 12u, 0u);
+        for (uint32_t size = 0u; size < 9u; ++size) {
+            badger_bytes_store_u32(r + 16u, size);
+            assert(clean_peer_phy_supported(trace) == (size == 4u));
+        }
+        badger_bytes_store_u32(r + 16u, 4u);
+        badger_bytes_store_u32(r + 20u, 65536u);
+        assert(!clean_peer_phy_supported(trace));
+        badger_bytes_store_u32(r + 20u, 0u);
+        assert(clean_peer_phy_supported(trace));
+    }
+}
+
 static void monitor_tests(void) {
     uint8_t request[CLEAN_PEER_CONTROL_BYTES], set, trace[CLEAN_PEER_TRACE_BYTES] = {0};
     uint32_t command;
@@ -84,6 +242,7 @@ static void monitor_tests(void) {
         assert(usb_report_u32(request) == (i == 2u ? 6u : i == 3u ? 1u : 0u));
         for (uint32_t j = 4u; j < sizeof(request); ++j) assert(!request[j]);
     }
+
     assert(!clean_peer_prepare_monitor(CLEAN_PEER_RECORDS, request, &command, &set));
     badger_bytes_store_u32(trace, CLEAN_PEER_MAGIC);
     badger_bytes_store_u32(trace + 16u, CLEAN_PEER_RECORDS);
@@ -174,6 +333,9 @@ static void protected_secret_tests(void) {
 }
 
 int main(void) {
+    counter_tests();
+    cck_frame_tests();
+    phy_tests();
     protected_secret_tests();
     frame_tests();
     monitor_tests();

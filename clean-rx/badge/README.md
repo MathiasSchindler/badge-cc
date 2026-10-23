@@ -1201,6 +1201,28 @@ collection and cleanup succeeded; `complete=0` is not reception proof or
 a passing C1 qualification. There is no decoded PHY-rate/preamble proof
 in this opaque vendor format (`phy_rate_verified=false`).
 
+The trace also records first/last raw-packet arrival, setup-ready and finished
+times, largest inter-packet gap, and the packet count/last arrival **before
+cleanup**, all times in microseconds since monitor setup began. Cleanup can
+drain queued packets: the overall last-arrival time alone does not prove
+continuous capture. These counters include ambient non-control packets;
+only the fixture-matched complete MPDUs establish payload/FCS evidence.
+
+`--cck-monitor-poll SOAK_NONCE_HEX_28` explicitly opts into a GET_MONITOR
+control request every 100 ms. The default remains unpolled. This is a
+diagnostic, not a fix: the retained polled station trials all fail with
+firmware timeout 6 after 46 raw packets, despite partial valid captures.
+Failed collection preserves evidence and exits unsuccessfully.
+
+`--phy-probe` separately attempts seven GET_PHYREG (command 94) reads after
+bringing the vendor radio up on channel 1. It uses an eight-byte zeroed
+register/band request for addresses 0x42c/0x465/0x464/0x466/0x430/0x431/0x432;
+that layout and the registers' meanings are not established by successful
+hardware readback. The shipped firmware rejects every read with controller
+status -23. `phy_readback_supported=false` and a nonzero collector exit mean
+the reported zero placeholders **are not register values**. No PHY-register
+writes or application/data TX are requested.
+
 The vendor transport's 2,040-byte SDPCM limit remains unchanged: this mode
 cannot receive a complete 2,332-byte MPDU. Never infer its complete waveform
 from a matching prefix or a source template counter.
@@ -1209,8 +1231,84 @@ The retained campaign independently validates eight attempts each at 32 and
 1,500 MSDU bytes with the second badge as vendor listener, but no complete
 1,600-byte attempt. The Pico listener misses even the small positive
 controls, so its absence of captures cannot localize the boundary failure.
+Later 100-ms-polled station trials retain three complete 1-Mbps/1,500-byte
+and eight complete 2-Mbps/1,600-byte attempts, but no complete
+1-Mbps/1,600-byte attempt. Every polled capture operation itself times out;
+these are partial frame observations, not passing reference qualifications.
+They exclude a simple reference packet-size cap at 1,628 MPDU bytes, but do
+not distinguish incomplete 1-Mbps TX from receive-duration limitations.
 The clean paired boundary failure still reproduces. See
 [the current investigation](../dev-doc/MILESTONE_HISTORY.md#c1-independent-boundary-investigation).
+
+#### Pico vendor-managed CCK source
+
+The independent peer can also generate eight fresh ordinary broadcast data
+frames at fixed 1 or 2 Mbps, with long preamble. This uses the unchanged
+official CYW43 radio firmware and its managed open AP, not packet-engine
+or clean TX code. The production packet-engine queries remain unsupported.
+No laptop association or local network credentials are needed.
+
+```sh
+make -f clean-rx/peer/Makefile HT_PEER_BUILD=build/clean-rx/pico-reference/peer \
+  HT_PEER_PICO=1 ht-peer ht-peer-test
+make -C clean-rx/badge BUILD="$PWD/build/clean-rx/pico-reference/badge" all test
+
+# Back up complete flash, install matching UF2s and boot the badge first.
+# Use the same fresh 28-hex challenge in both commands.
+build/clean-rx/pico-reference/badge/collector BADGE_SERIAL build/cck-source-rx.bin \
+  1 --vendor-cck-rx "$challenge" 1 1606
+build/clean-rx/pico-reference/peer/collector PICO_SERIAL build/cck-source-tx.bin \
+  --tx-cck "$challenge" 1 1606
+```
+
+Run the two collectors concurrently, allowing for the badge's cold radio
+initialization before starting the source. The tested harness launched the
+Pico about 1.8 seconds after the clean collector, plus USB boot/enumeration
+time. Restore and compare each complete original flash afterward. The
+receive-only fixture has a ten-second total loader budget covering cold
+initialization, 4.2 seconds of RX and shutdown; it does not extend a PHY wait
+or change other modes' deadlines.
+
+Both commands take rate `1` or `2` and Ethernet size `62..2014`, with size
+modulo four equal to two so SDPCM alignment cannot append Ethernet payload
+bytes. Challenge bytes 11/12 encode size; byte 13 encodes `0x80 | Mbps`.
+The Ethernet size includes its 14-byte header. A plain From-DS MPDU is
+Ethernet size + 22 bytes including FCS (QoS adds two more). Thus size 1606
+tests the same 1628-byte MPDU length as the clean 1600-byte MSDU fixture;
+size 1614 contains 1600 Ethernet payload bytes but produces a 1636-byte MPDU.
+
+The source verifies multicast-rate and long-preamble readback and sends at
+most eight frames at 100-ms target intervals. A separate explicit oversized
+TX diagnostic permits packets within the existing 2040-byte SDPCM buffer;
+normal Ethernet TX/RX retains its 1514-byte maximum. The size bound is a host
+buffer bound, **not** a claim that vendor firmware transmits every size.
+Version-10 vendor counters are sampled before/after: eight accounted data
+frames and no new TX errors are required. A counter mismatch is an explicit
+failure, even if all eight host submissions succeeded. Counters alone do
+not establish a complete OTA waveform (`tx_over_air_confirmed=false`).
+
+The clean receiver checks the complete nonce-bound payload, addresses,
+sequence and FCS on-device, plus decoded CCK rate, channel and long preamble.
+It reports distinct sequence masks/duplicates; it does not infer long-frame
+validity from the retained prefix. `fresh_cck_rx=true` means at least one
+complete valid capture, not eight-of-eight reliability; inspect
+`all_frames_received`. Neither result completes C1 or C3.
+
+A second vendor peer supports
+`--vendor-cck-monitor CHALLENGE_HEX_28 MBPS ETHERNET_BYTES` for these exact
+AP fixtures, using the same passive channel-1 setup. Its opaque envelopes
+still do not verify PHY rate, and its forwarding cutoff remains unqualified.
+
+The Pico control passes eight-of-eight small frames at both rates. Final
+independent tests receive 8/8 1580-byte MPDUs at 1 Mbps, 4/8 at 1584 bytes,
+and 0/8 at 1588 and 1628 bytes; the same four sizes pass 8/8 at 2 Mbps.
+The Pico accounts all eight TX frames at each of those sizes, with no new
+TX errors. Size 1714 Ethernet is a separate **invalid stimulus**: vendor
+data-TX counters remain zero at both rates despite host submissions, and
+the final source fails explicitly. The vendor badge monitor also receives
+the 1636-byte fixture at 2 Mbps but not 1 Mbps. A complete long 1-Mbps
+waveform is therefore still unproven, even with official vendor endpoints.
+See [the retained reference campaign](../dev-doc/MILESTONE_HISTORY.md#c1-pico-vendor-reference-campaign).
 
 ### Bounded legacy fragmentation fixture
 

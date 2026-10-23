@@ -606,6 +606,37 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         return tx==CLEAN_HT_AMPDU_PROBE_TX_MODE ? submitted : received;
     }
     if (tx == CLEAN_PEER_RX_MODE) {
+        if (clean_peer_cck(nonce)) {
+            const uint8_t *p = detail + CLEAN_PEER_RX_DETAIL;
+            uint32_t length = usb_report_u32(p + 4u);
+            uint32_t count = usb_report_u32(detail + 1996u), mask = usb_report_u32(p + 8u);
+            uint32_t ethernet = clean_peer_ethernet_length(nonce);
+            int fresh = !usb_report_u32(detail + 8u) && usb_report_u32(detail + 36u) == 10u &&
+                usb_report_u32(p) == CLEAN_PEER_MAGIC && count && mask && !(mask & ~255u) &&
+                (length == ethernet + 22u || length == ethernet + 24u) &&
+                usb_report_u32(p + 16u) == (nonce[13] == 0x81u ? 10u : 20u) &&
+                usb_report_u32(p + 20u) == channel;
+            clean_ht_diag_t diagnostic;
+            memcpy(&diagnostic, detail + CLEAN_HT_DIAG_DETAIL, sizeof(diagnostic));
+            printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"mode\":\"vendor-cck-rx\","
+                   "\"channel\":%u,\"mbps\":%u,\"ethernet_bytes\":%u,\"error\":%u,"
+                   "\"fresh_cck_rx\":%s,\"fresh_frames\":%u,\"sequence_bitmap\":%u,"
+                   "\"duplicates\":%u,\"mpdu_bytes\":%u,\"last_fcs\":\"%08x\","
+                   "\"long_preamble_verified\":%s,\"full_payload_fcs_checked_on_device\":%s,"
+                   "\"early_final_count\":%u,\"early_outcome\":%u,"
+                   "\"discard_bad_fcs\":%u,\"discard_oversize\":%u,"
+                   "\"discard_rx_event\":%u,\"discard_plcp\":%u,"
+                   "\"all_frames_received\":%s,\"cck_qualified\":false}\n",
+                   serial,USB_REPORT_BUILD_ID,channel,nonce[13]&3u,ethernet,
+                   usb_report_u32(detail+8u),fresh?"true":"false",count,mask,
+                   usb_report_u32(p+12u),length,usb_report_u32(p+24u),
+                   fresh?"true":"false",fresh?"true":"false",
+                   diagnostic.early.final_count,diagnostic.early.outcome,
+                   usb_report_u32(detail+492u),usb_report_u32(detail+496u),
+                   usb_report_u32(detail+500u),usb_report_u32(detail+504u),
+                   fresh && mask==255u && count==8u && !usb_report_u32(p+12u)?"true":"false");
+            return fresh;
+        }
         clean_ht_rx_t rx;
         clean_ht_diag_t diagnostic;
         memcpy(&rx, detail + CLEAN_HT_DETAIL, sizeof(rx));
@@ -1465,6 +1496,19 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint8_t peer_mode = 0u;
+    int vendor_cck = argc == 8 && strcmp(argv[4], "--vendor-cck-rx") == 0;
+    if (vendor_cck) {
+        char *rate_end, *size_end;
+        unsigned long rate = strtoul(argv[6], &rate_end, 10);
+        unsigned long size = strtoul(argv[7], &size_end, 10);
+        if (!peer_challenge_decode(argv[5], challenge) || !*argv[6] || *rate_end ||
+            !*argv[7] || *size_end || rate > 2u || size > CLEAN_PEER_ETHERNET_STORAGE ||
+            !clean_peer_cck_configure(challenge,(uint32_t)rate,(uint32_t)size)) {
+            fputs("Vendor CCK RX requires a 28-hex challenge, 1 or 2 Mbps and aligned Ethernet size 62..2014\n",stderr);
+            return 2;
+        }
+        peer_mode = CLEAN_PEER_RX_MODE;
+    }
     int ampdu_probe = argc == 7 && (strcmp(argv[4],"--ht-ampdu-probe-tx")==0 ||
                                    strcmp(argv[4],"--ht-ampdu-probe-rx")==0);
     int vendor_ht = argc == 7 && strcmp(argv[4], "--vendor-ht-rx") == 0;
@@ -1586,6 +1630,7 @@ int main(int argc, char **argv) {
               "--peer-rx|--peer-tx|--peer-tx-1m CHALLENGE_HEX_28\n", stderr);
         fputs("HT diagnostic only: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ht-observe OR --ht-probe-tx|--ht-probe-rx CHALLENGE_HEX_28 MCS:0-7\n", stderr);
+        fputs("C1 vendor CCK RX: --vendor-cck-rx CHALLENGE_HEX_28 MBPS:1,2 ETHERNET_BYTES:62-2014 (size modulo 4 must be 2)\n",stderr);
         fputs("HT data diagnostic: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ht-data-tx|--ht-data-rx CHALLENGE_HEX_28 MCS:0-7 MPDU_BYTES:28-2332\n", stderr);
         fputs("HT ACK diagnostic: collector SERIAL EVIDENCE_BIN CHANNEL "

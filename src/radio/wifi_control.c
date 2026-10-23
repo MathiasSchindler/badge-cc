@@ -94,9 +94,10 @@ int wifi_control_version(const wifi_control_packet_t *packet, uint16_t id, char 
     return 0;
 }
 
-uint32_t wifi_data_frame(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
-                         uint8_t interface, const uint8_t *frame, uint32_t length) {
-    if (packet == 0 || frame == 0 || interface > 1u || length < 14u || length > WIFI_ETHERNET_MAX) return 0u;
+static uint32_t data_frame(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
+                          uint8_t interface, const uint8_t *frame, uint32_t length,
+                          uint32_t maximum) {
+    if (packet == 0 || frame == 0 || interface > 1u || length < 14u || length > maximum) return 0u;
     uint32_t size = length + 18u, aligned = (size + 3u) & ~3u;
     badger_bytes_zero(packet, aligned);
     packet[0] = (uint8_t)size; packet[1] = (uint8_t)(size >> 8u);
@@ -108,6 +109,16 @@ uint32_t wifi_data_frame(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
     packet[16] = interface;
     badger_bytes_copy(packet + 18u, frame, length);
     return aligned;
+}
+
+uint32_t wifi_data_frame(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
+                         uint8_t interface, const uint8_t *frame, uint32_t length) {
+    return data_frame(packet, sequence, interface, frame, length, WIFI_ETHERNET_MAX);
+}
+
+uint32_t wifi_data_frame_diagnostic(uint8_t packet[WIFI_CONTROL_MAX], uint8_t sequence,
+                                    uint8_t interface, const uint8_t *frame, uint32_t length) {
+    return data_frame(packet, sequence, interface, frame, length, WIFI_CONTROL_MAX - 18u);
 }
 
 int wifi_data_decode(const wifi_control_packet_t *packet, uint8_t *interface,

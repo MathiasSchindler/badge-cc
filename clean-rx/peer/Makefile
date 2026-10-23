@@ -107,7 +107,7 @@ $(HT_PEER_BUILD)/network_test: $(HT_PEER_DIR)/network_test.c $(HT_PEER_DIR)/netw
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
 		$< $(HT_PEER_DIR)/network.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
 
-$(HT_PEER_BUILD)/protocol_test: $(HT_PEER_DIR)/protocol_test.c $(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/lifecycle_usb.h $(HT_PEER_DIR)/protected_ap.h clean-rx/src/wpa2_crypto.c $(HT_PEER_DIR)/Makefile src/usb/live_usb_control.c | $(HT_PEER_BUILD)
+$(HT_PEER_BUILD)/protocol_test: $(HT_PEER_DIR)/protocol_test.c $(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/cck_monitor.h $(wildcard clean-rx/src/*.h) $(HT_PEER_DIR)/lifecycle_usb.h $(HT_PEER_DIR)/protected_ap.h clean-rx/src/wpa2_crypto.c $(HT_PEER_DIR)/Makefile src/usb/live_usb_control.c | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -DLIVE_USB_FIRMWARE -DLIVE_USB_CLEAN \
 		$< clean-rx/src/wpa2_crypto.c src/usb/live_usb_control.c $(SHARED_DIR)/usb_report.c \
 		$(TOOLS_DIR)/diagnostics_logic.c $(WIFI_USB_HOST_SOURCES) -o $@

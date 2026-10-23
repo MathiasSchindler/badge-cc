@@ -23,6 +23,7 @@ static int cancel_assets;
 static wifi_fw_assets_t assets;
 static uint32_t raw_packets;
 static uint8_t live_backplane;
+static uint32_t diagnostic_sent;
 
 static void raw_receive(void *context, const uint8_t *packet, uint32_t length) {
     assert(context == &raw_packets);
@@ -135,6 +136,11 @@ static wifi_bus_result_t transfer(const wifi_wire_t *wire, const uint8_t *tx,
             wifi_control_packet_t packet;
             assert(wifi_control_parse(tx+4u, size, &packet));
             if(packet.channel==2u) {
+                if (packet.payload_size > WIFI_ETHERNET_MAX + 4u) {
+                    assert(packet.payload[0] == 0x20u && packet.payload[2] == 1u);
+                    diagnostic_sent = packet.payload_size - 4u;
+                    return WIFI_BUS_OK;
+                }
                 const uint8_t *ethernet;uint8_t interface;uint32_t frame_length;
                 assert(wifi_data_decode(&packet,&interface,&ethernet,&frame_length));
                 queue_size=wifi_data_frame(queue,0u,interface,ethernet,frame_length);
@@ -204,7 +210,7 @@ static void initialize(void) {
     for (unsigned i=0u;i<sizeof(clm);++i) clm[i]=(uint8_t)(i+1u);
     memset(memory, 0, sizeof(memory));
     queue_size=window_base=ticks=off_count=confirmed=token=0u;
-    data_size=inject_data=0u;
+    data_size=inject_data=diagnostic_sent=0u;
     controller_error=wrong_id=reply_interface=0u;
     corrupt_address=UINT32_MAX;
     arm_reset=ram_reset=1u; arm_io=ram_io=0u;
@@ -217,6 +223,22 @@ static void initialize(void) {
 }
 
 static void protocol_tests(void) {
+    uint8_t large_frame[2023], guarded[WIFI_CONTROL_MAX + 8u];
+    memset(large_frame, 0x5a, sizeof(large_frame));
+    for (uint32_t n = 14u; n <= 2022u; ++n) {
+        memset(guarded, 0xa5, sizeof(guarded));
+        uint32_t aligned = wifi_data_frame_diagnostic(guarded, 255u, 1u, large_frame, n);
+        assert(aligned == ((n + 21u) & ~3u) && aligned <= WIFI_CONTROL_MAX);
+        assert(memcmp(guarded + 18u, large_frame, n) == 0);
+        for (uint32_t i = n + 18u; i < aligned; ++i) assert(!guarded[i]);
+        for (uint32_t i = aligned; i < sizeof(guarded); ++i) assert(guarded[i] == 0xa5u);
+        assert(!!wifi_data_frame(guarded, 0u, 0u, large_frame, n) == (n <= WIFI_ETHERNET_MAX));
+    }
+    assert(!wifi_data_frame_diagnostic(guarded, 0u, 1u, large_frame, 2023u));
+    assert(!wifi_data_frame_diagnostic(guarded, 0u, 2u, large_frame, 62u));
+    assert(!wifi_data_frame_diagnostic(guarded, 0u, 1u, large_frame, 13u));
+    assert(!wifi_data_frame_diagnostic(guarded, 0u, 1u, NULL, 62u));
+    assert(!wifi_data_frame_diagnostic(NULL, 0u, 1u, large_frame, 62u));
     uint8_t packet[2040], payload[192] = "ver";
     uint32_t size = wifi_control_request(packet, 255u, 15u, 262u, 0u, payload, sizeof(payload));
     wifi_control_packet_t decoded;
@@ -368,6 +390,11 @@ int main(void) {
     assert(wifi_firmware_send_frame(0u,ethernet,sizeof(ethernet)));
     assert(wifi_firmware_read_frame(frame,&frame_length,&interface)==1);
     assert(interface==0u && frame_length==sizeof(ethernet) && memcmp(frame,ethernet,sizeof(ethernet))==0);
+    uint8_t oversized[1614] = {0};
+    assert(!wifi_firmware_send_frame(1u,oversized,sizeof(oversized)) &&
+           report.error == WIFI_FW_PROTOCOL && !diagnostic_sent);
+    assert(wifi_firmware_send_frame_diagnostic(1u,oversized,sizeof(oversized)) &&
+           report.error == WIFI_FW_OK && diagnostic_sent == sizeof(oversized));
     wifi_firmware_stop();
     wifi_firmware_stop();
     assert(off_count==1u);

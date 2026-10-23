@@ -181,14 +181,21 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                     detail[2001u], peer_challenge[13]) &&
                 clean_ht_ack_match(packet + 18u, size - 18u, peer_challenge) : 0);
             if (detail[2000u] == CLEAN_PEER_RX_MODE && size >= 18u &&
-                clean_ht_rx_metadata(packet[15], packet[16], packet[17], size - 18u,
-                                     detail[2001u], peer_challenge[13])) {
+                (clean_peer_cck(peer_challenge) ?
+                 clean_peer_cck_metadata(packet, detail[2001u], peer_challenge) :
+                 clean_ht_rx_metadata(packet[15], packet[16], packet[17], size - 18u,
+                                      detail[2001u], peer_challenge[13]))) {
                 int sequence = clean_peer_mpdu_sequence(packet + 18u, size - 18u, peer_challenge);
                 if (sequence >= 0) {
                     uint32_t mask = badger_bytes_load_u32(detail + CLEAN_PEER_RX_DETAIL + 8u);
                     uint32_t bit = 1u << (uint32_t)sequence;
                     badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL, CLEAN_PEER_MAGIC);
                     badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 8u, mask | bit);
+                    badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 4u, size - 18u);
+                    badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 16u, packet[15]);
+                    badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 20u, packet[16]);
+                    badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 24u,
+                                          badger_bytes_load_u32(packet + size - 4u));
                     if (mask & bit)
                         badger_bytes_store_u32(detail + CLEAN_PEER_RX_DETAIL + 12u,
                             badger_bytes_load_u32(detail + CLEAN_PEER_RX_DETAIL + 12u) + 1u);
@@ -1044,6 +1051,7 @@ static void run(const uint8_t nonce[16]) {
     wifi_board_select_pio(1u);
     clean_loader_init(&l, wifi_board_wire(), service, 0);
     if (nonce[14]==CLEAN_WPA_REKEY_MODE) l.budget_us=CLEAN_WPA_REKEY_BUDGET_US;
+    if (nonce[14] == CLEAN_PEER_RX_MODE) l.budget_us = 10000000u;
     soak_watchdog_at = l.wire->now_us(l.wire->context);
     if (badger_schedule_bootsel(8000u) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
@@ -1065,7 +1073,9 @@ static void run(const uint8_t nonce[16]) {
             nonce[14] != CLEAN_NETWORK_MODE && nonce[14] != CLEAN_WPA_REKEY_MODE && !(CLEAN_RX_AMPDU_PROBE &&
             nonce[14] <= CLEAN_HT_AMPDU_PROBE_RX_MODE)) || !secret_valid ||
         ((nonce[14] == 21u || nonce[14] == 22u ||
-          (nonce[14] >= 24u && nonce[14] <= 31u)) && nonce[13] >= 8u) ||
+          (nonce[14] >= 24u && nonce[14] <= 31u && nonce[14] != CLEAN_PEER_RX_MODE)) &&
+          nonce[13] >= 8u) ||
+        (nonce[14] == CLEAN_PEER_RX_MODE && !clean_peer_rx_config_valid(nonce)) ||
         (nonce[14] >= 26u && nonce[14] <= 28u && (!CLEAN_RX_HT_RESPONSE ||
                              clean_ht_data_length(nonce) != CLEAN_HT_ACK_MPDU)) ||
         (nonce[14] >= 24u && nonce[14] <= 28u &&

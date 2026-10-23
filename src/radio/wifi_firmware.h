@@ -76,6 +76,8 @@ int wifi_firmware_raw_enable(wifi_fw_raw_receive_t receive, void *context);
 /* 1 packet processed, 0 none, -1 radio/protocol error; never transmits data. */
 int wifi_firmware_raw_poll(void);
 int wifi_firmware_send_frame(uint8_t interface, const uint8_t *frame, uint32_t length);
+/* Explicit bounded oversized-TX diagnostic; vendor acceptance requires OTA verification. */
+int wifi_firmware_send_frame_diagnostic(uint8_t interface, const uint8_t *frame, uint32_t length);
 /* 1 frame copied, 0 no frame, -1 radio/protocol error. */
 int wifi_firmware_read_frame(uint8_t frame[1514], uint32_t *length, uint8_t *interface);
 uint32_t wifi_firmware_rx_dropped(void);

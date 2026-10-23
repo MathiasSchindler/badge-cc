@@ -590,7 +590,8 @@ int wifi_firmware_raw_poll(void) {
     return poll_packet(&packet);
 }
 
-int wifi_firmware_send_frame(uint8_t interface, const uint8_t *frame, uint32_t length) {
+static int send_frame(uint8_t interface, const uint8_t *frame, uint32_t length,
+                       uint8_t diagnostic) {
     if (!state.ready || !state.data_enabled) return 0;
     state.report->error = WIFI_FW_OK;
     state.operation_start = state.wire->now_us(state.wire->context);
@@ -602,12 +603,22 @@ int wifi_firmware_send_frame(uint8_t interface, const uint8_t *frame, uint32_t l
         if (attempt >= 10000u || state.wire->now_us(state.wire->context)-started >= 500000u) return failed(WIFI_FW_TIMEOUT);
     }
     if (!wait_reg(0u,8u,4u,0x20u,0x20u,500000u)) return 0;
-    uint32_t size = wifi_data_frame(state.control_tx,state.sequence,interface,frame,length);
+    uint32_t size = diagnostic ?
+        wifi_data_frame_diagnostic(state.control_tx,state.sequence,interface,frame,length) :
+        wifi_data_frame(state.control_tx,state.sequence,interface,frame,length);
     if (size == 0u) return failed(WIFI_FW_PROTOCOL);
     if (!transfer(1u,2u,0u,state.control_tx,0,size)) return 0;
     ++state.sequence;
     ++state.report->tx_packets;
     return 1;
+}
+
+int wifi_firmware_send_frame(uint8_t interface, const uint8_t *frame, uint32_t length) {
+    return send_frame(interface, frame, length, 0u);
+}
+
+int wifi_firmware_send_frame_diagnostic(uint8_t interface, const uint8_t *frame, uint32_t length) {
+    return send_frame(interface, frame, length, 1u);
 }
 
 int wifi_firmware_read_frame(uint8_t frame[1514], uint32_t *length, uint8_t *interface) {
