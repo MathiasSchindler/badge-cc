@@ -92,9 +92,89 @@ its outage-related losses too. A final corrected-runner cold smoke passed with
 13 echoes, and cancellation after independently observed connected data
 stopped both collectors and returned both badges to BOOTSEL. Departure and
 channel-announcement handling have native coverage; the five recovery cycles
-kept the AP on channel 1. Persistent WPA2, negotiated HT/WMM and B2 networking remain open.
+kept the AP on channel 1. Persistent WPA2 and negotiated HT/WMM remain open;
+continuous data has the separate B2 profile below.
 Default, WMM/HT-response and HT/SHM badge builds and their native regression
 suites pass. Vendor firmware, shared platform code and the Pico are unchanged.
+
+## B2 continuous static-address networking
+
+Mode 33 (`--station-network BSSID SECONDS`) reuses B1's legacy/open station
+lifecycle for 10..3900 seconds, but exchanges Ethernet ARP and IPv4/UDP rather
+than the B1 echo EtherType. This is a deliberately small diagnostic network
+path, not a general-purpose IP stack or production networking API:
+
+- AP `192.0.2.1`, station `192.0.2.2`, UDP port `30526`; addresses are static.
+  No DHCP, routing, IP options/fragmentation, VLAN, WPA2 or negotiated HT/WMM.
+  The fixture stays on channel 1, with legacy rate selection inherited from
+  B1 and the vendor AP; this is not an all-rate MAC qualification.
+- Each endpoint independently originates requests at up to five per second,
+  alternating 48-byte and 1472-byte application payloads: 90-byte and
+  full-sized 1514-byte Ethernet frames (1500-byte IP packets). Both directions
+  check IPv4/UDP checksums and every application byte.
+- Session, connection epoch, origin and sequence bind requests and replies.
+  AP binding happens only after complete payload validation and independent
+  vendor-radio association confirmation. Old sessions/epochs cannot acknowledge
+  current requests. Valid later epochs retain cumulative loss/abandonment evidence.
+- TX and RX each have four 1514-byte slots. A full TX ring retains the pending
+  RX operation for backpressure; full RX input is explicitly counted. BUSY
+  retains the outbound Ethernet frame. Actual MAC submission removes it even
+  on ACK timeout; neither completion nor an ACK means application delivery.
+- One application request per direction is outstanding, with a 250-ms retry
+  interval and four bounded submissions. Exhaustion records loss; no counters
+  are cleared to manufacture a pass. Duplicates are answered without duplicate
+  delivery. Payload hashes independently cross-check the delivered streams.
+- The final five seconds of every 20-second interval stop new requests.
+  Pending requests/replies still drain. Generation stops before the overall
+  deadline to permit final acknowledgements. Both USB collectors also stop
+  issuing requests for two seconds periodically; firmware must keep servicing
+  radio and USB independently.
+
+Build with the same two commands as B1. After full-flash backup and installation
+of matching images, leave both badges in BOOTSEL and run:
+
+```sh
+bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 30 --network
+bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 3600 --network
+node clean-rx/badge/network_verify.cjs --self-test
+```
+
+The runner's build/tool overrides, signal cleanup and evidence retention are
+the same as B1; it never flashes or restores originals. Low-level collector
+commands are `collector SERIAL EVIDENCE_BIN CHANNEL --station-network BSSID SECONDS`
+and `collector SERIAL EVIDENCE_BIN --network-ap CHALLENGE_HEX_28 SECONDS`.
+Retain the station JSON/raw archive and AP JSONL/raw archive together. The
+paired oracle checks every network-report field against its raw archive,
+MAC/session/epoch bindings, counts and payload hashes in both directions,
+full-sized traffic, bounded queue high-water marks, scheduled idle intervals,
+host stalls and requested elapsed duration. Loss, corruption, RX overflow,
+abandoned work, incomplete acknowledgement or a service gap above two seconds
+fails qualification. The conservative minimum stimulus is 0.75 new requests
+per elapsed second after the initial five seconds, in each direction.
+Only a real run of at least 3600 seconds can set `soak_qualified:true`;
+the native virtual-hour test is explicitly not RF evidence.
+
+Network storage is fixed: each engine uses 13,868 bytes, including two
+6080-byte rings and reusable packet construction space, with no heap.
+Full-sized packets do not allocate full-sized temporary stack arrays in
+the network engine. Compiler stack-usage files accompany both firmware
+builds; the station network step uses 136 bytes, with separate 56-byte UDP
+and 32-byte payload-builder frames. Reports retain application round-trip
+latency maximum/sample count, service gap maximum, retries, duplicates,
+loss, abandonment and queue pressure rather than hiding radio failures.
+
+Native ASan/UBSan tests cover a virtual bidirectional hour with full-sized
+traffic and idle, timer wrap, duplicate suppression, queue saturation and
+resumption, checksum/payload corruption, binding poisoning, reconnect epochs,
+stale traffic, retry exhaustion and maximum-sized MPDU conversion.
+Real qualification and its exact scope are recorded in
+[the milestone history](../dev-doc/MILESTONE_HISTORY.md#b2-continuous-application-data)
+and [the roadmap](../../todo.md#b2-continuous-application-data).
+The 30-second full-sized control passed; the real 60-minute run failed:
+five beacon-loss recoveries coincided with application loss (3 station,
+21 AP) and 3 abandoned AP work items. There was no corruption or queue
+overflow, but this profile is **not yet B2 soak-qualified**. Both originals
+were restored and full-readback-verified after testing.
 
 ## Existing radio qualification
 

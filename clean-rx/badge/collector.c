@@ -16,6 +16,7 @@
 #include "../src/wpa2_crypto.h"
 #include "station_rx.h"
 #include "station_lifecycle.h"
+#include "../peer/network_json.h"
 #include "../src/tx_diag.h"
 #include "../src/mac_soak.h"
 
@@ -254,7 +255,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (target != NULL) memcpy(nonce, target, 6u);
     nonce[15] = channel;
     nonce[14] = tx;
-    if (tx == CLEAN_LIFECYCLE_MODE) {
+    if (tx == CLEAN_LIFECYCLE_MODE || tx == CLEAN_NETWORK_MODE) {
         nonce[12] = (uint8_t)lifecycle_seconds;
         nonce[13] = (uint8_t)(lifecycle_seconds >> 8u);
     }
@@ -302,10 +303,16 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
     if (soak && !monotonic_us(&submit_after)) return 0;
     int got = 0;
-    for (unsigned attempt = 0u; attempt < (tx >= 19u ? CLEAN_SOAK_POLLS : 800u); ++attempt) {
-        if (tx == CLEAN_LIFECYCLE_MODE && lifecycle_cancel) {
+    uint32_t host_stalls = 0u;
+    uint32_t polls = tx == CLEAN_NETWORK_MODE ? (lifecycle_seconds + 30u) * 10u :
+        tx >= 19u ? CLEAN_SOAK_POLLS : 800u;
+    for (unsigned attempt = 0u; attempt < polls; ++attempt) {
+        if ((tx == CLEAN_LIFECYCLE_MODE || tx == CLEAN_NETWORK_MODE) && lifecycle_cancel) {
             fputs("Station lifecycle cancelled; requesting BOOTSEL cleanup\n", stderr);
             return 0;
+        }
+        if (tx == CLEAN_NETWORK_MODE && attempt % 100u == 50u) {
+            ++host_stalls; usleep(2000000u);
         }
         int count = libusb_control_transfer(device, 0xc0u, LIVE_USB_WIFI_REPORT, 0, 0,
                                             report, sizeof(report), 1000u);
@@ -314,7 +321,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             fprintf(stderr, "Report read: %d\n", count);
             return 0;
         }
-        usleep(tx >= 19u ? CLEAN_SOAK_POLL_US : 10000u);
+        usleep(tx == CLEAN_NETWORK_MODE ? 100000u : tx >= 19u ? CLEAN_SOAK_POLL_US : 10000u);
     }
     if (!got) { fputs("Report deadline\n", stderr); return 0; }
     if (soak && !monotonic_us(&report_at)) return 0;
@@ -346,6 +353,23 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+    if (tx == CLEAN_NETWORK_MODE) {
+        clean_network_report_t n;
+        clean_lifecycle_report_t life;
+        memcpy(&n, detail + CLEAN_NETWORK_DETAIL, sizeof(n));
+        memcpy(&life, detail + CLEAN_LIFECYCLE_DETAIL, sizeof(life));
+        int valid = !usb_report_u32(detail + 8u) && clean_network_valid(&n) &&
+            life.magic == CLEAN_LIFECYCLE_MAGIC && life.cleanup == 1u &&
+            life.state == CLEAN_LIFE_STOPPED && life.reason == CLEAN_LIFE_DEADLINE &&
+            life.connections == life.data_connections;
+        printf("{\"test\":\"b2-station-result\",\"valid\":%s,\"build\":\"%08x\","
+               "\"radio_error\":%u,\"connections\":%u,\"data_connections\":%u,"
+               "\"host_stalls\":%u,\"network\":",valid?"true":"false",USB_REPORT_BUILD_ID,
+               usb_report_u32(detail + 8u),life.connections,life.data_connections,host_stalls);
+        clean_network_print(&n); puts("}");
+        if (!valid) fputs("B2 station retained corruption, loss, unsettled data or radio failure\n",stderr);
+        return valid;
+    }
     if (tx == CLEAN_LIFECYCLE_MODE) {
         clean_lifecycle_report_t r;
         memcpy(&r, detail + CLEAN_LIFECYCLE_DETAIL, sizeof(r));
@@ -1356,14 +1380,16 @@ int main(int argc, char **argv) {
         return inspect(argv[2], argv[3]) ? 0 : 1;
     uint8_t challenge[14];
     uint8_t target[6];
-    int lifecycle_mode = argc == 7 && !strcmp(argv[4], "--station-lifecycle");
+    int network_mode = argc == 7 && !strcmp(argv[4], "--station-network");
+    int lifecycle_mode = network_mode || (argc == 7 && !strcmp(argv[4], "--station-lifecycle"));
     uint32_t lifecycle_seconds = 0u;
     if (lifecycle_mode) {
         char *end_seconds;
         unsigned long seconds = strtoul(argv[6], &end_seconds, 10);
-        if (!*argv[6] || *end_seconds || seconds < 1u || seconds > 600u ||
+        if (!*argv[6] || *end_seconds || seconds < (network_mode ? 10u : 1u) ||
+            seconds > (network_mode ? 3900u : 600u) ||
             !ap_bssid_decode(argv[5], target)) {
-            fputs("Station lifecycle requires a unicast BSSID and duration 1..600 seconds\n", stderr);
+            fputs("Station requires a unicast BSSID; lifecycle 1..600 or network 10..3900 seconds\n", stderr);
             return 2;
         }
         lifecycle_seconds = (uint32_t)seconds;
@@ -1510,6 +1536,8 @@ int main(int argc, char **argv) {
               "--ap-auth|--ap-assoc|--ap-monitor XX:XX:XX:XX:XX:XX\n", stderr);
         fputs("Persistent open station: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--station-lifecycle BSSID SECONDS:1-600\n", stderr);
+        fputs("Continuous static ARP/IP/UDP: collector SERIAL EVIDENCE_BIN CHANNEL "
+              "--station-network BSSID SECONDS:10-3900\n", stderr);
         fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--ap-wpa2 XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE\n",stderr);
         fputs("Continuous raw MAC: collector SERIAL EVIDENCE_BIN CHANNEL "
@@ -1558,7 +1586,7 @@ int main(int argc, char **argv) {
                         strcmp(argv[4], "--ap-monitor") == 0 ? 17u : 15u;
     if (wpa_mode) mode=18u;
     if (lifecycle_mode) {
-        mode = CLEAN_LIFECYCLE_MODE;
+        mode = network_mode ? CLEAN_NETWORK_MODE : CLEAN_LIFECYCLE_MODE;
     }
     if (status == 0) ok = collect(device, argv[2], (uint8_t)channel, mode,
                                  peer_mode ? challenge : NULL, ap_mode ? target : NULL, argv[1],

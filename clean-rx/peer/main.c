@@ -2,6 +2,7 @@
 #include "frame.h"
 #include "lifecycle.h"
 #include "lifecycle_usb.h"
+#include "network.h"
 #include "build_id.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -21,6 +22,7 @@ static int32_t usb_error;
 static uint32_t run_limit = 16000000u;
 static uint8_t evidence[CLEAN_PEER_TRACE_BYTES];
 static wifi_link_t link;
+static clean_network_t network;
 static int service(void *context, const wifi_fw_report_t *report);
 
 static void recovery_service(void) {
@@ -41,6 +43,61 @@ static int link_control(void *context, uint32_t command, uint8_t set, uint8_t in
                                     reply, capacity, received);
     link.report.controller_status = firmware.controller_status;
     return ok;
+}
+
+static void network_ap(const uint8_t nonce[16], const uint8_t report[64]) {
+    uint8_t mac[6], empty[6] = {0};
+    for (uint32_t i = 0u; i < 6u; ++i) mac[i] = clean_peer_mac_byte(nonce, i);
+    const wifi_wire_t *wire = wifi_board_wire();
+    uint32_t seconds = nonce[12] | (uint32_t)nonce[13] << 8u;
+    uint32_t started = wire->now_us(wire->context), published = started;
+    wifi_link_ops_t ops = {.context = 0, .control = link_control};
+    wifi_link_init(&link, &ops, WIFI_LINK_OPEN_AP, nonce, mac);
+    int ok = wifi_link_configure(&link) && wifi_firmware_data_enable();
+    clean_network_init(&network, 0u, mac, empty, empty, 0u, seconds, started);
+    badger_bytes_store_u32(evidence + 20u, CLEAN_NETWORK_AP_MODE);
+    badger_bytes_copy(evidence + CLEAN_NETWORK_AP_DETAIL,
+        (const uint8_t *)&network.report, sizeof(network.report));
+    if (ok) ok = clean_lifecycle_snapshot(&control, generation, report, evidence, 0u);
+    while (ok && !network.report.error &&
+           wire->now_us(wire->context) - started < (seconds + 15u) * 1000000u) {
+        if (!service(0, 0)) { ok = 0; break; }
+        uint32_t now = wire->now_us(wire->context);
+        if (network.report.bound && now - network.started >= (seconds + 2u) * 1000000u) break;
+        if (now - published >= 1000000u) {
+            badger_bytes_copy(evidence + CLEAN_NETWORK_AP_DETAIL,
+                (const uint8_t *)&network.report, sizeof(network.report));
+            if (!clean_lifecycle_snapshot(&control, generation, report, evidence, 1u)) {
+                ok = 0; break;
+            }
+            published = now;
+        }
+        static uint8_t frame[CLEAN_NETWORK_MTU];
+        uint8_t interface;
+        uint32_t length;
+        int received = wifi_firmware_read_frame(frame, &length, &interface);
+        if (received < 0) { ok = 0; break; }
+        if (received && interface == 1u)
+            (void)clean_network_input(&network, frame, length);
+        uint8_t bound = network.report.bound;
+        clean_network_step(&network, now);
+        if (!bound && network.report.bound &&
+            (!wifi_link_poll(&link) || !link.report.associated ||
+             !badger_bytes_equal(link.report.peer, network.report.peer, 6u))) {
+            ok = 0; break;
+        }
+        const uint8_t *out = clean_network_output(&network, &length);
+        if (out) {
+            if (!wifi_firmware_send_frame(1u, out, length)) { ok = 0; break; }
+            clean_network_sent(&network);
+        }
+    }
+    if (!network.report.error && (!ok || usb_error || !network.report.bound))
+        network.report.error = firmware.error ? firmware.error : 0x100u;
+    network.report.state = network.report.error ? 3u : 2u;
+    network.report.abandoned += !!network.pending + network.tx.count + network.rx.count;
+    badger_bytes_copy(evidence + CLEAN_NETWORK_AP_DETAIL,
+        (const uint8_t *)&network.report, sizeof(network.report));
 }
 
 static void lifecycle_ap(const uint8_t nonce[16], const uint8_t report[64]) {
@@ -262,12 +319,15 @@ static void probe(const uint8_t nonce[16]) {
     badger_bytes_store_u32(evidence + 12u, assets->clm_crc);
     badger_bytes_store_u32(evidence + 16u, CLEAN_PEER_RECORDS);
     badger_bytes_store_u32(evidence + 20u, nonce[14] == 2u ? 2u : 1u);
-    run_limit = nonce[14] == CLEAN_LIFECYCLE_AP_MODE ?
-        ((uint32_t)nonce[13] + 20u) * 1000000u : 16000000u;
+    run_limit = nonce[14] == CLEAN_NETWORK_AP_MODE ?
+        ((uint32_t)(nonce[12] | (uint32_t)nonce[13] << 8u) + 25u) * 1000000u :
+        nonce[14] == CLEAN_LIFECYCLE_AP_MODE ? ((uint32_t)nonce[13] + 20u) * 1000000u : 16000000u;
     int ready = wifi_firmware_begin(wifi_board_wire(), assets, &firmware, service, 0);
     uint8_t report[64];
     wifi_firmware_report(report, USB_REPORT_BUILD_ID, nonce, &firmware);
-    if (ready && nonce[14] == CLEAN_LIFECYCLE_AP_MODE) {
+    if (ready && nonce[14] == CLEAN_NETWORK_AP_MODE) {
+        network_ap(nonce, report);
+    } else if (ready && nonce[14] == CLEAN_LIFECYCLE_AP_MODE) {
         lifecycle_ap(nonce, report);
     } else if (ready && nonce[14] == 1u) {
         transmit(nonce);
@@ -295,7 +355,7 @@ static void probe(const uint8_t nonce[16]) {
     }
     wifi_firmware_stop();
     if (!usb_error && !control.reboot_requested) {
-        if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE) {
+        if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE) {
             if (!clean_lifecycle_snapshot(&control, generation, report, evidence, 1u))
                 usb_error = -102;
         } else {
@@ -324,14 +384,15 @@ void bare_main(void) {
         uint8_t nonce[16];
         generation = live_usb_probe_take(&control, nonce);
         if (!usb_error && generation) {
-            if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE)
+            if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE)
                 usb_error = nametag_clock_reference();
             if (usb_error) break;
             run_started = recovery_at = *(volatile uint32_t *)0x400b000cu;
             session_active = 1u;
             wifi_board_init();
             wifi_board_select_pio(1u);
-            if (measure_clock(nonce[14] == CLEAN_LIFECYCLE_AP_MODE)) probe(nonce);
+            if (measure_clock(nonce[14] == CLEAN_LIFECYCLE_AP_MODE ||
+                              nonce[14] == CLEAN_NETWORK_AP_MODE)) probe(nonce);
         }
     }
     wifi_firmware_stop();

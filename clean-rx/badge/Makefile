@@ -7,7 +7,7 @@ CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
 	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u -DLIVE_USB_CLEAN
 CFLAGS += $(EXTRA_CFLAGS)
-SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
+SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../peer/network.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/arch/rp2350/nametag_clock.c \
 	$(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb_hw.c \
@@ -19,7 +19,7 @@ SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
 HEADERS := $(wildcard *.h ../src/*.h $(ROOT)/src/tools/diagnostics_logic.h \
-	../peer/frame.h ../peer/protocol.h ../peer/lifecycle.h \
+	../peer/frame.h ../peer/protocol.h ../peer/lifecycle.h ../peer/network.h ../peer/network_json.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test station_lifecycle_test)
 LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
@@ -73,7 +73,7 @@ $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 
 $(BUILD)/collector: collector.c frames.h station.h ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
 	cc -std=c11 -Wall -Wextra -Werror -O2 $(EXTRA_CFLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
-		$< ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
+		$< ../peer/network.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
 test: $(NATIVE_TESTS)
@@ -83,6 +83,8 @@ test: $(NATIVE_TESTS)
 	$(BUILD)/secret_test
 	$(BUILD)/ht20_test
 	$(BUILD)/station_lifecycle_test
+	node network_verify.cjs --self-test
+	bash -n lifecycle_probe.sh
 	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh
 	bash -n mac_trials.sh
 	bash -n mac_soak.sh

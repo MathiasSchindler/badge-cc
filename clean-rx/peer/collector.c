@@ -4,6 +4,7 @@
 #include "protocol.h"
 #include "frame.h"
 #include "lifecycle.h"
+#include "network_json.h"
 #include "build_id.h"
 #include "../../src/host/tools/usb_live_transport.h"
 #include "../../src/shared/bytes.h"
@@ -112,8 +113,44 @@ static int collect_ap(libusb_device_handle *device, const char *path,
     return valid;
 }
 
+static int collect_network(libusb_device_handle *device, const char *path,
+        const uint8_t nonce[16], uint8_t report[64], uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
+    uint32_t seconds = nonce[12] | (uint32_t)nonce[13] << 8u, host_stalls = 0u;
+    clean_network_report_t n;
+    int announced = 0;
+    for (uint32_t i = 0u; i < (seconds + 25u) * 5u; ++i) {
+        if (ap_cancel) { fputs("B2 AP cancelled; requesting BOOTSEL\n",stderr); return 0; }
+        if (!read_trace(device, report, trace)) return 0;
+        memcpy(&n, trace + CLEAN_NETWORK_AP_DETAIL, sizeof(n));
+        if (usb_report_u32(trace) != CLEAN_PEER_MAGIC ||
+            usb_report_u32(trace + 20u) != CLEAN_NETWORK_AP_MODE ||
+            n.magic != CLEAN_NETWORK_MAGIC) {
+            fputs("B2 AP evidence layout mismatch\n",stderr); return 0;
+        }
+        if (n.state != 1u) break;
+        if (!announced) {
+            fputs("{\"test\":\"b2-ap-ready\",\"bssid\":\"",stdout); print_mac(n.mac);
+            puts("\"}"); if (fflush(stdout)) { perror("B2 readiness"); return 0; }
+            announced = 1;
+        }
+        if (i % 25u == 20u) { ++host_stalls; usleep(2000000u); }
+        usleep(200000u);
+        int count = libusb_control_transfer(device,0xc0u,LIVE_USB_FW_REPORT,0u,0u,report,64u,1000u);
+        if (count != 64 || !clean_peer_report_valid(report,nonce,USB_REPORT_BUILD_ID)) {
+            fputs("B2 AP bound report read failed\n",stderr); return 0;
+        }
+    }
+    if (!write_evidence(path,report,trace)) return 0;
+    int valid = clean_network_valid(&n);
+    printf("{\"test\":\"b2-ap-result\",\"valid\":%s,\"build\":\"%08x\","
+           "\"host_stalls\":%u,\"network\":",valid?"true":"false",USB_REPORT_BUILD_ID,host_stalls);
+    clean_network_print(&n); puts("}");
+    if (!valid) fputs("B2 AP retained corruption, loss, unsettled data or radio failure\n",stderr);
+    return valid;
+}
+
 static int collect(libusb_device_handle *device, const char *path, const uint8_t *challenge,
-                   int monitor, uint32_t ap_seconds, uint32_t ap_cycles) {
+                   int monitor, uint32_t ap_seconds, uint32_t ap_cycles, int network) {
     uint8_t info[12], nonce[16], request[64], report[64], trace[CLEAN_PEER_TRACE_BYTES];
     const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
@@ -133,8 +170,9 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
         nonce[14] = 1u;
     }
     if (ap_seconds) {
-        nonce[12] = (uint8_t)ap_cycles; nonce[13] = (uint8_t)ap_seconds;
-        nonce[14] = CLEAN_LIFECYCLE_AP_MODE;
+        nonce[12] = network ? (uint8_t)ap_seconds : (uint8_t)ap_cycles;
+        nonce[13] = network ? (uint8_t)(ap_seconds >> 8u) : (uint8_t)ap_seconds;
+        nonce[14] = network ? CLEAN_NETWORK_AP_MODE : CLEAN_LIFECYCLE_AP_MODE;
     }
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, 3u);
     if (!transfer(device, 0x40u, LIVE_USB_FW_SUBMIT, request, sizeof(request))) return 0;
@@ -153,6 +191,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
         fputs("Missing or invalid nonce-bound vendor peer report\n", stderr);
         return 0;
     }
+    if (network) return collect_network(device,path,nonce,report,trace);
     if (ap_seconds) return collect_ap(device, path, nonce, report, trace);
     if (!read_trace(device, report, trace)) return 0;
     if (!clean_peer_trace_valid(trace) ||
@@ -201,10 +240,12 @@ int main(int argc, char **argv) {
     uint8_t challenge[14];
     int tx = argc == 5 && !strcmp(argv[3], "--tx-multicast");
     int monitor = argc == 4 && !strcmp(argv[3], "--monitor-probe");
-    int ap = argc == 7 && !strcmp(argv[3], "--lifecycle-ap");
+    int network = argc == 6 && !strcmp(argv[3], "--network-ap");
+    int ap = network || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
     uint32_t ap_seconds = 0u, ap_cycles = 0u;
     if ((argc != 3 && !tx && !monitor && !ap) || strlen(argv[1]) != 16u) {
         fputs("Usage: collector SERIAL EVIDENCE_BIN [--tx-multicast CHALLENGE_HEX_28 | --monitor-probe | --lifecycle-ap CHALLENGE_HEX_28 SECONDS:8-120 CYCLES:0-5]\n", stderr);
+        fputs("Continuous AP: collector SERIAL EVIDENCE_BIN --network-ap CHALLENGE_HEX_28 SECONDS:10-3900\n",stderr);
         return 2;
     }
     if (tx || ap) {
@@ -224,11 +265,12 @@ int main(int argc, char **argv) {
     if (ap) {
         char *end;
         unsigned long seconds = strtoul(argv[5], &end, 10);
-        if (!*argv[5] || *end || seconds < 8u || seconds > 120u) {
-            fputs("Lifecycle AP duration must be 8..120 seconds\n", stderr); return 2;
+        if (!*argv[5] || *end || seconds < (network?10u:8u) || seconds > (network?3900u:120u)) {
+            fputs("AP duration must be lifecycle 8..120 or network 10..3900 seconds\n", stderr); return 2;
         }
-        unsigned long cycles = strtoul(argv[6], &end, 10);
-        if (!*argv[6] || *end || cycles > 5u || (cycles && seconds < 11u * cycles + 10u)) {
+        unsigned long cycles = network ? 0u : strtoul(argv[6], &end, 10);
+        if (!network && (!*argv[6] || *end || cycles > 5u ||
+            (cycles && seconds < 11u * cycles + 10u))) {
             fputs("Lifecycle AP requires 0..5 outages and time for all cycles\n", stderr); return 2;
         }
         ap_seconds = (uint32_t)seconds; ap_cycles = (uint32_t)cycles;
@@ -240,7 +282,7 @@ int main(int argc, char **argv) {
     if (ap && (signal(SIGINT, cancel_ap) == SIG_ERR || signal(SIGTERM, cancel_ap) == SIG_ERR)) {
         perror("signal"); return 1;
     }
-    alarm(ap ? ap_seconds + 30u : 18u);
+    alarm(ap ? ap_seconds + 45u : 18u);
     libusb_context *context = NULL;
     int status = libusb_init(&context);
     if (status) { fprintf(stderr, "USB init: %s\n", libusb_error_name(status)); return 1; }
@@ -256,7 +298,7 @@ int main(int argc, char **argv) {
     if (!status) status = libusb_claim_interface(device, 0);
     int ok = 0;
     if (!status) ok = collect(device, argv[2], tx || ap ? challenge : NULL,
-                             monitor, ap_seconds, ap_cycles);
+                             monitor, ap_seconds, ap_cycles, network);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     if (fflush(stdout)) { perror("Vendor peer JSON flush"); ok = 0; }
     int rebooted = transfer(device, 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);

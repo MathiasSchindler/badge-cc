@@ -151,7 +151,8 @@ pass or a new 100,000-frame qualification.
 ## B. Sustained station operation
 
 **Status: B1's opt-in legacy/open lifecycle and bounded qualification pass.
-WPA2 persistence and continuous networking remain open.**
+B2 networking is implemented, but its 60-minute qualification failed.
+WPA2 persistence remains open.**
 
 ### B1. Connection lifecycle
 
@@ -187,10 +188,36 @@ collectors and returned both badges to BOOTSEL without reporting a false pass.
 
 ### B2. Continuous application data
 
-- [ ] Provide bounded Ethernet/MSDU queues with backpressure and host servicing.
-- [ ] Exercise ARP/IP/UDP with DHCP or documented static addressing.
+- [x] Provide bounded Ethernet/MSDU queues with backpressure and host servicing
+  in the opt-in legacy/open B2 profile.
+- [x] Exercise ARP/IP/UDP with documented static addressing.
 - [ ] Pass a 60-minute bidirectional soak including idle and host stalls,
   without corruption, stuck state, unrecovered disconnects or unbounded queues.
+
+Mode 33 implements four-slot Ethernet TX/RX rings and independent bidirectional
+UDP requests, alternating 90-byte and full-sized 1514-byte Ethernet frames.
+Static addresses are AP `192.0.2.1`, station `192.0.2.2`, UDP `30526`.
+Native sanitizer tests cover a virtual hour, backpressure/resumption, timer
+wrap, checksums, corrupt binding, stale/reconnect epochs and retry exhaustion.
+The first full-sized 30-second RF control passed: 108 station-originated and
+100 AP-originated messages, including 54/50 full-sized requests; all were
+independently delivered and acknowledged, with zero loss, corruption,
+RX overflow or abandoned work. It exercised scheduled idle and 3/5 actual
+host stalls; 6/8 application retries remain visible. This is not a 60-minute
+qualification. See [usage](clean-rx/badge/README.md#b2-continuous-static-address-networking)
+and [evidence](clean-rx/dev-doc/MILESTONE_HISTORY.md#b2-continuous-application-data).
+
+The full-sized `b2-20261023/hardware/soak02-*` real 3600-second run was
+**rejected**, not qualified: station 13,214 generated / 13,211 acknowledged
+(3 lost), AP 13,259 / 13,235 (21 lost, 3 abandoned work items).
+Both ran all 180 scheduled idle intervals and 287/500 host stalls.
+Corruption and RX overflow were zero; TX/RX queue high-water marks stayed
+at 2/1. The station had five beacon-loss recoveries, six associations but
+only five data-verified epochs, with no authentication/association failures
+or fatal radio error. Preserve this failed evidence. Next investigate the
+beacon/reception outages and application continuity across controller reloads;
+do not relax the oracle or erase losses. Both original images were restored
+and full-readback-verified; the Pico was not modified.
 
 ### B3. Reproducible station qualification
 

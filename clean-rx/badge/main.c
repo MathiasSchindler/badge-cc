@@ -4,6 +4,7 @@
 #include "station.h"
 #include "station_rx.h"
 #include "station_lifecycle.h"
+#include "station_network.h"
 #include "wpa2.h"
 #include "../src/unicast.h"
 #include "../src/tx_diag.h"
@@ -50,13 +51,16 @@ static uint8_t soak_expected[CLEAN_TX_STORAGE_BYTES];
 static clean_soak_fragment_status_t soak_fragments;
 static clean_soak_progress_t soak_progress;
 static clean_lifecycle_t lifecycle;
+static clean_network_t network;
+static uint8_t network_frame[CLEAN_NETWORK_MTU + 32u], network_ethernet[CLEAN_NETWORK_MTU];
 static uint32_t soak_watchdog_at;
 static uint32_t probe_started;
 static uint32_t clock_before[12], clock_after[12], sys_khz_q5;
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size);
 static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd);
 
-static int lifecycle_mode(void) { return detail[2000u] == CLEAN_LIFECYCLE_MODE; }
+static int network_mode(void) { return detail[2000u] == CLEAN_NETWORK_MODE; }
+static int lifecycle_mode(void) { return detail[2000u] == CLEAN_LIFECYCLE_MODE || network_mode(); }
 static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u || lifecycle_mode(); }
 static int soak_mode(void) { return detail[2000u]==19u || detail[2000u]==20u; }
 static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=31u; }
@@ -802,10 +806,13 @@ static void station_lifecycle_run(clean_loader_t *l, const uint8_t nonce[16]) {
     uint8_t own[6] = {2u, nonce[6], nonce[7], nonce[8], nonce[9], nonce[10]};
     clean_station_request_t request = {.sequence = clean_station_u16(nonce + 10u)};
     uint16_t aid = 0u, mac_sequence = request.sequence;
+    uint32_t epoch_delivered = 0u;
     uint8_t radio = 1u;
     (void)clean_lifecycle_init(&lifecycle, started, nonce[15]);
     badger_bytes_copy(detail + 1972u, own, 6u);
     badger_bytes_copy(detail + 1980u, station_target, 6u);
+    if (network_mode())
+        clean_network_init(&network, 1u, own, station_target, nonce + 6u, 1u, seconds, started);
     while (l->error == CLEAN_OK && wire->now_us(wire->context) - started < seconds * 1000000u) {
         if (!clean_service(l)) break;
         uint32_t now = wire->now_us(wire->context);
@@ -853,6 +860,10 @@ static void station_lifecycle_run(clean_loader_t *l, const uint8_t nonce[16]) {
             } else if (association) {
                 if (!clean_lifecycle_associated(&lifecycle, now, aid)) {
                     l->error = CLEAN_INPUT; l->actual = aid; break;
+                }
+                if (network_mode()) {
+                    clean_network_reset(&network, r->epoch, now);
+                    epoch_delivered = network.report.delivered;
                 }
             } else (void)clean_lifecycle_authenticated(&lifecycle, now);
             continue;
@@ -910,10 +921,47 @@ static void station_lifecycle_run(clean_loader_t *l, const uint8_t nonce[16]) {
                 clean_lifecycle_disconnect(&lifecycle, now, CLEAN_LIFE_DEPARTURE, (uint32_t)reason);
                 continue;
             }
+            if (network_mode()) {
+                uint32_t bytes = clean_network_ethernet(network_ethernet, rx_packet + 18u,
+                    size - 18u, own, station_target);
+                if (bytes && clean_station_rx(&station_rx, rx_packet, &size,
+                        own, station_target, now) == CLEAN_MAC_DELIVER)
+                    (void)clean_network_input(&network, network_ethernet, bytes);
+            }
             if (clean_lifecycle_response(rx_packet + 18u, size - 18u, own, station_target) &&
                 clean_station_rx(&station_rx, rx_packet, &size, own, station_target, now) == CLEAN_MAC_DELIVER)
                 (void)clean_lifecycle_echo(&lifecycle, now, rx_packet + 50u,
                     CLEAN_LIFECYCLE_PAYLOAD_BYTES, nonce + 6u);
+        }
+        if (network_mode()) {
+            clean_network_step(&network, now);
+            if (network.report.error) {
+                l->error = CLEAN_CONTROLLER; l->actual = network.report.error; break;
+            }
+            if (network.report.delivered > epoch_delivered && !lifecycle.verified) {
+                lifecycle.verified = 1u; ++r->data_connections;
+            }
+            uint32_t bytes;
+            const uint8_t *ethernet = clean_network_output(&network, &bytes);
+            if (!ethernet) continue;
+            uint32_t length = clean_network_mpdu(network_frame, ethernet, bytes,
+                own, station_target, mac_sequence++);
+            if (!length) { l->error = CLEAN_INPUT; l->actual = bytes; break; }
+            if (!station_command(l, network_frame, (length + 3u) & ~3u,
+                    5u | clean_tx_length_bits(length) | (1u << 18u) |
+                    (1u << 19u) | CLEAN_TX_ACK_REQUIRED)) break;
+            clean_unicast_status_t tx;
+            if (!clean_block(l, CLEAN_UNICAST_ADDR, (uint8_t *)&tx, sizeof(tx), 0u)) break;
+            if (tx.magic != CLEAN_UNICAST_MAGIC || tx.attempts > 1u ||
+                (tx.result != CLEAN_UNICAST_ACKED && tx.result != CLEAN_UNICAST_TIMEOUT &&
+                 tx.result != CLEAN_UNICAST_BUSY)) {
+                l->error = CLEAN_CONTROLLER; l->actual = tx.result; break;
+            }
+            r->tx_attempts += tx.attempts;
+            if (tx.result == CLEAN_UNICAST_TIMEOUT) ++r->tx_timeouts;
+            if (tx.result == CLEAN_UNICAST_BUSY) ++r->tx_busy;
+            if (tx.attempts) clean_network_sent(&network);
+            continue;
         }
         if (!lifecycle.pending && now - lifecycle.send_at >= 500000u) {
             uint8_t frame[92];
@@ -950,6 +998,13 @@ static void station_lifecycle_run(clean_loader_t *l, const uint8_t nonce[16]) {
     lifecycle.report.cleanup = 1u;
     lifecycle.report.elapsed_lo = now - started;
     lifecycle.report.elapsed_hi = 0u;
+    if (network_mode()) {
+        network.report.state = l->error ? 3u : 2u;
+        if (!network.report.error) network.report.error = l->error;
+        network.report.abandoned += !!network.pending + network.tx.count + network.rx.count;
+        badger_bytes_copy(detail + CLEAN_NETWORK_DETAIL,
+            (const uint8_t *)&network.report, sizeof(network.report));
+    }
     if (!l->error) l->stage = 8u;
 }
 
@@ -976,7 +1031,8 @@ static void run(const uint8_t nonce[16]) {
     wpa_wipe(control.clean_secret,64u); control.clean_secret_ready=0u;
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
-    if ((nonce[14] > CLEAN_PEER_RX_MODE && nonce[14] != CLEAN_LIFECYCLE_MODE && !(CLEAN_RX_AMPDU_PROBE &&
+    if ((nonce[14] > CLEAN_PEER_RX_MODE && nonce[14] != CLEAN_LIFECYCLE_MODE &&
+            nonce[14] != CLEAN_NETWORK_MODE && !(CLEAN_RX_AMPDU_PROBE &&
             nonce[14] <= CLEAN_HT_AMPDU_PROBE_RX_MODE)) || !secret_valid ||
         ((nonce[14] == 21u || nonce[14] == 22u ||
           (nonce[14] >= 24u && nonce[14] <= 31u)) && nonce[13] >= 8u) ||
@@ -992,7 +1048,8 @@ static void run(const uint8_t nonce[16]) {
     if (lifecycle_mode()) {
         uint32_t seconds = clean_station_u16(nonce + 12u);
         (void)clean_lifecycle_init(&lifecycle, probe_started, channel);
-        if (!seconds || seconds > 600u) l.error = CLEAN_INPUT;
+        if (!seconds || seconds > (network_mode() ? 3900u : 600u) ||
+            (network_mode() && seconds < 10u)) l.error = CLEAN_INPUT;
         l.budget_us = (uint64_t)(seconds + 10u) * 1000000u;
     }
     station_ap_status = 0;

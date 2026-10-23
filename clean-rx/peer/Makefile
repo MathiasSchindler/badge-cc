@@ -5,10 +5,11 @@ include Makefile
 HT_PEER_DIR := clean-rx/peer
 HT_PEER_BUILD := build/clean-rx/peer
 HT_PEER_SHARED := $(filter-out $(FIRMWARE_DIR)/usb_wifi_firmware.o,$(USB_WIFI_OBJS)) \
-	$(FIRMWARE_DIR)/wifi_link.o $(HT_PEER_BUILD)/clock.o
+	$(FIRMWARE_DIR)/wifi_link.o $(HT_PEER_BUILD)/clock.o $(HT_PEER_BUILD)/network.o
 HT_PEER_INPUTS := $(HT_PEER_DIR)/main.c $(HT_PEER_DIR)/collector.c \
 	$(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/lifecycle.h \
 	$(HT_PEER_DIR)/lifecycle_usb.h $(HT_PEER_DIR)/Makefile \
+	$(HT_PEER_DIR)/network.c $(HT_PEER_DIR)/network.h $(HT_PEER_DIR)/network_json.h \
 	$(USB_WIFI_INPUTS) $(WIFI_ASSET_FILES) $(RADIO_DIR)/wifi_link.c $(RADIO_DIR)/wifi_link.h \
 	$(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h
 
@@ -23,10 +24,13 @@ $(HT_PEER_BUILD)/build_id.h: $(HT_PEER_INPUTS) | $(HT_PEER_BUILD)
 	printf '#define USB_REPORT_BUILD_ID 0x%su\n' "$$id" > $@
 
 $(HT_PEER_BUILD)/main.o: $(HT_PEER_DIR)/main.c $(HT_PEER_BUILD)/build_id.h
-	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_FIRMWARE -I$(HT_PEER_BUILD) -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) -fstack-usage -DLIVE_USB_FIRMWARE -I$(HT_PEER_BUILD) -c $< -o $@
 
 $(HT_PEER_BUILD)/clock.o: $(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h | $(HT_PEER_BUILD)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+
+$(HT_PEER_BUILD)/network.o: $(HT_PEER_DIR)/network.c $(HT_PEER_DIR)/network.h | $(HT_PEER_BUILD)
+	$(RP2350_CC) $(RP2350_CFLAGS) -fstack-usage -c $< -o $@
 
 $(HT_PEER_BUILD)/vendor_ht.elf: $(HT_PEER_BUILD)/main.o $(COMMON_FIRMWARE_OBJS) $(HT_PEER_SHARED) $(ARCH_DIR)/memmap_report.ld
 	$(RP2350_CC) $(RP2350_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
@@ -43,12 +47,17 @@ $(HT_PEER_BUILD)/vendor_ht.uf2: $(HT_PEER_BUILD)/vendor_ht.bin $(BIN2UF2)
 
 $(HT_PEER_BUILD)/collector: $(HT_PEER_DIR)/collector.c $(HT_PEER_BUILD)/build_id.h
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I$(HT_PEER_BUILD) \
-		$$(pkg-config --cflags libusb-1.0) $< $(SHARED_DIR)/usb_report.c \
+		$$(pkg-config --cflags libusb-1.0) $< $(HT_PEER_DIR)/network.c $(SHARED_DIR)/usb_report.c \
 		$(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_trace.c \
 		$$(pkg-config --libs libusb-1.0) -o $@
 
-ht-peer-test: $(HT_PEER_BUILD)/protocol_test
+ht-peer-test: $(HT_PEER_BUILD)/protocol_test $(HT_PEER_BUILD)/network_test
 	$(HT_PEER_BUILD)/protocol_test
+	$(HT_PEER_BUILD)/network_test
+
+$(HT_PEER_BUILD)/network_test: $(HT_PEER_DIR)/network_test.c $(HT_PEER_DIR)/network.c $(HT_PEER_DIR)/network.h $(wildcard clean-rx/badge/*.h clean-rx/src/*.h) | $(HT_PEER_BUILD)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+		$< $(HT_PEER_DIR)/network.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
 
 $(HT_PEER_BUILD)/protocol_test: $(HT_PEER_DIR)/protocol_test.c $(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/lifecycle_usb.h src/usb/live_usb_control.c | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -DLIVE_USB_FIRMWARE \
