@@ -4,7 +4,7 @@ set -o pipefail
 
 if [[ $# -lt 3 || ! $1 =~ ^[0-9A-F]{16}$ ||
       ! $2 =~ ^[0-9A-F]{16}$ || $1 == "$2" ]]; then
-    echo "Usage: bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL NEW_PREFIX [--peer-ap CHANNEL:1,6,11] [--raw-psk|--wrong-password]" >&2
+    echo "Usage: bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL NEW_PREFIX [--peer-ap CHANNEL:1,6,11] [--raw-psk|--wrong-password] [--group-traffic]" >&2
     exit 2
 fi
 cd "$(dirname "$0")/../.." || exit 1
@@ -15,8 +15,12 @@ shift 3
 channel=1
 peer=0
 credential_mode=passphrase
+group_traffic=0
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --group-traffic)
+            if [[ $group_traffic -ne 0 ]]; then echo "Duplicate --group-traffic" >&2; exit 2; fi
+            group_traffic=1; shift ;;
         --peer-ap)
             if [[ $peer -ne 0 || $# -lt 2 || ! $2 =~ ^(1|6|11)$ ]]; then
                 echo "Expected a single --peer-ap CHANNEL:1,6,11" >&2; exit 2
@@ -30,6 +34,9 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown WPA2 trial argument: $1" >&2; exit 2 ;;
     esac
 done
+if [[ $group_traffic -eq 1 && ( $peer -ne 1 || $credential_mode == wrong-password ) ]]; then
+    echo "--group-traffic requires --peer-ap and correct credentials" >&2; exit 2
+fi
 collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/collector}
 ap_host=build/host-tools/usb_wifi_link_host
 if [[ $peer -eq 1 ]]; then ap_host=${CLEAN_RX_AP_COLLECTOR:-build/clean-rx/peer/collector}; fi
@@ -73,7 +80,9 @@ start_badge "$ap_serial" || exit 1
 sleep 0.5
 SECONDS=0
 if [[ $peer -eq 1 ]]; then
-    "$ap_host" "$ap_serial" "$prefix-ap.bin" --protected-ap "$channel" 16 "$private/credentials" \
+    ap_mode=--protected-ap; ap_seconds=16
+    if [[ $group_traffic -eq 1 ]]; then ap_mode=--protected-traffic-ap; ap_seconds=45; fi
+    "$ap_host" "$ap_serial" "$prefix-ap.bin" "$ap_mode" "$channel" "$ap_seconds" "$private/credentials" \
         > "$prefix-ap.jsonl" 2> "$prefix-ap.stderr" &
 else
     "$ap_host" --ap-only "$ap_serial" --credentials-out "$private/credentials" \
@@ -82,6 +91,7 @@ fi
 ap_pid=$!
 ready_test=ap-ready
 if [[ $peer -eq 1 ]]; then ready_test=e1-ap-ready; fi
+if [[ $group_traffic -eq 1 ]]; then ready_test=e2-ap-ready; fi
 for ((attempt=0;attempt<200;attempt++)); do
     if grep -q "\"test\":\"$ready_test\"" "$prefix-ap.jsonl"; then break; fi
     if ! kill -0 "$ap_pid" 2>/dev/null; then break; fi
@@ -103,7 +113,9 @@ elif [[ $credential_mode == raw-psk ]]; then
     credentials=$private/raw
 fi
 printf 'station_start_seconds=%s\n' "$SECONDS" >> "$prefix-timing.log"
-"$collector" "$station_serial" "$prefix-station.bin" "$channel" --ap-wpa2 "$bssid" "$credentials" \
+station_mode=--ap-wpa2
+if [[ $group_traffic -eq 1 ]]; then station_mode=--ap-wpa2-rekey; fi
+"$collector" "$station_serial" "$prefix-station.bin" "$channel" "$station_mode" "$bssid" "$credentials" \
     > "$prefix-station.json" 2> "$prefix-station.stderr" &
 station_pid=$!
 wait "$station_pid"
@@ -115,6 +127,11 @@ ap_result=$?
 ap_pid=
 printf 'ap_done_seconds=%s\nap_exit=%s\n' "$SECONDS" "$ap_result" >> "$prefix-timing.log"
 if [[ $peer -eq 1 ]]; then
+    if [[ $group_traffic -eq 1 ]]; then
+        node clean-rx/badge/wpa2_rekey_verify.cjs "$prefix" "$station_serial" "$ap_serial" --traffic-only \
+            > "$prefix-pair.json"
+        exit $?
+    fi
     node clean-rx/badge/wpa2_verify.cjs "$prefix" "$channel" "$credential_mode" \
         "$station_serial" "$ap_serial" > "$prefix-pair.json"
     exit $?

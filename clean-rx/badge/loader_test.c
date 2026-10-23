@@ -11,6 +11,7 @@
 #include "../src/ht20.h"
 #include "station_rx.h"
 #include "wpa2.h"
+#include "../peer/lifecycle.h"
 
 static uint32_t ticks, calls, blocks, state, base;
 static int cancel, mismatch, bus_error, terminate_error, f2_post_status, ack_error;
@@ -914,6 +915,12 @@ static void station_tests(void) {
     badger_bytes_store_u32(response + 30u, diag_crc32(response, 30u));
     memcpy(evidence + 600u, response, 34u);
     assert(clean_station_evidence(evidence));
+    uint8_t saved_mode=evidence[2000u];
+    evidence[2000u]=CLEAN_WPA_REKEY_MODE;
+    assert(clean_station_evidence(evidence));
+    evidence[2000u]=CLEAN_LIFECYCLE_MODE;
+    assert(!clean_station_evidence(evidence));
+    evidence[2000u]=saved_mode;
     clean_ht_peer_report(&ap.ht, 1u, evidence);
     assert(clean_station_evidence(evidence));
     assert(badger_bytes_load_u32(evidence + CLEAN_HT_PEER_DETAIL) == CLEAN_HT_PEER_MAGIC);
@@ -1089,6 +1096,15 @@ int main(void) {
     clean_loader_init(&l, &wire, service, NULL);
     ticks += 6000000u;
     assert(!clean_service(&l) && l.error == CLEAN_TIMEOUT);
+    clean_loader_init(&l, &wire, service, NULL);
+    l.budget_us = CLEAN_WPA_REKEY_BUDGET_US;
+    ticks += 6000000u;
+    assert(clean_service(&l));
+    ticks += (CLEAN_WPA_REKEY_SECONDS-6u)*1000000u;
+    assert(clean_service(&l) && l.elapsed_us==CLEAN_WPA_REKEY_SECONDS*1000000u+2u);
+    ticks += CLEAN_WPA_REKEY_BUDGET_US-CLEAN_WPA_REKEY_SECONDS*1000000u-4u;
+    assert(clean_service(&l) && l.elapsed_us==CLEAN_WPA_REKEY_BUDGET_US-1u);
+    assert(!clean_service(&l) && l.error==CLEAN_TIMEOUT);
     clean_loader_init(&l, &wire, service, NULL);
     l.budget_us = 3505000000u;
     ticks += 8000000u;

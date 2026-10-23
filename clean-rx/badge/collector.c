@@ -15,6 +15,7 @@
 #include "../src/ht20.h"
 #include "../peer/frame.h"
 #include "../src/wpa2_crypto.h"
+#include "wpa2.h"
 #include "station_rx.h"
 #include "station_lifecycle.h"
 #include "../peer/network_json.h"
@@ -312,7 +313,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         nonce[12] = (uint8_t)lifecycle_seconds;
         nonce[13] = (uint8_t)(lifecycle_seconds >> 8u);
     }
-    if (tx==18u) {
+    if (clean_wpa_mode(tx)) {
         char ssid[34];
         uint8_t secret[64], digest[20];
         int valid=read_credentials(credentials,ssid,secret);
@@ -336,7 +337,8 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (soak && !monotonic_us(&submit_after)) return 0;
     int got = 0;
     uint32_t host_stalls = 0u;
-    uint32_t polls = tx == CLEAN_NETWORK_MODE ? (lifecycle_seconds + 30u) * 10u :
+    uint32_t polls = tx==CLEAN_WPA_REKEY_MODE ? (CLEAN_WPA_REKEY_SECONDS+30u)*10u :
+        tx == CLEAN_NETWORK_MODE ? (lifecycle_seconds + 30u) * 10u :
         tx >= 19u ? CLEAN_SOAK_POLLS : 800u;
     for (unsigned attempt = 0u; attempt < polls; ++attempt) {
         if ((tx == CLEAN_LIFECYCLE_MODE || tx == CLEAN_NETWORK_MODE) && lifecycle_cancel) {
@@ -353,7 +355,8 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             fprintf(stderr, "Report read: %d\n", count);
             return 0;
         }
-        usleep(tx == CLEAN_NETWORK_MODE ? 100000u : tx >= 19u ? CLEAN_SOAK_POLL_US : 10000u);
+        usleep(tx == CLEAN_NETWORK_MODE || tx==CLEAN_WPA_REKEY_MODE ?
+               100000u : tx >= 19u ? CLEAN_SOAK_POLL_US : 10000u);
     }
     if (!got) { fputs("Report deadline\n", stderr); return 0; }
     if (soak && !monotonic_us(&report_at)) return 0;
@@ -1165,9 +1168,10 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(detail + 8u));
         return usb_report_u32(detail + 8u) == 0u;
     }
-    if (tx == 16u || tx==18u) {
+    if (tx == 16u || clean_wpa_mode(tx)) {
         int associated = clean_station_evidence(detail);
-        int authorized=tx==18u && associated && usb_report_u32(detail+1640u)==0x32575043u &&
+        int protected_mode=clean_wpa_mode(tx);
+        int authorized=protected_mode && associated && usb_report_u32(detail+1640u)==0x32575043u &&
             usb_report_u32(detail+1644u)==4u && !usb_report_u32(detail+1648u) &&
             usb_report_u32(detail+1668u)>0u;
         printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,\"stage\":%u,"
@@ -1210,13 +1214,13 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                usb_report_u32(detail + 568u), associated ? "true" : "false",authorized?"true":"false",
                detail[1972], detail[1973], detail[1974], detail[1975], detail[1976], detail[1977],
                usb_report_u32(detail + 1096u), usb_report_u32(detail + 796u),
-               (tx==18u?usb_report_u32(detail+1652u)>0u:clean_station_eapol_evidence(detail)) ? "true" : "false",
-               tx==18u?usb_report_u32(detail+1652u):usb_report_u32(detail + 576u),
-               tx==18u?usb_report_u32(detail+1644u):0u,tx==18u?usb_report_u32(detail+1648u):0u,
-               tx==18u?usb_report_u32(detail+1656u):0u,tx==18u?usb_report_u32(detail+1660u):0u,
-               tx==18u?usb_report_u32(detail+1664u):0u,tx==18u?usb_report_u32(detail+1668u):0u,
-               tx==18u?usb_report_u32(detail+1672u):0u,
-               tx==18u?usb_report_u32(detail+1676u):0u,
+               (protected_mode?usb_report_u32(detail+1652u)>0u:clean_station_eapol_evidence(detail)) ? "true" : "false",
+               protected_mode?usb_report_u32(detail+1652u):usb_report_u32(detail + 576u),
+               protected_mode?usb_report_u32(detail+1644u):0u,protected_mode?usb_report_u32(detail+1648u):0u,
+               protected_mode?usb_report_u32(detail+1656u):0u,protected_mode?usb_report_u32(detail+1660u):0u,
+               protected_mode?usb_report_u32(detail+1664u):0u,protected_mode?usb_report_u32(detail+1668u):0u,
+               protected_mode?usb_report_u32(detail+1672u):0u,
+               protected_mode?usb_report_u32(detail+1676u):0u,
                usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL)==CLEAN_STATION_MAC_MAGIC?"true":"false",
                usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+4u),
                usb_report_u32(detail+CLEAN_STATION_MAC_DETAIL+8u),
@@ -1315,10 +1319,27 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                 printf("%02x", failure.raw[i]);
             putchar('"');
         }
+        if (tx==CLEAN_WPA_REKEY_MODE) {
+            const uint8_t *r=detail+CLEAN_WPA_REKEY_DETAIL;
+            printf(",\"rekey_report\":%s,\"group_rx\":%u,\"broadcast_rx\":%u,"
+                   "\"multicast_rx\":%u,\"group_rekeys\":%u,\"pairwise_rekeys\":%u,"
+                   "\"group_messages\":%u,\"group_responses\":%u,\"replay_drops\":%u,"
+                   "\"plaintext_drops\":%u,\"protected_duration_us\":%u",
+                   usb_report_u32(r)==CLEAN_WPA_REKEY_MAGIC?"true":"false",
+                   usb_report_u32(r+4u),usb_report_u32(r+8u),usb_report_u32(r+12u),
+                   usb_report_u32(r+16u),usb_report_u32(r+20u),usb_report_u32(r+24u),
+                   usb_report_u32(r+28u),usb_report_u32(r+32u),usb_report_u32(r+36u),
+                   usb_report_u32(r+40u));
+            fputs(",\"protected_token\":\"",stdout);
+            for (uint32_t i=0u;i<16u;++i) printf("%02x",r[44u+i]);
+            putchar('"');
+            printf(",\"group_verified\":%u,\"pairwise_verified\":%u",
+                   usb_report_u32(r+60u),usb_report_u32(r+64u));
+        }
         puts("}");
         if (!associated) fputs("No validated successful association exchange\n", stderr);
-        if (tx==18u && !authorized) fputs("WPA2 protected round trip not established\n",stderr);
-        return tx==18u?authorized:associated;
+        if (protected_mode && !authorized) fputs("WPA2 protected round trip not established\n",stderr);
+        return protected_mode?authorized:associated;
     }
     printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"channel\":%u,\"stage\":%u,\"error\":%u,"
            "\"address\":\"%08x\",\"actual\":\"%08x\",\"verified_bytes\":%u,"
@@ -1430,7 +1451,8 @@ int main(int argc, char **argv) {
         if (signal(SIGINT, cancel_lifecycle) == SIG_ERR ||
             signal(SIGTERM, cancel_lifecycle) == SIG_ERR) { perror("signal"); return 1; }
     }
-    int wpa_mode=argc==7 && strcmp(argv[4],"--ap-wpa2")==0;
+    int rekey_mode=argc==7 && strcmp(argv[4],"--ap-wpa2-rekey")==0;
+    int wpa_mode=rekey_mode || (argc==7 && strcmp(argv[4],"--ap-wpa2")==0);
     int ap_mode = lifecycle_mode || wpa_mode || (argc == 6 && (strcmp(argv[4], "--ap-auth") == 0 ||
                                 strcmp(argv[4], "--ap-assoc") == 0 ||
                                 strcmp(argv[4], "--ap-monitor") == 0));
@@ -1573,7 +1595,7 @@ int main(int argc, char **argv) {
         fputs("Continuous static ARP/IP/UDP: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--station-network BSSID SECONDS:10-3900\n", stderr);
         fputs("WPA2 protected trial: collector SERIAL EVIDENCE_BIN CHANNEL "
-              "--ap-wpa2 XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE\n",stderr);
+              "--ap-wpa2 or --ap-wpa2-rekey XX:XX:XX:XX:XX:XX PRIVATE_CREDENTIAL_FILE\n",stderr);
         fputs("Continuous raw MAC: collector SERIAL EVIDENCE_BIN CHANNEL "
               "--mac-soak-init|--mac-soak-reply CHALLENGE_HEX_28 COUNT:1-100000 [DROP_ACKS:0-16 [PHY [PAYLOAD]]]\n",stderr);
         return 2;
@@ -1585,7 +1607,8 @@ int main(int argc, char **argv) {
         if (!((argv[1][i] >= '0' && argv[1][i] <= '9') ||
               (argv[1][i] >= 'A' && argv[1][i] <= 'F'))) return 2;
     if (signal(SIGALRM, deadline) == SIG_ERR) { perror("signal"); return 1; }
-    alarm(lifecycle_mode ? lifecycle_seconds + 20u : soak ? CLEAN_SOAK_HOST_SECONDS : 15u);
+    alarm(rekey_mode ? CLEAN_WPA_REKEY_SECONDS+30u :
+          lifecycle_mode ? lifecycle_seconds + 20u : soak ? CLEAN_SOAK_HOST_SECONDS : 15u);
     libusb_context *context = NULL;
     int status = libusb_init(&context);
     if (status != 0) { fprintf(stderr, "USB init: %s\n", libusb_error_name(status)); return 1; }
@@ -1618,7 +1641,7 @@ int main(int argc, char **argv) {
     if (peer_mode) mode = peer_mode;
     if (ap_mode) mode = strcmp(argv[4], "--ap-assoc") == 0 ? 16u :
                         strcmp(argv[4], "--ap-monitor") == 0 ? 17u : 15u;
-    if (wpa_mode) mode=18u;
+    if (wpa_mode) mode=rekey_mode?CLEAN_WPA_REKEY_MODE:18u;
     if (lifecycle_mode) {
         mode = network_mode ? CLEAN_NETWORK_MODE : CLEAN_LIFECYCLE_MODE;
     }

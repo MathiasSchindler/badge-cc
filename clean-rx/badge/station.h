@@ -6,6 +6,11 @@
 #include "../src/mac.h"
 #include "ht_station.h"
 
+#define CLEAN_WPA_REKEY_MODE 34u
+static inline int clean_wpa_mode(uint32_t mode) {
+    return mode==18u || mode==CLEAN_WPA_REKEY_MODE;
+}
+
 typedef struct {
     clean_ht_peer_t ht;
     uint16_t aid, capability;
@@ -426,7 +431,7 @@ static inline int clean_station_evidence(const uint8_t detail[2048]) {
     uint32_t auth_size = badger_bytes_load_u32(detail + 596u);
     uint32_t assoc_size = badger_bytes_load_u32(detail + 796u);
     uint16_t aid = 0u;
-    return (detail[2000u] == 16u || detail[2000u] == 18u) && badger_bytes_load_u32(detail + 8u) == 0u &&
+    return (detail[2000u] == 16u || clean_wpa_mode(detail[2000u])) && badger_bytes_load_u32(detail + 8u) == 0u &&
            badger_bytes_load_u32(detail + 4u) == 8u &&
            badger_bytes_load_u32(detail + 520u) == 0x31545341u &&
            badger_bytes_load_u32(detail + 524u) == 4u &&

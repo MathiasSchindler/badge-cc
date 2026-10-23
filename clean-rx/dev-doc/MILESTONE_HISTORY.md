@@ -1173,13 +1173,89 @@ group traffic, E3/B2 hour-long operation, or negotiated HT qualification.
 
 ### E2. Group traffic and rekey
 
-- [ ] Implement GTK-backed broadcast/multicast decryption, key-index selection
+- [x] Implement GTK-backed broadcast/multicast decryption, key-index selection
   and replay state, including GTK replacement and permitted overlap.
-- [ ] Implement the group-key handshake and pairwise rekey with bounded
+- [x] Implement the group-key handshake and pairwise rekey with bounded
   retries, correct key activation and no PN reset under retransmission.
 - [ ] Verify real broadcast/multicast traffic and at least three forced group
   rekeys and three pairwise rekeys during traffic, without plaintext leakage,
   duplicate delivery, incorrect key reuse or unrecovered link loss.
+
+**2026-10-23 implementation:** four GTK slots select CCMP keys by the on-air
+KeyID, maintain independent replay state for 16 QoS TIDs plus non-QoS, initialize
+and monotonically advance RSC floors, and allow a two-second previous-slot
+overlap. Same-key reinstallations preserve PNs; aliasing a live GTK into a
+different slot is rejected. Expiry and terminal failure wipe retired keys.
+Authenticated group traffic is decrypted separately from pairwise fragment/
+reorder state; plaintext data is rejected and counted.
+
+The RSN group-key exchange validates MIC, AES-wrap integrity, pinned RSN when
+present, unique GTK KDE, RSC, replay and duplicate identity. G2 uses a protected
+pairwise envelope. The authenticator owns G1 retransmissions; duplicate
+responses have the existing eight-second/four-retry bounds, rather than an
+invented third handshake message or an idle-link timeout.
+
+Encrypted pairwise M1 starts a fresh SNonce/PTK epoch while old-key traffic can
+continue. A secret HMAC-based per-session nonce sequence is seeded from the PMK
+and initial OS-random SNonce, advances on fresh M1 only, and rejects wrap.
+The PMK therefore remains private in RAM until explicit teardown/failure.
+M2 and M4 use the new KCK but old data-key envelopes; accepted M3 commits the
+new TK and its fresh PN epoch exactly once. The previous PTK/PN state remains
+available only for bounded M3/M4 loss recovery until new-key data proves
+completion, then is wiped. Same-key GTK PN state survives pairwise rekey.
+Concurrent group/pairwise key exchanges are explicitly rejected; this is not
+WPA3, enterprise, PMF, or HT qualification.
+
+Native ASan/UBSan tests cover three group replacements, broadcast/multicast on
+all 17 replay lanes, RSC carry/selection, overlap expiry, encrypted G1/G2,
+same-key PN preservation, and three encrypted four-way rekeys during traffic.
+They exercise lost M4 with old-key encrypted M3 retransmission, fresh nonces,
+old/new MIC and envelope ownership, duplicate PN preservation, deadline wrap,
+malformed/MIC/replay rejection and key/plaintext wiping. These are NOT RF.
+
+Station mode 34 and AP mode 7 add a separate bounded protected-traffic fixture.
+Mode 32 is already B1 lifecycle; the first `traffic01` attempt exposed that
+mode collision and was rejected, not counted as security qualification.
+A compile-time mode guard and a negative oracle fixture now prevent its reuse.
+The AP final snapshot uses the same atomic report/trace publication as E1.
+The E2 verifier binds raw identities, security readbacks, challenge tokens,
+counts, duration and controller exits. Full E2 acceptance requires at least
+three group plus three pairwise rekeys, each with its own subsequent protected
+traffic proof; `--traffic-only` explicitly leaves the milestone unqualified.
+
+**Hardware investigation and result:** `traffic02` independently received
+26 protected unicast echoes, two broadcasts and three multicasts before the
+old six-second whole-loader budget expired. E2 now explicitly sets a bounded
+55-second budget, with native tests crossing six/35 seconds and checking its
+exact expiration. `traffic03` then completed 35.000066 seconds with 346 echoes
+and 70 group receptions, but correctly failed the host acceptance gate:
+the shared association-evidence predicate still allowed only modes 16/18.
+The protected-mode predicate now also covers mode 34; native tests assert
+that 34 passes valid captured association evidence while B1 mode 32 does not.
+The failed runs remain retained, not reclassified or spliced into a pass.
+
+Campaign `build/clean-rx/e2-20261023/hardware/traffic04-*` passed the complete
+35-second traffic-only control with station build `7904df1d` and Pico AP
+`b91f9a24`: 348 independently echoed protected unicast challenges, 17 broadcast
+and 52 multicast receptions. The AP submitted 68 broadcast and 68 multicast
+challenges; this is group-delivery evidence, not a lossless-link claim.
+Both endpoints retained authorization, no WPA or transport error occurred,
+and plaintext data was not accepted. The separate `traffic04-e1-*` connection
+also passed M1/M2/M3/M4 and a fresh protected echo with these same builds.
+
+Both AP interval probes actually returned `BCME_UNSUPPORTED` (-23).
+No group or pairwise RF rekey occurred. Running the full E2 oracle without
+`--traffic-only` was explicitly verified to reject this archive because
+GTK rekey control is unavailable. **E2's final RF checkbox remains open**:
+three forced rotations of each kind still require a controllable authenticator.
+The native rotations above are not substituted for this hardware requirement.
+
+Full 16 MiB badge and 4 MiB Pico originals were restored/readback-compared
+after every campaign, including the last `traffic04`/E1 control. Their SHA-256
+hashes match the originals recorded under E1 above. The final campaigns
+restore only the preflight-bounded flashed prefix, then read and compare the
+entire flash; a full-image restore is retained as an explicit failure fallback.
+The other badge was untouched. No commit or push was performed.
 
 ### E3. Sustained protected operation
 

@@ -23,6 +23,9 @@
 
 _Static_assert(CLEAN_STATION_TRACE_DETAIL + sizeof(clean_mac_trace_status_t) <=
                CLEAN_SOAK_FAULT_DETAIL, "MAC trace must not overlap soak fault evidence");
+_Static_assert(CLEAN_WPA_REKEY_MODE>CLEAN_NETWORK_MODE &&
+               CLEAN_WPA_REKEY_MODE>CLEAN_HT_AMPDU_PROBE_RX_MODE,
+               "Protected traffic mode must not alias existing station/HT modes");
 
 extern const uint8_t clean_image[], clean_image_end[];
 static live_usb_control_t control;
@@ -61,7 +64,7 @@ static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uin
 
 static int network_mode(void) { return detail[2000u] == CLEAN_NETWORK_MODE; }
 static int lifecycle_mode(void) { return detail[2000u] == CLEAN_LIFECYCLE_MODE || network_mode(); }
-static int station_mode(void) { return detail[2000u]==16u || detail[2000u]==18u || lifecycle_mode(); }
+static int station_mode(void) { return detail[2000u]==16u || clean_wpa_mode(detail[2000u]) || lifecycle_mode(); }
 static int soak_mode(void) { return detail[2000u]==19u || detail[2000u]==20u; }
 static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=31u; }
 
@@ -256,7 +259,8 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
 static int service(void *unused) {
     (void)unused;
     usb_error = live_usb_hw_poll(&control);
-    if (!usb_error && (soak_mode() || lifecycle_mode() || detail[2000u] == CLEAN_PEER_RX_MODE)) {
+    if (!usb_error && (soak_mode() || lifecycle_mode() || detail[2000u] == CLEAN_PEER_RX_MODE ||
+                      detail[2000u] == CLEAN_WPA_REKEY_MODE)) {
         const wifi_wire_t *wire = wifi_board_wire();
         uint32_t now = wire->now_us(wire->context);
         if (now - soak_watchdog_at >= 4000000u) {
@@ -622,11 +626,14 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     wpa.rx_amsdu = (uint8_t)(CLEAN_RX_HT_RX && station_ap.association.wmm);
     wpa_wipe(wpa_secret,sizeof(wpa_secret));
     uint32_t started=l->wire->now_us(l->wire->context), last_probe=started;
+    int extended=detail[2000u]==CLEAN_WPA_REKEY_MODE;
     uint8_t *packet=rx_packet;
     uint8_t tx[512];
     uint32_t pending = 0u;
     uint8_t pending_key = 0u;
     while (!l->error && !wpa.error) {
+        if (extended && l->wire->now_us(l->wire->context)-started>=
+            CLEAN_WPA_REKEY_SECONDS*1000000u) break;
         uint32_t retry_length;
         int retry=clean_wpa_poll(&wpa,l->wire->now_us(l->wire->context),tx,&retry_length);
         if (retry<0) break;
@@ -635,7 +642,8 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
         if (!station_receive(l,mac,&size)) break;
         if (size>=18u) {
             const uint8_t *m=packet+18u;
-            if (size<=CLEAN_DETAIL_PACKET_BYTES && size>=42u && !(m[1]&64u) &&
+            if (size<=(extended?CLEAN_WPA_REKEY_DETAIL-1104u:CLEAN_DETAIL_PACKET_BYTES) &&
+                size>=42u && !(m[1]&64u) &&
                 wpa_equal(m+4u,mac,6u) && clean_frame_valid(m,size-18u)) {
                 badger_bytes_store_u32(detail+1088u,size);
                 badger_bytes_copy(detail+1104u,packet,size);
@@ -651,8 +659,7 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
             int result=clean_wpa_receive(&wpa,m,size-18u,tx,&length);
             if (result<0) break;
             if (result) { pending=length; pending_key=1u; }
-            else if (wpa.installed && clean_wpa_protected(&wpa,m,size-18u,
-                l->wire->now_us(l->wire->context))>0) break;
+            else if (!extended && wpa.stage==WPA_PROTECTED) break;
         }
         if (pending) {
             if (!station_command(l,tx,pending,5u|clean_tx_length_bits(pending)|
@@ -664,14 +671,13 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
             }
             if (badger_bytes_load_u32(status+8u)) {
                 if (pending_key) {
-                    if (wpa.installed) ++wpa.m4; else ++wpa.m2;
-                    if (wpa.stage==WPA_KEYS) wpa.stage=WPA_M4_SENT;
+                    clean_wpa_tx_complete(&wpa);
                 }
                 pending=0u;
             }
         }
         uint32_t tick=l->wire->now_us(l->wire->context);
-        if (!pending && wpa.stage>=WPA_M4_SENT && tick-last_probe>=100000u) {
+        if (!pending && (wpa.stage>=WPA_M4_SENT || wpa.rekey) && tick-last_probe>=100000u) {
             uint32_t length=clean_wpa_probe(&wpa,tx);
             if (!length) break;
             pending=length;
@@ -679,7 +685,7 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
             last_probe=tick;
         }
     }
-    if (!wpa.error && wpa.stage!=WPA_PROTECTED)
+    if (!wpa.error && (l->error || wpa.stage!=WPA_PROTECTED))
         (void)clean_wpa_abort(&wpa,l->error?WPA_TRANSPORT:WPA_TIMEOUT);
     badger_bytes_store_u32(detail+1640u,0x32575043u);
     badger_bytes_store_u32(detail+1644u,wpa.stage);
@@ -691,6 +697,19 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     badger_bytes_store_u32(detail+1668u,wpa.protected_rx);
     badger_bytes_store_u32(detail+1672u,wpa.gtk_info);
     badger_bytes_store_u32(detail+1676u,wpa.retransmissions);
+    if (extended) {
+        const uint32_t words[]={CLEAN_WPA_REKEY_MAGIC,wpa.group_rx,wpa.broadcast_rx,
+            wpa.multicast_rx,wpa.group_rekeys,wpa.pairwise_rekeys,wpa.group_messages,
+            wpa.group_responses,wpa.replay_drops,wpa.plaintext_drops,
+            l->wire->now_us(l->wire->context)-started};
+        _Static_assert(CLEAN_WPA_REKEY_DETAIL+sizeof(words)<=1640u,
+                       "E2 evidence must precede the E1 handshake report");
+        for (uint32_t i=0u;i<sizeof(words)/sizeof(words[0]);++i)
+            badger_bytes_store_u32(detail+CLEAN_WPA_REKEY_DETAIL+4u*i,words[i]);
+        badger_bytes_copy(detail+CLEAN_WPA_REKEY_DETAIL+sizeof(words),wpa.probe_token,16u);
+        badger_bytes_store_u32(detail+CLEAN_WPA_REKEY_DETAIL+60u,wpa.group_verified);
+        badger_bytes_store_u32(detail+CLEAN_WPA_REKEY_DETAIL+64u,wpa.pairwise_verified);
+    }
     badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+16u,wpa.amsdu_rx);
     badger_bytes_store_u32(detail+CLEAN_WMM_DETAIL+20u,wpa.amsdu_subframes);
     clean_station_qos_report_at(&wpa.rx_mac,&wpa.rx_qos,detail,CLEAN_STATION_PROTECTED_DETAIL);
@@ -747,7 +766,7 @@ static int station_phase(clean_loader_t *l, const uint8_t mac[6],
 }
 
 static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
-    if (nonce[14]==18u) {
+    if (clean_wpa_mode(nonce[14])) {
         badger_bytes_zero(detail+1640u,36u);
         badger_bytes_store_u32(detail+1640u,0x32575043u);
         badger_bytes_store_u32(detail+1648u,WPA_ASSOCIATION);
@@ -791,7 +810,7 @@ static void station_run(clean_loader_t *l, const uint8_t nonce[16]) {
     }
     badger_bytes_store_u32(detail + 536u, aid);
     badger_bytes_store_u32(detail + 524u, 4u);
-    if (nonce[14]==18u) station_wpa(l,mac);
+    if (clean_wpa_mode(nonce[14])) station_wpa(l,mac);
     else (void)receive_for(l, 2500000u, 0u);
 }
 
@@ -1020,6 +1039,7 @@ static void run(const uint8_t nonce[16]) {
     wifi_board_init();
     wifi_board_select_pio(1u);
     clean_loader_init(&l, wifi_board_wire(), service, 0);
+    if (nonce[14]==CLEAN_WPA_REKEY_MODE) l.budget_us=CLEAN_WPA_REKEY_BUDGET_US;
     soak_watchdog_at = l.wire->now_us(l.wire->context);
     if (badger_schedule_bootsel(8000u) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
@@ -1027,7 +1047,7 @@ static void run(const uint8_t nonce[16]) {
     if (CLEAN_RX_WMM) clean_qos_rx_init(&station_qos);
     station_wmm_updates = station_wmm_offered = 0u;
     int secret_valid=1;
-    if (nonce[14]==18u) {
+    if (clean_wpa_mode(nonce[14])) {
         uint8_t digest[20];
         badger_bytes_copy(wpa_secret,control.clean_secret,64u);
         wpa_secret_binding(wpa_secret,nonce,nonce[15],digest);
@@ -1038,7 +1058,7 @@ static void run(const uint8_t nonce[16]) {
     uint32_t length = (uint32_t)(clean_image_end - clean_image);
     uint32_t channel = nonce[15];
     if ((nonce[14] > CLEAN_PEER_RX_MODE && nonce[14] != CLEAN_LIFECYCLE_MODE &&
-            nonce[14] != CLEAN_NETWORK_MODE && !(CLEAN_RX_AMPDU_PROBE &&
+            nonce[14] != CLEAN_NETWORK_MODE && nonce[14] != CLEAN_WPA_REKEY_MODE && !(CLEAN_RX_AMPDU_PROBE &&
             nonce[14] <= CLEAN_HT_AMPDU_PROBE_RX_MODE)) || !secret_valid ||
         ((nonce[14] == 21u || nonce[14] == 22u ||
           (nonce[14] >= 24u && nonce[14] <= 31u)) && nonce[13] >= 8u) ||
@@ -1442,7 +1462,7 @@ snapshot_done:
            lifecycle_mode() ? "STATION LIFECYCLE / CHECK REPORT" :
            ht_probe_mode() ? (nonce[14] == 21u || nonce[14] == 24u ? "HT / TX SUBMITTED ONLY" :
                               "HT PROBE / CHECK RAW EVIDENCE") :
-           nonce[14] == 18u ?
+           clean_wpa_mode(nonce[14]) ?
            (badger_bytes_load_u32(detail+1644u)==WPA_PROTECTED ?
             "WPA2 / PROTECTED ECHO VERIFIED" : "WPA2 HANDSHAKE / DATA FAILED") :
            nonce[14] == 16u ?

@@ -133,7 +133,8 @@ static void protected_secret_tests(void) {
     const uint8_t provision[8]={0x40u,LIVE_USB_CLEAN_SECRET,0u,0u,0u,0u,64u,0u};
     const uint8_t submit[8]={0x40u,LIVE_USB_FW_SUBMIT,0u,0u,0u,0u,64u,0u};
     const uint8_t poll[8]={0xc0u,LIVE_USB_FW_REPORT,0u,0u,0u,0u,64u,0u};
-    for (uint32_t early=0u;early<2u;++early) {
+    for (uint32_t early=0u;early<4u;++early) {
+        nonce[14]=early>=2u?CLEAN_GROUP_AP_MODE:CLEAN_PROTECTED_AP_MODE;
         live_usb_control_init(&usb,123u,"0102030405060708"); usb.configured=1u;
         live_usb_control_setup(&usb,provision);
         live_usb_control_complete(&usb,0u,secret,sizeof(secret));
@@ -144,7 +145,7 @@ static void protected_secret_tests(void) {
         live_usb_control_complete(&usb,0u,request,sizeof(request));
         live_usb_control_complete(&usb,1u,0,0u);
         assert(live_usb_probe_take(&usb,taken));
-        if (early) {
+        if (early&1u) {
             assert(clean_protected_ap_take_secret(pmk,usb.clean_secret,&usb.clean_secret_ready,taken));
             live_usb_control_setup(&usb,poll);
             assert(usb.phase==USB_PHASE_STALL);
@@ -164,6 +165,7 @@ static void protected_secret_tests(void) {
         memcpy(usb.clean_secret,secret,64u); usb.clean_secret_ready=1u;
         memcpy(taken,nonce,16u);
         taken[fault==0u?6u:fault==1u?14u:fault==2u?15u:5u]^=1u;
+        if (fault==1u) taken[14]=8u;
         assert(!clean_protected_ap_take_secret(pmk,usb.clean_secret,&usb.clean_secret_ready,taken));
         for (uint32_t i=0u;i<32u;++i) assert(!pmk[i]);
     }

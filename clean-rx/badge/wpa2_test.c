@@ -675,6 +675,236 @@ static void protected_block_ack(clean_wpa_t before) {
     puts("Protected BA: ciphertext reordering before per-TID PN checks, sequence wrap, replay, MIC rejection and delimiter-stream delivery pass; NOT PSM/on-air BA");
 }
 
+static uint32_t group_key(clean_wpa_t *s, uint8_t m[512], uint8_t replay,
+                           uint8_t id, uint8_t value, uint8_t rsc) {
+    (void)incoming(s,m,1);
+    uint8_t *e=m+32u, plain[24]={221u,22u,0u,15u,172u,1u,0u,0u};
+    plain[6]=id; memset(plain+8u,value,16u);
+    e[3]=127u; e[5]=0x13u; e[6]=0x82u; e[16]=replay;
+    memset(e+17u,0,64u); e[65]=rsc;
+    e[98]=(uint8_t)wrap_size(s->ptk+16u,plain,sizeof(plain),e+99u);
+    sign_key(s,m,167u);
+    return 167u;
+}
+
+static uint32_t group_frame(clean_wpa_t *s, uint8_t *m, uint8_t id,
+                             uint8_t tid, uint8_t pn, int broadcast) {
+    uint8_t plain[32]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
+    memcpy(plain+16u,s->probe_token,16u);
+    uint32_t n=protected_qos_fragment(s,m,tid,0u,0u,0,pn,plain,32u);
+    uint32_t h=tid==16u?24u:26u;
+    memset(m+4u,255,6u);
+    if (!broadcast) { m[4]=1u; m[5]=0u; m[6]=94u; m[7]=0u; m[8]=0u; m[9]=1u; }
+    m[h+3u]=(uint8_t)(32u|(id<<6u));
+    uint8_t number[6]={pn};
+    assert(wpa_ccmp(s->group[id].key,m,h,number,plain,32u,m+h+8u,m+h+40u,0));
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    return n;
+}
+
+static uint32_t encrypt_key(uint8_t *m, uint32_t n, const uint8_t key[16],
+                             uint8_t pn) {
+    uint8_t plain[400], number[6]={pn};
+    uint32_t size=n-28u;
+    memcpy(plain,m+24u,size); m[1]|=64u;
+    memset(m+24u,0,8u); m[24]=pn; m[27]=32u;
+    assert(wpa_ccmp(key,m,24u,number,plain,size,m+32u,m+32u+size,0));
+    badger_bytes_store_u32(m+n+12u,diag_crc32(m,n+12u));
+    return n+16u;
+}
+
+static void encrypted_response(const uint8_t *frame, uint32_t size,
+        const uint8_t tk[16], const uint8_t kck[16], uint16_t info) {
+    const uint8_t *m=frame+6u;
+    assert(m[1]==0x41u && clean_frame_valid(m,size-6u));
+    uint8_t plain[160], tag[8], digest[20], mic[16];
+    uint8_t pn[6]={m[24],m[25],m[28],m[29],m[30],m[31]};
+    uint32_t length=size-50u;
+    memcpy(tag,m+32u+length,8u);
+    assert(wpa_ccmp(tk,m,24u,pn,m+32u,length,plain,tag,1));
+    uint8_t *e=plain+8u;
+    assert((((uint16_t)e[5]<<8u)|e[6])==info);
+    memcpy(mic,e+81u,16u); memset(e+81u,0,16u);
+    wpa_hmac(kck,16u,e,length-8u,digest);
+    assert(!memcmp(mic,digest,16u));
+}
+
+static void group_rekey(clean_wpa_t before) {
+    uint8_t m[512], tx[512];
+    uint32_t length,n;
+    clean_wpa_t s=before;
+    s.stage=WPA_PROTECTED; s.clock=100u;
+    for (uint32_t cycle=0u;cycle<3u;++cycle) {
+        uint8_t id=(uint8_t)(2u+(cycle&1u)), value=(uint8_t)(20u+cycle);
+        n=group_key(&s,m,(uint8_t)(3u+cycle),id,value,7u);
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+        assert(s.group_rekeys==cycle+1u && s.group[id].valid && s.gtk_id==id);
+        encrypted_response(tx,length,s.ptk+32u,s.ptk,0x302u);
+        clean_wpa_tx_complete(&s);
+        assert(s.group_responses==cycle+1u && s.stage==WPA_PROTECTED);
+        clean_wpa_t installed=s;
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+        assert(!memcmp(s.group,installed.group,sizeof(s.group)) &&
+               s.group_rekeys==installed.group_rekeys);
+        for (uint8_t tid=0u;tid<17u;++tid) {
+            n=group_frame(&s,m,id,tid,7u,1);
+            assert(!clean_wpa_protected(&s,m,n,101u) && !s.error);
+            n=group_frame(&s,m,id,tid,8u,1);
+            assert(clean_wpa_protected(&s,m,n,102u)==1 && !s.error);
+            assert(!clean_wpa_protected(&s,m,n,103u));
+            n=group_frame(&s,m,id,tid,9u,0);
+            assert(clean_wpa_protected(&s,m,n,104u)==1);
+            assert(s.group[id].pn[tid][0]==9u && !s.rx_pn[tid][0]);
+        }
+        n=group_key(&s,m,(uint8_t)(3u+cycle),id,value,7u);
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==1 &&
+               s.group[id].pn[16][0]==9u);
+    }
+    assert(s.group_rx==102u && s.broadcast_rx==51u && s.multicast_rx==51u &&
+           s.group_verified==3u);
+    n=group_frame(&s,m,2u,16u,10u,1);
+    assert(clean_wpa_protected(&s,m,n,100u+CLEAN_WPA_GTK_OVERLAP_US-1u)==1);
+    n=group_frame(&s,m,2u,16u,11u,1);
+    /* Slot 3, not the active slot 2, expires at the exact overlap boundary. */
+    n=group_frame(&s,m,3u,16u,10u,1);
+    assert(!clean_wpa_protected(&s,m,n,100u+CLEAN_WPA_GTK_OVERLAP_US));
+    assert(!s.group[3].valid && s.group[2].valid);
+    for (uint32_t i=0u;i<16u;++i) assert(!s.group[3].key[i]);
+
+    s=before; s.stage=WPA_PROTECTED;
+    n=group_key(&s,m,3u,2u,20u,0u);
+    n=encrypt_key(m,n,s.ptk+32u,1u);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==1 && s.rx_pn[16][0]==1u);
+    assert(!clean_wpa_receive(&s,m,n,tx,&length) && s.group_rekeys==1u);
+    n=group_frame(&s,m,2u,16u,1u,1);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==0 && s.group_rx==1u);
+    n=group_key(&s,m,4u,2u,20u,10u);
+    n=encrypt_key(m,n,s.ptk+32u,2u);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==1 && s.group_rekeys==1u &&
+           s.group[2].pn[16][0]==10u && s.rx_pn[16][0]==2u);
+    n=group_frame(&s,m,2u,16u,9u,1);
+    assert(!clean_wpa_protected(&s,m,n,1u) && s.group_rx==1u);
+    n=group_frame(&s,m,2u,16u,11u,1);
+    assert(clean_wpa_protected(&s,m,n,2u)==1 && s.group_rx==2u);
+    s=before; s.stage=WPA_PROTECTED;
+    n=group_key(&s,m,3u,2u,4u,0u);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_REPLAY);
+    s=before; s.stage=WPA_PROTECTED;
+    n=group_key(&s,m,3u,2u,20u,0u);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+    n=group_key(&s,m,3u,2u,21u,0u);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_REPLAY);
+
+    for (uint32_t fault=0u;fault<7u;++fault) {
+        s=before; s.stage=WPA_PROTECTED;
+        n=group_key(&s,m,3u,2u,20u,0u);
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+        n=group_frame(&s,m,2u,16u,1u,1);
+        if (fault==0u) m[n-12u]^=1u;
+        if (fault==1u) m[27]=32u;
+        if (fault==2u) m[27]|=1u;
+        if (fault==3u) m[4]=2u;
+        if (fault==4u) m[10]^=1u;
+        if (fault==5u) m[1]&=(uint8_t)~64u;
+        if (fault==6u) m[27]=0xe0u;
+        badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+        int result=clean_wpa_receive(&s,m,n,tx,&length);
+        assert(result<=0 && !s.group_rx && !s.protected_rx && !length);
+        if (fault==0u || fault==2u) {
+            assert(s.error==(fault==0u?WPA_MIC:WPA_FORMAT) && !s.installed);
+            for (uint32_t i=0u;i<sizeof(s.group);++i) assert(!((uint8_t *)s.group)[i]);
+        } else assert(!s.error);
+    }
+    s=before; s.stage=WPA_PROTECTED;
+    n=group_key(&s,m,3u,2u,20u,0u);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+    for (uint32_t i=0u;i<CLEAN_WPA_MAX_RETRIES;++i)
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_TIMEOUT);
+    s=before; s.stage=WPA_PROTECTED;
+    n=group_key(&s,m,3u,2u,20u,0u);
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==1);
+    s.clock=CLEAN_WPA_DEADLINE_US;
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==-1 && s.error==WPA_TIMEOUT);
+    puts("E2 GTK: three replacements, broadcast/multicast on all 17 replay lanes, RSC, key-ID/MIC/plaintext rejection, duplicate PN preservation, bounded overlap and retries pass; NOT RF");
+}
+
+static void pairwise_rekey(clean_wpa_t before) {
+    uint8_t m[512], tx[512], old_ptk[48], old_nonce[32], plain[48];
+    uint32_t length,n;
+    clean_wpa_t s=before;
+    for (uint32_t i=0u;i<32u;++i) assert(before.pmk[i]==1u);
+    s.stage=WPA_PROTECTED;
+    for (uint8_t cycle=0u;cycle<3u;++cycle) {
+        s.clock=100u+(uint32_t)cycle*10000000u;
+        memcpy(old_ptk,s.ptk,48u); memcpy(old_nonce,s.snonce,32u);
+        s.tx_pn[0]=50u; s.rx_pn[16][0]=50u; s.group[s.gtk_id].pn[16][0]=10u;
+        n=incoming(&s,m,0); m[48]=(uint8_t)(3u+2u*cycle);
+        memset(m+49u,10+cycle,32u);
+        badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+        n=encrypt_key(m,n,old_ptk+32u,51u);
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==1 && s.rekey);
+        assert(memcmp(old_nonce,s.snonce,32u) && memcmp(old_ptk,s.ptk,48u));
+        uint8_t pmk[32], derived[48];
+        memset(pmk,1,32u);
+        wpa_ptk(pmk,s.bssid,s.mac,s.anonce,s.snonce,derived);
+        assert(!memcmp(derived,s.ptk,48u));
+        assert(!memcmp(old_ptk,s.old_ptk,48u) && s.tx_pn[0]==51u);
+        encrypted_response(tx,length,old_ptk+32u,s.ptk,0x10au);
+        memcpy(old_nonce,s.snonce,32u);
+        clean_wpa_tx_complete(&s);
+        assert(s.m2==cycle+1u);
+        assert(!clean_wpa_poll(&s,s.clock+CLEAN_WPA_RETRY_US-1u,tx,&length));
+        assert(clean_wpa_poll(&s,s.clock+1u,tx,&length)==1);
+        encrypted_response(tx,length,old_ptk+32u,s.ptk,0x10au);
+        assert(!memcmp(old_nonce,s.snonce,32u) && s.rx_pn[16][0]==51u);
+        n=incoming(&s,m,1);
+        assert(wpa_unwrap(s.ptk+16u,m+131u,56u,plain));
+        plain[28]=s.gtk_id; memcpy(plain+30u,s.gtk,16u);
+        wrap(s.ptk+16u,plain,m+131u);
+        m[48]=(uint8_t)(4u+2u*cycle); memcpy(m+49u,s.anonce,32u);
+        sign_key(&s,m,n);
+        n=encrypt_key(m,n,old_ptk+32u,52u);
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==1 && !s.rekey);
+        encrypted_response(tx,length,old_ptk+32u,s.ptk,0x30au);
+        assert(s.pairwise_rekeys==cycle+1u && !s.tx_pn[0] && !s.rx_pn[16][0]);
+        assert(s.group[s.gtk_id].pn[16][0]==10u);
+        assert(s.old_valid && !memcmp(s.old_ptk,old_ptk,48u));
+        assert(!clean_wpa_receive(&s,m,n,tx,&length));
+        uint8_t retry[512]; memcpy(retry,m,n);
+        uint8_t retry_plain[400], tag[8], number[6]={52u};
+        memcpy(tag,retry+n-12u,8u);
+        assert(wpa_ccmp(old_ptk+32u,retry,24u,number,retry+32u,n-44u,
+                        retry_plain,tag,1));
+        number[0]=53u; retry[24]=53u;
+        assert(wpa_ccmp(old_ptk+32u,retry,24u,number,retry_plain,n-44u,
+                        retry+32u,retry+n-12u,0));
+        badger_bytes_store_u32(retry+n-4u,diag_crc32(retry,n-4u));
+        assert(clean_wpa_receive(&s,retry,n,tx,&length)==1 && !s.tx_pn[0] &&
+               !s.rx_pn[16][0] && s.pairwise_rekeys==cycle+1u);
+        encrypted_response(tx,length,old_ptk+32u,s.ptk,0x30au);
+        clean_wpa_tx_complete(&s);
+        assert(s.m4==cycle+1u && s.stage==WPA_M4_SENT);
+        uint8_t reply[32]={170u,170u,3u,0u,0u,0u,136u,181u,'U','2','6','W','P','A','2',1u};
+        memcpy(reply+16u,s.probe_token,16u);
+        n=protected_fragment(&s,m,cycle,0u,0,1u,reply,32u);
+        assert(clean_wpa_receive(&s,m,n,tx,&length)==0 && !length);
+        assert(s.stage==WPA_PROTECTED && s.protected_rx==cycle+1u);
+        assert(s.pairwise_verified==cycle+1u && !s.old_valid);
+        for (uint32_t i=0u;i<48u;++i) assert(!s.old_ptk[i]);
+        assert(clean_wpa_probe(&s,tx) && s.tx_pn[0]==1u);
+    }
+    s=before; s.stage=WPA_PROTECTED; s.clock=0xffff0000u;
+    n=incoming(&s,m,0); m[48]=3u; memset(m+49u,10,32u);
+    badger_bytes_store_u32(m+n-4u,diag_crc32(m,n-4u));
+    assert(clean_wpa_receive(&s,m,n,tx,&length)==1 && s.rekey);
+    assert(clean_wpa_poll(&s,0xffff0000u+CLEAN_WPA_DEADLINE_US,tx,&length)==-1);
+    assert(!s.installed && s.error==WPA_TIMEOUT);
+    for (uint32_t i=0u;i<48u;++i) assert(!s.old_ptk[i] && !s.ptk[i]);
+    for (uint32_t i=0u;i<32u;++i) assert(!s.pmk[i]);
+    puts("E2 PTK: three encrypted four-way rekeys during traffic, fresh per-epoch SNonces, old-TK M2/M4 envelopes, new-KCK MICs, atomic PN epochs, unchanged GTK PN and wrap-safe failure wiping pass; NOT RF");
+}
+
 static void handshake(void) {
     uint8_t secret[64], mac[6]={2u,6u,7u,8u,9u,10u}, ap[6]={2u,1u,2u,3u,4u,5u};
     memset(secret,1,32u); memset(secret+32u,3,32u);
@@ -696,6 +926,8 @@ static void handshake(void) {
     protected_fragments(s);
     protected_qos(s);
     protected_aggregates(s);
+    group_rekey(s);
+    pairwise_rekey(s);
     s.tx_pn[0]=5u; s.rx_pn[0][0]=9u;
     assert(clean_wpa_receive(&s,m,n,tx,&size)==1 && s.tx_pn[0]==5u && s.rx_pn[0][0]==9u);
     clean_wpa_t installed=s;

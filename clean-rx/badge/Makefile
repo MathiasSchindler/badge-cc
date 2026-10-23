@@ -87,6 +87,7 @@ test: $(NATIVE_TESTS) $(BUILD)/collector
 	node lifecycle_verify.cjs --self-test
 	node qualification_verify.cjs --self-test
 	node wpa2_verify.cjs --self-test $(BUILD)/collector
+	node wpa2_rekey_verify.cjs --self-test
 	bash -n lifecycle_probe.sh
 	bash -n qualification_probe.sh
 	bash -n $(ROOT)/src/host/tools/usb_wifi_clean_wpa2_run.sh

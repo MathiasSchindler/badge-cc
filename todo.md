@@ -400,10 +400,30 @@ See [E1 commands and boundaries](clean-rx/badge/README.md#e1-protected-pico-ap-m
 
 ### E2. Group traffic and rekey
 
-- [ ] Complete GTK broadcast/multicast, key selection, replay and replacement.
-- [ ] Complete bounded group/pairwise rekey without retransmission PN resets.
+**Status: implemented and native-tested; forced-rekey RF qualification remains open.**
+
+- [x] Complete GTK broadcast/multicast, key selection, replay and replacement.
+- [x] Complete bounded group/pairwise rekey without retransmission PN resets.
 - [ ] Verify real group traffic and three group plus three pairwise rekeys
   during traffic without plaintext leakage or unrecovered failure.
+
+Four GTK slots have independent per-TID/non-QoS replay windows and RSC floors,
+with two-second old-slot overlap. Group-key responses and pairwise rekeys
+support protected EAPOL envelopes. Pairwise retries retain the old key/PN epoch
+until new-key data proves completion, without reinstalling keys on duplicates.
+The session retains its PMK and a secret HMAC-based nonce-generator seed until
+teardown. Native tests exercise three group and three encrypted pairwise
+rekeys, per-epoch traffic proof, retry loss, malformed/MIC/replay rejection
+and wiping. Mode 34 adds a bounded 35-second protected-traffic probe; mode 32
+remains B1 lifecycle. The strict E2 oracle requires three independently proven
+epochs of each type; traffic-only controls cannot close the milestone.
+Hardware campaign `traffic04` passed the full 35-second traffic control:
+348 protected unicast echoes, 17 broadcasts and 52 multicasts, plus a separate
+fresh E1 regression connection. Both full original flash images were restored
+and readback-verified. The Pico AP returned `BCME_UNSUPPORTED` (-23) for both
+forced-rekey controls, so zero RF rekeys occurred; the stronger E2 gate
+correctly rejects this as full qualification. A controllable authenticator
+is still required for the three-group/three-pairwise RF acceptance test.
 
 ### E3. Sustained protected operation
 
