@@ -42,7 +42,9 @@ static void draw(badger_canvas_t *canvas) {
     number(canvas,188u,"ERROR/PAIR",((uint32_t)host.error<<16u)|host.pair_error);
     number(canvas,200u,host.error==5u?"FLASH ROM ERROR":"CMD/STATUS",
            host.error==5u?(uint32_t)clicker_flash_error():((uint32_t)host.command_opcode<<16u)|host.last_status);
-    number(canvas,212u,"SM/ENC/DISC",
+    number(canvas,212u,host.error?"EVENT/META/DISC":host.pair_error?"PAIR FEATURES":"SM/ENC/DISC",
+           host.error?((uint32_t)host.last_event<<24u)|((uint32_t)host.last_meta<<16u)|host.disconnect_reason:
+           host.pair_error?host.pairing_features:
            ((uint32_t)(host.pairing?host.pairing:host.stopped_pairing)<<24u) |
            ((uint32_t)host.last_smp<<16u) | ((uint32_t)host.encryption_status<<8u) | host.disconnect_reason);
     badger_gfx_text(canvas,4,228,host.error?"B TO BOOTSEL":
@@ -69,8 +71,10 @@ void clicker_hid_run(badger_canvas_t *canvas,clicker_input_t *input,
         if (clicker_host_pump(&host)<0) break;
         uint32_t tick=now();uint8_t raw=buttons_read();
         clicker_input_sample(input,raw,tick);
+        uint8_t was_blocked=chord.blocked;
         if (clicker_chord_update(&chord,raw,input->stable,tick)) clicker_host_new_computer(&host);
-        clicker_input_set_ready(input,(uint8_t)(clicker_host_ready(&host) && !chord.blocked));
+        if (chord.blocked && (!was_blocked || input->count)) clicker_input_cancel_taps(input);
+        clicker_input_set_ready(input,(uint8_t)clicker_host_ready(&host));
         if (input->overflow) {host.error=2u;break;}
         uint8_t report[8];
         if (clicker_input_peek(input,report) && clicker_host_notify(&host,report)) clicker_input_accept(input);

@@ -13,15 +13,17 @@ typedef struct {
     clicker_acl_t output[8];
     uint8_t command_head, command_count, output_head, output_count, waiting, command_tag;
     uint16_t command_opcode, handle, acl_size, outstanding, acl_credit, acl_total;
-    uint8_t connected, encrypted, authenticated, advertising, error, last_event, last_status;
+    uint8_t connected, encrypted, authenticated, advertising, error, last_event, last_status, last_meta;
     uint8_t own[6], peer[6], peer_type, new_only, closing;
     int8_t session_bond;
     uint32_t notifications, connections, disconnects, pairing_started, switch_started, rejected;
     uint32_t command_started, incoming_started;
+    uint32_t stale_commands;
     uint8_t request[7], response[7], tk[16], random[16], confirm[16], stk[16], entropy[64];
     uint8_t rng_bytes, pairing, peer_keys, keys_sent, dirty, pair_error;
     uint8_t last_smp, stopped_pairing, encryption_status, disconnect_reason;
     uint32_t passkey;
+    uint32_t pairing_features;
     clicker_bond_t candidate;
     uint8_t incoming[512];
     uint16_t incoming_size, incoming_expected;

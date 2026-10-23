@@ -150,6 +150,12 @@ int main(void) {
     assert(!clicker_chord_update(&chord,0x19u,0x19u,4000000u));
     assert(!clicker_chord_update(&chord,0x19u,0x19u,4500000u));
     assert(clicker_chord_update(&chord,0x19u,0x19u,5000000u));
+    begin(0u);
+    stable(1u);expect(CLICKER_KEY_PREVIOUS);
+    clicker_input_cancel_taps(&state);
+    expect(0u);no_report();
+    sample(1u,1000000u);no_report();
+    stable(0u);stable(1u);expect(CLICKER_KEY_PREVIOUS);expect(0u);
     puts("PASS: board profile, five keys, debounce threshold, startup-held suppression,");
     puts("      tap/release ordering, backpressure, hold, reconnect, wrap and overflow");
     return 0;

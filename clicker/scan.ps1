@@ -1,6 +1,8 @@
 param(
     [int]$Seconds = 40,
     [string]$ExpectedAddress,
+    [string]$Name = 'Universe Clicker',
+    [switch]$Active,
     [string]$FlashImage,
     [string]$Serial,
     [string]$Picotool = "$PSScriptRoot\..\build\clicker\tools\picotool\picotool\picotool.exe"
@@ -34,17 +36,19 @@ public static class ClickerBleScan {
     public static readonly ConcurrentQueue<string> Seen = new ConcurrentQueue<string>();
     private static BluetoothLEAdvertisementWatcher watcher;
     private static ulong expectedAddress;
-    public static void Start(string address) {
+    private static string expectedName;
+    public static void Start(string address,string name,bool active) {
         expectedAddress = String.IsNullOrEmpty(address) ? 0 :
             Convert.ToUInt64(address.Replace(":", "").Replace("-", ""), 16);
+        expectedName=name;
         watcher = new BluetoothLEAdvertisementWatcher();
-        watcher.ScanningMode = BluetoothLEScanningMode.Passive;
+        watcher.ScanningMode = active?BluetoothLEScanningMode.Active:BluetoothLEScanningMode.Passive;
         watcher.Received += Received;
         watcher.Start();
     }
     private static void Received(BluetoothLEAdvertisementWatcher source,
                                  BluetoothLEAdvertisementReceivedEventArgs args) {
-        if (args.Advertisement.LocalName == "Universe Clicker" &&
+        if (args.Advertisement.LocalName == expectedName &&
             (expectedAddress == 0 || args.BluetoothAddress == expectedAddress)) {
             Seen.Enqueue(String.Format("{0:o} {1:X12} RSSI={2} {3} {4}",
                 args.Timestamp, args.BluetoothAddress, args.RawSignalStrengthInDBm,
@@ -57,14 +61,14 @@ public static class ClickerBleScan {
 '@
 
 try {
-    [ClickerBleScan]::Start($ExpectedAddress)
+    [ClickerBleScan]::Start($ExpectedAddress,$Name,$Active.IsPresent)
     $scanStartedAt = [DateTimeOffset]::Now
     $rebootedAt = $null
     Start-Sleep -Milliseconds 500
     if ([ClickerBleScan]::Status() -ne 'Started') {
         throw "Windows BLE watcher failed to start: $([ClickerBleScan]::Status())"
     }
-    Write-Output 'Windows BLE scanner started; collecting only Universe Clicker advertisements.'
+    Write-Output "Windows BLE scanner started; collecting only $Name advertisements."
     if ($FlashImage) {
         & $Picotool load -v $FlashImage --ser $Serial *> "$PSScriptRoot\..\build\clicker\advertise-flash.log"
         if ($LASTEXITCODE -ne 0) { throw 'Advertising image flash/readback verification failed' }

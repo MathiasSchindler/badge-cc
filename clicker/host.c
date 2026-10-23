@@ -40,6 +40,8 @@ static void clear_pairing(clicker_host_t *h) {
     clicker_secret_clear(h->tk,sizeof(h->tk));clicker_secret_clear(h->random,sizeof(h->random));
     clicker_secret_clear(h->stk,sizeof(h->stk));clicker_secret_clear(h->entropy,sizeof(h->entropy));
     clicker_secret_clear(h->confirm,sizeof(h->confirm));h->pairing=0u;h->rng_bytes=0u;
+    clicker_secret_clear(&h->candidate,sizeof(h->candidate));
+    h->passkey=0u;h->keys_sent=h->peer_keys=0u;
 }
 static int pair_failed(clicker_host_t *h,uint8_t reason) {
     uint8_t p[2]={5u,reason};h->pair_error=reason;
@@ -97,6 +99,7 @@ static int smp(clicker_host_t *h,const uint8_t *p,uint32_t n) {
     h->last_smp=p[0];
     if (p[0]==1u) {
         if (n!=7u) return pair_failed(h,0x0au);
+        h->pairing_features=((uint32_t)p[1]<<24u)|((uint32_t)p[3]<<16u)|((uint32_t)p[4]<<8u)|p[6];
         if (h->encrypted || h->pairing) return pair_failed(h,9u);
         if ((p[1]!=2u && p[1]!=4u) || p[2]!=0u || (p[3]&3u)!=1u)
             return pair_failed(h,3u);
@@ -190,8 +193,12 @@ static int received_acl(clicker_host_t *h,const uint8_t *p,uint32_t n) {
 }
 
 static int ltk_request(clicker_host_t *h,const uint8_t *p,uint32_t n) {
-    if (n!=15u || !h->connected || get16(p+3u)!=h->handle) return failed(h,1u);
-    uint8_t parameters[18];put16(parameters,h->handle);
+    if (n!=15u) return failed(h,1u);
+    uint8_t parameters[18];put16(parameters,get16(p+3u));
+    if (!h->connected || get16(p+3u)!=h->handle) {
+        ++h->rejected;
+        return command(h,0x201bu,parameters,2u,0u);
+    }
     uint8_t zero=0u;for (uint32_t i=5u;i<15u;++i) zero|=p[i];
     if (!zero && h->pairing==PAIR_ENCRYPT) {
         badger_bytes_copy(parameters+2u,h->stk,16u);h->authenticated=1u;
@@ -200,6 +207,10 @@ static int ltk_request(clicker_host_t *h,const uint8_t *p,uint32_t n) {
     for (uint32_t i=0u;i<CLICKER_BONDS;++i) {
         clicker_bond_t *b=&h->bonds->peers[i];
         if (b->valid && b->ediv==get16(p+13u) && clicker_secret_equal(b->random,p+5u,8u)) {
+            if (h->new_only) {
+                ++h->rejected;h->closing=1u;h->switch_started=tick(h);
+                return command(h,0x201bu,parameters,2u,0u);
+            }
             badger_bytes_copy(parameters+2u,b->ltk,16u);h->session_bond=(int8_t)i;h->authenticated=1u;
             return command(h,0x201au,parameters,18u,0u);
         }
@@ -211,6 +222,7 @@ static int connected(clicker_host_t *h,const uint8_t *p,uint32_t n) {
     if (p[3]!=0u) {h->last_status=p[3];return advertise(h);}
     uint16_t handle=get16(p+4u);
     if (p[6]!=1u || p[7]>1u || handle>0x0effu) return failed(h,1u);
+    h->advertising=0u;
     if (h->connected || (h->new_only && known_peer(h,p[7],p+8u)>=0)) {
         ++h->rejected;return disconnect(h,handle);
     }
@@ -237,6 +249,7 @@ static int encrypted(clicker_host_t *h,const uint8_t *p,uint32_t n) {
     if (h->session_bond>=0) {
         const clicker_bond_t *b=&h->bonds->peers[(uint8_t)h->session_bond];
         h->gatt.report_ccc=b->report_ccc;h->gatt.boot_ccc=b->boot_ccc;h->gatt.service_ccc=b->service_ccc;
+        h->pair_error=0u;
     }
     return 1;
 }
@@ -257,6 +270,16 @@ int clicker_host_packet(clicker_host_t *h,uint8_t type,const uint8_t *p,uint32_t
         h->bt->credits=credits;h->last_status=status;
         if (!h->waiting || opcode!=h->command_opcode) return failed(h,3u);
         uint8_t tag=h->command_tag;h->waiting=0u;
+        if (status==2u &&
+            (opcode==0x0406u || opcode==0x201au || opcode==0x201bu ||
+             opcode==0x2020u || opcode==0x2021u)) {
+            ++h->stale_commands;
+            return 1;
+        }
+        if (status==0x12u && opcode==0x0406u && !h->connected) {
+            ++h->stale_commands;
+            return 1;
+        }
         if (status) return failed(h,3u);
         if (tag==TAG_RNG) return random_complete(h,result,size);
         if (tag==TAG_ADVERTISE) h->advertising=1u;
@@ -287,12 +310,17 @@ int clicker_host_packet(clicker_host_t *h,uint8_t type,const uint8_t *p,uint32_t
     if (p[0]==0x10u || p[0]==0x1au) return failed(h,1u);
     if (p[0]==0x3eu) {
         if (n<3u) return failed(h,1u);
+        h->last_meta=p[2];
         if (p[2]==1u || p[2]==0x0au) return connected(h,p,n);
         if (p[2]==5u) return ltk_request(h,p,n);
         if (p[2]==6u) {
-            if (n!=13u || get16(p+3u)!=h->handle) return failed(h,1u);
+            if (n!=13u) return failed(h,1u);
             uint8_t parameters[14];badger_bytes_copy(parameters,p+3u,10u);
             badger_bytes_zero(parameters+10u,4u);
+            if (!h->connected || get16(p+3u)!=h->handle) {
+                put16(parameters,get16(p+3u));parameters[2]=0x3bu;
+                return command(h,0x2021u,parameters,3u,0u);
+            }
             uint32_t min=get16(p+5u),max=get16(p+7u),latency=get16(p+9u),timeout=get16(p+11u);
             if (min<6u || max>3200u || min>max || latency>499u || timeout<10u ||
                 timeout>3200u || timeout*4u<=(latency+1u)*max) {
@@ -333,7 +361,7 @@ int clicker_host_init(clicker_host_t *h,clicker_bt_t *bt,clicker_bonds_t *bonds,
         command(h,0x2009u,scan,32u,0u) && advertise(h);
 }
 int clicker_host_ready(const clicker_host_t *h) {
-    return !h->error && h->connected && h->session_bond>=0 && !h->closing &&
+    return !h->error && h->connected && h->session_bond>=0 && !h->closing && !h->new_only &&
         !h->dirty && !h->gatt.dirty && clicker_gatt_notification_handle(&h->gatt)!=0u;
 }
 int clicker_host_notify(clicker_host_t *h,const uint8_t report[8]) {
@@ -344,12 +372,12 @@ int clicker_host_notify(clicker_host_t *h,const uint8_t report[8]) {
     badger_bytes_copy(h->gatt.report,report,8u);++h->notifications;return 1;
 }
 void clicker_host_new_computer(clicker_host_t *h) {
-    h->new_only=1u;
     if (h->connected && !h->closing) {
         uint8_t released[8]={0};
         if (clicker_host_ready(h) && !clicker_host_notify(h,released)) {h->error=2u;return;}
         h->closing=1u;h->switch_started=tick(h);
     }
+    h->new_only=1u;
 }
 int clicker_host_persist(clicker_host_t *h,const clicker_bond_io_t *io) {
     if (h->error || !h->connected || h->output_count || h->outstanding) return !h->error;

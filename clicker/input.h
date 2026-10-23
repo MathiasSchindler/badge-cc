@@ -35,5 +35,7 @@ void clicker_input_sample(clicker_input_t *state, uint8_t pressed, uint32_t tick
 uint8_t clicker_input_peek(const clicker_input_t *state,
                            uint8_t report[CLICKER_REPORT_SIZE]);
 void clicker_input_accept(clicker_input_t *state);
+/* Cancel unsent taps without losing the release for an already-sent press. */
+void clicker_input_cancel_taps(clicker_input_t *state);
 
 #endif

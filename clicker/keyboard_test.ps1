@@ -37,19 +37,22 @@ public sealed class ClickerKeyObserver : Form {
     private readonly Dictionary<IntPtr,bool> devices = new Dictionary<IntPtr,bool>();
     private readonly TextBox text = new TextBox();
     private readonly string address;
+    private readonly bool resetMode;
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private string failure;
 
     private ClickerKeyObserver(int seconds, string expected, string mode) {
         address=expected;
+        resetMode=mode=="reset";
         Text="GitHub badge keyboard delivery test";
         Width=780; Height=450;
         text.Multiline=true; text.ReadOnly=true; text.Dock=DockStyle.Fill;
         text.Font=new Font("Consolas",11);
         text.Text=mode=="reset"?
-                  "Hold C/Right, then press RESET while still holding it.\r\n"+
+                  "Hold C/Right for one second, then press RESET while holding it.\r\n"+
                   "Keep holding until CONNECTED - READY, then release it.\r\n"+
-                  "Finally press A/Left once. No new pairing should be needed.\r\n\r\n":
+                  "Finally press A/Left once, then stop pressing buttons.\r\n"+
+                  "The window will close two seconds after four events.\r\n\r\n":
                   "Press A, B, C, Up, Down once each, with pauses.\r\n"+
                   "Then hold C for about two seconds and release it.\r\n"+
                   "2026: Left, Enter, Right, Up, Down; then hold Right.\r\n"+
@@ -93,6 +96,10 @@ public sealed class ClickerKeyObserver : Form {
                             string name=key.Key==0x21?"PAGE_UP":key.Key==0x22?"PAGE_DOWN":"B";
                             string line=String.Format("{0:o} {1} {2}",DateTimeOffset.Now,name,(key.Flags&1)!=0?"UP":"DOWN");
                             lines.Add(line);text.AppendText(line+"\r\n");
+                            if (resetMode && lines.Count==4) {
+                                text.AppendText("Four events captured; stop pressing buttons. Closing shortly.\r\n");
+                                timer.Stop();timer.Interval=2000;timer.Start();
+                            }
                         }
                     }
                 } finally {Marshal.FreeHGlobal(memory);}
@@ -114,7 +121,9 @@ public sealed class ClickerKeyObserver : Form {
 '@
 
 $events = [ClickerKeyObserver]::Run($Seconds,$Address,$Mode)
-$events | Set-Content -LiteralPath "$PSScriptRoot\..\build\clicker\keyboard-$Mode-observation.txt"
+$stamp=Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$log="$PSScriptRoot\..\build\clicker\keyboard-$Mode-$stamp-observation.txt"
+$events | Set-Content -LiteralPath $log
 $expected = @(
     'PAGE_UP DOWN','PAGE_UP UP','B DOWN','B UP','PAGE_DOWN DOWN','PAGE_DOWN UP',
     'PAGE_UP DOWN','PAGE_UP UP','PAGE_DOWN DOWN','PAGE_DOWN UP','PAGE_DOWN DOWN','PAGE_DOWN UP'
@@ -122,6 +131,7 @@ $expected = @(
 if ($Mode -eq 'reset') { $expected=@('PAGE_DOWN DOWN','PAGE_DOWN UP','PAGE_UP DOWN','PAGE_UP UP') }
 $observed = @($events | ForEach-Object { ($_ -split ' ',2)[1] })
 Write-Output "Captured $($observed.Count) badge-only keyboard events."
+Write-Output "Observation: $log"
 $events | Write-Output
 if ($observed.Count -ne $expected.Count) { throw "Expected exactly $($expected.Count) key transition events" }
 for ($i=0; $i -lt $expected.Count; ++$i) {

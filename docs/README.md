@@ -40,9 +40,9 @@ transfer. No documentation page is blanket authorization to flash.
 ## Other badge work
 
 - [Presentation clicker](../clicker/README.md): separate 2025/2026 freestanding
-  display/input, Bluetooth controller and bounded advertising diagnostics;
-  2025 HCI and Windows advertisement reception verified. BLE HID and pairing
-  are not yet implemented.
+  BLE HID keyboard with passkey pairing, persistent bonds and five-button
+  press/release delivery. Windows pairing/input verified on 2025; 2026 is
+  build-only. Isolated input/controller/advertising diagnostics are retained.
 - [Boat physics demo](tools/boat.md): conservative sloshing-water prototype,
   buoyant boat, accelerometer input and hardware-gated milestones.
 - [Animated nametag](tools/nametag.md): continuous single-core prototype,

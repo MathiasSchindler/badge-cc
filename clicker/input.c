@@ -77,15 +77,21 @@ void clicker_input_accept(clicker_input_t *state) {
         state->release_pending = 1u;
     }
 
-    uint8_t clicker_chord_update(clicker_chord_t *chord, uint8_t raw,
-                                  uint8_t stable, uint32_t tick) {
-        uint8_t all=(raw&0x19u)==0x19u;
-        if (all) chord->blocked=1u;
-        if (all && !chord->all) chord->started=tick;
-        chord->all=all;
-        if (raw==0u) {chord->blocked=chord->fired=0u;return 0u;}
-        if (all && !chord->fired && (stable&0x19u)==0x19u &&
-            tick-chord->started>=1000000u) {chord->fired=1u;return 1u;}
-        return 0u;
-    }
+}
+
+uint8_t clicker_chord_update(clicker_chord_t *chord, uint8_t raw,
+                              uint8_t stable, uint32_t tick) {
+    uint8_t all=(raw&0x19u)==0x19u;
+    if (all) chord->blocked=1u;
+    if (all && !chord->all) chord->started=tick;
+    chord->all=all;
+    if (raw==0u) {chord->blocked=chord->fired=0u;return 0u;}
+    if (all && !chord->fired && (stable&0x19u)==0x19u &&
+        tick-chord->started>=1000000u) {chord->fired=1u;return 1u;}
+    return 0u;
+}
+
+void clicker_input_cancel_taps(clicker_input_t *state) {
+    state->head=state->count=state->armed=0u;
+    state->release_pending=1u;
 }

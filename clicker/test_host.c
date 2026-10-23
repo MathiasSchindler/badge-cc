@@ -10,6 +10,7 @@ static uint8_t events[64][32], lengths[64], event_in,event_out,entropy;
 static uint8_t transmitted[64][200], transmitted_size[64], transmitted_cid[64], transmissions;
 static uint8_t flash[8192], last_parameters[32];
 static uint16_t last_opcode;
+static uint32_t negative_replies;
 static clicker_host_t host;
 static clicker_bt_t bt;
 static clicker_bonds_t bonds;
@@ -25,6 +26,7 @@ int clicker_bt_send(clicker_bt_t *unused,uint8_t type,const uint8_t *p,uint32_t 
     if (type==1u) {
         assert(n==(uint32_t)p[2]+3u && p[2]<=32u);
         last_opcode=get16(p);memcpy(last_parameters,p+3u,p[2]);
+        if (last_opcode==0x201bu) ++negative_replies;
         uint8_t reply[14]={0x0e,4,1,p[0],p[1],0};
         if (last_opcode==0x2018u) {
             reply[1]=12u;
@@ -135,6 +137,13 @@ int main(void) {
     assert(host.new_only && host.closing==2u && last_opcode==0x0406u);
     assert(clicker_host_packet(&host,4u,disconnected,sizeof(disconnected)));pumps();
     connect_peer();assert(!host.connected && host.rejected==1u && bonds.peers[0].valid);
+    assert(clicker_host_packet(&host,4u,ltk,sizeof(ltk)));
+    pumps();assert(!host.error && !host.authenticated);
+    uint8_t changed_address[21]={0x3e,19,1,0,1,0,1,0,7,8,9,10,11,12,24,0,0,0,0xf4,1,0};
+    assert(clicker_host_packet(&host,4u,changed_address,sizeof(changed_address)));pumps();
+    uint32_t negatives=negative_replies;
+    assert(clicker_host_packet(&host,4u,ltk,sizeof(ltk)));pumps();
+    assert(negative_replies==negatives+1u && !host.authenticated && host.session_bond<0);
 
     clicker_gatt_t g;uint8_t out[CLICKER_GATT_MTU];clicker_gatt_init(&g);
     const uint8_t services[]={0x10,1,0,0xff,0xff,0,0x28};
@@ -172,6 +181,14 @@ int main(void) {
             assert(guard[0]==0x5au && guard[sizeof(guard)-1u]==0xa5u);
         }
     }
+    host.error=0u;host.connected=0u;host.waiting=1u;host.command_opcode=0x201au;
+    host.command_tag=0u;
+    const uint8_t stale[]={0x0e,4,1,0x1a,0x20,2};
+    assert(clicker_host_packet(&host,4u,stale,sizeof(stale)) && host.stale_commands==1u);
+    host.waiting=1u;host.command_opcode=0x0406u;
+    const uint8_t already_closed[]={0x0f,4,0x12,1,6,4};
+    assert(clicker_host_packet(&host,4u,already_closed,sizeof(already_closed)) &&
+           host.stale_commands==2u && !host.error);
     puts("PASS: encrypted GATT/HID discovery, legacy passkey pairing/key distribution,");
     puts("      persisted CCC/LTK reconnect, ACL completion credits, press/release and new-host rejection");
     return 0;

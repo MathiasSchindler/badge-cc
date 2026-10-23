@@ -22,6 +22,9 @@ Optional SDK-based applications explore Bluetooth and Wi-Fi.
 
 ## Highlights
 
+- **[Presentation clicker](clicker/README.md)** — freestanding BLE keyboard
+  with displayed-passkey pairing, persistent bonds and slide-navigation
+  buttons; Windows input verified on the 2025 badge.
 - **[Tilt Maze](docs/tilt-maze.md)** — steer a marble through procedural mazes
   by tilting the badge, with increasingly challenging levels and hazards.
 - **[Tilt Breakout](docs/tilt-breakout.md)** and
