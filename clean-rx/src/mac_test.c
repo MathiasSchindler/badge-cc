@@ -475,7 +475,7 @@ static void soak_fragment_protocol(void) {
     uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u,7u,8u};
     uint8_t tx[CLEAN_TX_STORAGE_BYTES], packet[CLEAN_RX_PACKET_BYTES], expected[CLEAN_TX_STORAGE_BYTES];
     const uint32_t indices[] = {0u, 4095u, 4096u, 99999u};
-    for (uint32_t profile = 5u; profile < CLEAN_SOAK_PAYLOADS; ++profile)
+    for (uint32_t profile = 5u; profile <= 6u; ++profile)
         for (uint32_t phy = 0u; phy < CLEAN_SOAK_PHYS; ++phy)
             for (uint32_t role = 1u; role <= 2u; ++role)
                 for (uint32_t test = 0u; test < sizeof(indices) / sizeof(indices[0]); ++test) {

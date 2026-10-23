@@ -550,6 +550,59 @@ Both badges were restored and independently compared after testing:
 16-MiB flash. Both were left in BOOTSEL. The Mac's networking was unchanged.
 See [fixture usage and detailed evidence](../badge/README.md#dssscck-rate-and-preamble-fixture).
 
+#### C1 independent boundary investigation
+
+The later `build/clean-rx/c1-finish/hardware/` campaign reproduces the failure
+on the current clean build (`3b5748a1`): the paired
+`baseline-boundary` trial ACKs and delivers indices 0/1 (1,500/1,550 bytes)
+in both directions, then fails index 2 (1,600 bytes). The responder observes
+the correct 13,024-us PLCP LENGTH but only 1,590 RXE bytes. No PHY timeout,
+PLCP, ACK ownership or receive-validation change is made.
+
+A fixed `1600` MSDU profile now permits directly testing the failing size
+without first relying on successful ACKs to advance through a boundary
+cycle. It preserves the original profile IDs, uses ID 7, and emits one
+1,628-byte MPDU with PLCP `0a04e03219b8` at 1 Mbps. Native tests exercise all
+eight profiles, rate/preamble combinations, frame sizes and invalid bounds.
+
+The vendor peer gains an explicit passive raw-capture mode, separate from
+its monitor-capability probe and protected AP profiles. Its native ASan/UBSan
+tests reject altered payload/header/FCS, wrong nonce and truncation, and
+accept complete boundary/fixed-1,600 frames in both source roles. It makes
+no PHY-rate claim from opaque vendor envelopes and does not enlarge the
+vendor transport's 2,040-byte limit.
+
+| Evidence prefix | Vendor listener | Clean stimulus | Complete independent captures |
+| --- | --- | --- | --- |
+| `baseline-boundary` | Pico, `075cf3e5` | Paired 1-Mbps boundary cycle | 0; initial accounting incorrectly treated CDC requests as data TX |
+| `monitor-small` | Pico, `6bb0fcf7` | Paired 1-Mbps / 32 | 0, despite successful clean deliveries |
+| `monitor-promisc-boundary` | Pico, `567e8725` | Paired boundary cycle, explicit promiscuous readbacks | 0 |
+| `badge-monitor-small` | Badge B, `dcc070df` | 1-Mbps / 32 | 8 complete attempts, payload and FCS verified |
+| `badge-monitor-1600` | Badge B, `3ce2b1f5` | 1-Mbps / 1,600 | 0; capture operation itself succeeds |
+| `badge-monitor-1500` | Badge B, `4495cafa` | 1-Mbps / 1,500 | 8 complete attempts, payload and FCS verified |
+
+The two positive independent controls each repeat fixture index zero because
+the vendor listener does not ACK. They are not sixteen fresh deliveries or
+a loss-rate qualification. Source collector failure without an ACK is
+expected in those passive two-device trials. `sdpcm_tx` explicitly includes
+CDC setup/cleanup requests and cannot be interpreted as data/RF TX.
+
+The Pico's missing positive controls prevent using its missing larger frames
+as evidence of source silence. Even with the working badge reference,
+absence of a complete 1,600-byte frame does not distinguish an incomplete
+transmit waveform from a limitation of the reference receiver. No complete
+full-sized OTA waveform is established. The initiating cause and safe repair
+remain unknown; **C1 remains open**. Do not repeat the removed speculative
+LCN20 register writes or relax FCS/length/acceptance gates.
+
+All three devices were freshly backed up in full. After every campaign,
+all borrowed flash was restored and independently compared in full:
+16 MiB for each badge and 4 MiB for the Pico. Original SHA-256 values are
+`02ff81bb2e453010f8517eb2df0391d569d285ed4ac97bfa275d4493c044b7ac`
+(A), `2db102857596e0e680415be45b21ffb703a149c24ba9ee0b4950d008bf7ab3b3`
+(B), and `f26bc587c863623426a4d0eeb0624c8f01e8fb150de7fe4c2ac28fe43c00e486`
+(Pico). All were left in BOOTSEL; the laptop networking was not changed.
+
 ### C2. Basic-rate and mixed-network compatibility
 
 - [ ] Negotiate appropriate supported/basic rates, including a usable

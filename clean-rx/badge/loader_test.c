@@ -493,6 +493,11 @@ static void cck_rates(void) {
     for (uint32_t phy = 0u; phy < CLEAN_SOAK_PHYS * CLEAN_SOAK_PAYLOADS; ++phy) {
         uint8_t nonce[14] = {1u,2u,3u,4u};
         nonce[13] = (uint8_t)phy;
+        if ((phy >> 3u) == 7u) {
+            assert(clean_soak_payload_size(nonce,0u)==1600u);
+            assert(clean_soak_payload_size(nonce,9u)==1600u);
+            assert(clean_soak_fragments(nonce)==1u);
+        }
         uint32_t rate = clean_soak_rate(nonce);
         uint8_t flags = rate == 4u ? CLEAN_RX_OFDM :
             clean_soak_short(nonce) ? CLEAN_RX_SHORT_PREAMBLE : 0u;

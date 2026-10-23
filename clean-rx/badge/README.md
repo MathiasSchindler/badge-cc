@@ -1125,7 +1125,7 @@ soak, persistent AP station link or independent RF timing measurement.
 
 The optional sixth argument selects `ofdm6` (default), `1-long`, `2-long`,
 `5.5-long`, `11-long`, `2-short`, `5.5-short` or `11-short`. The optional
-seventh argument selects `cycle` (default), `32`, `1500`, `2304`,
+seventh argument selects `cycle` (default), `32`, `1500`, `1600`, `2304`,
 `cck-boundary`, `frag2` or `frag16`. The boundary mode repeats MSDU lengths
 1500/1550/1600/1650/1700/1750/1800/1850/1900/2304 bytes, stopping at the
 first fixture failure. Fixed-size selection is explicit and recorded in configuration and
@@ -1136,11 +1136,13 @@ Collectors accept `[DROP_ACKS [PHY [PAYLOAD]]]` after `COUNT`.
 bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1500 100 0 1-long 1500
 bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-11-short 100 0 11-short
 bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-boundary 10 0 1-long cck-boundary
+bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1600 5 0 1-long 1600
 ```
 
 The last challenge byte encodes PHY in bits 0..2 and payload selection in
-bits 3..5 (values 0..6: cycle/32/1500/2304/cck-boundary/frag2/frag16);
-value 7 and any higher bits are rejected. Payload seed,
+bits 3..5 (values 0..7: cycle/32/1500/2304/cck-boundary/frag2/frag16/1600);
+any higher bits are rejected. The fixed 1,600-byte profile is a single MPDU,
+not fragmentation or a replacement for full-sized reception. Payload seed,
 exact length, FCS and sequence validation cover every selection. CCK selects
 the four b basic rates; default OFDM retains its existing rate policy.
 Every accepted delivery also checks the separate receiver's decoded
@@ -1160,6 +1162,55 @@ This is C1 PHY/rate evidence, not C2 b-only association, C3's 1,000-frame
 per-cell qualification, calibrated RF/EVM/spectral-mask evidence, or
 independent SIFS measurements. Full-sized 1-Mbps reception is still failing
 and must not be represented as qualified.
+
+#### Independent CCK boundary monitor
+
+The vendor peer has a separate `--cck-monitor SOAK_NONCE_HEX_28` capture
+mode (9). Build the peer/collector with the normal
+`make -f clean-rx/peer/Makefile ht-peer ht-peer-test` command for a badge;
+`HT_PEER_PICO=1` selects Pico wiring. Preserve matching build outputs.
+Save full flash before borrowing any device, install the matching images
+explicitly, and restore and compare the complete original flash afterward.
+
+Unlike `--monitor-probe`, this mode actually receives for ten seconds on
+channel 1. It disables power saving/MPC, enables and checks monitor and
+promiscuous mode and the actual/target channel, then disables/readback-checks
+both receive modes before stopping. It requests no application/data TX;
+`sdpcm_tx` counts control requests too, not RF transmissions.
+
+The monitor nonce must match the **effective** soak nonce, not just its random
+challenge: bytes 8..11 contain little-endian `COUNT`, byte 12 is the requested
+ACK-drop count, and byte 13 encodes PHY/payload as above. For example, generate
+the monitor nonce for `COUNT=5`, `DROP_ACKS=0`, `1-long`, `1600`:
+
+```sh
+# Use the same fresh 28-hex challenge in the clean collector.
+soak_nonce=$(node -e 'const n=Buffer.from(process.argv[1],"hex"); if(n.length!==14) process.exit(2); n.writeUInt32LE(5,8); n[12]=0; n[13]=57; console.log(n.toString("hex"))' "$challenge")
+build/clean-rx/peer/collector MONITOR_SERIAL build/cck-monitor.bin --cck-monitor "$soak_nonce"
+# In another terminal, boot the clean sender and run before the monitor ends:
+build/clean-rx/badge/collector TX_SERIAL build/cck-tx.bin 1 --mac-soak-init "$challenge" 5 0 1-long 1600
+```
+
+The monitor scans validated non-control vendor SDPCM envelopes for the exact
+fixture addresses, nonce-derived payload pattern, length and complete FCS.
+It retains attempt counts, largest validated MSDU, per-role index masks
+(bit `index % 10`), the latest length/FCS/offset, and the first/last up to
+64 bytes of the latest validated MPDU. Retries are attempts, **not** fresh
+application deliveries. A successful collector exit means capture setup,
+collection and cleanup succeeded; `complete=0` is not reception proof or
+a passing C1 qualification. There is no decoded PHY-rate/preamble proof
+in this opaque vendor format (`phy_rate_verified=false`).
+
+The vendor transport's 2,040-byte SDPCM limit remains unchanged: this mode
+cannot receive a complete 2,332-byte MPDU. Never infer its complete waveform
+from a matching prefix or a source template counter.
+
+The retained campaign independently validates eight attempts each at 32 and
+1,500 MSDU bytes with the second badge as vendor listener, but no complete
+1,600-byte attempt. The Pico listener misses even the small positive
+controls, so its absence of captures cannot localize the boundary failure.
+The clean paired boundary failure still reproduces. See
+[the current investigation](../dev-doc/MILESTONE_HISTORY.md#c1-independent-boundary-investigation).
 
 ### Bounded legacy fragmentation fixture
 

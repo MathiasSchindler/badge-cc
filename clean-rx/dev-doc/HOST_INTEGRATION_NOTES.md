@@ -43,6 +43,12 @@ MSDUs but reproduces incomplete reception at 1,600 bytes. RXE stops at
 roughly 1,589/1,590 bytes despite correct PLCP decoding; doubling the PSM
 wait does not recover the missing bytes. The exact PHY/RXE cause is not
 identified and no experimental timeout-register changes are retained.
+The fixed `1600` payload profile directly targets the failing size.
+An independent vendor-monitor campaign validates complete 32/1,500-byte
+attempts on the second badge, but not 1,600 bytes; its Pico controls miss even
+small frames. This does not yet distinguish incomplete TX from reference
+RX limitations. See the
+[independent boundary investigation](MILESTONE_HISTORY.md#c1-independent-boundary-investigation).
 See the [diagnostics](HARDWARE_DEVELOPMENT.md#1-mbps-receive-truncation-diagnostics).
 Automatic ACK timing
 and general WPA2 connectivity remain unqualified.

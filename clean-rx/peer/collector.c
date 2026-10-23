@@ -9,6 +9,7 @@
 #include "network_json.h"
 #include "qualification.h"
 #include "build_id.h"
+#include "cck_monitor.h"
 #include "../../src/host/tools/usb_live_transport.h"
 #include "../../src/shared/bytes.h"
 
@@ -260,6 +261,33 @@ static int collect_network(libusb_device_handle *device, const char *path,
     return valid;
 }
 
+static int collect_cck(const char *path, const uint8_t report[64],
+        const uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
+    if (!write_evidence(path,report,trace)) return 0;
+    printf("{\"build\":\"%08x\",\"cck_monitor\":true,\"setup\":%u,"
+           "\"raw_packets\":%u,\"max_raw_bytes\":%u,\"candidates\":%u,"
+           "\"truncated\":%u,\"payload_failures\":%u,\"fcs_failures\":%u,"
+           "\"complete\":%u,\"max_payload\":%u,\"role1_mask\":%u,"
+           "\"role2_mask\":%u,\"last_mpdu_bytes\":%u,\"last_fcs\":\"%08x\","
+           "\"last_offset\":%u,\"cleanup\":%u,\"error\":%u,\"sdpcm_tx\":%u,"
+           "\"firmware_error\":%u,\"phy_rate_verified\":false}\n",
+           USB_REPORT_BUILD_ID,usb_report_u32(trace+28u),usb_report_u32(trace+32u),
+           usb_report_u32(trace+36u),usb_report_u32(trace+40u),usb_report_u32(trace+44u),
+           usb_report_u32(trace+48u),usb_report_u32(trace+52u),usb_report_u32(trace+56u),
+           usb_report_u32(trace+60u),usb_report_u32(trace+64u),usb_report_u32(trace+68u),
+           usb_report_u32(trace+72u),usb_report_u32(trace+76u),usb_report_u32(trace+80u),
+           usb_report_u32(trace+84u),usb_report_u32(trace+88u),usb_report_u32(trace+92u),
+           usb_report_u32(report+32u)>>8u);
+    int ok=usb_report_u32(trace)==CLEAN_PEER_MAGIC &&
+        usb_report_u32(trace+20u)==CLEAN_CCK_MONITOR_MODE &&
+        usb_report_u32(trace+24u)==CLEAN_CCK_MONITOR_MAGIC &&
+        usb_report_u32(trace+28u)==1u && usb_report_u32(trace+84u)==1u &&
+        !usb_report_u32(trace+88u) &&
+        !(usb_report_u32(report+32u)>>8u);
+    if (!ok) fputs("CCK passive monitor failed; diagnostic evidence retained\n",stderr);
+    return ok;
+}
+
 static int collect(libusb_device_handle *device, const char *path, const uint8_t *challenge,
                    int monitor, uint32_t ap_seconds, uint32_t ap_cycles, int network,
                    uint32_t ap_channel, const char *serial, const char *protected_credentials,
@@ -282,7 +310,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     nonce[14] = monitor ? 2u : 0u;
     if (challenge) {
         memcpy(nonce, challenge, 14u);
-        nonce[14] = 1u;
+        nonce[14] = monitor==2?CLEAN_CCK_MONITOR_MODE:1u;
     }
     if (ap_seconds) {
         nonce[12] = network ? (uint8_t)ap_seconds : (uint8_t)ap_cycles;
@@ -296,7 +324,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, 3u);
     if (!transfer(device, 0x40u, LIVE_USB_FW_SUBMIT, request, sizeof(request))) return 0;
     int received = 0;
-    for (uint32_t i = 0u; i < 500u; ++i) {
+    for (uint32_t i = 0u; i < (monitor==2?1000u:500u); ++i) {
         int n = libusb_control_transfer(device, 0xc0u, LIVE_USB_FW_REPORT, 0u, 0u,
                                         report, sizeof(report), 1000u);
         if (n == sizeof(report)) { received = 1; break; }
@@ -313,6 +341,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     if (network) return collect_network(device,path,nonce,report,trace);
     if (ap_seconds) return collect_ap(device, path, nonce, report, trace,serial);
     if (!read_trace(device, report, trace)) return 0;
+    if (monitor==2) return collect_cck(path,report,trace);
     if (!clean_peer_trace_valid(trace) ||
         usb_report_u32(trace + 20u) != (monitor ? 2u : 1u)) {
         fputs("Invalid vendor peer evidence layout\n", stderr);
@@ -359,6 +388,7 @@ int main(int argc, char **argv) {
     uint8_t challenge[14];
     int tx = argc == 5 && !strcmp(argv[3], "--tx-multicast");
     int monitor = argc == 4 && !strcmp(argv[3], "--monitor-probe");
+    int cck = argc == 5 && !strcmp(argv[3], "--cck-monitor");
     int network = argc == 6 && !strcmp(argv[3], "--network-ap");
     int qualification = argc == 7 && !strcmp(argv[3], "--qualification-ap");
     int rekey = argc == 7 && !strcmp(argv[3], "--protected-rekey-ap");
@@ -366,16 +396,17 @@ int main(int argc, char **argv) {
     int protected = group || (argc == 7 && !strcmp(argv[3], "--protected-ap"));
     int ap = protected || network || qualification || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
     uint32_t ap_seconds = 0u, ap_cycles = 0u, ap_channel = 0u;
-    if ((argc != 3 && !tx && !monitor && !ap) || strlen(argv[1]) != 16u) {
+    if ((argc != 3 && !tx && !monitor && !cck && !ap) || strlen(argv[1]) != 16u) {
         fputs("Usage: collector SERIAL EVIDENCE_BIN [--tx-multicast CHALLENGE_HEX_28 | --monitor-probe | --lifecycle-ap CHALLENGE_HEX_28 SECONDS:8-120 CYCLES:0-5]\n", stderr);
         fputs("Continuous AP: collector SERIAL EVIDENCE_BIN --network-ap CHALLENGE_HEX_28 SECONDS:10-3900\n",stderr);
         fputs("B3 AP: collector SERIAL EVIDENCE_BIN --qualification-ap CHALLENGE_HEX_28 SECONDS:8-120 CHANNEL:1,6,11\n",stderr);
         fputs("E1 AP: collector SERIAL EVIDENCE_BIN --protected-ap CHANNEL:1,6,11 SECONDS:12-120 PRIVATE_CREDENTIAL_OUT\n",stderr);
         fputs("E2 traffic AP: replace --protected-ap with --protected-traffic-ap (does not force rekeys)\n",stderr);
         fputs("E2 controlled AP: --protected-rekey-ap (host-owned authenticator)\n",stderr);
+        fputs("C1 passive capture: --cck-monitor SOAK_NONCE_HEX_28 (channel 1, 10 seconds)\n",stderr);
         return 2;
     }
-    if ((tx || ap) && !protected) {
+    if ((tx || ap || cck) && !protected) {
         if (strlen(argv[4]) != 28u) return 2;
         for (uint32_t i = 0u; i < 14u; ++i) {
             unsigned value = 0u;
@@ -422,7 +453,7 @@ int main(int argc, char **argv) {
     if (ap && (signal(SIGINT, cancel_ap) == SIG_ERR || signal(SIGTERM, cancel_ap) == SIG_ERR)) {
         perror("signal"); return 1;
     }
-    alarm(ap ? ap_seconds + 45u : 18u);
+    alarm(ap ? ap_seconds + 45u : cck?30u:18u);
     libusb_context *context = NULL;
     int status = libusb_init(&context);
     if (status) { fprintf(stderr, "USB init: %s\n", libusb_error_name(status)); return 1; }
@@ -437,8 +468,8 @@ int main(int argc, char **argv) {
     if (!status && configuration != 1) status = libusb_set_configuration(device, 1);
     if (!status) status = libusb_claim_interface(device, 0);
     int ok = 0;
-    if (!status) ok = collect(device, argv[2], tx || (ap && !protected) ? challenge : NULL,
-                             monitor, ap_seconds, ap_cycles, network, ap_channel, argv[1],
+    if (!status) ok = collect(device, argv[2], tx || cck || (ap && !protected) ? challenge : NULL,
+                             cck?2:monitor, ap_seconds, ap_cycles, network, ap_channel, argv[1],
                              protected?argv[6]:NULL,group);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     if (fflush(stdout)) { perror("Vendor peer JSON flush"); ok = 0; }

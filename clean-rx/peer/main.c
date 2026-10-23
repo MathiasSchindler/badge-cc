@@ -6,6 +6,7 @@
 #include "qualification.h"
 #include "protected_ap.h"
 #include "authenticator.h"
+#include "cck_monitor.h"
 #include "build_id.h"
 #include "../../src/usb/live_usb_hw.h"
 #include "../../src/arch/rp2350/bootrom_reboot.h"
@@ -28,6 +29,7 @@ static wifi_link_t link;
 static clean_network_t network;
 static uint8_t protected_pmk[32], protected_secret_valid;
 static uint8_t protected_seed[32];
+static uint8_t cck_nonce[14];
 static clean_auth_t authenticator;
 static int service(void *context, const wifi_fw_report_t *report);
 #if CLEAN_PEER_PICO
@@ -534,6 +536,51 @@ static int measure_clock(uint8_t calibrated) {
     return 0;
 }
 
+static void cck_receive(void *context, const uint8_t *packet, uint32_t length) {
+    clean_cck_monitor_packet(evidence,context,packet,length);
+}
+
+static int cck_scalar(uint32_t command, uint8_t set, uint32_t value, uint32_t *readback) {
+    uint8_t request[12]={0}, reply[16]={0}; uint32_t received=0u;
+    badger_bytes_store_u32(request,value);
+    int ok=wifi_firmware_control(command,set,0u,request,command==29u?12u:4u,
+                                 reply,sizeof(reply),&received);
+    if (ok && !set && received!=(command==29u?12u:4u)) {
+        firmware.error=WIFI_FW_PROTOCOL; return 0;
+    }
+    *readback=usb_report_u32(reply);
+    if (ok && command==29u) ok=*readback==1u && usb_report_u32(reply+4u)==1u;
+    return ok;
+}
+
+static void cck_monitor(const uint8_t nonce[16], uint8_t report[64]) {
+    uint32_t value=0u;
+    badger_bytes_store_u32(evidence+20u,CLEAN_CCK_MONITOR_MODE);
+    badger_bytes_store_u32(evidence+24u,CLEAN_CCK_MONITOR_MAGIC);
+    uint8_t mpc[8]={'m','p','c',0u,0u,0u,0u}, reply[16]; uint32_t received=0u;
+    badger_bytes_copy(cck_nonce,nonce,sizeof(cck_nonce));
+    int ok=wifi_firmware_raw_enable(cck_receive,cck_nonce) &&
+        wifi_firmware_control(263u,1u,0u,mpc,sizeof(mpc),reply,sizeof(reply),&received) &&
+        cck_scalar(86u,1u,0u,&value) && cck_scalar(2u,1u,0u,&value) &&
+        cck_scalar(30u,1u,1u,&value) && cck_scalar(108u,1u,1u,&value) &&
+        cck_scalar(10u,1u,1u,&value) && cck_scalar(9u,0u,0u,&value) && value==1u &&
+        cck_scalar(107u,0u,0u,&value) && value==1u &&
+        cck_scalar(29u,0u,0u,&value);
+    badger_bytes_store_u32(evidence+28u,ok?1u:0u);
+    uint32_t started=*(volatile uint32_t *)0x400b000cu;
+    while (ok && service(0,0) && *(volatile uint32_t *)0x400b000cu-started<10000000u)
+        ok=wifi_firmware_raw_poll()>=0;
+    if (ok) ok=cck_scalar(10u,1u,0u,&value) &&
+               cck_scalar(9u,0u,0u,&value) && value==0u &&
+               cck_scalar(108u,1u,0u,&value) &&
+               cck_scalar(107u,0u,0u,&value) && value==0u;
+    badger_bytes_store_u32(evidence+84u,ok?1u:0u);
+    if (!ok && !firmware.error) firmware.error=WIFI_FW_PROTOCOL;
+    badger_bytes_store_u32(evidence+88u,firmware.error);
+    badger_bytes_store_u32(evidence+92u,firmware.tx_packets);
+    wifi_firmware_report(report,USB_REPORT_BUILD_ID,nonce,&firmware);
+}
+
 static void probe(const uint8_t nonce[16]) {
     const wifi_fw_assets_t *assets = wifi_firmware_assets();
     badger_bytes_zero(evidence, sizeof(evidence));
@@ -552,7 +599,9 @@ static void probe(const uint8_t nonce[16]) {
     int ready = wifi_firmware_begin(wifi_board_wire(), assets, &firmware, service, 0);
     uint8_t report[64];
     wifi_firmware_report(report, USB_REPORT_BUILD_ID, nonce, &firmware);
-    if (ready && clean_protected_ap_mode(nonce[14])) {
+    if (ready && nonce[14]==CLEAN_CCK_MONITOR_MODE) {
+        cck_monitor(nonce,report);
+    } else if (ready && clean_protected_ap_mode(nonce[14])) {
         protected_ap(nonce,report);
     } else if (ready && nonce[14] == CLEAN_NETWORK_AP_MODE) {
         network_ap(nonce, report);
@@ -627,7 +676,8 @@ void bare_main(void) {
                 control.clean_secret,&control.clean_secret_ready,nonce);
             if (!protected_secret_valid) wpa_wipe(protected_seed,sizeof(protected_seed));
             if (nonce[14] == CLEAN_LIFECYCLE_AP_MODE || nonce[14] == CLEAN_NETWORK_AP_MODE ||
-                nonce[14] == CLEAN_QUALIFICATION_AP_MODE || clean_protected_ap_mode(nonce[14]))
+                nonce[14] == CLEAN_QUALIFICATION_AP_MODE || clean_protected_ap_mode(nonce[14]) ||
+                nonce[14] == CLEAN_CCK_MONITOR_MODE)
                 usb_error = nametag_clock_reference();
             if (usb_error) break;
             run_started = recovery_at = *(volatile uint32_t *)0x400b000cu;
@@ -637,6 +687,7 @@ void bare_main(void) {
             if (measure_clock(nonce[14] == CLEAN_LIFECYCLE_AP_MODE ||
                               nonce[14] == CLEAN_NETWORK_AP_MODE ||
                               nonce[14] == CLEAN_QUALIFICATION_AP_MODE ||
+                              nonce[14] == CLEAN_CCK_MONITOR_MODE ||
                               nonce[14] == CLEAN_PROTECTED_AP_MODE)) probe(nonce);
         }
     }

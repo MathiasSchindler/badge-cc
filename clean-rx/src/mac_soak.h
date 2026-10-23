@@ -14,7 +14,7 @@
 #define CLEAN_SOAK_POLL_US 250000u
 #define CLEAN_SOAK_POLLS (CLEAN_SOAK_HOST_SECONDS * 4u)
 #define CLEAN_SOAK_PHYS 8u
-#define CLEAN_SOAK_PAYLOADS 7u
+#define CLEAN_SOAK_PAYLOADS 8u
 #define CLEAN_SOAK_FRAGMENT_DETAIL (CLEAN_SOAK_DETAIL + 64u)
 #define CLEAN_SOAK_FRAGMENT_MAGIC 0x3147534du
 #define CLEAN_SOAK_PROGRESS_DETAIL 720u
@@ -59,7 +59,7 @@ static const char *const clean_soak_phy_names[CLEAN_SOAK_PHYS] = {
 };
 
 static const char *const clean_soak_payload_names[CLEAN_SOAK_PAYLOADS] = {
-    "cycle", "32", "1500", "2304", "cck-boundary", "frag2", "frag16"
+    "cycle", "32", "1500", "2304", "cck-boundary", "frag2", "frag16", "1600"
 };
 
 typedef struct {
@@ -115,6 +115,7 @@ static inline uint32_t clean_soak_size(uint32_t index) {
 static inline uint32_t clean_soak_payload_size(const uint8_t nonce[14], uint32_t index) {
     uint32_t payload = nonce[13] >> 3u;
     if (payload >= CLEAN_SOAK_PAYLOADS) return 0u;
+    if (payload == 7u) return 1600u;
     if (payload == 4u) {
         static const uint16_t sizes[10] = {
             1500u, 1550u, 1600u, 1650u, 1700u, 1750u, 1800u, 1850u, 1900u, 2304u

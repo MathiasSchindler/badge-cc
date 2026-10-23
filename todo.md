@@ -243,6 +243,8 @@ and [hardware evidence](clean-rx/dev-doc/MILESTONE_HISTORY.md#b3-reproducible-st
 
 **Status: rate/preamble support implemented; full-sized 1-Mbps RX remains open.**
 See [implementation, matrices and investigation](clean-rx/dev-doc/MILESTONE_HISTORY.md#c1-all-legacy-dssscck-rates).
+The latest investigation adds a fixed 1,600-byte reproducer and independent
+vendor-monitor controls, but does not establish a safe repair or close this gate.
 
 - [ ] Complete all-rate TX/RX, including full-sized 1-Mbps reception.
 - [x] Implement PLCP, airtime and permitted long/short preamble handling.

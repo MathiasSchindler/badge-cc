@@ -17,6 +17,7 @@ HT_PEER_INPUTS := $(HT_PEER_DIR)/main.c $(HT_PEER_DIR)/collector.c \
 	$(HT_PEER_DIR)/network.c $(HT_PEER_DIR)/network.h $(HT_PEER_DIR)/network_json.h \
 	$(HT_PEER_DIR)/qualification.h \
 	$(HT_PEER_DIR)/protected_ap.h $(HT_PEER_DIR)/authenticator.c $(HT_PEER_DIR)/authenticator.h \
+	$(HT_PEER_DIR)/cck_monitor.h clean-rx/src/mac_soak.h clean-rx/src/phy_rates.h \
 	clean-rx/src/wpa2_crypto.c clean-rx/src/wpa2_crypto.h \
 	$(USB_WIFI_INPUTS) $(WIFI_ASSET_FILES) $(RADIO_DIR)/wifi_link.c $(RADIO_DIR)/wifi_link.h \
 	$(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h
@@ -81,11 +82,17 @@ $(HT_PEER_BUILD)/collector: $(HT_PEER_DIR)/collector.c $(HT_PEER_BUILD)/build_id
 		clean-rx/src/wpa2_crypto.c $(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_trace.c \
 		$$(pkg-config --libs libusb-1.0) -o $@
 
-ht-peer-test: $(HT_PEER_BUILD)/protocol_test $(HT_PEER_BUILD)/network_test $(HT_PEER_BUILD)/qualification_test $(HT_PEER_BUILD)/authenticator_test
+ht-peer-test: $(HT_PEER_BUILD)/protocol_test $(HT_PEER_BUILD)/network_test $(HT_PEER_BUILD)/qualification_test $(HT_PEER_BUILD)/authenticator_test $(HT_PEER_BUILD)/cck_monitor_test
 	$(HT_PEER_BUILD)/protocol_test
 	$(HT_PEER_BUILD)/network_test
 	$(HT_PEER_BUILD)/qualification_test
 	$(HT_PEER_BUILD)/authenticator_test
+	$(HT_PEER_BUILD)/cck_monitor_test
+
+$(HT_PEER_BUILD)/cck_monitor_test: $(HT_PEER_DIR)/cck_monitor_test.c $(HT_PEER_DIR)/cck_monitor.h $(HT_PEER_DIR)/protocol.h $(wildcard clean-rx/src/*.h) clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c | $(HT_PEER_BUILD)
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+		$< clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c \
+		$(TOOLS_DIR)/diagnostics_logic.c -o $@
 
 $(HT_PEER_BUILD)/authenticator_test: $(HT_PEER_DIR)/authenticator_test.c $(HT_PEER_DIR)/authenticator.c $(HT_PEER_DIR)/authenticator.h $(wildcard clean-rx/badge/*.h clean-rx/src/*.h) clean-rx/badge/wpa2.c clean-rx/src/wpa2_crypto.c clean-rx/src/mac.c clean-rx/src/block_ack.c | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
