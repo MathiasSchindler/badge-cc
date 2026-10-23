@@ -201,11 +201,18 @@ static void phy_tests(void) {
 
     assert(!clean_peer_prepare_phy(CLEAN_PEER_RECORDS, request, &command, &set));
     assert(clean_peer_phy_supported(trace));
-    for (uint32_t mode = 0u; mode <= 4u; ++mode) {
+    for (uint32_t mode = 0u; mode <= 5u; ++mode) {
         badger_bytes_store_u32(trace + 20u, mode);
-        assert(clean_peer_trace_valid(trace) == (mode >= 1u && mode <= 3u));
+        assert(clean_peer_trace_valid(trace) == (mode >= 1u && mode <= 4u));
         assert(clean_peer_phy_supported(trace) == (mode == 3u));
     }
+    badger_bytes_store_u32(trace + 20u, 4u);
+    badger_bytes_store_u32(trace + 28u, 0x141u);
+    assert(clean_peer_phy_supported(trace));
+    badger_bytes_store_u32(trace + 28u, 65535u);
+    assert(!clean_peer_phy_supported(trace));
+    badger_bytes_store_u32(trace + 28u, 0u);
+    assert(!clean_peer_phy_supported(trace));
     badger_bytes_store_u32(trace + 20u, 3u);
     badger_bytes_store_u32(trace + 24u, CLEAN_PEER_RECORDS - 1u);
     assert(!clean_peer_phy_supported(trace));

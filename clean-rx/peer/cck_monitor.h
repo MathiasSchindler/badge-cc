@@ -5,9 +5,42 @@
 #include "frame.h"
 #include "../src/mac_soak.h"
 #include "../../src/shared/bytes.h"
+#include "../../src/radio/wifi_control.h"
 
 #define CLEAN_CCK_MONITOR_MODE 9u
 #define CLEAN_CCK_MONITOR_MAGIC 0x314b4343u
+#define CLEAN_CCK_STATION_MAGIC 0x31534343u
+
+static inline void clean_cck_station_packet(uint8_t trace[CLEAN_PEER_TRACE_BYTES],
+        const uint8_t nonce[14], const uint8_t *raw, uint32_t length) {
+    wifi_control_packet_t packet;
+    badger_bytes_store_u32(trace+52u,usb_report_u32(trace+52u)+1u);
+    if (!wifi_control_parse_raw(raw,length,&packet)) {
+        badger_bytes_store_u32(trace+84u,usb_report_u32(trace+84u)+1u);
+        return;
+    }
+    if (packet.channel != 2u) return;
+    badger_bytes_store_u32(trace+56u,usb_report_u32(trace+56u)+1u);
+    const uint8_t *frame; uint32_t bytes; uint8_t interface;
+    if (!wifi_data_decode_diagnostic(&packet,&interface,&frame,&bytes) || interface != 0u) {
+        badger_bytes_store_u32(trace+84u,usb_report_u32(trace+84u)+1u);
+        return;
+    }
+    if (bytes > usb_report_u32(trace+72u)) badger_bytes_store_u32(trace+72u,bytes);
+    int sequence = clean_peer_ethernet_sequence(frame,bytes,nonce);
+    if (sequence < 0) {
+        int candidate = frame[12] == 0x88u && frame[13] == 0xb5u;
+        for (uint32_t i = 0u; i < 6u; ++i)
+            if (frame[6u+i] != clean_peer_mac_byte(nonce,i)) candidate = 0;
+        if (candidate) badger_bytes_store_u32(trace+88u,usb_report_u32(trace+88u)+1u);
+        return;
+    }
+    uint32_t mask = usb_report_u32(trace+64u), bit = 1u << (uint32_t)sequence;
+    if (mask & bit) badger_bytes_store_u32(trace+68u,usb_report_u32(trace+68u)+1u);
+    badger_bytes_store_u32(trace+64u,mask|bit);
+    badger_bytes_store_u32(trace+76u,bytes);
+    badger_bytes_store_u32(trace+80u,usb_report_u32(trace+80u)+1u);
+}
 
 static inline void clean_cck_monitor_record(uint8_t trace[CLEAN_PEER_TRACE_BYTES],
         const uint8_t *m, uint32_t bytes, uint32_t at, uint32_t payload,

@@ -1223,7 +1223,36 @@ status -23. `phy_readback_supported=false` and a nonzero collector exit mean
 the reported zero placeholders **are not register values**. No PHY-register
 writes or application/data TX are requested.
 
-The vendor transport's 2,040-byte SDPCM limit remains unchanged: this mode
+`--phy-window-probe` is a separate, opt-in alternative that successfully reads
+the same seven registers on the Pico:
+
+```sh
+make -f clean-rx/peer/Makefile HT_PEER_PICO=1 \
+  HT_PEER_BUILD=build/clean-rx/cck-window/peer ht-peer
+# Back up the Pico and flash the matching vendor_ht.uf2 before collecting.
+build/clean-rx/cck-window/peer/collector 6572BE3E4636AF51 phy-window.bin --phy-window-probe
+```
+
+Build and flash the matching peer with `HT_PEER_PICO=1` first, using the backup
+and restoration procedure above. This mode uses genuine 16-bit backplane
+accesses: no force-32-bit address flag, and no write to the adjacent PHYDATA
+halfword. Each query saves the PHY selector, selects and reads back the
+requested address, requires two equal data reads, and restores the selector.
+It does not write PHYDATA. Restoration failures and inconsistent reads fail
+explicitly. Trace mode 4 and `phy_window_probe=true` distinguish this path
+from the unsupported command-94 probe; `phy_version_raw` is not a decoded
+hardware revision. The collector requires all seven successful 16-bit values
+and a nonzero/non-`0xffff` version before reporting readback supported.
+
+The vendor firmware remains running and could independently access the PHY
+selector. Readback checks and repeat cold trials do not make these operations
+atomic; this is diagnostic evidence, not an interface for production PHY
+modification. Three initial cold Pico trials agree on version `0xdc00` and
+values `2590, 10, 0, 2000, 0, 0, 46336` in the address order above.
+The suspected `0x42c` and `0x465` values match clean defaults. These readings
+do not establish undocumented register semantics or justify changing them.
+
+The vendor monitor transport's 2,040-byte SDPCM limit remains unchanged: it
 cannot receive a complete 2,332-byte MPDU. Never infer its complete waveform
 from a matching prefix or a source template counter.
 
@@ -1309,6 +1338,60 @@ the final source fails explicitly. The vendor badge monitor also receives
 the 1636-byte fixture at 2 Mbps but not 1 Mbps. A complete long 1-Mbps
 waveform is therefore still unproven, even with official vendor endpoints.
 See [the retained reference campaign](../dev-doc/MILESTONE_HISTORY.md#c1-pico-vendor-reference-campaign).
+
+#### Associated vendor CCK receiver
+
+An additional opt-in reference avoids passive-monitor forwarding entirely:
+one vendor peer runs the open AP and the other joins as an ordinary managed
+station. Neither uses the clean transmitter or receiver. Only the temporary
+nonce-derived test network is joined; laptop networking is not changed.
+
+```sh
+make -f clean-rx/peer/Makefile HT_PEER_BUILD=build/clean-rx/cck-managed/peer \
+  HT_PEER_PICO=1 ht-peer ht-peer-test
+make -f clean-rx/peer/Makefile HT_PEER_BUILD=build/clean-rx/cck-managed/badge ht-peer
+
+# Back up full flash and install each device's matching vendor_ht.uf2.
+# Run in separate terminals with the same fresh 28-hex challenge.
+build/clean-rx/cck-managed/peer/collector PICO_SERIAL build/cck-associated-tx.bin \
+  --tx-cck-associated "$challenge" 1 1606
+build/clean-rx/cck-managed/badge/collector BADGE_SERIAL build/cck-associated-rx.bin \
+  --vendor-cck-station "$challenge" 1 1606
+```
+
+Start the AP source first and the station promptly afterward. The source
+waits up to eight seconds for the exact nonce-derived station MAC before
+starting its existing eight-frame burst. The station also requires the exact
+AP BSSID and collects for up to four seconds after association. Both require
+the same rate/size arguments as `--tx-cck`. The association-gated source
+checks fixed multicast rate and long-preamble settings again after
+association and after transmission, as well as the existing data-TX counters.
+Legacy `--tx-cck` timing and behavior are unchanged.
+
+Station mode 13 uses the existing raw SDPCM callback **without enabling
+monitor mode**. An explicit diagnostic BDC decoder accepts larger Ethernet
+payloads within the existing 2040-byte SDPCM envelope; normal RX queues,
+Ethernet MTU, and the normal decoder remain limited to 1514 bytes. Complete
+destination/source/EtherType, nonce, pattern and all eight sequences are
+checked on-device. Missing frames, duplicates, malformed data or fixture
+corruption fail the station collector with retained evidence and exit 1.
+`valid=true` requires eight complete distinct frames, not just association.
+
+This path observes complete decapsulated Ethernet frames, **not** MPDU FCS
+or independently decoded PHY rate. JSON explicitly reports
+`mpdu_fcs_visible=false` and `phy_rate_verified=false`. A successful payload
+therefore must not be described as an independent raw waveform capture or
+used alone to complete C1.
+
+The initial Pico-to-badge controls pass 8/8 at 1 Mbps with 62/1514 Ethernet
+bytes and at 2 Mbps with 62/1606 bytes. At 1 Mbps / 1606 bytes, one complete
+frame (sequence 5) arrives, but seven do not: the operation correctly fails.
+Simultaneous vendor/clean receivers both pass their short-1-Mbps and
+long-2-Mbps controls, then both miss all eight long-1-Mbps frames in two
+trials. Reverse badge-to-Pico reception also loses positive-control frames,
+so it is not a qualified reference direction.
+See [the associated-reference evidence](../dev-doc/MILESTONE_HISTORY.md#c1-associated-vendor-reference-investigation).
+Always restore and compare each complete original flash after testing.
 
 ### Bounded legacy fragmentation fixture
 

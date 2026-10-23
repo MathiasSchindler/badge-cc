@@ -294,6 +294,41 @@ static int collect_cck(const char *path, const uint8_t report[64],
     return ok;
 }
 
+static int collect_cck_station(const char *path, const uint8_t report[64],
+        const uint8_t trace[CLEAN_PEER_TRACE_BYTES], const uint8_t nonce[16]) {
+    if (!write_evidence(path,report,trace)) return 0;
+    uint8_t expected[6];
+    for (uint32_t i=0u;i<6u;++i) expected[i]=clean_peer_mac_byte(nonce,i);
+    int valid = usb_report_u32(report+32u)==11u &&
+        usb_report_u32(trace)==CLEAN_PEER_MAGIC &&
+        usb_report_u32(trace+20u)==CLEAN_PEER_CCK_STATION_MODE &&
+        usb_report_u32(trace+24u)==CLEAN_CCK_STATION_MAGIC &&
+        usb_report_u32(trace+28u)==5u && !usb_report_u32(trace+32u) &&
+        !usb_report_u32(trace+36u) && usb_report_u32(trace+48u)==1u &&
+        usb_report_u32(trace+64u)==255u && !usb_report_u32(trace+68u) &&
+        usb_report_u32(trace+76u)==clean_peer_ethernet_length(nonce) &&
+        usb_report_u32(trace+80u)==CLEAN_PEER_FRAME_COUNT &&
+        !usb_report_u32(trace+84u) && !usb_report_u32(trace+88u) &&
+        badger_bytes_equal(trace+96u,expected,sizeof(expected));
+    printf("{\"build\":\"%08x\",\"vendor_cck_station\":true,\"valid\":%s,"
+        "\"stage\":%u,\"firmware_error\":%u,\"link_error\":%u,\"last_command\":%u,"
+        "\"link_stage\":%u,\"associated\":%s,\"raw_packets\":%u,\"data_packets\":%u,"
+        "\"sequence_bitmap\":%u,\"duplicates\":%u,\"max_ethernet_bytes\":%u,"
+        "\"last_ethernet_bytes\":%u,\"complete_frames\":%u,"
+        "\"malformed\":%u,\"fixture_rejections\":%u,\"expected_ethernet_bytes\":%u,"
+        "\"phy_rate_verified\":false,\"mpdu_fcs_visible\":false,"
+        "\"all_frames_received\":%s}\n",
+        USB_REPORT_BUILD_ID,valid?"true":"false",usb_report_u32(trace+28u),
+        usb_report_u32(trace+32u),usb_report_u32(trace+36u),usb_report_u32(trace+40u),
+        usb_report_u32(trace+44u),usb_report_u32(trace+48u)?"true":"false",
+        usb_report_u32(trace+52u),usb_report_u32(trace+56u),usb_report_u32(trace+64u),
+        usb_report_u32(trace+68u),usb_report_u32(trace+72u),usb_report_u32(trace+76u),
+        usb_report_u32(trace+80u),usb_report_u32(trace+84u),usb_report_u32(trace+88u),
+        clean_peer_ethernet_length(nonce),valid?"true":"false");
+    if (!valid) fputs("Vendor associated CCK receiver failed its complete-frame controls; evidence retained\n",stderr);
+    return valid;
+}
+
 static int collect(libusb_device_handle *device, const char *path, const uint8_t *challenge,
                    int monitor, uint32_t ap_seconds, uint32_t ap_cycles, int network,
                    uint32_t ap_channel, const char *serial, const char *protected_credentials,
@@ -313,11 +348,14 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     if (!ok) { fputs("Cannot read a fresh peer nonce\n", stderr); return 0; }
     if (protected_credentials)
         return collect_protected(device,path,nonce,ap_channel,ap_seconds,protected_credentials,serial,group);
-    nonce[14] = monitor==4?CLEAN_PEER_PHY_PROBE_MODE:monitor?2u:0u;
+    nonce[14] = monitor==5?CLEAN_PEER_PHY_WINDOW_MODE:
+        monitor==4?CLEAN_PEER_PHY_PROBE_MODE:monitor?2u:0u;
     if (monitor==2 || monitor==3) nonce[15]=monitor==3?1u:0u;
     if (challenge) {
         memcpy(nonce, challenge, 14u);
-        nonce[14] = monitor==2 || monitor==3?CLEAN_CCK_MONITOR_MODE:
+        nonce[14] = monitor==6?CLEAN_PEER_CCK_STATION_MODE:
+            monitor==7?CLEAN_PEER_CCK_ASSOC_TX_MODE:
+            monitor==2 || monitor==3?CLEAN_CCK_MONITOR_MODE:
             clean_peer_cck(nonce) ? CLEAN_PEER_CCK_TX_MODE : 1u;
     }
     if (ap_seconds) {
@@ -332,7 +370,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, 3u);
     if (!transfer(device, 0x40u, LIVE_USB_FW_SUBMIT, request, sizeof(request))) return 0;
     int received = 0;
-    for (uint32_t i = 0u; i < (monitor==2 || monitor==3?1000u:500u); ++i) {
+    for (uint32_t i = 0u; i < (monitor==2 || monitor==3 || monitor==6 || monitor==7?1000u:500u); ++i) {
         int n = libusb_control_transfer(device, 0xc0u, LIVE_USB_FW_REPORT, 0u, 0u,
                                         report, sizeof(report), 1000u);
         if (n == sizeof(report)) { received = 1; break; }
@@ -350,14 +388,15 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
     if (ap_seconds) return collect_ap(device, path, nonce, report, trace,serial);
     if (!read_trace(device, report, trace)) return 0;
     if (monitor==2 || monitor==3) return collect_cck(path,report,trace,nonce);
+    if (monitor==6) return collect_cck_station(path,report,trace,nonce);
     if (!clean_peer_trace_valid(trace) ||
-        usb_report_u32(trace + 20u) != (monitor==4?3u:monitor?2u:1u)) {
+        usb_report_u32(trace + 20u) != (monitor==5?4u:monitor==4?3u:monitor==1?2u:1u)) {
         fputs("Invalid vendor peer evidence layout\n", stderr);
         return 0;
     }
     if (!write_evidence(path, report, trace)) return 0;
     uint32_t flags = usb_report_u32(report + 32u), completed = usb_report_u32(trace + 24u);
-    int phy_supported = monitor == 4 && clean_peer_phy_supported(trace);
+    int phy_supported = monitor >= 4 && clean_peer_phy_supported(trace);
     if (challenge) {
         const uint8_t *t = trace + CLEAN_PEER_TX_DETAIL;
         printf("{\"build\":\"%08x\",\"firmware_error\":%u,\"radio_tx_requested\":true,"
@@ -387,30 +426,39 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
                 fputc('}',stdout);
             }
         }
+        if (monitor==7)
+            printf(",\"association_gated\":true,\"expected_peer_connected\":%s,\"association_wait_us\":%u,"
+                "\"post_association_settings_verified\":%s,\"post_tx_settings_verified\":%s",
+                usb_report_u32(t+40u)==1u?"true":"false",usb_report_u32(t+36u),
+                usb_report_u32(t+44u)==1u?"true":"false",usb_report_u32(t+48u)==1u?"true":"false");
         puts("}");
         return flags == 11u && usb_report_u32(t) == 5u &&
-            usb_report_u32(t + 12u) == CLEAN_PEER_FRAME_COUNT && !usb_report_u32(t + 16u);
+            usb_report_u32(t + 12u) == CLEAN_PEER_FRAME_COUNT && !usb_report_u32(t + 16u) &&
+            (monitor!=7 || (usb_report_u32(t+40u)==1u &&
+                usb_report_u32(t+44u)==1u && usb_report_u32(t+48u)==1u));
     }
     printf("{\"build\":\"%08x\",\"firmware_stage\":%u,\"firmware_error\":%u,"
            "\"firmware_crc\":\"%08x\",\"radio_tx_requested\":false,"
            "\"monitor_probe\":%s,\"monitor_enable_readback_supported\":%s,"
            "\"phy_probe\":%s,\"phy_readback_supported\":%s,"
+           "\"phy_window_probe\":%s,\"phy_version_raw\":%u,"
            "\"raw_receive_proven\":false,\"queries\":[",
            USB_REPORT_BUILD_ID, flags & 255u, flags >> 8u, usb_report_u32(trace + 4u),
            monitor==1 ? "true" : "false",
            monitor==1 && clean_peer_monitor_supported(trace) ? "true" : "false",
-           monitor==4?"true":"false",phy_supported?"true":"false");
+           monitor>=4?"true":"false",phy_supported?"true":"false",
+           monitor==5?"true":"false",monitor==5?usb_report_u32(trace+28u):0u);
     for (uint32_t i = 0u; i < completed; ++i) {
         const uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
         printf("%s{\"name\":\"%s\",\"ok\":%s,\"error\":%u,\"controller_status\":%d,"
                "\"length\":%u,\"value\":%u}", i ? "," : "",
-               monitor==4?clean_peer_phy_names[i]:monitor ? clean_peer_monitor_operations[i] : clean_peer_variables[i],
+               monitor>=4?clean_peer_phy_names[i]:monitor ? clean_peer_monitor_operations[i] : clean_peer_variables[i],
                usb_report_u32(r + 4u) ? "true" : "false", usb_report_u32(r + 8u),
                (int32_t)usb_report_u32(r + 12u), usb_report_u32(r + 16u),
                usb_report_u32(r + 20u));
     }
     puts("]}");
-    if (monitor == 4 && !phy_supported) {
+    if (monitor >= 4 && !phy_supported) {
         fputs("Vendor PHY register readback failed or is unsupported; query values are not register evidence\n", stderr);
         return 0;
     }
@@ -420,13 +468,16 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
 
 int main(int argc, char **argv) {
     uint8_t challenge[14];
-    int tx_cck = argc == 7 && !strcmp(argv[3], "--tx-cck");
+    int associated_tx = argc == 7 && !strcmp(argv[3], "--tx-cck-associated");
+    int station = argc == 7 && !strcmp(argv[3], "--vendor-cck-station");
+    int tx_cck = associated_tx || (argc == 7 && !strcmp(argv[3], "--tx-cck"));
     int tx = tx_cck || (argc == 5 && !strcmp(argv[3], "--tx-multicast"));
     int monitor = argc == 4 && !strcmp(argv[3], "--monitor-probe");
     int cck_poll = argc == 5 && !strcmp(argv[3], "--cck-monitor-poll");
     int vendor_monitor = argc == 7 && !strcmp(argv[3], "--vendor-cck-monitor");
     int cck = vendor_monitor || cck_poll || (argc == 5 && !strcmp(argv[3], "--cck-monitor"));
-    int phy_probe = argc==4 && !strcmp(argv[3],"--phy-probe");
+    int phy_window = argc==4 && !strcmp(argv[3],"--phy-window-probe");
+    int phy_probe = phy_window || (argc==4 && !strcmp(argv[3],"--phy-probe"));
     int network = argc == 6 && !strcmp(argv[3], "--network-ap");
     int qualification = argc == 7 && !strcmp(argv[3], "--qualification-ap");
     int rekey = argc == 7 && !strcmp(argv[3], "--protected-rekey-ap");
@@ -434,7 +485,7 @@ int main(int argc, char **argv) {
     int protected = group || (argc == 7 && !strcmp(argv[3], "--protected-ap"));
     int ap = protected || network || qualification || (argc == 7 && !strcmp(argv[3], "--lifecycle-ap"));
     uint32_t ap_seconds = 0u, ap_cycles = 0u, ap_channel = 0u;
-    if ((argc != 3 && !tx && !monitor && !cck && !phy_probe && !ap) || strlen(argv[1]) != 16u) {
+    if ((argc != 3 && !tx && !station && !monitor && !cck && !phy_probe && !ap) || strlen(argv[1]) != 16u) {
         fputs("Usage: collector SERIAL EVIDENCE_BIN [--tx-multicast CHALLENGE_HEX_28 | --monitor-probe | --lifecycle-ap CHALLENGE_HEX_28 SECONDS:8-120 CYCLES:0-5]\n", stderr);
         fputs("Continuous AP: collector SERIAL EVIDENCE_BIN --network-ap CHALLENGE_HEX_28 SECONDS:10-3900\n",stderr);
         fputs("B3 AP: collector SERIAL EVIDENCE_BIN --qualification-ap CHALLENGE_HEX_28 SECONDS:8-120 CHANNEL:1,6,11\n",stderr);
@@ -443,11 +494,13 @@ int main(int argc, char **argv) {
         fputs("E2 controlled AP: --protected-rekey-ap (host-owned authenticator)\n",stderr);
         fputs("C1 passive capture: --cck-monitor SOAK_NONCE_HEX_28 (channel 1, 10 seconds)\n",stderr);
         fputs("C1 diagnostics: --cck-monitor-poll SOAK_NONCE_HEX_28 or --phy-probe\n",stderr);
+        fputs("C1 halfword-only PHY window read: --phy-window-probe (restores PHY selector; no PHYDATA writes)\n",stderr);
         fputs("C1 vendor TX: --tx-cck CHALLENGE_HEX_28 MBPS:1,2 ETHERNET_BYTES:62-2014 (size modulo 4 must be 2)\n",stderr);
         fputs("C1 vendor reference RX: --vendor-cck-monitor CHALLENGE_HEX_28 MBPS:1,2 ETHERNET_BYTES:62-2014\n",stderr);
+        fputs("C1 associated control: --tx-cck-associated or --vendor-cck-station CHALLENGE_HEX_28 MBPS:1,2 ETHERNET_BYTES:62-2014\n",stderr);
         return 2;
     }
-    if ((tx || ap || cck) && !protected) {
+    if ((tx || station || ap || cck) && !protected) {
         if (strlen(argv[4]) != 28u) return 2;
         for (uint32_t i = 0u; i < 14u; ++i) {
             unsigned value = 0u;
@@ -459,7 +512,7 @@ int main(int argc, char **argv) {
             }
             challenge[i] = (uint8_t)value;
         }
-        if (tx_cck || vendor_monitor) {
+        if (tx_cck || vendor_monitor || station) {
             char *rate_end, *size_end;
             unsigned long rate = strtoul(argv[5], &rate_end, 10);
             unsigned long size = strtoul(argv[6], &size_end, 10);
@@ -504,7 +557,7 @@ int main(int argc, char **argv) {
     if (ap && (signal(SIGINT, cancel_ap) == SIG_ERR || signal(SIGTERM, cancel_ap) == SIG_ERR)) {
         perror("signal"); return 1;
     }
-    alarm(ap ? ap_seconds + 45u : cck?30u:18u);
+    alarm(ap ? ap_seconds + 45u : cck || station || associated_tx?30u:18u);
     libusb_context *context = NULL;
     int status = libusb_init(&context);
     if (status) { fprintf(stderr, "USB init: %s\n", libusb_error_name(status)); return 1; }
@@ -519,8 +572,8 @@ int main(int argc, char **argv) {
     if (!status && configuration != 1) status = libusb_set_configuration(device, 1);
     if (!status) status = libusb_claim_interface(device, 0);
     int ok = 0;
-    if (!status) ok = collect(device, argv[2], tx || cck || (ap && !protected) ? challenge : NULL,
-                             cck?(cck_poll?3:2):phy_probe?4:monitor, ap_seconds, ap_cycles, network, ap_channel, argv[1],
+    if (!status) ok = collect(device, argv[2], tx || cck || station || (ap && !protected) ? challenge : NULL,
+                             station?6:associated_tx?7:cck?(cck_poll?3:2):phy_probe?(phy_window?5:4):monitor, ap_seconds, ap_cycles, network, ap_channel, argv[1],
                              protected?argv[6]:NULL,group);
     else fprintf(stderr, "USB claim: %s\n", libusb_error_name(status));
     if (fflush(stdout)) { perror("Vendor peer JSON flush"); ok = 0; }

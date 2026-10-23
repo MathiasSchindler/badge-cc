@@ -512,28 +512,46 @@ void wifi_firmware_stop(void) {
     state.raw_context = 0;
 }
 
-static int backplane_begin(uint32_t address) {
+static int backplane_begin(uint32_t address, uint32_t alignment) {
     if (!state.ready) return 0;
     state.report->error = WIFI_FW_OK;
     state.report->controller_status = 0u;
     state.operation_start = state.wire->now_us(state.wire->context);
-    if ((address & 3u) != 0u) return failed(WIFI_FW_PROTOCOL);
+    if ((address & (alignment - 1u)) != 0u) return failed(WIFI_FW_PROTOCOL);
     return service();
 }
 
 int wifi_firmware_backplane_read32(uint32_t address, uint32_t *value) {
-    if (!backplane_begin(address)) return 0;
+    if (!backplane_begin(address, 4u)) return 0;
     if (value == 0) return failed(WIFI_FW_PROTOCOL);
     return bp_read(address, 4u, value);
 }
 
 int wifi_firmware_backplane_write32(uint32_t address, uint32_t value) {
-    return backplane_begin(address) && bp_write(address, 4u, value);
+    return backplane_begin(address, 4u) && bp_write(address, 4u, value);
+}
+
+int wifi_firmware_backplane_read16(uint32_t address, uint16_t *value) {
+    if (!backplane_begin(address, 2u)) return 0;
+    if (!value) return failed(WIFI_FW_PROTOCOL);
+    if (!window(address)) return 0;
+    uint32_t actual;
+    int ok = readreg(1u, address & 0x7fffu, 2u, &actual);
+    state.report->address = address;
+    if (ok) *value = (uint16_t)actual;
+    return ok;
+}
+
+int wifi_firmware_backplane_write16(uint32_t address, uint16_t value) {
+    if (!backplane_begin(address, 2u) || !window(address)) return 0;
+    int ok = writereg(1u, address & 0x7fffu, 2u, value);
+    state.report->address = address;
+    return ok;
 }
 
 static int backplane_memory(uint32_t address, const uint8_t *source,
                              uint8_t *destination, uint32_t length) {
-    if (!backplane_begin(address)) return 0;
+    if (!backplane_begin(address, 4u)) return 0;
     if (length == 0u || length > 4096u || (length & 3u) != 0u ||
         length > 0xffffffffu - address || (source == 0 && destination == 0)) {
         return failed(WIFI_FW_PROTOCOL);

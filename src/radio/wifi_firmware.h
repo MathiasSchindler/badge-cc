@@ -67,6 +67,9 @@ void wifi_firmware_stop(void);
    These do not enable WLAN or transmit Ethernet frames. */
 int wifi_firmware_backplane_read32(uint32_t address, uint32_t *value);
 int wifi_firmware_backplane_write32(uint32_t address, uint32_t value);
+/* Halfword-aligned, two-byte access without the force-32-bit window flag. */
+int wifi_firmware_backplane_read16(uint32_t address, uint16_t *value);
+int wifi_firmware_backplane_write16(uint32_t address, uint16_t value);
 int wifi_firmware_backplane_read(uint32_t address, uint8_t *data, uint32_t length);
 int wifi_firmware_backplane_write(uint32_t address, const uint8_t *data, uint32_t length);
 int wifi_firmware_data_enable(void);

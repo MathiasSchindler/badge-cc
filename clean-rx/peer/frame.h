@@ -11,6 +11,8 @@
 #define CLEAN_PEER_RX_DETAIL 680u
 #define CLEAN_PEER_TX_DETAIL 28u
 #define CLEAN_PEER_CCK_TX_MODE 11u
+#define CLEAN_PEER_CCK_STATION_MODE 13u
+#define CLEAN_PEER_CCK_ASSOC_TX_MODE 14u
 #define CLEAN_PEER_ETHERNET_STORAGE 2014u
 _Static_assert((CLEAN_PEER_ETHERNET_BYTES + 18u) % 4u == 0u,
                "Vendor SDPCM transfer must not add Ethernet tail padding");
@@ -77,6 +79,27 @@ static inline void clean_peer_ethernet(uint8_t *frame,
         frame[i] = clean_peer_payload_byte(nonce, i - 14u, sequence);
 }
 
+static inline int clean_peer_payload_sequence(const uint8_t *body, uint32_t length,
+                                              const uint8_t nonce[14]) {
+    uint32_t ethernet = clean_peer_ethernet_length(nonce);
+    if (!body || !ethernet || length != ethernet - 14u) return -1;
+    uint8_t sequence = body[18];
+    if (sequence >= CLEAN_PEER_FRAME_COUNT) return -1;
+    for (uint32_t i = 0u; i < length; ++i)
+        if (body[i] != clean_peer_payload_byte(nonce, i, sequence)) return -1;
+    return sequence;
+}
+
+static inline int clean_peer_ethernet_sequence(const uint8_t *frame, uint32_t length,
+                                               const uint8_t nonce[14]) {
+    if (!frame || length != clean_peer_ethernet_length(nonce) ||
+        length < CLEAN_PEER_ETHERNET_BYTES || frame[12] != 0x88u || frame[13] != 0xb5u)
+        return -1;
+    for (uint32_t i = 0u; i < 6u; ++i)
+        if (frame[i] != 255u || frame[6u+i] != clean_peer_mac_byte(nonce,i)) return -1;
+    return clean_peer_payload_sequence(frame+14u,length-14u,nonce);
+}
+
 /* Returns a sequence number only for the complete, FCS-checked fresh fixture. */
 static inline int clean_peer_mpdu_sequence(const uint8_t *mpdu, uint32_t length,
                                            const uint8_t nonce[14]) {
@@ -94,11 +117,6 @@ static inline int clean_peer_mpdu_sequence(const uint8_t *mpdu, uint32_t length,
             mpdu[16u + i] != clean_peer_mac_byte(nonce, i)) return -1;
     static const uint8_t snap[8] = {0xaau,0xaau,3u,0u,0u,0u,0x88u,0xb5u};
     if (!badger_bytes_equal(mpdu + header, snap, sizeof(snap))) return -1;
-    const uint8_t *body = mpdu + header + 8u;
-    uint8_t sequence = body[18];
-    if (sequence >= CLEAN_PEER_FRAME_COUNT) return -1;
-    for (uint32_t i = 0u; i < ethernet - 14u; ++i)
-        if (body[i] != clean_peer_payload_byte(nonce, i, sequence)) return -1;
-    return sequence;
+    return clean_peer_payload_sequence(mpdu+header+8u,ethernet-14u,nonce);
 }
 #endif

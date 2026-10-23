@@ -446,6 +446,17 @@ static int multicast_rate(uint32_t rate, uint8_t set, uint32_t *readback) {
     return ok;
 }
 
+static int cck_settings_readback(uint32_t expected, uint32_t *readback) {
+    uint8_t request[4]={0u}, reply[4]; uint32_t received=0u;
+    int ok = multicast_rate(0u,0u,readback) &&
+        wifi_firmware_control(35u,0u,1u,request,sizeof(request),reply,sizeof(reply),&received);
+    if (ok && (received != 4u || usb_report_u32(reply) != 1u ||
+               (*readback & ~0xc0000000u) != expected)) {
+        firmware.error = WIFI_FW_PROTOCOL; ok = 0;
+    }
+    return ok;
+}
+
 static int transmit_counters(uint32_t offset, uint32_t valid_offset) {
     uint8_t request[1024], reply[1024];
     badger_bytes_zero(request,sizeof(request));
@@ -461,13 +472,75 @@ static int transmit_counters(uint32_t offset, uint32_t valid_offset) {
     return ok;
 }
 
+static int cck_wait_peer(const uint8_t expected[6]) {
+    const wifi_wire_t *wire = wifi_board_wire();
+    uint32_t started = wire->now_us(wire->context), polled = started - 50000u;
+    while (wire->now_us(wire->context) - started < 8000000u && service(0,0)) {
+        uint32_t now = wire->now_us(wire->context);
+        if (now - polled < 50000u) continue;
+        polled = now;
+        if (!wifi_link_poll(&link)) {
+            if (!firmware.error) firmware.error = WIFI_FW_PROTOCOL;
+            return 0;
+        }
+        if (link.report.stage == WIFI_LINK_CONNECTED) {
+            if (badger_bytes_equal(link.report.peer,expected,6u)) return 1;
+            firmware.error = WIFI_FW_PROTOCOL;
+            return 0;
+        }
+    }
+    if (!firmware.error) firmware.error = WIFI_FW_TIMEOUT;
+    return 0;
+}
+
+static void cck_station_receive(void *context, const uint8_t *packet, uint32_t length) {
+    clean_cck_station_packet(evidence,context,packet,length);
+}
+
+static void cck_station(const uint8_t nonce[16]) {
+    uint8_t mac[6], expected[6];
+    for (uint32_t i = 0u; i < 6u; ++i) mac[i] = expected[i] = clean_peer_mac_byte(nonce,i);
+    mac[5] ^= 0x80u;
+    badger_bytes_copy(cck_nonce,nonce,sizeof(cck_nonce));
+    badger_bytes_store_u32(evidence+20u,CLEAN_PEER_CCK_STATION_MODE);
+    badger_bytes_store_u32(evidence+24u,CLEAN_CCK_STATION_MAGIC);
+    badger_bytes_store_u32(evidence+28u,1u);
+    wifi_link_ops_t ops = {.context=0,.control=link_control};
+    wifi_link_init(&link,&ops,WIFI_LINK_OPEN_STATION,nonce,mac);
+    int ok = clean_peer_cck(nonce) && clean_peer_ethernet_length(nonce) &&
+        wifi_link_configure(&link) && wifi_firmware_raw_enable(cck_station_receive,cck_nonce);
+    if (ok) {
+        badger_bytes_store_u32(evidence+28u,2u);
+        ok = cck_wait_peer(expected);
+    }
+    if (ok) {
+        badger_bytes_store_u32(evidence+48u,1u);
+        badger_bytes_copy(evidence+96u,link.report.peer,6u);
+        badger_bytes_store_u32(evidence+28u,3u);
+        const wifi_wire_t *wire = wifi_board_wire();
+        uint32_t started = wire->now_us(wire->context);
+        while (ok && usb_report_u32(evidence+64u) != 255u &&
+               wire->now_us(wire->context) - started < 4000000u && service(0,0))
+            ok = wifi_firmware_raw_poll() >= 0;
+        ok = ok && service(0,0);
+        if (ok) badger_bytes_store_u32(evidence+28u,
+            usb_report_u32(evidence+64u) == 255u ? 5u : 4u);
+    }
+    if (!ok && !firmware.error) firmware.error = WIFI_FW_PROTOCOL;
+    badger_bytes_store_u32(evidence+32u,firmware.error);
+    badger_bytes_store_u32(evidence+36u,link.report.error);
+    badger_bytes_store_u32(evidence+40u,link.report.last_command);
+    badger_bytes_store_u32(evidence+44u,link.report.stage);
+}
+
 static void transmit(const uint8_t nonce[16]) {
     uint8_t mac[6];
     for (uint32_t i = 0u; i < 6u; ++i) mac[i] = clean_peer_mac_byte(nonce, i);
     wifi_link_ops_t ops = {.context = 0, .control = link_control};
     wifi_link_init(&link, &ops, WIFI_LINK_OPEN_AP, nonce, mac);
     uint32_t stage = 1u, sent = 0u, readback = 0u;
-    int cck = nonce[14] == CLEAN_PEER_CCK_TX_MODE;
+    int associated = nonce[14] == CLEAN_PEER_CCK_ASSOC_TX_MODE;
+    int cck = nonce[14] == CLEAN_PEER_CCK_TX_MODE || associated;
     uint32_t requested = cck ? (nonce[13] & 3u) * 2u : clean_peer_ht_rate(nonce[13]);
     uint32_t length = clean_peer_ethernet_length(nonce);
     int ok = length && (cck ? clean_peer_cck(nonce) : nonce[13] < 8u) &&
@@ -503,6 +576,18 @@ static void transmit(const uint8_t nonce[16]) {
     if (ok) {
         ok = wifi_firmware_data_enable();
     }
+    if (ok && associated) {
+        uint8_t expected[6];
+        badger_bytes_copy(expected,mac,sizeof(expected)); expected[5] ^= 0x80u;
+        const wifi_wire_t *wire = wifi_board_wire();
+        uint32_t started = wire->now_us(wire->context);
+        ok = cck_wait_peer(expected);
+        badger_bytes_store_u32(evidence+CLEAN_PEER_TX_DETAIL+36u,
+            wire->now_us(wire->context)-started);
+        badger_bytes_store_u32(evidence+CLEAN_PEER_TX_DETAIL+40u,(uint32_t)ok);
+        if (ok) ok = cck_settings_readback(requested,&readback);
+        badger_bytes_store_u32(evidence+CLEAN_PEER_TX_DETAIL+44u,(uint32_t)ok);
+    }
     if (ok && cck) ok = transmit_counters(CLEAN_PEER_COUNTER_BEFORE,CLEAN_PEER_COUNTER_VALID);
     const wifi_wire_t *wire = wifi_board_wire();
     uint32_t started = wire->now_us(wire->context);
@@ -530,6 +615,10 @@ static void transmit(const uint8_t nonce[16]) {
                                               evidence+CLEAN_PEER_COUNTER_AFTER,sent)) {
         firmware.error = WIFI_FW_PROTOCOL;
         ok = 0;
+    }
+    if (ok && associated) {
+        ok = cck_settings_readback(requested,&readback);
+        badger_bytes_store_u32(evidence+CLEAN_PEER_TX_DETAIL+48u,(uint32_t)ok);
     }
     uint8_t *t = evidence + CLEAN_PEER_TX_DETAIL;
     badger_bytes_store_u32(t, ok ? 5u : stage);
@@ -643,6 +732,33 @@ static void cck_monitor(const uint8_t nonce[16], uint8_t report[64]) {
     wifi_firmware_report(report,USB_REPORT_BUILD_ID,nonce,&firmware);
 }
 
+static int phy_window_read(uint16_t reg, uint32_t *value) {
+    uint16_t saved, selected, first, second;
+    if (!wifi_firmware_backplane_read16(0x180013fcu,&saved)) return 0;
+    int ok = wifi_firmware_backplane_write16(0x180013fcu,reg) &&
+        wifi_firmware_backplane_read16(0x180013fcu,&selected);
+    if (ok && selected != reg) {
+        firmware.error = WIFI_FW_PROTOCOL; firmware.address = 0x180013fcu;
+        firmware.expected = reg; firmware.actual = selected; ok = 0;
+    }
+    if (ok) ok = wifi_firmware_backplane_read16(0x180013feu,&first) &&
+                 wifi_firmware_backplane_read16(0x180013feu,&second);
+    if (ok && first != second) {
+        firmware.error = WIFI_FW_PROTOCOL; firmware.address = 0x180013feu;
+        firmware.expected = first; firmware.actual = second; ok = 0;
+    }
+    wifi_fw_error_t error = firmware.error;
+    uint32_t address = firmware.address, expected = firmware.expected, actual = firmware.actual;
+    if (!wifi_firmware_backplane_write16(0x180013fcu,saved)) return 0;
+    if (!ok) {
+        firmware.error = error; firmware.address = address;
+        firmware.expected = expected; firmware.actual = actual;
+        return 0;
+    }
+    *value = first;
+    return 1;
+}
+
 static void probe(const uint8_t nonce[16]) {
     const wifi_fw_assets_t *assets = wifi_firmware_assets();
     badger_bytes_zero(evidence, sizeof(evidence));
@@ -661,7 +777,9 @@ static void probe(const uint8_t nonce[16]) {
     int ready = wifi_firmware_begin(wifi_board_wire(), assets, &firmware, service, 0);
     uint8_t report[64];
     wifi_firmware_report(report, USB_REPORT_BUILD_ID, nonce, &firmware);
-    if (ready && nonce[14]==CLEAN_CCK_MONITOR_MODE) {
+    if (ready && nonce[14]==CLEAN_PEER_CCK_STATION_MODE) {
+        cck_station(nonce);
+    } else if (ready && nonce[14]==CLEAN_CCK_MONITOR_MODE) {
         cck_monitor(nonce,report);
     } else if (ready && clean_protected_ap_mode(nonce[14])) {
         protected_ap(nonce,report);
@@ -670,16 +788,26 @@ static void probe(const uint8_t nonce[16]) {
     } else if (ready && (nonce[14] == CLEAN_LIFECYCLE_AP_MODE ||
                         nonce[14] == CLEAN_QUALIFICATION_AP_MODE)) {
         lifecycle_ap(nonce, report);
-    } else if (ready && (nonce[14] == 1u || nonce[14] == CLEAN_PEER_CCK_TX_MODE)) {
+    } else if (ready && (nonce[14] == 1u || nonce[14] == CLEAN_PEER_CCK_TX_MODE ||
+                        nonce[14] == CLEAN_PEER_CCK_ASSOC_TX_MODE)) {
         transmit(nonce);
     } else if (ready) {
-        if (nonce[14]==CLEAN_PEER_PHY_PROBE_MODE) {
+        int phy_window = nonce[14] == CLEAN_PEER_PHY_WINDOW_MODE;
+        if (nonce[14]==CLEAN_PEER_PHY_PROBE_MODE || phy_window) {
             uint32_t value=0u;
             ready=cck_scalar(2u,1u,0u,&value) && cck_scalar(30u,1u,1u,&value);
-            badger_bytes_store_u32(evidence+20u,3u);
+            badger_bytes_store_u32(evidence+20u,phy_window?4u:3u);
+            if (ready && phy_window) {
+                ready = phy_window_read(0u,&value);
+                if (ready && (!value || value == 65535u)) {
+                    firmware.error = WIFI_FW_PROTOCOL; ready = 0;
+                }
+                if (ready) badger_bytes_store_u32(evidence+28u,value);
+            }
         }
-        for (uint32_t i = 0u; i < 60u; ++i)
-            evidence[28u + i] = (uint8_t)firmware.version[i];
+        if (!phy_window)
+            for (uint32_t i = 0u; i < 60u; ++i)
+                evidence[28u + i] = (uint8_t)firmware.version[i];
         for (uint32_t i = 0u; ready && i < CLEAN_PEER_RECORDS && service(0, 0); ++i) {
             uint8_t request[CLEAN_PEER_CONTROL_BYTES], reply[CLEAN_PEER_CONTROL_BYTES], set;
             uint32_t command, received = 0u;
@@ -687,8 +815,13 @@ static void probe(const uint8_t nonce[16]) {
                 clean_peer_prepare_phy(i,request,&command,&set) : nonce[14] == 2u ?
                 clean_peer_prepare_monitor(i, request, &command, &set) :
                 clean_peer_prepare_query(i, request, &command, &set);
-            int ok = wifi_firmware_control(command, set, 0u, request, size,
-                                            reply, sizeof(reply), &received);
+            int ok;
+            if (phy_window) {
+                uint32_t value;
+                ok = phy_window_read(clean_peer_phy_registers[i],&value);
+                if (ok) { badger_bytes_store_u32(reply,value); received = 4u; }
+            } else ok = wifi_firmware_control(command, set, 0u, request, size,
+                                               reply, sizeof(reply), &received);
             uint8_t *r = evidence + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
             badger_bytes_store_u32(r, i);
             badger_bytes_store_u32(r + 4u, (uint32_t)ok);

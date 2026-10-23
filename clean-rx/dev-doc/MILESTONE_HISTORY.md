@@ -745,6 +745,166 @@ invalid-rate/alignment/upper-bound checks and `git diff --check` pass.
 The two final zero-data-TX controls are checked to exit 1. These are
 bounded fixture results, not C3's 1,000-frame-per-cell qualification.
 
+#### C1 vendor PHY window and coexistence controls
+
+The next investigation adds opt-in `--phy-window-probe`, independently of the
+still-unsupported GET_PHYREG command. The live transport now exposes aligned
+16-bit backplane reads/writes without the force-32-bit address flag, matching
+the access distinction in [Linux SSB SDIO](https://github.com/torvalds/linux/blob/master/drivers/ssb/sdio.c).
+Existing 32-bit and block operations are unchanged. Native fake-bus tests
+check halfword-but-not-word-aligned access, omitted flag, neighboring memory
+preservation, and rejection of misaligned/null inputs.
+
+The peer saves PHYADDR at `0x180013fc`, selects one register, verifies the
+selector, requires two equal PHYDATA reads at `0x180013fe`, and restores the
+saved selector even after an intermediate error. No PHYDATA writes occur.
+Restoration errors remain fatal; successful restoration preserves a preceding
+failure. The collector requires all seven successful, complete 16-bit values
+and a plausible nonzero/non-`0xffff` raw version in new trace mode 4.
+These checks cannot exclude concurrent selector accesses by the running
+vendor firmware and do not establish LCN20 register semantics.
+
+Three initial cold trials (`072f1d7c`, vendor asset CRC `e627c344`) give:
+
+| PHY register | Vendor readback |
+| --- | --- |
+| 0 | `0xdc00` (raw version, not decoded) |
+| `0x42c` | 2590 |
+| `0x465` | 10 |
+| `0x464` | 0 |
+| `0x466` | 2000 |
+| `0x430` | 0 |
+| `0x431` | 0 |
+| `0x432` | 46336 (`0xb500`) |
+
+The suspected `0x42c`/`0x465` values match clean defaults, so there is no
+observed vendor/clean mismatch to repair there. In particular, the number
+2000 alone does not identify a receive-duration limit. Evidence and the
+full-flash restoration comparison are retained under
+`build/clean-rx/cck-window/hardware/initial-probe/`.
+
+A separate isolated source build `02ee8919` tests vendor Bluetooth
+coexistence as a duration-arbitration hypothesis. The public `wlioctl.h`
+definition `WL_BTC_DISABLE=0` establishes the requested disabled mode, rather
+than relying on the unrelated Linux DHCP coexistence enum. Each cold AP trial
+queries `btc_mode`, sets 0, and confirms readback `1 -> 0` before submitting
+eight frames. Clean receiver `8bf5afb9` reports:
+
+| Rate | Ethernet bytes | MPDU bytes including FCS | Complete fresh frames |
+| --- | --- | --- | --- |
+| 1 Mbps | 62 | 84 | 8/8 |
+| 1 Mbps | 1514 | 1536 | 8/8 |
+| 1 Mbps | 1606 | 1628 | 0/8 |
+| 2 Mbps | 1606 | 1628 | 8/8 |
+
+All four sources account eight data transmissions with zero new TX errors.
+Successful receives validate full payload/FCS and decoded rate/long preamble.
+Global bad-FCS counters include ambient traffic and cannot identify the lost
+frames. Disabling source coexistence does not recover the boundary; this
+does not test a clean-receiver-side coexistence change or prove physical EOF.
+The unsuccessful compile-time switch and temporary collector fields were
+removed, leaving production coexistence behavior unchanged.
+Evidence is under `build/clean-rx/cck-window/hardware/btc-off/`.
+
+The Pico and badge A were freshly backed up, restored, and compared over
+their entire 4-MiB/16-MiB flash, with original hashes unchanged. Badge B was
+not modified. There is still no safe demonstrated PHY repair, no independent
+complete long 1-Mbps waveform capture, and no C1 qualification.
+
+The final diagnostic build `42827d38` repeats all seven readings unchanged
+across three further cold Pico trials, with full-flash restoration verified;
+records are under `build/clean-rx/cck-window/hardware/final-probe/`.
+Pico and default badge vendor peers build successfully. Shared transport,
+peer ASan/UBSan regressions, and clean badge build/native regressions pass.
+
+#### C1 associated vendor reference investigation
+
+With only the two badges and Pico available, the next diagnostic replaces
+passive vendor monitoring with an ordinary associated open-network station.
+This removes dependence on monitor forwarding and its previous 30/32/46-
+packet limitations. Both endpoints retain the unchanged official radio asset
+behind our diagnostic RP2350 application, not the official Pico SDK host
+stack. No speculative PHY write or receive-wait extension is introduced.
+
+Opt-in peer mode 13 (`--vendor-cck-station`) joins the nonce-derived AP and
+requires its exact BSSID. Mode 14 (`--tx-cck-associated`) waits up to eight
+seconds for the exact nonce-derived station MAC before sending the existing
+eight multicast-rate/long-preamble fixtures. The source rechecks those
+settings after association and after TX, in addition to the existing
+version-10 data-TX counters. Legacy source/monitor modes are unchanged.
+
+The receiver uses the existing raw SDPCM callback without enabling monitor
+mode, then an explicitly diagnostic BDC decoder and complete Ethernet
+destination/source/EtherType/nonce/sequence/pattern validation. Normal RX
+queues and the normal decoder retain the 1514-byte limit. The diagnostic
+decoder is bounded by the existing 2040-byte SDPCM envelope, including the
+12-byte minimum SDPCM and 4-byte minimum BDC headers. It does not enlarge a
+buffer or copy an oversized frame into the normal queue.
+
+The station requires eight distinct complete frames with no duplicates,
+malformed data or fixture corruption to pass. Missing frames retain evidence
+but exit 1, not a success-shaped result. Its four-second collection window
+starts after association. Ethernet decapsulation strips MPDU/FCS and PHY
+metadata: `mpdu_fcs_visible=false` and `phy_rate_verified=false` remain explicit.
+
+Archives are under `build/clean-rx/cck-managed/hardware/`:
+
+- `associated-controls`: Pico source `76e543fb`, badge B managed station
+  `bef8b820`. All eight frames arrive at 2 Mbps / 62 and 1606 Ethernet bytes,
+  and 1 Mbps / 62 and 1514 bytes. At 1 Mbps / 1606, one complete payload
+  arrives (sequence 5, mask `0x20`) and seven do not; the receiver exits 1.
+  This is useful partial payload evidence, not a passing capture operation
+  or independently rate-decoded complete MPDU.
+- `reverse-controls`: badge B source and Pico managed station. At 2 Mbps /
+  62 bytes the Pico receives 8/8, but at 1606 bytes only 3/8 (`0x2c`).
+  The next 1-Mbps / 62-byte positive control receives 7/8 (`0xef`), so
+  the campaign stops and restores both devices rather than interpreting
+  further missing long frames from an unqualified reference direction.
+- `simultaneous-controls`: Pico source, badge B managed station and badge A
+  clean receiver `8bf5afb9` listen to the same broadcasts. Both receivers
+  receive 8/8 at 2 Mbps / 62 and 1606 Ethernet bytes and 1 Mbps / 1514.
+  Both receive 0/8 at 1 Mbps / 1606 in two separate nonce-bound trials.
+
+The final `final-boundary` campaign uses source `8a59ca5c` and vendor
+station `b6d25163`, adding the post-association/post-TX settings checks.
+The clean receiver deliberately stays on the matched archived build
+`8bf5afb9` to avoid changing a second experimental variable:
+
+| Requested rate | Ethernet bytes | Expected plain MPDU bytes including FCS | Vendor station complete payloads | Clean complete, FCS/rate/preamble-verified MPDUs |
+| --- | --- | --- | --- | --- |
+| 2 Mbps | 62 | 84 | 8/8 | 8/8 |
+| 2 Mbps | 1606 | 1628 | 8/8 | 8/8 |
+| 1 Mbps | 1514 | 1536 | 8/8 | 8/8 |
+| 1 Mbps | 1562 | 1584 | 6/8 (`0xd7`) | 4/8 (`0x74`) |
+| 1 Mbps | 1566 | 1588 | 0/8 | 0/8 |
+| 1 Mbps | 1606 | 1628 | 0/8 | 0/8 |
+
+All six sources account eight data transmissions with zero new TX errors
+and successful fixed-rate/long-preamble readbacks after association and TX.
+At 1584 bytes, the masks differ: some sequences arrive only at the vendor
+station and one only at the clean receiver. Thus a universal hard transmitter
+cutoff is not an adequate explanation for that cell. Global clean discard
+counters include ambient traffic and are not per-fixture failure counts.
+
+The sharp long-1-Mbps loss also reproduces without any clean firmware in
+either vendor endpoint. Therefore a timeout solely in our clean PSM cannot
+explain the entire observation. The single initial 1606-byte Ethernet
+delivery establishes that the managed vendor path is not absolutely
+incapable of delivering that size, but it does not establish stable
+1-Mbps transmission or isolate TX versus RX at the failing boundary.
+RF/clock/board configuration or a shared chip/firmware duration-sensitive
+limitation remain hypotheses, not demonstrated causes. C1 stays open.
+
+Every campaign freshly backs up and restores complete flash. Final SHA-256
+comparisons match the original 4-MiB Pico and both original 16-MiB badges;
+all devices are left in BOOTSEL. Source/peer ASan/UBSan tests, shared
+transport/default-MTU regressions and clean badge build/native regressions
+pass. New tests cover every-byte fixture corruption/truncation, identity and
+nonce mismatch, duplicates, malformed BDC, all normal/diagnostic TX lengths,
+and exact maximum diagnostic RX bounds. Fourteen invalid new CLI cases
+reject before USB access. No laptop network, credential, radio asset,
+production MTU or qualification criterion was changed.
+
 ### C2. Basic-rate and mixed-network compatibility
 
 - [ ] Negotiate appropriate supported/basic rates, including a usable

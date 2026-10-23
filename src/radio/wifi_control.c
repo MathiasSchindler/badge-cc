@@ -121,16 +121,26 @@ uint32_t wifi_data_frame_diagnostic(uint8_t packet[WIFI_CONTROL_MAX], uint8_t se
     return data_frame(packet, sequence, interface, frame, length, WIFI_CONTROL_MAX - 18u);
 }
 
-int wifi_data_decode(const wifi_control_packet_t *packet, uint8_t *interface,
-                     const uint8_t **frame, uint32_t *length) {
+static int data_decode(const wifi_control_packet_t *packet, uint8_t *interface,
+                        const uint8_t **frame, uint32_t *length, uint32_t maximum) {
     if (packet == 0 || interface == 0 || frame == 0 || length == 0 ||
         packet->channel != 2u || packet->payload == 0 || packet->payload_size < 4u) return 0;
     const uint8_t *data = packet->payload;
     uint32_t offset = 4u + (uint32_t)data[3] * 4u;
     if ((data[0] >> 4u) != 2u || (data[2] & 15u) > 1u || offset > packet->payload_size ||
-        packet->payload_size - offset < 14u || packet->payload_size - offset > WIFI_ETHERNET_MAX) return 0;
+        packet->payload_size - offset < 14u || packet->payload_size - offset > maximum) return 0;
     *interface = data[2] & 15u;
     *frame = data + offset;
     *length = packet->payload_size - offset;
     return 1;
+}
+
+int wifi_data_decode(const wifi_control_packet_t *packet, uint8_t *interface,
+                     const uint8_t **frame, uint32_t *length) {
+    return data_decode(packet, interface, frame, length, WIFI_ETHERNET_MAX);
+}
+
+int wifi_data_decode_diagnostic(const wifi_control_packet_t *packet, uint8_t *interface,
+                                const uint8_t **frame, uint32_t *length) {
+    return data_decode(packet, interface, frame, length, WIFI_CONTROL_MAX - 16u);
 }

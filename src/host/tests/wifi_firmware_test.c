@@ -71,6 +71,7 @@ wifi_bus_result_t wifi_gspi_write(const wifi_wire_t *wire, uint8_t function, uin
                address == 0x1001fu || address == 0x1000fu);
         return WIFI_BUS_OK;
     }
+    if (size == 2u) assert(!(address & 0x8000u));
     address = window_base | (address & 0x7fffu);
     if (address == 0x18103800u) {
         assert(value == 0u && token != 0u);
@@ -81,7 +82,12 @@ wifi_bus_result_t wifi_gspi_write(const wifi_wire_t *wire, uint8_t function, uin
     else if (address == 0x18103408u) arm_io = value;
     else if (address == 0x18104408u) ram_io = value;
     else if (address == 0x7fffcu) token = value;
-    else if (address + 4u <= sizeof(memory)) store(memory + address, value);
+    else if (address + 4u <= sizeof(memory)) {
+        if (size == 2u) {
+            memory[address] = (uint8_t)value;
+            memory[address+1u] = (uint8_t)(value >> 8u);
+        } else store(memory + address, value);
+    }
     else assert(address == 0x18004010u || address == 0x18004044u || address == 0x18002024u);
     return WIFI_BUS_OK;
 }
@@ -96,13 +102,17 @@ wifi_bus_result_t wifi_gspi_read(const wifi_wire_t *wire, uint8_t function, uint
     else if (address == 0x1001eu) *value = 0u;
     else if (address == 0x1001fu) *value = 3u;
     else {
+        if (size == 2u) assert(!(address & 0x8000u));
         address = window_base | (address & 0x7fffu);
         if (address == 0x18103800u) *value = arm_reset;
         else if (address == 0x18104800u) *value = ram_reset;
         else if (address == 0x18103408u) *value = arm_io;
         else if (address == 0x18104408u) *value = ram_io;
         else if (address == 0x7fffcu) *value = token;
-        else if (address + 4u <= sizeof(memory)) *value = read32(memory + address);
+        else if (address + 4u <= sizeof(memory)) {
+            *value = size == 2u ? (uint32_t)memory[address] | (uint32_t)memory[address+1u] << 8u :
+                read32(memory + address);
+        }
         else assert(!"Unexpected register read");
     }
     return WIFI_BUS_OK;
@@ -223,7 +233,7 @@ static void initialize(void) {
 }
 
 static void protocol_tests(void) {
-    uint8_t large_frame[2023], guarded[WIFI_CONTROL_MAX + 8u];
+    uint8_t large_frame[2024], guarded[WIFI_CONTROL_MAX + 8u];
     memset(large_frame, 0x5a, sizeof(large_frame));
     for (uint32_t n = 14u; n <= 2022u; ++n) {
         memset(guarded, 0xa5, sizeof(guarded));
@@ -232,6 +242,12 @@ static void protocol_tests(void) {
         assert(memcmp(guarded + 18u, large_frame, n) == 0);
         for (uint32_t i = n + 18u; i < aligned; ++i) assert(!guarded[i]);
         for (uint32_t i = aligned; i < sizeof(guarded); ++i) assert(guarded[i] == 0xa5u);
+        wifi_control_packet_t decoded;
+        const uint8_t *frame; uint32_t length; uint8_t interface;
+        assert(wifi_control_parse_raw(guarded,aligned,&decoded));
+        assert(wifi_data_decode_diagnostic(&decoded,&interface,&frame,&length));
+        assert(interface==1u && length==n && memcmp(frame,large_frame,n)==0);
+        assert(wifi_data_decode(&decoded,&interface,&frame,&length)==(n<=WIFI_ETHERNET_MAX));
         assert(!!wifi_data_frame(guarded, 0u, 0u, large_frame, n) == (n <= WIFI_ETHERNET_MAX));
     }
     assert(!wifi_data_frame_diagnostic(guarded, 0u, 1u, large_frame, 2023u));
@@ -239,6 +255,19 @@ static void protocol_tests(void) {
     assert(!wifi_data_frame_diagnostic(guarded, 0u, 1u, large_frame, 13u));
     assert(!wifi_data_frame_diagnostic(guarded, 0u, 1u, NULL, 62u));
     assert(!wifi_data_frame_diagnostic(NULL, 0u, 1u, large_frame, 62u));
+    memset(guarded,0,sizeof(guarded));
+    guarded[0]=(uint8_t)WIFI_CONTROL_MAX; guarded[1]=(uint8_t)(WIFI_CONTROL_MAX>>8u);
+    guarded[2]=(uint8_t)~WIFI_CONTROL_MAX; guarded[3]=(uint8_t)(~WIFI_CONTROL_MAX>>8u);
+    guarded[5]=2u; guarded[7]=12u; guarded[12]=0x20u;
+    wifi_control_packet_t maximum;
+    const uint8_t *maximum_frame; uint32_t maximum_length; uint8_t maximum_interface;
+    assert(wifi_control_parse_raw(guarded,WIFI_CONTROL_MAX,&maximum));
+    assert(wifi_data_decode_diagnostic(&maximum,&maximum_interface,&maximum_frame,&maximum_length));
+    assert(maximum_interface==0u && maximum_length==2024u && maximum_frame==guarded+16u);
+    assert(!wifi_data_decode(&maximum,&maximum_interface,&maximum_frame,&maximum_length));
+    ++maximum.payload_size;
+    assert(!wifi_data_decode_diagnostic(&maximum,&maximum_interface,&maximum_frame,&maximum_length));
+    assert(!wifi_data_decode_diagnostic(NULL,&maximum_interface,&maximum_frame,&maximum_length));
     uint8_t packet[2040], payload[192] = "ver";
     uint32_t size = wifi_control_request(packet, 255u, 15u, 262u, 0u, payload, sizeof(payload));
     wifi_control_packet_t decoded;
@@ -346,6 +375,15 @@ int main(void) {
     assert(wifi_firmware_backplane_write32(0x10000u, 0x12345678u));
     uint32_t bp_value;
     assert(wifi_firmware_backplane_read32(0x10000u, &bp_value) && bp_value == 0x12345678u);
+    uint16_t halfword = 0u;
+    assert(wifi_firmware_backplane_write32(0x10004u,0xabcdef01u));
+    assert(wifi_firmware_backplane_read16(0x10002u,&halfword) && halfword == 0x1234u);
+    assert(wifi_firmware_backplane_write16(0x10002u,0x9876u));
+    assert(wifi_firmware_backplane_read32(0x10000u,&bp_value) && bp_value == 0x98765678u);
+    assert(wifi_firmware_backplane_read32(0x10004u,&bp_value) && bp_value == 0xabcdef01u);
+    assert(!wifi_firmware_backplane_read16(0x10001u,&halfword) && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_backplane_write16(0x10001u,0u) && report.error == WIFI_FW_PROTOCOL);
+    assert(!wifi_firmware_backplane_read16(0x10002u,NULL) && report.error == WIFI_FW_PROTOCOL);
     assert(!wifi_firmware_backplane_read(1u, bp_result, 4u) && report.error == WIFI_FW_PROTOCOL);
     assert(!wifi_firmware_backplane_read(0u, bp_result, 3u) && report.error == WIFI_FW_PROTOCOL);
     assert(!wifi_firmware_backplane_read(0u, 0, 4u) && report.error == WIFI_FW_PROTOCOL);

@@ -89,10 +89,10 @@ ht-peer-test: $(HT_PEER_BUILD)/protocol_test $(HT_PEER_BUILD)/network_test $(HT_
 	$(HT_PEER_BUILD)/authenticator_test
 	$(HT_PEER_BUILD)/cck_monitor_test
 
-$(HT_PEER_BUILD)/cck_monitor_test: $(HT_PEER_DIR)/cck_monitor_test.c $(HT_PEER_DIR)/cck_monitor.h $(HT_PEER_DIR)/protocol.h $(wildcard clean-rx/src/*.h) clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c | $(HT_PEER_BUILD)
+$(HT_PEER_BUILD)/cck_monitor_test: $(HT_PEER_DIR)/cck_monitor_test.c $(HT_PEER_DIR)/cck_monitor.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/protocol.h $(wildcard clean-rx/src/*.h) clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_control.c $(RADIO_DIR)/wifi_control.h | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
 		$< clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c \
-		$(TOOLS_DIR)/diagnostics_logic.c -o $@
+		$(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_control.c -o $@
 
 $(HT_PEER_BUILD)/authenticator_test: $(HT_PEER_DIR)/authenticator_test.c $(HT_PEER_DIR)/authenticator.c $(HT_PEER_DIR)/authenticator.h $(wildcard clean-rx/badge/*.h clean-rx/src/*.h) clean-rx/badge/wpa2.c clean-rx/src/wpa2_crypto.c clean-rx/src/mac.c clean-rx/src/block_ack.c | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \

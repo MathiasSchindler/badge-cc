@@ -32,5 +32,8 @@ uint32_t wifi_data_frame_diagnostic(uint8_t packet[WIFI_CONTROL_MAX], uint8_t se
                                     uint8_t interface, const uint8_t *frame, uint32_t length);
 int wifi_data_decode(const wifi_control_packet_t *packet, uint8_t *interface,
                      const uint8_t **frame, uint32_t *length);
+/* Explicit oversized-RX diagnostic; use with a validated SDPCM packet, not the normal RX queue. */
+int wifi_data_decode_diagnostic(const wifi_control_packet_t *packet, uint8_t *interface,
+                                const uint8_t **frame, uint32_t *length);
 
 #endif

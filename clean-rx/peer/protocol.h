@@ -11,6 +11,7 @@
 #define CLEAN_PEER_TRACE_BYTES 256u
 #define CLEAN_PEER_CONTROL_BYTES 1024u
 #define CLEAN_PEER_PHY_PROBE_MODE 10u
+#define CLEAN_PEER_PHY_WINDOW_MODE 12u
 #define CLEAN_PEER_COUNTER_BEFORE 88u
 #define CLEAN_PEER_COUNTER_AFTER 120u
 #define CLEAN_PEER_COUNTER_VALID 152u
@@ -121,7 +122,7 @@ static inline int clean_peer_report_valid(const uint8_t report[64],
 static inline int clean_peer_trace_valid(const uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
     if (usb_report_u32(trace) != CLEAN_PEER_MAGIC ||
         usb_report_u32(trace + 16u) != CLEAN_PEER_RECORDS ||
-        (usb_report_u32(trace + 20u) < 1u || usb_report_u32(trace + 20u) > 3u) ||
+        (usb_report_u32(trace + 20u) < 1u || usb_report_u32(trace + 20u) > 4u) ||
         usb_report_u32(trace + 24u) > CLEAN_PEER_RECORDS) return 0;
     uint32_t completed = usb_report_u32(trace + 24u);
     for (uint32_t i = 0u; i < completed; ++i) {
@@ -136,8 +137,11 @@ static inline int clean_peer_trace_valid(const uint8_t trace[CLEAN_PEER_TRACE_BY
 }
 
 static inline int clean_peer_phy_supported(const uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
-    if (!clean_peer_trace_valid(trace) || usb_report_u32(trace + 20u) != 3u ||
+    uint32_t mode = usb_report_u32(trace + 20u);
+    if (!clean_peer_trace_valid(trace) || (mode != 3u && mode != 4u) ||
         usb_report_u32(trace + 24u) != CLEAN_PEER_RECORDS) return 0;
+    if (mode == 4u && (!usb_report_u32(trace + 28u) ||
+                       usb_report_u32(trace + 28u) >= 65535u)) return 0;
     for (uint32_t i = 0u; i < CLEAN_PEER_RECORDS; ++i) {
         const uint8_t *r = trace + CLEAN_PEER_RECORD_BASE + i * CLEAN_PEER_RECORD_BYTES;
         if (!usb_report_u32(r + 4u) || usb_report_u32(r + 16u) != 4u ||
