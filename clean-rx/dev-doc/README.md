@@ -5,6 +5,19 @@ failures, open questions and qualification. Its historical records describe
 the builds and conditions named in each entry, not necessarily the current
 firmware.
 
+The firmware and chip reference in `doc/` describes implemented behavior
+only. Development procedures, validation, history, hypotheses, bugs, open
+questions and requested changes belong here, not in that reference.
+
+- [Development and offline acceptance](DEVELOPMENT.md): toolchain,
+  native tests, validation commands and boundary enforcement.
+- [Open feature and reliability questions](STATUS.md): unresolved behavior,
+  missing capabilities and hardware qualification.
+- [HT20 diagnostic development notes](HT20_DIAGNOSTIC_NOTES.md): copy,
+  streaming and aggregate investigations moved out of the interface reference.
+- [Host tools and paired WPA2 trials](HOST_TOOL_USAGE.md): desktop collection,
+  private credential handling and paired hardware procedures.
+
 - [C01 cleanup inventory and baseline](C01_BASELINE.md): file ownership,
   profile catalogue, dependency boundaries, reproducible offline capture,
   frozen hashes and explicit test-coverage gaps.
@@ -17,6 +30,14 @@ firmware.
 - [C04 contract and fixture separation](C04_CONTRACT_SEPARATION.md): portable
   operations versus wire/layout contracts, explicit diagnostic codecs,
   host-owned crypto/fixtures and frozen ABI compatibility checks.
+- [C05 diagnostic profiles](C05_DIAGNOSTIC_PROFILES.md): ordinary versus
+  diagnostic command/ACK behavior and the outstanding hardware gate.
+- [C06 controller composition](C06_CONTROLLER_COMPOSITION.md): explicit
+  state ownership and byte-preserving controller/PSM unity composition.
+- [C07 tool/profile ownership](C07_TOOL_AND_PROFILE_OWNERSHIP.md): central
+  selections, firmware-only targets and development-tool migration.
+- [C08 final acceptance record](C08_OFFLINE_ACCEPTANCE.md): boundary
+  mutation tests, final matrix results and unperformed hardware gates.
 - [HT20 implementation and investigations](HT20_IMPLEMENTATION.md):
   D1/D2/D3 milestones, API development, receive failures, contention
   diagnostics, watchdog work, association/runtime peer profiles and

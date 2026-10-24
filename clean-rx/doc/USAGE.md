@@ -14,38 +14,48 @@ duplicating sizes or command bit fields.
 
 Portable HT and unicast operations are in [ht20.h](../src/ht20.h) and
 [unicast.h](../src/unicast.h). Diagnostic command codecs have an explicit
-[ht_command.h](../src/ht_command.h) include. Host-only campaign fixtures
-live under [tests/fixtures/](../tests/fixtures/) and software WPA2/CCMP
-under [host/](../host/); neither is a controller dependency.
+[ht_command.h](../src/diagnostic/ht_command.h) include. Software WPA2/CCMP
+is implemented in the RP2350 host using [host/](../host/).
 
 ## Building
 
 From the repository root:
 
 ```sh
-make -C clean-rx/src CC=clang BUILD=../../build/clean-rx
-make -C clean-rx/badge
+# Ordinary standalone controller:
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx/runtime \
+  PROFILE=runtime SELECTION=default
+
+# Matched diagnostic controller and RP2350 badge image:
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx/diagnostic \
+  PROFILE=diagnostic SELECTION=ht-data
+make -C clean-rx/badge BUILD=../../build/clean-rx/badge \
+  CONTROLLER_BIN=../../build/clean-rx/diagnostic/cyw43_rx_fw.bin \
+  PROFILE=diagnostic SELECTION=ht-data firmware
 ```
 
-The controller output is `build/clean-rx/cyw43_rx_fw.bin`. The badge build
-embeds it and produces `build/clean-rx/badge/clean_rx.uf2` and the USB
-`collector`. The controller and badge use freestanding C and project-owned
-code. Building the collector requires the host's libusb development files.
+The first command produces `build/clean-rx/runtime/cyw43_rx_fw.bin`.
+The badge example embeds the separately built diagnostic image and produces
+`build/clean-rx/badge/clean_rx.uf2`; it does not flash or start a device.
+
+`PROFILE` selects the runtime/diagnostic behavior boundary and defaults to
+`runtime` for the controller. `SELECTION` selects feature flags from
+[profiles.mk](../src/profiles.mk) and defaults to `default`. Badge diagnostic
+applications default to `PROFILE=diagnostic`, so do not supply a runtime
+binary to them accidentally. Keep host/controller profile and selection
+matched; use the generated `profile.txt` and layout manifest.
+
+Runtime rejects diagnostic commands 9, 11 and 17, and command-12 descriptor
+versions other than normal HT v1, with firmware error `0x85`. Ordinary
+ACK/CTS responses cannot enable diagnostic suppression. Explicit
+`PROFILE=diagnostic` enables diagnostic commands and ACK suppression;
+`PROFILE=sdio-test` is synthetic transport traffic, not a radio profile.
 
 The controller production build is self-contained: copying `clean-rx/src/`
 is sufficient to build its binary with the tools above. It requires no
 other repository source, SDK, libc or downloaded firmware executable.
-Native tests and RP2350 host applications have separate source/tool
-dependencies. See [the isolation checks](../dev-doc/C02_ISOLATION.md) for
-standalone builds and byte-for-byte comparison against the pre-cleanup
-controller profiles. On-chip ROM calibration tables remain a hardware
-dependency.
-
-Native controller/model and fixture-integration tests are documented in
-[the test guide](../tests/README.md). Run `make -C clean-rx/tests test` from
-the repository root; explicit diagnostic test profiles supply their own
-required flags. Legacy `make -C clean-rx/src test` forwards to the test
-build and is not a production dependency.
+On-chip ROM calibration tables are a hardware dependency. Building requires
+Make, Clang with the ARM target, LLD, `llvm-objcopy` and `llvm-size`.
 
 For an application embedding the controller directly, place the binary in
 a read-only assembly section using `.incbin`, and expose start/end symbols
@@ -121,7 +131,7 @@ radio LPF setup, promiscuous reception, TX permission and station role.
 not read by the controller. Continuous operation is selected by
 `MULTI->target_frames = 0xffffffff`; command 6 selects hardware crypto.
 The initial channel occupies bits 23..16.
-Controller channel selection accepts 1..14; the badge collector accepts 1..11.
+Controller channel selection accepts 1..14.
 
 Bound every wait and check `fw_state` for `FW_STATE_ERROR` (255).
 Preserve the first error code/address/value and treat it as a failed
@@ -193,8 +203,6 @@ address. The hardware matcher persists until reprogrammed or reset.
 
 The [HT20 reference](HT20.md) describes commands 12, 14, 15 and 16,
 including the opt-in non-HT WMM station build.
-Developer-only fixtures and test commands are documented in
-[dev-doc](../dev-doc/README.md).
 
 ## Receiving frames
 
@@ -245,33 +253,3 @@ sequence.
 The badge host implements WPA2-PSK authentication and software CCMP,
 including handshake validation, replay protection and protected receive
 reassembly. Its station association emits legacy capabilities.
-
-The collector accepts:
-
-```sh
-build/clean-rx/badge/collector SERIAL evidence.bin CHANNEL \
-  --ap-wpa2 BSSID PRIVATE_CREDENTIAL_FILE
-```
-
-The credential file belongs to the current user, has mode `0600`, and
-contains exactly two LF-terminated lines: SSID (1..32 bytes) and passphrase
-(8..63 bytes). The collector derives the PMK and sends it with a fresh
-SNonce through the dedicated secret-control path, bound to the BSSID,
-channel and request. This is separate from the controller's raw
-hardware-key command.
-
-For a paired WPA2 fixture, install the unmodified vendor `usb-wifi-link`
-image on one badge and the clean image on the other, leaving both in
-BOOTSEL. Run:
-
-```sh
-CLEAN_RX_COLLECTOR=build/clean-rx/badge/collector \
-  bash clean-rx/tools/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/new-wpa2-trial
-```
-
-The runner boots both USB applications before starting the AP, starts
-station collection at AP readiness, and requires independent matching-peer
-authorization and protected traffic. It writes phase times and both
-endpoints' evidence under the new prefix. `--wrong-password` selects the
-negative control. Temporary credentials are private and removed on exit;
-the runner does not flash either badge.

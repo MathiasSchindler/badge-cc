@@ -10,6 +10,31 @@ source code. They are implementation identifiers, not a badge-specific
 ordering-code or silicon-revision identification. See the
 [device-family reference scope](README.md).
 
+## Firmware organization
+
+The controller source is in [`src/`](../src/). It uses project-owned
+types/byte operations, `-ffreestanding -nostdinc -fno-builtin` and a
+`-nostdlib` link. ROM calibration tables are a device-runtime dependency.
+
+[`main.c`](../src/main.c) is a small, explicit unity-composition root.
+Transport/DMA, station/response coordination, receive/recovery, command
+dispatch and passive evidence publication live in
+[`runtime/`](../src/runtime/). They form one compilation unit rather than
+separately linked objects.
+Mutable accesses name their owner through `TRANSPORT`, `STATION`,
+`PUBLICATION` or gated `AGGREGATE`; `LOOP` values have automatic lifetime.
+Memory-overlap/mailbox/FIFO assertions stay beside
+[their controller contracts](../src/runtime/contracts.h).
+
+Ordinary response, contention, receive evidence, cleanup and observer
+composition lives in [`psm/`](../src/psm/). Explicit diagnostic controller
+and PSM fragments live in [`diagnostic/`](../src/diagnostic/); default
+runtime and passive recovery do not compile dependencies on that directory.
+Public wire/layout contracts are defined in controller headers shared with
+the RP2350 host. Named feature selections are defined in
+[`profiles.mk`](../src/profiles.mk); behavior modes are selected by
+[`firmware.mk`](../src/firmware.mk).
+
 ## Cores and data paths
 
 | Core | Register base | Wrapper base | Role |
@@ -182,8 +207,8 @@ On reception shutdown the controller copies this 28-word SHM record
 (`0x750`) into a 60-byte `BAF1` SRAM record at `0x204b0`. The badge copies it
 to USB detail offset 600 only when no validated authentication response is
 saved there; the authentication-response length at offset 596 remains zero.
-The collector distinguishes this record from successful response evidence
-with `auth_bad_fcs_report`. These sampled times are not RF/SIFS timestamps.
+The zero authentication-response length distinguishes this snapshot from
+a validated response. These sampled times are not RF/SIFS timestamps.
 
 ## Function 2 packet format
 
@@ -238,11 +263,6 @@ Legacy OFDM uses `PHYCTL=0x0041`; long/short DSSS/CCK use `0x0040/0x0050`.
 Rate-specific PHYCTL1 values and airtime helpers are defined in
 [phy_rates.h](../src/phy_rates.h). The [HT20 reference](HT20.md) describes
 its template controls and descriptors.
-
-The badge USB application's independent-peer receive diagnostic is RX-only.
-It checks fresh broadcast data addresses, SNAP/payload, fixture sequence,
-complete MPDU FCS, HT20 metadata and the matching terminal HT-SIG. It
-records the received sequence bitmap and duplicate count separately.
 
 Command 6 copies eight staged 16-bit key words to SHM `0x618..0x61f`
 and sets the hardware-crypto selector at `0x615`. The raw hardware path

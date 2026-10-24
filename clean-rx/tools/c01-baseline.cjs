@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const boundaries = require('./controller-boundaries.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const controller = path.join(root, 'clean-rx/src');
@@ -192,6 +193,8 @@ function captureProfile(profile, output) {
     const tests = [...ordinaryTests, ...(profile.extraTests || [])];
     const args = ['-C', controller, 'CC=clang', 'PROFILE=diagnostic', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
         'all'];
+    boundaries.checkSourceTree(controller);
+    boundaries.checkMakeInputs(controller, build, args);
     run('make', args, root, path.join(build, 'build.log'));
     const testArgs = ['-C', nativeTests, 'PROFILE=diagnostic', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
         ...tests.map(test => path.join(build, test))];
@@ -222,6 +225,10 @@ function captureProfile(profile, output) {
     }
     const undefinedSymbols = run('llvm-nm', ['--undefined-only', elfPath]).trim();
     if (undefinedSymbols) throw new Error(`Unexpected undefined symbols: ${undefinedSymbols}`);
+    boundaries.checkSymbols(symbols, undefinedSymbols);
+    boundaries.checkDependencies(controller, inputs.map(input => ({
+        inputs: input.dependencies.map(file => path.resolve(root, file)),
+    })), compilerFlags);
     const sizeOutput = run('llvm-size', [elfPath]);
     const sizes = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+\d+\s+[0-9a-f]+\s+/m.exec(sizeOutput);
     if (!sizes) throw new Error('Unrecognized llvm-size output');

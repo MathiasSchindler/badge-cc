@@ -17,7 +17,7 @@ is intentionally changed.
 | [unicast_contract.h](../src/unicast_contract.h) | Unicast/response/EDCA/ACK command values, records and region-overlap assertions |
 | [ht20.h](../src/ht20.h) | Portable HT rates, airtime, PHY controls, signal encoding/validation and RX metadata/decoding |
 | [unicast.h](../src/unicast.h) | Portable response policy/rate preparation, TX ownership and deadlines |
-| [ht_command.h](../src/ht_command.h) | Exact finite diagnostic command codecs/admission, explicitly selected by controller orchestration and matching host consumers |
+| [ht_command.h](../src/diagnostic/ht_command.h) | Exact finite diagnostic command codecs/admission, explicitly selected by controller orchestration and matching host consumers |
 | [tests/fixtures/](../tests/fixtures/) | Host-only HT builders, pattern/trace/evidence matching, returned-ACK checks and all soak/fragment campaign helpers |
 | [host/](../host/) | Shared software WPA2 cryptography for badge, collectors and independent peer |
 

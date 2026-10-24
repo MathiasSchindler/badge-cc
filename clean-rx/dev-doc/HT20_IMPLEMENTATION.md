@@ -1328,7 +1328,7 @@ without declaring the mandatory live MAC ready.
   cannot enlarge the accepted association's MCS set or 40-MHz capability;
   changed channel, missing operation, unsupported basic MCS and departure
   invalidate/recompute the candidate without activating HT.
-- [collector.c](../badge/collector.c) exposes the unadvertised target IE
+- [collector.c](../tools/badge/collector.c) exposes the unadvertised target IE
   and candidate MCS mask/selection, always with HT inactive. Finite
   probe/data/ACK records also describe the requested format, width, GI,
   streams, rate, symbols, calculated airtime and L-SIG length.

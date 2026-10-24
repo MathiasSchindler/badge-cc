@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { referenceTargets, extractSymbol, psmSymbol } = require('./c01-baseline.cjs');
+const boundaries = require('./controller-boundaries.cjs');
 const root = path.resolve(__dirname, '../..');
 
 function hash(bytes) {
@@ -98,6 +99,10 @@ function buildProfile(source, build, flags, isolated, profile) {
     fs.mkdirSync(build);
     const args = ['-C', source, 'CC=clang', ...(profile ? [`PROFILE=${profile}`] : isolated ? ['PROFILE=diagnostic'] : []),
         `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`, 'all'];
+    if (isolated) {
+        boundaries.checkSourceTree(source);
+        boundaries.checkMakeInputs(source, build, args);
+    }
     run('make', args, root, path.join(build, 'build.log'));
     const compilerFlags = fs.readFileSync(path.join(build, 'build_flags'), 'utf8').trim().split('\n')[1].trim().split(/\s+/);
     const sourceList = /^SRCS\s*:=\s*(.+)$/m.exec(fs.readFileSync(path.join(source, 'Makefile'), 'utf8'));
@@ -116,7 +121,12 @@ function buildProfile(source, build, flags, isolated, profile) {
     const elf = path.join(build, 'cyw43_rx_fw.elf');
     const symbols = run('llvm-nm', ['--print-size', '--radix=x', '--defined-only', elf]);
     fs.writeFileSync(path.join(build, 'symbols.txt'), symbols);
-    if (run('llvm-nm', ['--undefined-only', elf]).trim()) throw new Error(`Undefined symbols in ${elf}`);
+    const undefinedSymbols = run('llvm-nm', ['--undefined-only', elf]);
+    if (isolated) {
+        boundaries.checkDependencies(source, dependencies, compilerFlags);
+        boundaries.checkSymbols(symbols, undefinedSymbols);
+    }
+    if (undefinedSymbols.trim()) throw new Error(`Undefined symbols in ${elf}`);
     if (/\b(?:malloc|calloc|realloc|free|memcpy|memmove|memset|printf|puts)\s*$/m.test(symbols)) {
         throw new Error(`Unexpected library symbol in ${elf}`);
     }

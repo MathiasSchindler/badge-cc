@@ -42,12 +42,11 @@ a requirement that every consumer be a native test. Host software WPA2
 cryptography is shared separately under [host/](../host/).
 
 Controller-required command codecs remain in
-[ht_command.h](../src/ht_command.h). The controller validates some finite
+[ht_command.h](../src/diagnostic/ht_command.h). The controller validates some finite
 diagnostic commands by reconstructing their canonical bytes. Host fixture
 code reuses those codecs, not a second implementation. The portable HT
-header and ABI headers do not import that command layer. Isolating active
-diagnostic behavior from ordinary firmware remains C05; this move does
-not change which commands existing profiles accept.
+header and ABI headers do not import that command layer. Runtime excludes
+these active diagnostic codecs; `PROFILE=diagnostic` selects them explicitly.
 
 Run the boundary, implementation-preservation and ABI compatibility checks:
 
@@ -75,16 +74,24 @@ linked into controller firmware.
 
 | Target | Selection | Executed checks and limits |
 | --- | --- | --- |
-| `test` | Caller-supplied `EXTRA_CFLAGS`, empty by default | Runtime in both header orders, PSM, Block ACK, recovery executable and MAC/station integration |
+| `test` | `PROFILE=runtime SELECTION=default`, unless explicitly overridden | Runtime in both header orders, PSM, Block ACK, recovery executable and MAC/station integration |
 | `test-copy-scope` | Scope-on observer selection matching C01 `copy-scope` | Default suites plus emitted copy-scope model and capture/protocol checks |
 | `test-early-rx` | Early-FIFO passive recovery selection, without ordered-flush/prefix diagnostic | Default suites plus early-RX admission/protocol checks; ordered recovery reports disabled |
 | `test-recovery` | Ordered-flush and prefix selection matching C01 `early-prefix` | Default suites plus early-RX; ordered-flush/prefix recovery checks actually execute |
 
-The defaults and constraints are in [profiles.mk](profiles.mk). The test
+The forwarding targets are in [profiles.mk](profiles.mk); authoritative
+feature definitions are in [src/profiles.mk](../src/profiles.mk), and
+behavior modes in [firmware.mk](../src/firmware.mk). For a direct selection:
+
+```sh
+make -C clean-rx/tests PROFILE=diagnostic SELECTION=copy-scope \
+  BUILD=../../build/clean-rx/scope-tests test copy-scope-test
+```
+
+The test
 profile selections are checked against the frozen C01 definitions by
 [the test-layout checks](../tools/c03-tests.test.cjs); they do not change
-the firmware profile definitions owned by existing application/experiment
-builds. Profile centralization for production callers remains C07.
+the shared catalogue or maintain separate copies of its flags.
 
 Low-level `copy-scope-test` and `early-rx-test` targets still accept explicit
 `EXTRA_CFLAGS`. They preserve experiment runners' exact selected profiles;
@@ -98,7 +105,7 @@ not coverage merely because another suite succeeded.
 Existing `make -C clean-rx/src ... test`, `runtime-test`, `copy-scope-test`
 and `early-rx-test` invocations forward to this Makefile with an absolute
 output path and unchanged `EXTRA_CFLAGS`. Unit/integration and named profile
-targets can also be forwarded. This preserves vendor-burst and documented
+targets, `PROFILE` and `SELECTION` can also be forwarded. This preserves vendor-burst and documented
 historical runners without changing their experiment flags or output paths.
 Native executable build rules themselves now belong to this Makefile;
 tools requesting an executable directly must use `-C clean-rx/tests`.
@@ -106,6 +113,19 @@ tools requesting an executable directly must use `-C clean-rx/tests`.
 The controller's ordinary `all` target does not include this Makefile or
 depend on the test directory, test sources, fixtures or native libraries.
 Both a production-only copy and a unit-only copy are validated separately.
+
+## Complete offline acceptance
+
+```sh
+make -C clean-rx check BUILD=../build/clean-rx/acceptance-NEW
+```
+
+This runs tooling/mutation tests, isolated-source comparisons, ordinary
+runtime and legacy diagnostic matrices, and all named native profiles.
+It fails if required copy-scope, early-RX or ordered-recovery coverage is
+missing/disabled. Historical disabled/unselected cases remain explicit,
+not counted as passes. Evidence directories must be new.
+See [the development guide](../dev-doc/DEVELOPMENT.md).
 
 These are native/model/integration tests, not RF emulation, physical timing
 qualification, or permission to flash devices. See

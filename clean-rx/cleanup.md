@@ -232,20 +232,31 @@ controller/PSM baselines. No hardware or RF tests were performed.
 
 **Prerequisites:** C02 through C07.
 
-- [ ] Add automated checks for controller includes/build inputs escaping
+- [x] Add automated checks for controller includes/build inputs escaping
   `src/`, test-code dependencies and unexpected linked runtime symbols.
-- [ ] Make isolated-source builds and the retained profile/test matrix
+- [x] Make isolated-source builds and the retained profile/test matrix
   repeatable checks rather than manual audit steps.
-- [ ] Verify ordinary builds exclude diagnostic behavior and diagnostic
+- [x] Verify ordinary builds exclude diagnostic behavior and diagnostic
   profiles exercise their selected code instead of reporting disabled paths.
-- [ ] Update architecture, usage and development guides with the actual
+- [x] Update architecture, usage and development guides with the actual
   layout, dependency direction, profile selection and validation commands.
-- [ ] Document unresolved reliability and feature gaps separately from
+- [x] Document unresolved reliability and feature gaps separately from
   structural-cleanup completion.
-- [ ] Run the final offline matrix and record any separately authorized
+- [x] Run the final offline matrix and record any separately authorized
   hardware requalification results with their limits.
 
 **Acceptance:** boundary violations fail checks; a new contributor can build
 the standalone controller, run native tests and select diagnostic firmware
 without reconstructing flags or dependencies from historical experiments.
 Cleanup completion does not imply vendor feature parity or RF reliability.
+
+Implementation and final offline validation:
+[C08 acceptance record](dev-doc/C08_OFFLINE_ACCEPTANCE.md).
+`make -C clean-rx check BUILD=../build/clean-rx/acceptance-NEW` runs the
+repeatable gate with fresh evidence. All 32 tooling tests, 74 diagnostic
+comparisons, six runtime comparisons, seven historical profiles and native
+suites pass. The C01 baseline remains unchanged.
+
+**C01-C08 structural cleanup is complete.** Remaining
+[feature/reliability limits](dev-doc/STATUS.md) and the separate C05 hardware
+acceptance gate remain open. No new hardware/RF qualification was performed.
