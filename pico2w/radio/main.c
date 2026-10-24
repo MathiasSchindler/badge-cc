@@ -13,6 +13,8 @@ static uint32_t screen_at, screen_column = 320u;
 #endif
 
 _Static_assert(PR_NODE >= 1 && PR_NODE <= 3, "Select Pico=1, badge A=2 or badge B=3");
+_Static_assert(256u + PR_PACKET <= PR_TIMING_DETAIL && PR_TIMING_DETAIL + 16u <= WIFI_TRACE_SIZE,
+               "Exchange timing must not overlap retained frames or exceed the trace");
 extern const uint8_t clean_image[], clean_image_end[];
 static live_usb_control_t usb;
 static clean_loader_t radio;
@@ -131,6 +133,10 @@ static void snapshot(void) {
     badger_bytes_store_u32(trace + 108u, sys_after);
     badger_bytes_copy(trace + 128u, last_request, sizeof(last_request));
     badger_bytes_copy(trace + 256u, last_reply, sizeof(last_reply));
+    badger_bytes_store_u32(trace + PR_TIMING_DETAIL, PR_TIMING_MAGIC);
+    badger_bytes_store_u32(trace + PR_TIMING_DETAIL + 4u, link.first_tx_at - link.began_at);
+    badger_bytes_store_u32(trace + PR_TIMING_DETAIL + 8u, link.completed_at - link.began_at);
+    badger_bytes_store_u32(trace + PR_TIMING_DETAIL + 12u, link.completed_at - link.first_tx_at);
     usb_report_header(report, 0x46363255u, USB_REPORT_BUILD_ID, nonce, 3u);
     badger_bytes_store_u32(report + 32u, error);
     badger_bytes_store_u32(report + 36u, radio_ready);

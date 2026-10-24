@@ -7,6 +7,7 @@
 #include "../../peer/frame.h"
 #include "../../peer/lifecycle.h"
 #include "../../peer/network_json.h"
+#include "../network_host.h"
 #include "../../peer/qualification.h"
 #include "build_id.h"
 #include "../../peer/cck_monitor.h"
@@ -226,8 +227,9 @@ static int collect_ap(libusb_device_handle *device, const char *path,
 }
 
 static int collect_network(libusb_device_handle *device, const char *path,
-        const uint8_t nonce[16], uint8_t report[64], uint8_t trace[CLEAN_PEER_TRACE_BYTES]) {
-    uint32_t seconds = nonce[12] | (uint32_t)nonce[13] << 8u, host_stalls = 0u;
+        const uint8_t nonce[16], uint8_t report[64], uint8_t trace[CLEAN_PEER_TRACE_BYTES],
+        clean_network_host_t *host) {
+    uint32_t seconds = nonce[12] | (uint32_t)nonce[13] << 8u;
     clean_network_report_t n;
     int announced = 0;
     for (uint32_t i = 0u; i < (seconds + 25u) * 5u; ++i) {
@@ -245,7 +247,7 @@ static int collect_network(libusb_device_handle *device, const char *path,
             puts("\"}"); if (fflush(stdout)) { perror("B2 readiness"); return 0; }
             announced = 1;
         }
-        if (i % 25u == 20u) { ++host_stalls; usleep(2000000u); }
+        if (i % 25u == 20u && !clean_network_host_pause(host)) return 0;
         usleep(200000u);
         int count = libusb_control_transfer(device,0xc0u,LIVE_USB_FW_REPORT,0u,0u,report,64u,1000u);
         if (count != 64 || !clean_peer_report_valid(report,nonce,USB_REPORT_BUILD_ID)) {
@@ -255,8 +257,8 @@ static int collect_network(libusb_device_handle *device, const char *path,
     if (!write_evidence(path,report,trace)) return 0;
     int valid = clean_network_valid(&n);
     printf("{\"test\":\"b2-ap-result\",\"valid\":%s,\"build\":\"%08x\","
-           "\"host_stalls\":%u,\"network\":",valid?"true":"false",USB_REPORT_BUILD_ID,host_stalls);
-    clean_network_print(&n); puts("}");
+           "\"host_stalls\":%u,\"network\":",valid?"true":"false",USB_REPORT_BUILD_ID,host->count);
+    clean_network_print(&n); clean_network_host_print(host); puts("}");
     if (!valid) fputs("B2 AP retained corruption, loss, unsettled data or radio failure\n",stderr);
     return valid;
 }
@@ -334,6 +336,8 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
                    uint32_t ap_channel, const char *serial, const char *protected_credentials,
                    int group) {
     uint8_t info[12], nonce[16], request[64], report[64], trace[CLEAN_PEER_TRACE_BYTES];
+    clean_network_host_t host;
+    if (network && !clean_network_host_init(&host)) return 0;
     const uint8_t prefix[] = {'U','2','6','L',1u,0u,64u,0u};
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
     if (memcmp(info, prefix, sizeof(prefix)) ||
@@ -384,7 +388,7 @@ static int collect(libusb_device_handle *device, const char *path, const uint8_t
         fputs("Missing or invalid nonce-bound vendor peer report\n", stderr);
         return 0;
     }
-    if (network) return collect_network(device,path,nonce,report,trace);
+    if (network) return collect_network(device,path,nonce,report,trace,&host);
     if (ap_seconds) return collect_ap(device, path, nonce, report, trace,serial);
     if (!read_trace(device, report, trace)) return 0;
     if (monitor==2 || monitor==3) return collect_cck(path,report,trace,nonce);

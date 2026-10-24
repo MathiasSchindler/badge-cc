@@ -42,6 +42,8 @@ static void roundtrip(uint8_t source, uint8_t destination, uint32_t now) {
     deliver(&a, &reply, 2, now + 7001u);
     deliver(&a, &reply, 0, now + 7002u);
     assert(a.confirmed == 1u && !a.active && !a.failed);
+    assert(a.first_tx_at==now && a.completed_at-a.began_at==7001u);
+    assert(a.completed_at-a.first_tx_at==7001u);
     assert(b.requests == 1u && b.duplicates == 1u);
     uint8_t frame[PR_MPDU];
     assert(pr_encode(frame, &request));

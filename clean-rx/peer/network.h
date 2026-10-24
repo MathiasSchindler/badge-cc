@@ -12,6 +12,8 @@
 #define CLEAN_NETWORK_MTU 1514u
 #define CLEAN_NETWORK_PORT 30526u
 #define CLEAN_NETWORK_PAYLOAD_MAX (CLEAN_NETWORK_MTU - 42u)
+#define CLEAN_NETWORK_METRICS_MAGIC 0x314d3842u
+#define CLEAN_NETWORK_EVENTS 4u
 
 typedef struct {
     uint32_t magic, state, error, seconds, elapsed_us;
@@ -22,7 +24,10 @@ typedef struct {
     uint8_t mac[6], peer[6], session[6], role, bound;
     uint32_t epoch;
     uint32_t large_generated, large_acknowledged, large_delivered, latency_max_us, latency_samples;
+    uint32_t metrics_magic, ack_attempts[4], latency_total_low, latency_total_high;
+    uint32_t latency_histogram[4], service_gaps, radio_timeouts, event_count, events[CLEAN_NETWORK_EVENTS];
 } clean_network_report_t;
+_Static_assert(sizeof(clean_network_report_t) == 224u, "Network metrics preserve the original 152-byte prefix");
 _Static_assert(CLEAN_NETWORK_AP_DETAIL + sizeof(clean_network_report_t) <= 256u,
                "Network AP evidence must fit the vendor trace");
 _Static_assert(CLEAN_NETWORK_DETAIL + sizeof(clean_network_report_t) <= 1616u,
@@ -50,5 +55,6 @@ int clean_network_input(clean_network_t *n, const uint8_t *frame, uint32_t lengt
 void clean_network_step(clean_network_t *n, uint32_t now);
 const uint8_t *clean_network_output(const clean_network_t *n, uint32_t *length);
 void clean_network_sent(clean_network_t *n);
+void clean_network_radio_timeout(clean_network_t *n, uint32_t now);
 int clean_network_valid(const clean_network_report_t *r);
 #endif

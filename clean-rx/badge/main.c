@@ -1,6 +1,7 @@
 #include "loader.h"
 #include "build_id.h"
 #include "frames.h"
+#include "ht_observe.h"
 #include "station.h"
 #include "station_rx.h"
 #include "station_lifecycle.h"
@@ -38,7 +39,11 @@ _Static_assert(CLEAN_SNAPSHOT_DETAIL + CLEAN_SNAPSHOT_BYTES <= sizeof(detail),
 _Static_assert(!CLEAN_RX_AMPDU_DELIVERY ||
                CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * CLEAN_HT_AMPDU_PROBE_MPDU <= sizeof(detail),
                "Aggregate payload evidence must fit the actual USB trace");
+#if CLEAN_BADGE_PICO
+int32_t pr_clock_sys(void);
+#else
 static badger_canvas_t canvas;
+#endif
 static uint8_t peer_challenge[14];
 static clean_station_ap_t station_ap;
 static uint8_t station_target[6];
@@ -60,6 +65,11 @@ static clean_network_t network;
 static uint8_t network_frame[CLEAN_NETWORK_MTU + 32u], network_ethernet[CLEAN_NETWORK_MTU];
 static uint32_t soak_watchdog_at;
 static uint32_t probe_started;
+_Static_assert(CLEAN_HT_TIMING_DETAIL >= CLEAN_HT_FAILURE_DETAIL + sizeof(clean_ht_failure_t) &&
+               CLEAN_HT_TIMING_DETAIL + 32u <= CLEAN_HT_WITNESS_ACK_DETAIL &&
+               CLEAN_HT_WITNESS_ACK_DETAIL + 24u <= CLEAN_HT_OBSERVER_DETAIL &&
+               CLEAN_HT_OBSERVER_DETAIL + 4u <= 1960u,
+               "Nonaggregate HT timing must not overlap ACK/failure/packet evidence");
 static uint32_t clock_before[12], clock_after[12], sys_khz_q5;
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size);
 static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd);
@@ -71,6 +81,9 @@ static int soak_mode(void) { return detail[2000u]==19u || detail[2000u]==20u; }
 static int ht_probe_mode(void) { return detail[2000u]>=21u && detail[2000u]<=31u; }
 
 static void screen(const char *status, uint32_t packets, uint32_t error) {
+#if CLEAN_BADGE_PICO
+    (void)status; (void)packets; (void)error;
+#else
     char number[12];
     badger_gfx_clear(&canvas, 0x0863u);
     badger_gfx_text(&canvas, 8, 12, "SOURCE WIFI TEST", 2u, 0xffffu);
@@ -88,22 +101,17 @@ static void screen(const char *status, uint32_t packets, uint32_t error) {
     for (uint32_t i = 0u; i < BADGER_GFX_WIDTH * BADGER_GFX_HEIGHT; ++i)
         badger_display_write(canvas.pixels[i]);
     badger_display_end();
+#endif
 }
 
 static void beacon(const uint8_t *packet, uint32_t size) {
-    if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_TX_MODE ||
-        detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE) return;
+    if (!clean_beacon_capture_mode(detail[2000u])) return;
     if (station_mode())
         clean_station_discover(packet, size, station_target, &station_ap, &station_ap_status);
     uint8_t entry[40];
     if (size < 18u || !clean_beacon_info(packet + 18u, size - 18u, entry, packet[16] & 15u))
         return;
-    uint32_t count = badger_bytes_load_u32(detail + 1632u);
-    for (uint32_t i = 0u; i < count; ++i)
-        if (badger_bytes_equal(detail + 1640u + 40u*i, entry, 6u)) return;
-    if (count == 8u) return;
-    badger_bytes_copy(detail + 1640u + 40u*count, entry, 40u);
-    badger_bytes_store_u32(detail + 1632u, count + 1u);
+    clean_record_beacon_entry(detail, entry);
 }
 
 static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
@@ -115,6 +123,11 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
             if (!station_receive(l, detail + 1972u, &size)) return 0;
         } else if (!clean_receive(l, packet, &size)) return 0;
         if (size != 0u) {
+            clean_ht_observe_f2(detail,packet,size,peer_challenge,
+                l->wire->now_us(l->wire->context)-probe_started);
+            if (CLEAN_BADGE_PICO && detail[2000u]==25u &&
+                clean_ht_data_length(peer_challenge)==CLEAN_HT_ACK_MPDU && size>=18u)
+                clean_ht_observe_ack(detail,packet+18u,size-18u,peer_challenge);
             if (detail[2000u] == 17u)
                 clean_station_monitor(detail, packet, size, station_target,
                     l->wire->now_us(l->wire->context) - started);
@@ -995,7 +1008,10 @@ static void station_lifecycle_run(clean_loader_t *l, const uint8_t nonce[16]) {
                 l->error = CLEAN_CONTROLLER; l->actual = tx.result; break;
             }
             r->tx_attempts += tx.attempts;
-            if (tx.result == CLEAN_UNICAST_TIMEOUT) ++r->tx_timeouts;
+            if (tx.result == CLEAN_UNICAST_TIMEOUT) {
+                ++r->tx_timeouts;
+                clean_network_radio_timeout(&network,wire->now_us(wire->context));
+            }
             if (tx.result == CLEAN_UNICAST_BUSY) ++r->tx_busy;
             if (tx.attempts) clean_network_sent(&network);
             continue;
@@ -1084,6 +1100,15 @@ static void run(const uint8_t nonce[16]) {
         l.error = CLEAN_INPUT;
     detail[2000u] = nonce[14];
     detail[2001u] = nonce[15];
+    if (CLEAN_BADGE_PICO) {
+        if (nonce[14]!=25u) l.error=CLEAN_INPUT;
+        badger_bytes_store_u32(detail+CLEAN_HT_OBSERVER_DETAIL,CLEAN_HT_OBSERVER_MAGIC);
+    }
+    if (nonce[14] >= 24u && nonce[14] <= 28u) {
+        badger_bytes_store_u32(detail+CLEAN_HT_F2_DETAIL,CLEAN_HT_F2_MAGIC);
+        badger_bytes_store_u32(detail + CLEAN_HT_TIMING_DETAIL, CLEAN_HT_TIMING_MAGIC);
+        badger_bytes_store_u32(detail + CLEAN_HT_TIMING_DETAIL + 4u, clean_request_generation(nonce));
+    }
     badger_bytes_copy(peer_challenge, nonce, sizeof(peer_challenge));
     badger_bytes_copy(station_target, nonce, 6u);
     if (lifecycle_mode()) {
@@ -1152,6 +1177,9 @@ static void run(const uint8_t nonce[16]) {
             badger_bytes_store_u32(detail + CLEAN_AMPDU_BA_RX_DETAIL, CLEAN_AMPDU_BA_RX_MAGIC);
         }
 #endif
+        if (nonce[14] >= 24u && nonce[14] <= 28u)
+            badger_bytes_store_u32(detail + CLEAN_HT_TIMING_DETAIL + 8u,
+                                  l.wire->now_us(l.wire->context) - probe_started);
         if (lifecycle_mode()) station_lifecycle_run(&l, nonce);
         else if (soak_mode()) mac_soak_run(&l, nonce);
         else if (nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE) {
@@ -1169,6 +1197,8 @@ static void run(const uint8_t nonce[16]) {
             uint32_t total = nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE ?
                 CLEAN_HT_AMPDU_PROBE_TX_BYTES : 6u + clean_ht_data_length(nonce);
             uint32_t started = l.wire->now_us(l.wire->context);
+            if (nonce[14] <= 28u)
+                badger_bytes_store_u32(detail + CLEAN_HT_TIMING_DETAIL + 16u, started - probe_started);
             do {
                 if (!(nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE ?
                       clean_ht_ampdu_probe_frame(rx_packet, nonce) :
@@ -1205,6 +1235,9 @@ static void run(const uint8_t nonce[16]) {
                     }
                 }
                 badger_bytes_store_u32(detail + 1096u, 1u);
+                if (nonce[14] <= 28u)
+                    badger_bytes_store_u32(detail + CLEAN_HT_TIMING_DETAIL + 20u,
+                                          l.wire->now_us(l.wire->context) - probe_started);
                 (void)receive_for(&l, 200000u, nonce[14] == 26u ? 26u : 0u);
                 break;
             } while (l.error == CLEAN_OK);
@@ -1303,6 +1336,9 @@ static void run(const uint8_t nonce[16]) {
                 if (l.error == CLEAN_OK) (void)receive_for(&l, 200000u, nonce[14]);
             }
         }
+        if (nonce[14] >= 24u && nonce[14] <= 28u)
+            badger_bytes_store_u32(detail + CLEAN_HT_TIMING_DETAIL + 12u,
+                                  l.wire->now_us(l.wire->context) - probe_started);
         if (l.error == CLEAN_OK && !lifecycle_mode() && clean_write(&l, CLEAN_MBOX + 24u, 3u) &&
             clean_wait_state(&l, 10u, CLEAN_LOADER_STOP_TIMEOUT_US)) l.stage = 8u;
     }
@@ -1387,6 +1423,9 @@ static void run(const uint8_t nonce[16]) {
     if (snapshot && (nonce[14] == 27u || nonce[14] == 28u))
         snapshot = clean_block(&l, CLEAN_HT_FAILURE_ADDR, detail + CLEAN_HT_FAILURE_DETAIL,
                                sizeof(clean_ht_failure_t), 0u);
+    if (snapshot && nonce[14] >= 24u && nonce[14] <= 28u)
+        snapshot = clean_block(&l, CLEAN_TX_START_HANDOFFS_ADDR,
+                               detail + CLEAN_HT_TIMING_DETAIL + 24u, 8u, 0u);
     if (snapshot && nonce[14] == 27u)
         snapshot = clean_block(&l, CLEAN_UNICAST_ADDR + 16u, detail + 696u, 8u, 0u) &&
             clean_block(&l, CLEAN_MAC_TRACE_ADDR +
@@ -1531,11 +1570,16 @@ void bare_main(void) {
     int32_t recovery = badger_schedule_bootsel(CLEAN_BADGE_RECOVERY_MS);
     nametag_clock_snapshot(clock_before);
     clean_boot_error = recovery == 0 ? nametag_clock_reference() : recovery;
+#if CLEAN_BADGE_PICO
+    if (clean_boot_error == 0) clean_boot_error = pr_clock_sys();
+#endif
     if (clean_boot_error == 0)
         clean_boot_error = nametag_clock_frequency(9u, &sys_khz_q5);
     nametag_clock_snapshot(clock_after);
     if (clean_boot_error != 0) while (1) __asm__ volatile("wfi");
+#if !CLEAN_BADGE_PICO
     badger_display_init();
+#endif
     screen("WAITING FOR USB TEST REQUEST", 0u, 0u);
     uint32_t id[2];
     char serial[17], half[9];

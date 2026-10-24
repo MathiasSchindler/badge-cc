@@ -8,6 +8,15 @@ Use [current issues](../issues/README.md) for what remains open.
 
 ## Cross-board and capability regressions
 
+- [R08 retry and pause measurements](RETRY_AND_STALL_R08_2026-10-24.md):
+  original retry reanalysis, 120 fresh raw exchanges, measured desktop/device
+  timing, one passing network control, retained startup failure and restoration.
+- [HT loss-stage follow-up](HT_ROOT_CAUSE_2026-10-24.md):
+  32 separately authorized trials, retained B-to-A MCS7 misses, correlated
+  F2 diagnostics, rejected-SHM freshness limits and verified restoration.
+- [R07 intermittent HT investigation](HT_RECEPTION_R07_2026-10-24.md):
+  strict nonaggregate evidence, passive Pico calibration, retained misses,
+  beacon/report ownership fix, independent-ACK limitations and restoration.
 - [R06 aggregate DMA repair](DMA_REPAIR_R06_2026-10-24.md):
   format-zero fault, next-MPDU command and physical DMA layout, preserved
   ownership/completion state, strict three-body/bad-FCS checks and restoration.

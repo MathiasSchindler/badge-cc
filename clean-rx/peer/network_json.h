@@ -23,6 +23,23 @@ static inline void clean_network_print(const clean_network_report_t *r) {
     for (uint32_t i=0u;i<6u;++i) printf("%s%02x",i?":":"",r->peer[i]);
     fputs("\",\"session\":\"",stdout);
     for (uint32_t i=0u;i<6u;++i) printf("%02x",r->session[i]);
-    fputs("\"}",stdout);
+    fputs("\",\"diagnostics\":{\"available\":",stdout);
+    if (r->metrics_magic != CLEAN_NETWORK_METRICS_MAGIC) { fputs("false}}",stdout); return; }
+    printf("true,\"ack_attempts\":[%u,%u,%u,%u],\"latency_total_us\":%llu,"
+           "\"latency_histogram\":[%u,%u,%u,%u],\"service_gaps\":%u,"
+           "\"event_count\":%u,\"events_truncated\":%s,\"radio_timeouts\":",
+           r->ack_attempts[0],r->ack_attempts[1],r->ack_attempts[2],r->ack_attempts[3],
+           (unsigned long long)(((uint64_t)r->latency_total_high << 32u) | r->latency_total_low),
+           r->latency_histogram[0],r->latency_histogram[1],r->latency_histogram[2],
+           r->latency_histogram[3],r->service_gaps,r->event_count,
+           r->event_count > CLEAN_NETWORK_EVENTS ? "true" : "false");
+    if (r->role) printf("%u",r->radio_timeouts); else fputs("null",stdout);
+    fputs(",\"events\":[",stdout);
+    uint32_t first = r->event_count > CLEAN_NETWORK_EVENTS ? r->event_count - CLEAN_NETWORK_EVENTS : 0u;
+    for (uint32_t i=first;i<r->event_count;++i) {
+        uint32_t e=r->events[i%CLEAN_NETWORK_EVENTS];
+        printf("%s{\"kind\":%u,\"elapsed_ms\":%u}",i==first?"":",",e>>30u,e&0x3fffffffu);
+    }
+    fputs("]}}",stdout);
 }
 #endif

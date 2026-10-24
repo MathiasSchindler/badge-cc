@@ -33,6 +33,27 @@ not merely another successful finite fixture.
 [isolated RF hints](../experiments/rx/RF_HINT_CONTROLS.md) and
 [HT20 investigation sequence](../experiments/ht20/README.md).
 
+The [R07 investigation](../experiments/HT_RECEPTION_R07_2026-10-24.md)
+retains two additional target misses without positive independent TX proof.
+The replacement passive source Pico positively calibrated HT observation:
+12/12 initial target pairs and 1/1 fresh repeat passed, with 11/12 initial
+independent HT captures. The Pico also missed one fixture that both target
+endpoints proved successful. A silent observer is not proof of no RF;
+passive legacy ACK acquisition remains uncalibrated.
+
+Nonaggregate snapshots/oracles now reject incomplete/stale evidence and
+separate delivery, corrupt capture and ACK failure stages. Post-run analysis
+also found legacy beacon entries overwriting HT timing/optional ACK records.
+The separate [32-trial loss-stage follow-up](../experiments/HT_ROOT_CAUSE_2026-10-24.md)
+RF-tested that repair: all 92 snapshots/timing records survived. Initial
+target acceptance was 9/12, followed by 16/16 additional fresh ACK cells;
+three B-to-A MCS7 misses remain. Both receivers retained matching early
+HT-SIG/bad-FCS candidates but no correlated F2. The rejected ACK60 SHM
+record does not prove complete current-frame copy or on-air corruption.
+Next evidence must establish rejected-byte copy provenance and distinguish
+TX waveform failure from shared source-built RX behavior. Independent ACK
+acquisition remains uncalibrated; reliability and R07 acceptance remain open.
+
 ### HT aggregate and Block ACK
 
 **Status:** not integrated/qualified for general station operation.
@@ -63,6 +84,26 @@ retaining failed controls and independent physical evidence.
 **Records:** [completion/recovery](../experiments/mac/COMPLETION_AND_RECOVERY.md),
 [fragmentation](../experiments/mac/LEGACY_FRAGMENTATION.md) and
 [EDCA/WMM/protected receive](../experiments/mac/EDCA_AND_WMM.md).
+
+### Retry, desktop pauses and controller startup
+
+**Status:** R08 measurements are implemented; acceptance remains partial.
+The [R08 campaign](../experiments/RETRY_AND_STALL_R08_2026-10-24.md)
+accounted for the 31 historical retried exchanges and completed 120/120 fresh
+raw exchanges, 117 first-attempt. A passing 30-second pause-disabled network
+pair still retried without any >=250 ms bound service gap. Historical
+`host_stalls` were deliberate desktop polling pauses, not firmware stalls.
+
+The pause-enabled station then failed at controller startup (loader stage 5,
+error 5, mailbox state `0xff`) before networking or any station desktop pause.
+The campaign stopped without repeats; both badge-B network controls were not
+run. All original flashes were independently verified restored.
+
+**Next evidence:** obtain new authorization to investigate that startup fault
+and complete loaded pause-off/on comparisons on both badges. Independent
+physical RF-loss evidence is still needed; MAC ACK timeouts and application
+retries alone do not locate RF loss. Truncated event timelines are explicitly
+unavailable for whole-run alignment. Do not change retry policy on this basis.
 
 ### Runtime profile hardware qualification
 

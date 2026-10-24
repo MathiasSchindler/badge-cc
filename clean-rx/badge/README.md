@@ -11,6 +11,13 @@ experimental WPA2-PSK/CCMP supplicant and protected round-trip trial, but does
 not replace the default networking targets. Host USB collection uses the
 repository's existing libusb dependency.
 
+The isolated `BADGE_PICO=1` option builds a headless, receive-only Pico 2 W
+HT observer, not a general-purpose badge application for that board.
+It admits only mode 25 and uses the Pico system-clock helper; the default
+badge build and its TFT behavior remain unchanged. Follow the
+[observer build/evidence procedure](../dev-doc/guides/HOST_TOOLS.md#passive-independent-witness)
+and never cross-flash board images.
+
 ## B1 persistent open-station lifecycle
 
 The opt-in `--station-lifecycle BSSID SECONDS` mode maintains an open,
@@ -154,7 +161,7 @@ per elapsed second after the initial five seconds, in each direction.
 Only a real run of at least 3600 seconds can set `soak_qualified:true`;
 the native virtual-hour test is explicitly not RF evidence.
 
-Network storage is fixed: each engine uses 13,868 bytes, including two
+Network storage is fixed: each engine uses 13,940 bytes, including two
 6080-byte rings and reusable packet construction space, with no heap.
 Full-sized packets do not allocate full-sized temporary stack arrays in
 the network engine. Compiler stack-usage files accompany both firmware

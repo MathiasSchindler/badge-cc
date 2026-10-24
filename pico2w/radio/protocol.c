@@ -78,6 +78,7 @@ int pr_begin(pr_link_t *l, uint8_t destination, const uint8_t data[PR_DATA], uin
     l->active = 1u;
     l->attempts = 0u;
     l->retry_at = now;
+    l->began_at = now; l->first_tx_at = l->completed_at = 0u;
     return 1;
 }
 
@@ -90,6 +91,7 @@ int pr_receive(pr_link_t *l, const uint8_t *mpdu, uint32_t size, uint32_t now) {
             m.session != l->pending.session || m.sequence != l->pending.sequence ||
             !badger_bytes_equal(m.data, l->pending.data, PR_DATA)) return 0;
         l->active = 0u;
+        l->completed_at = now;
         ++l->confirmed;
         return 2;
     }
@@ -131,6 +133,7 @@ int pr_next(pr_link_t *l, uint32_t now, pr_message_t *m) {
         return 0;
     }
     badger_bytes_copy((uint8_t *)m, (const uint8_t *)&l->pending, sizeof(*m));
+    if (!l->attempts) l->first_tx_at = now;
     ++l->attempts;
     l->retry_at = now + 250000u + 17000u * l->node;
     return 1;

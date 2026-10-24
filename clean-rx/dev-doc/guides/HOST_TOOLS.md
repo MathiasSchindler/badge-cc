@@ -65,6 +65,62 @@ node --test clean-rx/tools/usb-orchestration.test.cjs
 
 These tests use fake processes/USB stubs and do not enumerate or flash hardware.
 
+## Retry, latency and host-pause measurements
+
+```sh
+node clean-rx/tools/reliability.cjs cross EXCHANGES.jsonl
+node clean-rx/tools/reliability.cjs network PREFIX SECONDS
+node --test clean-rx/tools/reliability.test.cjs
+```
+
+These are offline commands. The cross-board reader reconstructs both complete
+80-byte legacy request/reply frames, addresses, fresh challenges and FCS before
+reporting each directed link's first-attempt rate, six-bin completed-attempt
+distribution and host-observed latency median/p95/max. New radio-lab collectors
+also archive both complete traces and source-local request/reply timing at
+trace offset 384, magic `0x314d3852`. Host collection latency and on-device
+round-trip time are separate quantities. Older archives lack device timing;
+that field is unavailable, not reconstructed from desktop polling.
+
+For networking, `host_stalls` retains its historical name but counts
+**deliberately injected desktop polling pauses**, not detected firmware
+starvation. Both collectors now retain each pause's actual monotonic begin/end
+in `host_observation`. `CLEAN_RX_NETWORK_HOST_PAUSES=0` disables these pauses
+for a control; default/`1` retains the original two-second pauses and cadence.
+No retry policy or normal polling interval changes. Invalid values fail
+explicitly before a network command is submitted.
+
+The original 152-byte network report prefix is unchanged. A bounded 72-byte
+extension (magic `0x314d3842` at relative offset 152) fits both the unchanged
+2,092-byte station and 320-byte AP archives:
+
+| Relative offset | Evidence |
+| --- | --- |
+| 156 | Four acknowledged-message attempt counts, one through four |
+| 172 | 64-bit accumulated application round-trip latency |
+| 180 | Four latency bins: <=10 ms, <=250 ms, <=1 s, >1 s |
+| 196 | Bound network service gaps >=250 ms |
+| 200 | Source-built station MAC ACK timeouts; unavailable for the vendor AP |
+| 204 | Total diagnostic event count |
+| 208 | Last four events: high two bits are retry-enqueued=1, service-gap-end=2 or MAC-ACK-timeout=3; low 30 bits are elapsed milliseconds |
+
+Latency begins at initial application enqueue, not PHY transmission. Attempt
+histograms count acknowledged application messages, not firmware retries;
+first-attempt rates use all generated messages as denominator. The existing
+maximum service interval remains separately reported in `service_max_us`.
+AP timeline recording starts after session binding, because binding establishes
+its elapsed-time origin. Ring overflow is explicit and makes whole-run event
+correlation unavailable; it never becomes a zero-event timeline.
+
+The analyzer checks raw/JSON agreement, histogram/counter totals and measured
+pause intervals, retaining old metrics as unavailable when their marker is
+absent. Limits are the existing six cross-board attempts, four network
+application attempts and two-second maximum network service interval. No new
+first-attempt reliability target is invented. Shared-millisecond service-gap/
+retry/ACK-timeout observations are not a causal RF-loss proof. Desktop and
+device clocks are not synchronized, and a MAC ACK timeout alone cannot locate
+data-versus-ACK loss; an independent RF loss timeline is still required.
+
 ## WPA2 collection
 
 The badge application's independent-peer receive diagnostic is RX-only.
@@ -287,6 +343,158 @@ JSON and a nonzero exit status. The
 completed with strict passing evidence for all 44 cells after two fresh
 repeats; initial acceptance was 42/44. This does not qualify loss-free
 reception, DMA or general HT/BA operation.
-The later [R06 campaign](../experiments/DMA_REPAIR_R06_2026-10-24.md)
+
+## Nonaggregate HT evidence
+
+Data/extended A-MSDU and normal-ACK collectors require a complete, frozen,
+nonce/generation-bound snapshot of the mailbox, multi-capture and HT sections.
+Unavailable evidence produces `snapshot.valid:false`, `capture_available:false`
+and null reception/submission fields, not zero captures. The standalone
+inspection command is:
+
+```sh
+build/clean-rx/badge/collector --inspect-ht REPORT.bin CHALLENGE_HEX_28
+node clean-rx/tools/ht_verify.cjs EVIDENCE_PREFIX
+```
+
+Use the matching diagnostic selection/image/collector. `--inspect-ht` handles
+modes 24-28; aggregate inspection remains separate. The verifier checks raw
+request identity, generation, configuration, completion, retained payload bytes,
+the full-payload validation summary/FCS, metadata and returned ACK evidence
+against JSON. Long-frame reports retain a prefix, not a complete MPDU archive:
+their full-byte comparison still runs on the badge. Data/ACK pairing no longer
+prints a hard-coded successful summary. A receiver's fresh validated fixture
+can confirm transmission; local submission alone cannot.
+
+Modes 24-28 reserve the following 32 bytes of the otherwise unused post-failure
+report gap. Aggregate and station layouts are unchanged:
+
+| Offset | Field |
+| --- | --- |
+| 1800 | Timing magic `0x31545448` |
+| 1804 | Controller request generation |
+| 1808 | Post-setup receive-service window beginning |
+| 1812 | Receive-service window end, before normal stop |
+| 1816 | TX command loop beginning; zero if not reached |
+| 1820 | Submitted command/result accepted; zero if not reached |
+| 1824 | Stopped PHY-start handoff counter |
+| 1828 | Stopped completion handoff counter |
+
+Times are local microsecond deltas from probe start. The two handoff counters
+are diagnostic progress, not RF witnesses. JSON also records monotonic desktop
+USB-submit brackets and report arrival. These clocks are not synchronized
+between boards; adding the desktop submit time to a local delta does **not**
+prove receive/transmit overlap. The existing 200 ms staging lead is not a
+radio-arm handshake, and has not been increased as a presumed reliability fix.
+
+### Locating a nonaggregate receive loss
+
+```sh
+node clean-rx/tools/ht_verify.cjs --diagnose EVIDENCE_PREFIX
+```
+
+This retains the ordinary strict pair result and adds stage evidence for
+TX, target RX and an optional source-built observer. New images reserve a
+92-byte `ht_f2` record at offset 1860, ending before generic counters at 1960:
+magic `0x31463248`, correlated count, first packet size/time, calculated and
+received full-packet FCS, four metadata bytes and the first 64 MPDU bytes.
+Correlation requires the fresh transmitter address and sequence. Capture
+does not require valid FCS or expected HT metadata, so a rejected host fixture
+is not mistaken for missing radio reception. Later correlated arrivals
+increment the count without replacing the first record.
+
+Missing records in older images are unavailable, not zero observations.
+Long-frame records retain a prefix and full-packet CRC summary, not a
+complete archive. A matching early HT-SIG is only a rate/length candidate:
+it has no MAC identity and does not prove reception of the requested fixture.
+The existing ACK60 rejection record additionally retains the rejected bytes
+twice; nonce-correlated bad-FCS bytes, changing reads, controller capture
+without correlated F2, and correlated F2 rejected by the host are distinct
+stages. Rejection bytes are SHM observations, not qualified RXE FIFO captures:
+`shm_copy_freshness_proven` remains false even when the two reads match.
+Short rejected frames can bypass the final good-frame copy; the standard
+`ht-response` image has a 128-byte stream threshold, above ACK60's 66 RXE
+bytes. Do not interpret bad software FCS on that SHM record as proof of
+on-air corruption. These diagnostics do not change the controller RX/TX path or relax
+pair acceptance. An unexplained absence stays unexplained.
+
+### Passive independent witness
+
+The explicit `BADGE_PICO=1` build is a **receive-only Pico 2 W diagnostic**,
+not the normal badge image or a replacement for the existing Pico application.
+It qualifies the reference/system clocks using the existing Pico helper,
+does not initialize/write the TFT, and rejects every radio mode except
+Data RX (25). It cannot enable station responses or submit a TX fixture.
+The default `BADGE_PICO=0` retains the badge behavior.
+
+Build isolated controller, Pico observer and matching collector:
+
+```sh
+make -C clean-rx/src PROFILE=diagnostic SELECTION=ht-response \
+  BUILD=../../build/clean-rx/observer-controller
+make -C clean-rx/badge SELECTION=ht-response BADGE_PICO=1 \
+  BUILD=../../build/clean-rx/pico-ht-observer \
+  CONTROLLER_BIN=../../build/clean-rx/observer-controller/cyw43_rx_fw.bin all test
+```
+
+Never cross-flash badge/Pico images. Preserve and restore complete originals
+under the hardware-trial protocol. The observer collector uses the ordinary
+`SERIAL EVIDENCE_BIN CHANNEL --ht-data-rx CHALLENGE_HEX_28 MCS LENGTH` interface.
+It publishes only the final, frozen 2,092-byte report; there is no live-ready
+snapshot or RF-arm handshake. Start it alongside the target RX before TX,
+calibrate positive reception first, and retain the actual timing evidence.
+Use `witness_kind:"source"` in the pair configuration (optionally binding
+`witness_build` as well).
+
+For Data28 and ACK60, the oracle verifies the complete captured HT-SIG,
+requested MCS, MPDU and FCS. For A-MSDU3869 it additionally requires the
+Pico's full-fixture validation summary and retained prefix; the complete
+long MPDU is checked on-device, not entirely archived. ACK60 is deliberately
+observed in passive mode 25: the C collector correctly reports that it is
+**not** the ordinary Data60 fixture, while the separate oracle checks the
+actual ACK-requesting wire fixture.
+
+The unused nonaggregate report gap additionally contains:
+
+| Offset | Field |
+| --- | --- |
+| 1832 | First passive ACK magic `0x31574148`; zero if not recorded |
+| 1836 | Matching complete ACK count |
+| 1840 | First matching 14-byte ACK, including its FCS |
+| 1856 | Receive-only image marker `0x31534f48` |
+
+Legacy beacon-table writes are excluded from these HT modes: the old table
+shares bytes 1640-1959 with these diagnostics. The
+[R07 report](../experiments/HT_RECEPTION_R07_2026-10-24.md)
+records the discovered overlap and its original native-only validation.
+The separately authorized [loss-stage follow-up](../experiments/HT_ROOT_CAUSE_2026-10-24.md)
+RF-tested the repair, retaining all 92 complete snapshots/timing records.
+
+ACK recording requires a complete valid-FCS control frame addressed to the
+fresh transmitter MAC. The oracle checks those bytes and zero TX attempts,
+submissions and ACK-response configuration. A zero passive ACK count is
+not proof that no ACK was transmitted. Fresh MAC identities must not be reused.
+This third physical radio shares the source-built receiver implementation;
+it does not establish vendor interoperability or physical SIFS timing.
+The R07 campaign positively calibrated HT frame observation, **not**
+passive legacy ACK acquisition. Do not treat its zero ACK records as
+qualified observations of absent responses.
+
+`ht_verify.cjs` optionally consumes matching `-witness.bin`/`-witness.json`
+files. It distinguishes a complete witnessed frame missed by the target,
+a correlated corrupt capture, unrelated capture, missing/only-started ACK,
+an independently witnessed ACK not returned to TX, and unavailable evidence.
+Without a positive receiver/witness observation, missing TX versus missing RX
+remains explicitly unresolved. An absent passive witness never proves no RF.
+Intentional omitted-TX/omitted-RX controls must be declared in configuration.
+
+Native tests exercise complete ACK bytes, truncation and stale identity.
+Badge tests run the dependency-free Node oracle against the actual C decoder
+for every MCS and all three endpoint/observer fixture types, including
+long-frame FCS agreement, malformed snapshots, passivity and raw/JSON
+disagreements. Read-only decoding of the abandoned experimental 320-byte
+vendor witness remains for auditing archived R07 trials; its monitor modes
+are not maintained tools.
+The [R06 campaign](../experiments/DMA_REPAIR_R06_2026-10-24.md)
 validates the repaired finite DMA fixture and bad-FCS controls; retained
 empty captures still prevent a loss-free reception claim.

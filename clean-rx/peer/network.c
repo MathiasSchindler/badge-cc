@@ -27,6 +27,11 @@ static int push(clean_network_queue_t *q, const uint8_t *p, uint32_t size) {
 static void pop(clean_network_queue_t *q) {
     q->head = (q->head + 1u) % CLEAN_NETWORK_SLOTS; --q->count;
 }
+static void event(clean_network_t *n, uint32_t kind, uint32_t now) {
+    clean_network_report_t *r = &n->report;
+    r->events[r->event_count++ % CLEAN_NETWORK_EVENTS] =
+        (kind << 30u) | ((now - n->started) / 1000u);
+}
 static int enqueue(clean_network_t *n, const uint8_t *p, uint32_t size) {
     if (!push(&n->tx, p, size)) { ++n->report.tx_full; return 0; }
     if (n->tx.count > n->report.tx_high) n->report.tx_high = n->tx.count;
@@ -87,6 +92,7 @@ void clean_network_init(clean_network_t *n, uint8_t role, const uint8_t mac[6],
                         uint32_t epoch, uint32_t seconds, uint32_t now) {
     badger_bytes_zero((uint8_t *)n, sizeof(*n));
     n->report.magic = CLEAN_NETWORK_MAGIC; n->report.role = role; n->report.seconds = seconds;
+    n->report.metrics_magic = CLEAN_NETWORK_METRICS_MAGIC;
     if (role > 1u || !mac_valid(mac) || seconds < 10u || seconds > 3900u ||
         (role && (!mac_valid(peer) || !epoch))) { n->report.error = 1u; return; }
     badger_bytes_copy(n->report.mac, mac, 6u); badger_bytes_copy(n->report.peer, peer, 6u);
@@ -171,6 +177,12 @@ static int receive(clean_network_t *n, const uint8_t *p, uint32_t size, uint32_t
         if (n->pending && seq == n->pending) {
             uint32_t latency = now - n->send_at;
             if (latency > r->latency_max_us) r->latency_max_us = latency;
+            ++r->ack_attempts[n->attempts - 1u];
+            uint32_t before = r->latency_total_low;
+            r->latency_total_low += latency;
+            r->latency_total_high += r->latency_total_low < before;
+            ++r->latency_histogram[latency <= 10000u ? 0u : latency <= 250000u ? 1u :
+                                    latency <= 1000000u ? 2u : 3u];
             ++r->latency_samples;
             if (!(seq & 1u)) ++r->large_acknowledged;
             n->pending = 0u; ++r->acknowledged;
@@ -193,6 +205,7 @@ void clean_network_step(clean_network_t *n, uint32_t now) {
     if (r->error || r->state != 1u) return;
     uint32_t gap = now - n->last_service;
     if (gap > r->service_max_us) r->service_max_us = gap;
+    if (gap >= 250000u && r->bound) { ++r->service_gaps; event(n, 2u, now); }
     n->last_service = now; r->elapsed_us = now - n->started;
     if (n->rx.count && receive(n, n->rx.frame[n->rx.head], n->rx.length[n->rx.head], now)) {
         pop(&n->rx); ++r->rx_packets;
@@ -209,6 +222,7 @@ void clean_network_step(clean_network_t *n, uint32_t now) {
             uint32_t length = udp(n, request, n->pending, r->role, 0u);
             if (enqueue(n, request, length)) {
                 ++n->attempts; ++r->retries; n->pending_at = now;
+                event(n, 1u, now);
             }
         }
     }
@@ -234,6 +248,11 @@ const uint8_t *clean_network_output(const clean_network_t *n, uint32_t *size) {
 void clean_network_sent(clean_network_t *n) {
     if (!n->tx.count) { n->report.error = 2u; return; }
     pop(&n->tx); ++n->report.tx_packets;
+}
+void clean_network_radio_timeout(clean_network_t *n, uint32_t now) {
+    ++n->report.radio_timeouts;
+    n->report.elapsed_us=now-n->started;
+    event(n,3u,now);
 }
 int clean_network_valid(const clean_network_report_t *r) {
     return r->magic == CLEAN_NETWORK_MAGIC && r->state == 2u && !r->error &&

@@ -50,11 +50,17 @@ int main(void) {
     assert(b.report.large_generated==b.report.large_acknowledged);
     assert(a.report.latency_samples==a.report.acknowledged);
     assert(b.report.latency_samples==b.report.acknowledged);
+    assert(a.report.metrics_magic==CLEAN_NETWORK_METRICS_MAGIC);
+    assert(a.report.ack_attempts[0]==a.report.acknowledged);
+    assert(b.report.ack_attempts[0]==b.report.acknowledged);
+    assert(a.report.latency_histogram[0]+a.report.latency_histogram[1]+
+        a.report.latency_histogram[2]+a.report.latency_histogram[3]==a.report.acknowledged);
     assert(!a.report.lost && !b.report.lost && !a.report.corrupt && !b.report.corrupt);
     assert(a.report.idle_periods==180u && b.report.idle_periods==180u);
     a.report.state=b.report.state=2u;
     assert(clean_network_valid(&a.report) && clean_network_valid(&b.report));
     init(0xffff0000u,30u);
+    b.report.latency_total_low=0xfffffff0u;
     for (uint32_t elapsed=0u;elapsed<2000000u;elapsed+=10000u) {
         uint32_t now=0xffff0000u+elapsed;
         clean_network_step(&a,now); clean_network_step(&b,now);
@@ -62,6 +68,7 @@ int main(void) {
     }
     assert(a.report.duplicates && !a.report.corrupt && !b.report.corrupt);
     assert(a.report.delivered==b.report.generated && b.report.delivered==a.report.generated);
+    assert(b.report.latency_total_high==1u);
     init(0u,30u);
     uint8_t benign[14]={0};
     for (uint32_t i=0u;i<4u;++i) assert(clean_network_input(&a,benign,sizeof(benign)));
@@ -89,6 +96,15 @@ int main(void) {
     badger_bytes_store_u32(frame+length-4u,diag_crc32(frame+6u,length-10u));
     assert(clean_network_ethernet(decoded,frame+6u,length-6u,sta,ap)==90u);
     uint8_t original[90]; memcpy(original,packet,90u);
+    init(0u,30u);
+    clean_network_step(&a,1000000u);
+    assert(a.report.service_max_us==1000000u);
+    assert(!a.report.service_gaps && !a.report.event_count);
+    memcpy(a.report.peer,sta,6u); a.neighbor=1u;
+    assert(clean_network_input(&a,original,90u));
+    clean_network_step(&a,1000001u);
+    assert(a.report.bound && a.started==1000001u);
+    assert(!a.report.service_gaps && !a.report.event_count);
     for (uint32_t i=0u;i<90u;++i) {
         memcpy(corrupt,original,90u); corrupt[i]^=1u;
         init(0u,30u);
@@ -130,6 +146,8 @@ int main(void) {
         if (b.tx.count) clean_network_sent(&b);
     }
     assert(b.report.lost==1u && b.report.retries==3u);
+    assert(b.report.event_count==8u && b.report.service_gaps==5u);
+    assert((b.report.events[7u%CLEAN_NETWORK_EVENTS]>>30u)==2u);
     b.report.state=2u; assert(!clean_network_valid(&b.report));
     uint8_t maximum[CLEAN_NETWORK_MTU]={0};
     assert(!clean_network_input(&a,maximum,13u));

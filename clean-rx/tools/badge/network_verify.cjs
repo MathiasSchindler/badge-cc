@@ -5,6 +5,54 @@ const fields = ['magic','state','error','seconds','elapsed_us','generated','ackn
     'delivered','replies','retries','lost','duplicates','corrupt','stale','arp_tx','arp_rx',
     'tx_full','rx_full','tx_high','rx_high','tx_packets','rx_packets','abandoned',
     'idle_periods','service_max_us','tx_hash','rx_hash'];
+function metrics(n) {
+    const d=n.diagnostics;
+    if (!d || !d.available) return {available:false};
+    assert.ok(Number.isInteger(n.generated) && n.generated>=n.acknowledged);
+    for (const key of ['ack_attempts','latency_histogram']) {
+        assert.equal(d[key].length,4);
+        d[key].forEach(x=>assert.ok(Number.isInteger(x) && x>=0 && x<=0xffffffff));
+        assert.equal(d[key].reduce((a,b)=>a+b,0),n.acknowledged,key);
+    }
+    assert.ok(Number.isSafeInteger(d.latency_total_us) && d.latency_total_us>=0);
+    assert.ok(d.latency_total_us<=n.latency_max_us*n.latency_samples);
+    assert.ok(d.ack_attempts.reduce((sum,count,i)=>sum+i*count,0)<=n.retries);
+    assert.equal(d.events.length,Math.min(d.event_count,4));
+    assert.equal(d.events_truncated,d.event_count>4);
+    if(n.role)assert.ok(Number.isInteger(d.radio_timeouts) && d.radio_timeouts>=0);
+    else assert.equal(d.radio_timeouts,null);
+    assert.equal(d.event_count,n.retries+d.service_gaps+(d.radio_timeouts??0));
+    for (const e of d.events) {
+        assert.ok([1,2,3].includes(e.kind));
+        assert.ok(Number.isInteger(e.elapsed_ms) && e.elapsed_ms>=0 &&
+            e.elapsed_ms<=Math.floor(n.elapsed_us/1000));
+    }
+    const sums=d.events.filter(e=>e.kind===1).map(e=>e.elapsed_ms);
+    return {available:true,acknowledged:n.acknowledged,first_attempt:n.generated?d.ack_attempts[0]/n.generated:null,
+        attempts:d.ack_attempts,latency_mean_us:n.latency_samples?d.latency_total_us/n.latency_samples:null,
+        latency_max_us:n.latency_max_us,latency_histogram:d.latency_histogram,
+        service_gap_max_us:n.service_max_us,service_gaps:d.service_gaps,radio_timeouts:d.radio_timeouts,
+        event_timeline_complete:!d.events_truncated,
+        retry_gap_same_ms:d.events_truncated?null:sums.filter(t=>
+            d.events.some(e=>e.kind===2 && e.elapsed_ms===t)).length,
+        radio_gap_same_ms:d.events_truncated?null:d.events.filter(e=>e.kind===3 &&
+            d.events.some(g=>g.kind===2 && g.elapsed_ms===e.elapsed_ms)).length};
+}
+function host(n) {
+    const h=n.host_observation;
+    if (!h) return {available:false,pause_count:n.host_stalls,duration_us:null};
+    assert.equal(typeof h.pauses_enabled,'boolean');
+    assert.equal(h.pause_target_us,2000000);
+    assert.equal(h.pauses.length,n.host_stalls);
+    let end=0;
+    for (const p of h.pauses) {
+        assert.ok(Number.isSafeInteger(p.begin_us) && Number.isSafeInteger(p.end_us));
+        assert.ok(p.begin_us>=end && p.end_us>=p.begin_us);end=p.end_us;
+    }
+    if (!h.pauses_enabled) assert.equal(h.pauses.length,0);
+    return {available:true,pauses_enabled:h.pauses_enabled,pause_count:h.pauses.length,
+        duration_us:h.pauses.map(p=>p.end_us-p.begin_us)};
+}
 function verify(station, ap, seconds) {
     assert.equal(station.valid, true, 'station rejected continuous data');
     assert.equal(ap.valid, true, 'independent AP rejected continuous data');
@@ -29,14 +77,18 @@ function verify(station, ap, seconds) {
         assert.ok(n.elapsed_us>=seconds*1000000-1000000,'run ended before requested interval');
         assert.ok(n.idle_periods>=Math.floor(seconds/20),'missing scheduled idle periods');
         assert.ok(n.service_max_us>0 && n.service_max_us<=2000000,'network service starved');
+        metrics(n);
     }
     assert.equal(s.generated,a.delivered); assert.equal(a.generated,s.delivered);
     assert.equal(s.large_generated,a.large_delivered);
     assert.equal(a.large_generated,s.large_delivered);
     assert.equal(s.tx_hash,a.rx_hash); assert.equal(a.tx_hash,s.rx_hash);
     if (seconds>=30) {
-        assert.ok(station.host_stalls>=Math.floor(seconds/30) &&
-            ap.host_stalls>=Math.floor(seconds/30),'missing actual host stalls');
+        for (const record of [station,ap]) {
+            const h=host(record);
+            if (!h.available || h.pauses_enabled)
+                assert.ok(record.host_stalls>=Math.floor(seconds/30),'missing actual host stalls');
+        }
         assert.ok(s.idle_periods && a.idle_periods,'missing idle periods');
     }
 }
@@ -53,17 +105,36 @@ function archive(path,offset,n,size) {
     assert.equal(raw.readUInt32LE(offset+128),n.epoch);
     ['large_generated','large_acknowledged','large_delivered','latency_max_us','latency_samples']
         .forEach((key,i)=>assert.equal(raw.readUInt32LE(offset+132+i*4),n[key],key));
+    if (raw.readUInt32LE(offset+152)===0x314d3842) {
+        const d=n.diagnostics;assert.equal(d?.available,true);
+        assert.deepEqual(d.ack_attempts,[0,1,2,3].map(i=>raw.readUInt32LE(offset+156+i*4)));
+        assert.equal(BigInt(d.latency_total_us),raw.readBigUInt64LE(offset+172));
+        assert.deepEqual(d.latency_histogram,[0,1,2,3].map(i=>raw.readUInt32LE(offset+180+i*4)));
+        assert.equal(d.service_gaps,raw.readUInt32LE(offset+196));
+        assert.equal(d.radio_timeouts,n.role?raw.readUInt32LE(offset+200):null);
+        if(!n.role)assert.equal(raw.readUInt32LE(offset+200),0);
+        assert.equal(d.event_count,raw.readUInt32LE(offset+204));
+        const events=[];
+        for(let i=Math.max(0,d.event_count-4);i<d.event_count;++i) {
+            const word=raw.readUInt32LE(offset+208+(i%4)*4);
+            events.push({kind:word>>>30,elapsed_ms:word&0x3fffffff});
+        }
+        assert.deepEqual(d.events,events);metrics(n);
+    } else assert.ok(!n.diagnostics?.available,'metrics claimed without a raw marker');
     if (size===2048) {
         assert.equal(raw.readUInt32LE(8),0,'station radio error');
         assert.equal(raw[2000],33,'station mode');
         assert.equal(raw.readUInt32LE(612),1,'station cleanup');
         assert.equal(raw.readUInt32LE(620),0,'station elapsed high word');
         assert.ok(raw.readUInt32LE(616)>=n.seconds*1000000,'station deadline not reached');
+        if(n.diagnostics?.available)
+            assert.equal(n.diagnostics.radio_timeouts,raw.readUInt32LE(592),'MAC ACK timeout counters');
     } else {
         assert.equal(raw.readUInt32LE(84),4,'AP mode');
         assert.ok(n.elapsed_us>=n.seconds*1000000,'AP deadline not reached');
     }
 }
+if (require.main===module) {
 if (process.argv[2]==='--self-test') {
     const n={magic:0x324e5342,state:2,error:0,seconds:30,elapsed_us:30000000,generated:100,
         acknowledged:100,delivered:100,lost:0,corrupt:0,abandoned:0,rx_full:0,tx_high:4,
@@ -121,3 +192,5 @@ if (process.argv[2]==='--self-test') {
         station_retries:s.network.retries,ap_retries:a.network.retries,
         station_host_stalls:s.host_stalls,ap_host_stalls:a.host_stalls}));
 }
+}
+module.exports={verify,archive,metrics,host};

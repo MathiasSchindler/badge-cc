@@ -6,7 +6,14 @@ aggregate failures. R04 is implemented with offline failure-path validation
 and was used in the completed
 [R05 acceptance rerun](HARDWARE_ACCEPTANCE_R05_2026-10-24.md):
 42/44 initial passes, then 2/2 passing fresh repeats. Intermittent reception
-remains unresolved; R06-R10 remain pending.
+remains unresolved. R06 is implemented and bounded-hardware validated.
+The [R07 investigation](HT_RECEPTION_R07_2026-10-24.md) is implemented and
+its 44-trial campaign and separate
+[32-trial loss-stage follow-up](HT_ROOT_CAUSE_2026-10-24.md) complete; reliability/independent-ACK acceptance
+remains open. [R08 measurement tooling](RETRY_AND_STALL_R08_2026-10-24.md)
+is implemented; its bounded campaign stopped after a network startup failure.
+Loaded pause comparisons and physical RF-loss correlation remain open.
+R09-R10 remain pending.
 This is the campaign-specific follow-up list, not a
 replacement for the [functional roadmap](../../../todo.md).
 
@@ -21,8 +28,8 @@ aggregate reliability.
 | R04 | High | **Harden USB orchestration. Implemented; offline failure-path validated.** Replace fixed enumeration sleeps with bounded readiness checks; impose real subprocess deadlines on picotool and collectors. | Delayed enumeration, hung reboot, disconnect and cancellation terminate predictably, retain logs and stop dependent operations. No unbounded subprocess waits. |
 | R05 | High | **Repeat aggregate acceptance after R01-R04. Completed bounded rerun.** SHM 18/18, BA 16/18 initially plus 2/2 passing fresh repeats, both bad-FCS controls 4/4. All 44 cells have a strict passing attempt; initial failures remain retained, not loss-free acceptance. DMA was excluded under R06. | Independently validate delivered bytes, exact bitmaps, duplicate counts and terminal lease release. All-bad reception must complete with zero delivery and zero BA, not merely time out. Preserve every failed attempt. |
 | R06 | High | **Repair the separate DMA `0x8d` fault and missing final body. Implemented; bounded hardware validated.** Correct format-zero admission, the DMA next-MPDU command and its explicit physical layout; freeze descriptor/header/ownership/completion state. | Native regressions reproduce the rejected header and wrong command/layout. Independent three-body checks pass at MCS0/3/7 both directions, with bad-middle/all-bad controls. Retained empty captures and fresh repeats are not loss-free acceptance. |
-| R07 | Medium | **Investigate intermittent HT reception.** Start with the minimum-length Data, extended A-MSDU and clocked-ACK cells that failed initially. | Separate missing transmission, missing reception, corrupt capture and missing ACK using independent evidence. Report first-attempt results separately from successful repeats. |
-| R08 | Medium | **Measure retry and host-stall behavior.** Investigate the 31 retried cross-board exchanges and networking stall events before changing retry policy. | Report per-link first-attempt success, retry distribution, latency and stall duration against predefined limits. Demonstrate whether stalls correlate with RF loss. |
+| R07 | Medium | **Investigate intermittent HT reception. Implemented; bounded campaigns complete, acceptance still open.** Strict frozen/F2 evidence and a calibrated passive source Pico cover the original fixture classes. The ownership repair is RF-tested. Original misses and three new B-to-A MCS7 misses remain unresolved; rejected-byte freshness, TX versus common RX behavior and independent ACK acquisition remain open. | Separate missing transmission, missing reception, corrupt capture and missing ACK using independent evidence. Report first-attempt results separately from successful repeats; do not turn absent/uncalibrated observations into zero RF. |
+| R08 | Medium | **Measure retry and host-stall behavior. Implemented; partial bounded validation.** The 31 historical retries are accounted for; 120/120 fresh raw exchanges and one network control passed. A retained controller startup failure stopped the remaining matrix. Desktop pause and device service-gap measurements are separate; retry policy is unchanged. | Report per-link first-attempt success, retry distribution, latency and stall duration against predefined limits. Demonstrate whether stalls correlate with RF loss; loaded pause comparisons and independent RF-loss correlation remain open. |
 | R09 | Medium | **Add diagnostic-selection preflight.** Detect missing feature gates and image/collector mismatches before starting a positive RF trial. | Fixed-probe tests require the explicit probe gate; intentional disabled-gate controls remain supported and clearly classified. |
 | R10 | Follow-up | **Extend qualification beyond smoke tests.** Longer networking runs, repeated cold boots/recovery, broader channel/rate/length coverage and remaining runtime acceptance. | Agree measurable thresholds first; retain independent peer evidence. Physical SIFS timing, general HT/BA integration and production security remain separate gates. |
 
@@ -192,6 +199,38 @@ All 18 distinct repaired/control cells have independent passing evidence;
 24 accepted pairs and all seven failed attempts are retained.
 Both complete original badge flashes were independently restored and
 byte/hash verified; both badges were left in BOOTSEL.
+
+## R07 implementation and bounded investigation
+
+The [canonical R07 record](HT_RECEPTION_R07_2026-10-24.md) retains all 44
+authorized trials and separates initial cells, fresh repeats, the failed
+vendor-witness calibration and the source-built Pico phase. Nonaggregate
+snapshots/offline verification now reject stale, incomplete and mismatched
+evidence. A receive-only, headless Pico build independently observed fresh
+HT fixtures without transmitting responses.
+
+Target results were 11/12 initially, 11/12 in the separate fresh follow-up,
+1/1 during failed vendor calibration, then 12/12 with the source observer
+plus its 1/1 fresh repeat. Omission controls remain separate. Both complete
+badge flashes and the Pico original were independently restored and verified.
+No first-attempt failure was erased by a later success.
+
+The final native-tested repair also prevents legacy beacon-table writes
+from corrupting nonaggregate HT timing/optional ACK records. That exact
+final image was not RF-run after the trial budget was exhausted.
+Independent passive ACK acquisition was not positively calibrated; the
+original misses still cannot be attributed to TX or RX alone. R07's
+reliability/independent-ACK acceptance stays open, with no additional
+hardware authorization implied.
+
+The separately authorized [loss-stage follow-up](HT_ROOT_CAUSE_2026-10-24.md)
+subsequently used all 32 new slots and RF-tested the ownership repair, with
+92 valid snapshots/timing records and verified restoration of all originals.
+Initial acceptance was 9/12; four additional ACK matrices passed 16/16.
+Three B-to-A MCS7 misses had matching early HT-SIG/bad-FCS candidates on both
+receivers but no correlated F2. The ACK rejection's stable SHM bytes lack
+complete current-copy provenance. Root cause and independent ACK acquisition
+remain open; this is not a firmware reliability fix.
 
 ## Further qualification
 

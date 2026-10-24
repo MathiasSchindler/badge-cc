@@ -19,6 +19,7 @@
 #include "../../badge/station_rx.h"
 #include "../../badge/station_lifecycle.h"
 #include "../../peer/network_json.h"
+#include "../network_host.h"
 #include "../../src/tx_diag.h"
 #include "../../tests/fixtures/mac_soak.h"
 
@@ -323,18 +324,21 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     uint8_t info[12], nonce[16], request[64], report[64], detail[WIFI_TRACE_SIZE];
     uint64_t submit_before = 0u, submit_after = 0u, report_at = 0u;
     int soak = tx == 19u || tx == 20u;
+    clean_network_host_t host;
+    if (tx==CLEAN_NETWORK_MODE && !clean_network_host_init(&host)) return 0;
     if (device == NULL) {
         FILE *file = fopen(path, "rb");
         if (!file) { perror(path); return 0; }
         int valid = fread(detail, 1u, sizeof(detail), file) == sizeof(detail) &&
                     !ferror(file) && fgetc(file) == EOF;
         if (fclose(file)) valid = 0;
-        if (!valid) { fputs("Invalid aggregate evidence file\n", stderr); return 0; }
+        if (!valid) { fputs("Invalid radio evidence file\n", stderr); return 0; }
         tx = detail[2000u]; channel = detail[2001u];
         if (usb_report_u32(detail) != CLEAN_DETAIL_MAGIC ||
-            (tx != CLEAN_HT_AMPDU_PROBE_TX_MODE && tx != CLEAN_HT_AMPDU_PROBE_RX_MODE) ||
+            (tx != CLEAN_HT_AMPDU_PROBE_TX_MODE && tx != CLEAN_HT_AMPDU_PROBE_RX_MODE &&
+             (tx < 24u || tx > 28u)) ||
             channel < 1u || channel > 11u) {
-            fputs("Invalid aggregate evidence file\n", stderr); return 0;
+            fputs("Invalid radio evidence file\n", stderr); return 0;
         }
         memcpy(nonce, challenge, 14u); nonce[14] = tx; nonce[15] = channel;
         goto evidence_ready;
@@ -375,11 +379,10 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         if (!valid) return 0;
     }
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_USB_TEST_ID);
-    if (soak && !monotonic_us(&submit_before)) return 0;
+    if ((soak || (tx>=24u && tx<=28u)) && !monotonic_us(&submit_before)) return 0;
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
-    if (soak && !monotonic_us(&submit_after)) return 0;
+    if ((soak || (tx>=24u && tx<=28u)) && !monotonic_us(&submit_after)) return 0;
     int got = 0;
-    uint32_t host_stalls = 0u;
     uint32_t polls = tx==CLEAN_WPA_REKEY_MODE ? (CLEAN_WPA_REKEY_SECONDS+30u)*10u :
         tx == CLEAN_NETWORK_MODE ? (lifecycle_seconds + 30u) * 10u :
         tx >= 19u ? CLEAN_SOAK_POLLS : 800u;
@@ -389,7 +392,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
             return 0;
         }
         if (tx == CLEAN_NETWORK_MODE && attempt % 100u == 50u) {
-            ++host_stalls; usleep(2000000u);
+            if (!clean_network_host_pause(&host)) return 0;
         }
         int count = libusb_control_transfer(device, 0xc0u, LIVE_USB_WIFI_REPORT, 0, 0,
                                             report, sizeof(report), 1000u);
@@ -402,7 +405,7 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                100000u : tx >= 19u ? CLEAN_SOAK_POLL_US : 10000u);
     }
     if (!got) { fputs("Report deadline\n", stderr); return 0; }
-    if (soak && !monotonic_us(&report_at)) return 0;
+    if ((soak || (tx>=24u && tx<=28u)) && !monotonic_us(&report_at)) return 0;
     if (usb_report_u32(report) != 0x57363255u || report[4] != 1u ||
         report[5] != 0u || report[6] != 64u || report[7] != 0u ||
         usb_report_u32(report + 8u) != USB_REPORT_BUILD_ID ||
@@ -433,7 +436,8 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
 evidence_ready:
     if (!snapshot_result(detail + CLEAN_SNAPSHOT_DETAIL, usb_report_u32(detail + 8u)) &&
-        tx != CLEAN_HT_AMPDU_PROBE_TX_MODE && tx != CLEAN_HT_AMPDU_PROBE_RX_MODE) return 0;
+        tx != CLEAN_HT_AMPDU_PROBE_TX_MODE && tx != CLEAN_HT_AMPDU_PROBE_RX_MODE &&
+        (tx<24u || tx>28u)) return 0;
     if (tx == CLEAN_NETWORK_MODE) {
         clean_network_report_t n;
         clean_lifecycle_report_t life;
@@ -445,9 +449,11 @@ evidence_ready:
             life.connections == life.data_connections;
         printf("{\"test\":\"b2-station-result\",\"valid\":%s,\"build\":\"%08x\","
                "\"radio_error\":%u,\"connections\":%u,\"data_connections\":%u,"
-               "\"host_stalls\":%u,\"network\":",valid?"true":"false",USB_REPORT_BUILD_ID,
-               usb_report_u32(detail + 8u),life.connections,life.data_connections,host_stalls);
-        clean_network_print(&n); puts("}");
+               "\"host_stalls\":%u,\"radio_tx_attempts\":%u,\"radio_tx_timeouts\":%u,"
+               "\"radio_tx_busy\":%u,\"network\":",valid?"true":"false",USB_REPORT_BUILD_ID,
+               usb_report_u32(detail + 8u),life.connections,life.data_connections,host.count,
+               life.tx_attempts,life.tx_timeouts,life.tx_busy);
+        clean_network_print(&n); clean_network_host_print(&host); puts("}");
         if (!valid) fputs("B2 station retained corruption, loss, unsettled data or radio failure\n",stderr);
         return valid;
     }
@@ -824,6 +830,16 @@ evidence_ready:
         int data_mode = tx >= 24u;
         int ack_mode = tx >= 26u;
         int clocked = tx == 28u;
+        if (data_mode && !clean_snapshot_available(detail,nonce,CLEAN_SNAPSHOT_FROZEN |
+                CLEAN_SNAPSHOT_MAILBOX | CLEAN_SNAPSHOT_MULTI | CLEAN_SNAPSHOT_HT)) {
+            printf("{\"mode\":\"ht-data\",\"challenge\":\"");
+            for (uint32_t i=0u;i<14u;++i) printf("%02x",nonce[i]);
+            printf("\",\"snapshot\":{\"valid\":false},\"capture_available\":false,"
+                   "\"tx_submitted\":null,\"fresh_ht_rx\":null,\"fresh_ht_trace\":null,"
+                   "\"rx_captures\":null,\"fresh_return_ack\":null}\n");
+            fputs("HT capture unavailable: incomplete, unfrozen or stale snapshot\n",stderr);
+            return 0;
+        }
         uint32_t expected_length = data_mode ? clean_ht_data_length(nonce) : CLEAN_HT_PROBE_MPDU;
         clean_ht20_config_t config = {0};
         if (tx!=23u && !clean_ht20_configure(&config,expected_length,nonce[13],CLEAN_HT20_MCS_MASK)) {
@@ -913,6 +929,50 @@ evidence_ready:
         printf("\",\"challenge\":\"");
         for (uint32_t i = 0u; i < 14u; ++i) printf("%02x", nonce[i]);
         printf("\"");
+        if (data_mode) {
+            const uint8_t *timing=detail+CLEAN_HT_TIMING_DETAIL;
+            int timing_valid=usb_report_u32(timing)==CLEAN_HT_TIMING_MAGIC &&
+                usb_report_u32(timing+4u)==clean_request_generation(nonce);
+            printf(",\"snapshot\":{\"valid\":true},\"capture_available\":true,"
+                   "\"host_submit_before_us\":%llu,\"host_submit_after_us\":%llu,"
+                   "\"host_report_us\":%llu,\"ht_timing\":{\"valid\":%s,"
+                   "\"listen_begin_us\":%u,\"listen_end_us\":%u,"
+                   "\"command_begin_us\":%u,\"command_end_us\":%u,"
+                   "\"phy_start_handoffs\":%u,\"completion_handoffs\":%u}",
+                   (unsigned long long)submit_before,(unsigned long long)submit_after,
+                   (unsigned long long)report_at,timing_valid?"true":"false",
+                   usb_report_u32(timing+8u),usb_report_u32(timing+12u),
+                   usb_report_u32(timing+16u),usb_report_u32(timing+20u),
+                   usb_report_u32(timing+24u),usb_report_u32(timing+28u));
+            int observer=usb_report_u32(detail+CLEAN_HT_OBSERVER_DETAIL)==CLEAN_HT_OBSERVER_MAGIC;
+            const uint8_t *witness=detail+CLEAN_HT_WITNESS_ACK_DETAIL;
+            printf(",\"observer_only\":%s,\"passive_ack_count\":",observer?"true":"false");
+            if (observer) printf("%u",usb_report_u32(witness+4u)); else printf("null");
+            printf(",\"passive_ack_mpdu\":");
+            if (observer && usb_report_u32(witness)==CLEAN_HT_WITNESS_ACK_MAGIC &&
+                usb_report_u32(witness+4u)) {
+                printf("\"");
+                for (uint32_t i=0u;i<14u;++i) printf("%02x",witness[8u+i]);
+                printf("\"");
+            } else printf("null");
+            const uint8_t *f2=detail+CLEAN_HT_F2_DETAIL;
+            int f2_valid=usb_report_u32(f2)==CLEAN_HT_F2_MAGIC;
+            printf(",\"ht_f2\":{\"available\":%s,\"correlated\":",f2_valid?"true":"false");
+            if (f2_valid) printf("%u",usb_report_u32(f2+4u)); else printf("null");
+            if (f2_valid && usb_report_u32(f2+4u)) {
+                uint32_t size=usb_report_u32(f2+8u);
+                uint32_t prefix=size>=18u?size-18u:0u;
+                if (prefix>64u) prefix=64u;
+                printf(",\"packet_bytes\":%u,\"elapsed_us\":%u,"
+                       "\"calculated_fcs\":%u,\"received_fcs\":%u,\"metadata\":\"",
+                       size,usb_report_u32(f2+12u),usb_report_u32(f2+16u),usb_report_u32(f2+20u));
+                for (uint32_t i=0u;i<4u;++i) printf("%02x",f2[24u+i]);
+                printf("\",\"prefix\":\"");
+                for (uint32_t i=0u;i<prefix;++i) printf("%02x",f2[28u+i]);
+                printf("\"");
+            }
+            printf("}");
+        }
         if (tx!=23u) {
             printf(",\"ht20_format\":\"mixed\",\"ht20_width_mhz\":%u,"
                    "\"ht20_gi_ns\":%u,\"ht20_streams\":%u,"
@@ -1608,9 +1668,17 @@ evidence_ready:
 }
 
 int main(int argc, char **argv) {
-    if (argc == 4 && !strcmp(argv[1], "--inspect-ampdu")) {
+    if (argc == 4 && (!strcmp(argv[1], "--inspect-ampdu") || !strcmp(argv[1],"--inspect-ht"))) {
         uint8_t challenge[14];
         if (!peer_challenge_decode(argv[3], challenge)) return 1;
+        FILE *file=fopen(argv[2],"rb");
+        if (!file) { perror(argv[2]); return 1; }
+        int mode=fseek(file,2000L,SEEK_SET)==0?fgetc(file):-1;
+        if (fclose(file)) { perror("Evidence close"); return 1; }
+        if ((!strcmp(argv[1],"--inspect-ht") && (mode<24 || mode>28)) ||
+            (!strcmp(argv[1],"--inspect-ampdu") && mode!=30 && mode!=31)) {
+            fputs("Evidence mode differs from inspection command\n",stderr); return 1;
+        }
         return collect(NULL, argv[2], 0u, 0u, challenge, NULL, "offline", NULL, 0u) ? 0 : 1;
     }
     if (argc==4 && !strcmp(argv[1],"--derive-psk")) return derive_psk(argv[2],argv[3])?0:1;

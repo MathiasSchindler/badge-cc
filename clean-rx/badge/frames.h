@@ -7,6 +7,22 @@
 #include "../src/phy_rates.h"
 #include "../src/ht_contract.h"
 
+static inline int clean_beacon_capture_mode(uint32_t mode) {
+    return !((mode >= 24u && mode <= 28u) ||
+             mode == CLEAN_HT_AMPDU_PROBE_TX_MODE || mode == CLEAN_HT_AMPDU_PROBE_RX_MODE);
+}
+
+static inline void clean_record_beacon_entry(uint8_t detail[2048], const uint8_t entry[40]) {
+    /* The beacon table shares bytes 1640..1959 with frozen HT diagnostics. */
+    if (!clean_beacon_capture_mode(detail[2000u])) return;
+    uint32_t count = badger_bytes_load_u32(detail + 1632u);
+    if (count >= 8u) return;
+    for (uint32_t i = 0u; i < count; ++i)
+        if (badger_bytes_equal(detail + 1640u + 40u*i, entry, 6u)) return;
+    badger_bytes_copy(detail + 1640u + 40u*count, entry, 40u);
+    badger_bytes_store_u32(detail + 1632u, count + 1u);
+}
+
 static inline void clean_record_raw_packet(uint8_t detail[2048], const uint8_t *packet,
                                            uint32_t size) {
     if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_TX_MODE ||

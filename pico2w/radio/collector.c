@@ -155,6 +155,9 @@ static int exchange(device_t *a, device_t *b, FILE *random) {
             usb_report_u32(bt + 44u) == received + 1u &&
             matches(bt + 128u, a, b->node, PR_REQUEST, session, sequence, command + 2u) &&
             matches(at + 256u, b, a->node, PR_REPLY, session, sequence, command + 2u)) {
+            if (usb_report_u32(at + PR_TIMING_DETAIL) != PR_TIMING_MAGIC) {
+                fputs("Missing exchange timing evidence\n",stderr); return 0;
+            }
             printf("{\"test\":\"clean-rx-three-node\",\"source\":\"%s\","
                    "\"destination\":\"%s\",\"session\":%u,\"sequence\":%u,"
                    "\"elapsed_ms\":%llu,\"attempts\":%u,\"data_hex\":\"",
@@ -163,7 +166,13 @@ static int exchange(device_t *a, device_t *b, FILE *random) {
             hex(command + 2u, PR_DATA);
             printf("\",\"received_request_hex\":\""); hex(bt + 128u, PR_PACKET);
             printf("\",\"received_reply_hex\":\""); hex(at + 256u, PR_PACKET);
-            puts("\",\"verified\":true}");
+            printf("\",\"sender_trace_hex\":\""); hex(at,WIFI_TRACE_SIZE);
+            printf("\",\"receiver_trace_hex\":\""); hex(bt,WIFI_TRACE_SIZE);
+            printf("\",\"timing\":{\"available\":true,\"first_tx_delay_us\":%u,"
+                   "\"request_reply_us\":%u,\"round_trip_us\":%u},\"verified\":true}\n",
+                   usb_report_u32(at + PR_TIMING_DETAIL + 4u),
+                   usb_report_u32(at + PR_TIMING_DETAIL + 8u),
+                   usb_report_u32(at + PR_TIMING_DETAIL + 12u));
             fflush(stdout);
             return 1;
         }

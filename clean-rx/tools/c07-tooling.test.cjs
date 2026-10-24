@@ -123,12 +123,12 @@ test('unevolved relocated tools preserve their bodies apart from paths', () => {
         for (const file of fs.readdirSync(path.join(root, 'clean-rx/tools', app)))
             moves.push([`clean-rx/${app}/${file}`, `clean-rx/tools/${app}/${file}`]);
     for (const [before, after] of moves) {
-        // R02-R04 evolve reports and orchestration; native/oracle/failure-path tests cover them.
+        // R02-R04/R08 evolve reports and orchestration; native/oracle tests cover them.
         if (['badge/collector.c', 'badge/lifecycle_verify.cjs', 'badge/network_verify.cjs',
             'badge/wpa2_verify.cjs', 'badge/wpa2_rekey_verify.cjs', 'badge/ht_probe.sh',
             'badge/lifecycle_probe.sh', 'badge/wpa2_trial.sh', 'badge/mac_soak.sh',
             'badge/mac_trials.sh', 'badge/qualification_probe.sh', 'badge/wpa2_matrix.sh',
-            'peer/run.sh', 'vendor-burst/run.sh']
+            'peer/collector.c', 'peer/run.sh', 'vendor-burst/run.sh']
             .some(file => after === `clean-rx/tools/${file}`)) continue;
         let expected = run('git', ['show', `fb493e321ddf23c4a7caebd26c5e9b8202498233:${before}`]);
         if (before.endsWith('.c')) expected = expected.replace(/^#include "([^"]+)"$/gm, (line, include) =>

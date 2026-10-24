@@ -12,6 +12,8 @@
 #define PR_MAX_ATTEMPTS 6u
 #define PR_REQUEST 1u
 #define PR_REPLY 2u
+#define PR_TIMING_MAGIC 0x314d3852u
+#define PR_TIMING_DETAIL 384u
 
 typedef struct {
     uint8_t kind, source, destination, sender[8], data[PR_DATA];
@@ -22,6 +24,7 @@ typedef struct {
     uint8_t node, id[8], active, attempts, reply_pending;
     uint32_t session, sequence, retry_at, reply_at;
     uint32_t confirmed, failed, requests, replies, duplicates, reply_drops;
+    uint32_t began_at, first_tx_at, completed_at;
     uint32_t seen_session[4], seen_sequence[4];
     pr_message_t pending, reply;
 } pr_link_t;

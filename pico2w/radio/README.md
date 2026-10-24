@@ -43,6 +43,12 @@ chip ID against the explicitly selected USB serial. This is not a signature
 or an on-device board-identification interlock: choose the correct image.
 
 The original standalone [USB-only target](../README.md) is unchanged.
+The collector now retains both endpoint traces and source-local round-trip
+timing independently of desktop polling latency. Use the offline
+[retry/latency analyzer](../../clean-rx/dev-doc/guides/HOST_TOOLS.md#retry-latency-and-host-pause-measurements)
+for per-link first-attempt rates, retry distributions and latency percentiles.
+This instrumentation does not change the six-attempt retry policy.
+
 This optional target intentionally depends on the parent repository's
 loader, transport, startup, USB and badge display sources; it cannot be
 copied out independently like the original target. Its firmware build is

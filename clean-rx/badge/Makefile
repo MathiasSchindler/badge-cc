@@ -8,7 +8,9 @@ CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-Wall -Wextra -Werror -Oz -ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
 	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2092u -DLIVE_USB_CLEAN
-HOST_FLAGS := $(PROFILE_FLAGS) $(SELECTION_FLAGS) $(EXTRA_CFLAGS)
+BADGE_PICO ?= 0
+HOST_FLAGS := $(PROFILE_FLAGS) $(SELECTION_FLAGS) $(EXTRA_CFLAGS) -DCLEAN_BADGE_PICO=$(BADGE_PICO)
+HT_NATIVE_COLLECTOR = $(if $(filter -DCLEAN_RX_HT_RESPONSE=1,$(HOST_FLAGS)),$(BUILD)/collector)
 DEV := ../tools/badge
 CFLAGS += $(HOST_FLAGS)
 SOURCES := main.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../peer/network.c \
@@ -20,12 +22,17 @@ SOURCES := main.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/bloc
 	$(ROOT)/src/platform/badger/display.c $(ROOT)/src/platform/badger/graphics.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
+ifeq ($(BADGE_PICO),1)
+SOURCES += $(ROOT)/pico2w/radio/clock.c
+else ifneq ($(BADGE_PICO),0)
+$(error BADGE_PICO must be 0 or 1)
+endif
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
 HEADERS := $(wildcard *.h ../src/*.h ../src/psm/*.h ../src/diagnostic/*.h ../host/*.h ../tests/fixtures/*.h $(ROOT)/src/tools/diagnostics_logic.h \
 	../peer/frame.h ../peer/protocol.h ../peer/lifecycle.h ../peer/network.h ../peer/network_json.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
-NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test station_lifecycle_test)
+NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test ht_observe_test station_lifecycle_test)
 LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/tools/diagnostics_logic.c
@@ -79,7 +86,7 @@ $(ROOT)/build/host-tools/bin2uf2:
 $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
 
-$(BUILD)/collector: $(DEV)/collector.c frames.h station.h ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
+$(BUILD)/collector: $(DEV)/collector.c ../tools/network_host.h ../peer/network.h ../peer/network_json.h frames.h station.h ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
 	cc -std=c11 -Wall -Wextra -Werror -O2 $(HOST_FLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2092u $$(pkg-config --cflags libusb-1.0) \
 		$< ../peer/network.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
@@ -90,9 +97,12 @@ test: $(NATIVE_TESTS) $(BUILD)/collector
 	$(BUILD)/wpa2_test
 	$(BUILD)/secret_test
 	$(BUILD)/ht20_test
+	$(BUILD)/ht_observe_test
 	$(BUILD)/station_lifecycle_test
 	node $(DEV)/network_verify.cjs --self-test
+	cd $(ROOT) && node --test clean-rx/tools/reliability.test.cjs
 	node ../tools/ampdu_verify.cjs --self-test $(BUILD)/collector
+	CLEAN_RX_HT_COLLECTOR=$(HT_NATIVE_COLLECTOR) node --test ../tools/ht_verify.test.cjs
 	node $(DEV)/lifecycle_verify.cjs --self-test
 	node $(DEV)/qualification_verify.cjs --self-test
 	node $(DEV)/wpa2_verify.cjs --self-test $(BUILD)/collector
@@ -127,6 +137,10 @@ $(BUILD)/loader_test: $(LOADER_TEST_SOURCES) | $(BUILD)
 $(BUILD)/ht20_test: ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(HOST_FLAGS) -fsanitize=address,undefined \
 		ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
+
+$(BUILD)/ht_observe_test: ht_observe_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(HOST_FLAGS) -fsanitize=address,undefined \
+		$< ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/station_lifecycle_test: station_lifecycle_test.c station_lifecycle.h ../peer/lifecycle.h | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(HOST_FLAGS) -fsanitize=address,undefined \

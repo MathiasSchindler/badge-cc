@@ -104,8 +104,8 @@ if [[ $mode == ack ]]; then
 fi
 subframes=1
 if [[ $mode == ampdu-probe ]]; then subframes=3; fi
-printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"aggregate_subframes":%s,"vendor_peer":false,"ht_qualified":false}\n' \
-    "$challenge" "$mcs" "$channel" "$mpdu" "$subframes" > "$prefix-config.json" || exit 1
+printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"fixture":"%s","tx_frames":1,"aggregate_subframes":%s,"vendor_peer":false,"ht_qualified":false}\n' \
+    "$challenge" "$mcs" "$channel" "$mpdu" "$mode" "$subframes" > "$prefix-config.json" || exit 1
 rx_pid= tx_pid=
 cleanup() {
     usb_stop "$rx_pid" "$tx_pid"
@@ -141,21 +141,8 @@ if [[ $mode == ampdu-probe ]]; then
     node clean-rx/tools/ampdu_verify.cjs "$prefix" | tee "$prefix-pair.json"
     exit "$?"
 fi
-if [[ $mode == data ]]; then pair_mode=ht-data-pair; fi
-if [[ $mode == ack ]]; then
-    python3 - "$prefix" <<'PY' | tee "$prefix-pair.json"
-import json
-import sys
-with open(sys.argv[1] + "-tx.json") as file:
-    tx = json.load(file)
-with open(sys.argv[1] + "-rx.json") as file:
-    rx = json.load(file)
-print(json.dumps(dict(mode="ht-ack-pair", channel=tx["channel"], mcs=tx["mcs"], mpdu_bytes=60,
-                     fresh_ht_rx=rx["fresh_ht_rx"],
-                     ack_responses_started=rx["ack_responses_started"],
-                     fresh_return_ack=tx["fresh_return_ack"],
-                     sifs_timing_qualified=False, ht_interoperability_qualified=False)))
-PY
+if [[ $mode == data || $mode == ack ]]; then
+    node clean-rx/tools/ht_verify.cjs "$prefix" | tee "$prefix-pair.json"
     exit "$?"
 fi
 printf '{"mode":"%s","channel":%s,"mcs":%s,"mpdu_bytes":%s,"fresh_ht_rx":true,"tx_over_air_confirmed":true,"ht_interoperability_qualified":false}\n' \

@@ -84,7 +84,7 @@ $(HT_PEER_BUILD)/vendor_ht.bin: $(HT_PEER_BUILD)/vendor_ht.elf
 $(HT_PEER_BUILD)/vendor_ht.uf2: $(HT_PEER_BUILD)/vendor_ht.bin $(BIN2UF2)
 	$(BIN2UF2) $< $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
 
-$(HT_PEER_BUILD)/collector: $(HT_PEER_COLLECTOR) $(HT_PEER_BUILD)/build_id.h
+$(HT_PEER_BUILD)/collector: $(HT_PEER_COLLECTOR) clean-rx/tools/network_host.h $(HT_PEER_BUILD)/build_id.h
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I$(HT_PEER_BUILD) \
 		$$(pkg-config --cflags libusb-1.0) $< $(HT_PEER_DIR)/network.c $(SHARED_DIR)/usb_report.c \
 		clean-rx/host/wpa2_crypto.c $(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_trace.c \
