@@ -57,12 +57,13 @@ Changing validation inputs during the run also fails.
 Stages:
 
 1. All cleanup/tooling regression tests, including injected violations.
-2. Standalone current-source versus C01 comparisons: 74 diagnostic flag
+2. Documentation links, Markdown anchors and reference/development boundaries.
+3. Standalone current-source versus C01 comparisons: 74 diagnostic flag
    sets and 66 reference campaign selections.
-3. Six ordinary runtime controller/PSM/mutable-storage comparisons with C05.
-4. Seven-profile diagnostic capture, checked against immutable bytes,
+4. Six ordinary runtime controller/PSM/mutable-storage comparisons with C05.
+5. Seven-profile diagnostic capture, checked against immutable bytes,
    PSM addresses and explicit native coverage expectations.
-5. Runtime and diagnostic native suites, then copy-scope, early-RX and
+6. Runtime and diagnostic native suites, then copy-scope, early-RX and
    ordered/prefix recovery profiles with sanitizers.
 
 For a faster tooling-only check:
@@ -74,7 +75,64 @@ make -C clean-rx check-tools
 The full check is the acceptance gate; the fast check is not its substitute.
 Firmware `all` does not invoke the checker: keeping this development gate
 outside `src/` preserves standalone production builds without Node/Git/tests.
-Automation can run the same command and retain its manifest and stage logs.
+Run these checks locally; no CI service or JavaScript framework is required.
+All JavaScript development tools use only Node's built-in modules, without
+npm packages or an installation step.
+Acceptance input hashes include Markdown as well as production/test/tool
+inputs, so documentation drift during a run also fails.
+
+## Documentation boundary and review
+
+- `clean-rx/doc/` is a reference for the source-built firmware and CYW43439
+  as implemented: interfaces, layouts, chip resources and current behavior.
+  Current input rejection and unsupported behavior are reference facts;
+  do not remove them to imply capabilities that do not exist.
+- `clean-rx/dev-doc/` owns development procedures, tests, qualification,
+  history, campaign results, hypotheses, bugs, open questions and requested
+  changes. The [cleanup roadmap](../cleanup.md) is also a development
+  document, outside the reference tree.
+- Source interfaces for diagnostic firmware may be described in `doc/`.
+  Development-tool usage, experiment recipes and results may not.
+
+Run the documentation-only check from the repository root:
+
+```sh
+make -C clean-rx check-docs
+```
+
+The dependency-free [checker](../tools/documentation.cjs) scans Markdown below
+`clean-rx/`, excluding build output. It checks the repository's single-line
+inline/reference links and images, HTML link attributes and explicit anchors.
+Fenced code, inline code and comments are excluded. Indented text is checked,
+including list continuations; use fences for code examples containing links.
+ATX and setext headings use lowercase, punctuation-stripped anchor names
+with duplicate suffixes; common formatting and HTML entities are supported.
+It is a lightweight check for these conventions, not a complete Markdown
+renderer: review multiline links, complex nesting or unusual heading markup
+manually rather than expanding it into a parsing framework.
+Local links must resolve inside the repository; external URLs are not fetched.
+Root-relative local paths are interpreted from the repository root.
+
+Reference links may target `doc/` or controller/host implementation under
+`src/`, `host/`, `badge/` and `messenger/`, but not Markdown outside `doc/`.
+Links to development records, this roadmap, tests, tools, other non-reference
+locations, and equivalent GitHub blob/tree URLs are rejected.
+Use public manufacturer URLs for chip documents not tracked in the repository,
+rather than ignored local downloads.
+
+Automated link checks do **not** prove that prose has the right scope.
+Before accepting a reference edit, review:
+
+1. Does each statement describe current firmware/chip behavior rather than
+   past work, plans, hypotheses or an unresolved investigation?
+2. Are feature limitations stated as interface constraints, without promises,
+   qualification claims or misleading omissions?
+3. Are trial counts, failures, build IDs, experiment commands, test procedures
+   and proposed fixes recorded in `dev-doc/` instead?
+4. Do headings, links and examples remain correct after any material is moved?
+
+The documentation checker and its mutation tests are development tooling
+only. They do not enter controller build prerequisites or access hardware.
 
 ## Enforced boundaries and coverage
 

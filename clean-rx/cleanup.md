@@ -29,6 +29,9 @@ The controller builds checked remained freestanding, without libc.
   are test responsibilities.
 - Diagnostic variants must be explicitly selected and identifiable. Ordinary
   builds must not silently enable experimental behavior.
+- `doc/` describes the firmware and CYW43439 as they are, without development
+  history, plans or investigations. Development procedures, tests, bugs,
+  hypotheses, open questions and feature requests belong in `dev-doc/`.
 - Preserve current interfaces and behavior during organizational changes.
   Intentional behavior changes require their own acceptance criteria.
 
@@ -54,209 +57,176 @@ Historical manifests and evidence must not be rewritten to match new paths or
 build identities. Relevant qualification procedures remain in
 [development documentation](dev-doc/README.md) and [the roadmap](../todo.md).
 
-## Milestones
+## Completed milestones
+
+C01-C09 were completed on 2026-10-24. The summaries below describe delivered
+work; detailed implementation and validation records remain linked.
 
 ### C01 - Establish the inventory and reproducible baseline
 
-Completed 2026-10-24. See the [inventory and baseline record](dev-doc/C01_BASELINE.md)
-and [repeatable capture tool](tools/c01-baseline.cjs). Coverage gaps are explicit;
-completion is not a claim that every retained experiment was executed.
-
-- [x] Classify every file as controller runtime, shared ABI/portable runtime,
-  host runtime, native test, development tool or firmware-side diagnostic.
-- [x] Trace actual compiler inputs, linked objects and external includes for
-  the default controller and supported diagnostic profiles.
-- [x] Inventory profile flags and their owning build commands, including
-  consumers in `badge/`, `messenger/`, `peer/` and `vendor-burst/`.
-- [x] Record binary/PSM hashes, section sizes and test outcomes for the chosen
-  baseline matrix. Distinguish executed tests from disabled/skipped paths.
-- [x] Identify active experiments versus historical variants; do not remove
-  either merely because they are disabled by default.
-
-**Acceptance:** every retained profile has an owner, purpose, reproducible
-build command and explicit validation coverage or documented coverage gap.
+Inventoried source ownership, dependencies, profiles and experiments.
+Captured immutable controller/PSM hashes, geometry and native-test outcomes,
+distinguishing executed, disabled and unselected coverage.
+See [the baseline record](dev-doc/C01_BASELINE.md) and
+[capture tool](tools/c01-baseline.cjs).
 
 ### C02 - Make controller source independent
 
-**Prerequisite:** C01.
-
-Completed 2026-10-24. See the [implementation and isolation checks](dev-doc/C02_ISOLATION.md).
-All 74 distinct selected flag sets built from production sources alone and
-matched reconstructed C01 controller/PSM bytes; the seven frozen C01 profiles
-also matched their recorded hashes. Native-test dependencies remain for C03.
-
-- [x] Replace general-tree type and byte-helper dependencies with
-  controller-owned, minimal equivalents under `src/`.
-- [x] Reconcile the existing local `types.h` with the needs of native and
-  RP2350 consumers without assuming a 32-bit host pointer or `size_t`.
-- [x] Remove external include paths and prerequisites from the controller
-  build, separating native-test dependencies where necessary.
-- [x] Compile and link from a copy of only `src/`, with the rest of the
-  repository unavailable.
-- [x] Check linked images for undefined symbols and unintended runtime or
-  library dependencies.
-
-**Acceptance:** the isolated source tree builds all retained controller
-profiles without external source files, libc, SDKs or downloaded executables.
-Organizational changes preserve baseline controller and PSM bytes.
-On-chip ROM calibration-table use remains an explicitly documented hardware
-dependency, not a claim of independence from the silicon.
+Replaced external types/byte helpers and removed production dependencies
+outside `src/`. All 74 selected flag sets build from a standalone source copy
+without libc or undefined symbols and retain C01 controller/PSM bytes.
+On-chip ROM calibration tables remain a documented silicon dependency.
+See [the isolation record](dev-doc/C02_ISOLATION.md).
 
 ### C03 - Separate native tests and integration tests
 
-**Prerequisites:** C01, C02.
-
-Completed 2026-10-24. See the [test guide](tests/README.md) and
-[validation record](dev-doc/C03_TEST_SEPARATION.md). All seven native sources
-are relocated, named diagnostic profiles execute their required checks,
-and all 74 production-only selections retain their controller/PSM bytes.
-
-- [x] Move native test sources out of `src/` into a dedicated test directory.
-- [x] Separate controller unit/model tests from badge/peer integration tests.
-  In particular, make dependencies on station RX and vendor-peer protocols
-  explicit rather than hiding them in controller test recipes.
-- [x] Give test-only helpers and PSM simulation a test-owned location.
-- [x] Keep production builds independent of test files and test libraries.
-- [x] Provide named test profiles for copy-scope, early RX and recovery.
-  Report disabled coverage separately from tests that actually execute.
-- [x] Update all callers, build prerequisites and directly related guides.
-
-**Acceptance:** production builds require no test tree; all relocated tests
-retain their assertions and sanitizer coverage, and profile-specific tests
-run with their required flags.
+Moved all seven native sources out of `src/`, separating controller models
+from badge/peer integration and test-owned helpers. Preserved assertions,
+sanitizers and named copy-scope, early-RX and recovery coverage; production
+builds need no test tree.
+See [the test guide](tests/README.md) and
+[validation record](dev-doc/C03_TEST_SEPARATION.md).
 
 ### C04 - Separate portable runtime, ABI and fixture helpers
 
-**Prerequisites:** C02, C03.
-
-- [x] Split mixed headers such as `ht20.h`, `unicast.h` and `frame_limits.h`
-  into cohesive runtime operations, shared contracts and test fixtures.
-- [x] Keep controller-required shared contracts within the self-contained
-  `src/` tree; make host consumers import them in that direction only.
-- [x] Move synthetic frame generators, expected-pattern helpers and soak
-  fixtures to test/development ownership.
-- [x] Move host-only cryptography out of the controller source tree after
-  checking all badge, collector and peer consumers.
-- [x] Preserve command values, structure sizes, offsets, memory bounds and
-  version identifiers with explicit compatibility checks.
-
-**Acceptance:** controller headers do not import fixtures or host code;
-host consumers still build and test against unchanged wire contracts.
-No implementation is duplicated merely to satisfy directory boundaries.
-
-Implementation, diagnostic-codec ownership and offline evidence:
-[C04 contract/fixture separation](dev-doc/C04_CONTRACT_SEPARATION.md).
+Separated portable operations, shared ABI contracts, diagnostic codecs,
+synthetic fixtures and host-only crypto without duplicating implementations.
+Updated consumers and checked unchanged command values, layouts, bounds and
+versions. See [the contract/fixture record](dev-doc/C04_CONTRACT_SEPARATION.md).
 
 ### C05 - Isolate firmware-side tests and experimental profiles
 
-**Prerequisites:** C03, C04.
-
-- [x] Extract synthetic SDIO traffic into an explicit diagnostic variant.
-- [x] Isolate ACK suppression and other deliberate fault injection from the
-  ordinary runtime command path.
-- [x] Separate passive runtime observability from active experimental
-  behavior; retain necessary fault evidence and recovery safeguards.
-- [x] Give diagnostic code a distinct location and select it through explicit
-  source lists or narrowly scoped hooks, not implicit host/tool dependencies.
-- [x] Preserve access to existing experiments through named profiles and
-  document which commands each profile supports.
-- [x] Make ordinary builds reject diagnostic-only commands explicitly using
-  the established error-reporting mechanism.
-
-**Acceptance:** ordinary firmware cannot generate synthetic test traffic or
-activate fault injection. Diagnostic variants remain freestanding and
-identifiable. Removing default diagnostic behavior is an intentional
-behavior change with tests, documented compatibility impact and a separate
-hardware acceptance gate.
-
-Implementation and offline validation:
-[C05 diagnostic profiles](dev-doc/C05_DIAGNOSTIC_PROFILES.md).
-The implementation is complete; hardware acceptance remains a separate,
-unperformed gate requiring new authorization.
+Introduced explicit runtime, diagnostic and SDIO-test behavior profiles.
+Ordinary firmware rejects diagnostic commands and cannot activate synthetic
+traffic or ACK suppression; passive evidence and recovery remain available.
+This deliberately changed runtime behavior. Implementation and offline tests
+are complete; [hardware acceptance](dev-doc/C05_DIAGNOSTIC_PROFILES.md#separate-hardware-acceptance-gate-not-run)
+remains unperformed. See [the profile record](dev-doc/C05_DIAGNOSTIC_PROFILES.md).
 
 ### C06 - Decompose controller orchestration and PSM composition
 
-**Prerequisites:** C04, C05.
-
-- [x] Extract cohesive responsibilities from `main.c`: transport/DMA,
-  station/MAC coordination, command dispatch and diagnostic publication.
-- [x] Give mutable state explicit ownership and keep orchestration small;
-  avoid replacing one large file with hidden cross-module globals.
-- [x] Separate ordinary PSM program composition from experimental fragments
-  in `psm_ack.h` and `ht_observer.h`.
-- [x] Preserve PSM label ordering, instruction addresses, hook targets and
-  bounded control flow during organizational moves.
-- [x] Keep assertions covering memory overlap, ABI geometry and emitted
-  instruction constraints close to their owning contracts.
-
-**Acceptance:** organizational changes preserve binary/PSM baselines across
-the retained profile matrix. Any unavoidable differences receive explicit
-instruction/layout analysis and the required requalification rather than
-being treated as harmless file moves.
-
-Implementation and offline validation:
-[C06 controller composition](dev-doc/C06_CONTROLLER_COMPOSITION.md).
-All 74 retained diagnostic selections match C01 controller/PSM bytes;
-six ordinary runtime selections match C05 bytes and mutable-storage
-layouts. Implementation fragments retain one compilation unit deliberately.
-No hardware/RF acceptance was performed; the separate C05 gate remains.
+Extracted controller responsibilities and ordinary/diagnostic PSM composition,
+with explicit state-owner namespaces and local geometry assertions.
+Deliberately retained unity compilation and flat storage: 74 diagnostic
+selections match C01 bytes; six runtime selections match C05 bytes and mutable
+storage layouts. Namespaces do not provide separate-module encapsulation.
+See [the composition record](dev-doc/C06_CONTROLLER_COMPOSITION.md).
 
 ### C07 - Separate development tooling and centralize profile ownership
 
-**Prerequisites:** C03, C05, C06.
-
-- [x] Clearly distinguish host firmware from collectors, campaign runners,
-  evidence verifiers and independent peer fixtures.
-- [x] Keep development tools outside controller source and out of ordinary
-  firmware build prerequisites.
-- [x] Centralize named controller profile definitions within `src/`; make
-  external runners select them instead of maintaining divergent flag lists.
-- [x] Preserve existing campaign identities and invocation behavior, or
-  document intentional migration steps and validate replacement commands.
-- [x] Ensure builds and offline tests never flash devices or start RF
-  experiments implicitly.
-
-**Acceptance:** each profile has one authoritative definition, tools remain
-usable against their intended firmware variants, and a controller build
-requires no collectors, USB libraries, peer SDKs or campaign infrastructure.
-
-Implementation and offline validation:
-[C07 tool and profile ownership](dev-doc/C07_TOOL_AND_PROFILE_OWNERSHIP.md).
-Named selections are owned by `src/profiles.mk`; development tools live
-under `tools/`. Existing campaign Make targets and flags are preserved,
-with explicit tool-path migration and firmware-only build targets.
-All 74 diagnostic selections and six runtime comparisons retain their
-controller/PSM baselines. No hardware or RF tests were performed.
+Centralized named selections in `src/profiles.mk`, moved desktop tools under
+`tools/`, and added firmware-only application targets. Preserved campaign
+targets/flags, documented tool-path migration and removed collector source
+from firmware identities. Validated affected host consumers and retained
+controller/PSM baselines.
+See [the tooling/profile record](dev-doc/C07_TOOL_AND_PROFILE_OWNERSHIP.md).
 
 ### C08 - Enforce boundaries and complete documentation
 
-**Prerequisites:** C02 through C07.
+Added shared boundary enforcement, mutation tests and repeatable offline
+acceptance. The final run passed 32 tooling tests, 74 diagnostic comparisons,
+six runtime comparisons, seven historical profiles and native suites.
+Historical coverage remains 24 passed, six disabled and twelve unselected;
+the C01 baseline is unchanged. Updated contributor/reference documentation.
+See [the acceptance record](dev-doc/C08_OFFLINE_ACCEPTANCE.md).
 
-- [x] Add automated checks for controller includes/build inputs escaping
-  `src/`, test-code dependencies and unexpected linked runtime symbols.
-- [x] Make isolated-source builds and the retained profile/test matrix
-  repeatable checks rather than manual audit steps.
-- [x] Verify ordinary builds exclude diagnostic behavior and diagnostic
-  profiles exercise their selected code instead of reporting disabled paths.
-- [x] Update architecture, usage and development guides with the actual
-  layout, dependency direction, profile selection and validation commands.
-- [x] Document unresolved reliability and feature gaps separately from
-  structural-cleanup completion.
-- [x] Run the final offline matrix and record any separately authorized
-  hardware requalification results with their limits.
+Repeat with fresh evidence:
 
-**Acceptance:** boundary violations fail checks; a new contributor can build
-the standalone controller, run native tests and select diagnostic firmware
-without reconstructing flags or dependencies from historical experiments.
-Cleanup completion does not imply vendor feature parity or RF reliability.
-
-Implementation and final offline validation:
-[C08 acceptance record](dev-doc/C08_OFFLINE_ACCEPTANCE.md).
-`make -C clean-rx check BUILD=../build/clean-rx/acceptance-NEW` runs the
-repeatable gate with fresh evidence. All 32 tooling tests, 74 diagnostic
-comparisons, six runtime comparisons, seven historical profiles and native
-suites pass. The C01 baseline remains unchanged.
+```sh
+make -C clean-rx check BUILD=../build/clean-rx/acceptance-NEW
+```
 
 **C01-C08 structural cleanup is complete.** Remaining
 [feature/reliability limits](dev-doc/STATUS.md) and the separate C05 hardware
 acceptance gate remain open. No new hardware/RF qualification was performed.
+
+### C09 - Formalize and check the documentation boundary
+
+Documented reference/development ownership and human content-review criteria,
+including this roadmap's development role. Added
+[Markdown validation](tools/documentation.cjs) and six
+[regression tests](tools/c09-documentation.test.cjs) for links, heading
+anchors, HTML anchors and prohibited reference-to-development links.
+Reviewed all four reference guides against the scope policy and replaced
+the ignored local datasheet link with public manufacturer documentation.
+
+`make -C clean-rx check-docs` passes for 36 Markdown files and 402 local
+links; all 38 tooling tests pass. The full acceptance runner also invokes the
+documentation check and hashes Markdown inputs. Checks use only Node's
+built-in modules, with no npm packages or framework. No controller inputs
+or hardware behavior changed.
+See [contributor guidance](dev-doc/DEVELOPMENT.md#documentation-boundary-and-review)
+for setup, scope and review criteria. This is not a new full firmware-matrix
+or hardware qualification result.
+
+## Follow-up milestones
+
+C11-C13 are not complete. Keep checks local and dependency-free; no CI
+milestone is planned. C10 was withdrawn rather than renumbering later work.
+RX reliability, general HT/A-MPDU support and hardware qualification remain
+separate functional work, not acceptance criteria for these cleanup tasks.
+
+### C11 - Add a repeatable host-consumer compatibility gate
+
+**Prerequisites:** C07, C08.
+
+- [ ] Turn the affected badge, messenger, peer and reference application
+  builds/native tests into one documented, repeatable offline gate.
+- [ ] Include desktop collector builds and existing offline verifier
+  self-tests against the intended shared contracts and profile selections.
+- [ ] Record commands, toolchain/dependency versions, selected profiles
+  and failures; do not count missing SDKs or libraries as successful skips.
+- [ ] Keep this gate separate from standalone controller acceptance and
+  firmware prerequisites. Use existing local build/test tools without
+  introducing a framework, package manager or CI dependency.
+
+**Acceptance:** a clean environment with documented dependencies can run
+the consumer gate without hardware. Consumer build/test failures return
+nonzero, while controller-only builds and acceptance still require no
+application SDKs, collectors or USB libraries.
+
+### C12 - Define acceptance for intentional firmware changes
+
+**Prerequisites:** C01, C05, C08.
+
+- [ ] Distinguish historical reconstruction, behavior-preserving comparisons
+  and acceptance of an explicitly intended new firmware behavior.
+- [ ] Define versioned, reviewed expectations for changed bytes/layouts,
+  recording source revision, toolchain, flags and the reason for each change.
+- [ ] Require behavioral regression tests and instruction/memory/PSM analysis
+  appropriate to the change, plus separately authorized hardware
+  requalification where required.
+- [ ] Preserve C01/C05 historical evidence and coverage distinctions.
+  Never regenerate expected values from the candidate merely to make it pass.
+- [ ] Test rejection of unexplained differences and selection of the correct
+  expectations for each profile and acceptance mode.
+
+**Acceptance:** an approved intentional change can be validated reproducibly
+without rewriting historical evidence or disabling compatibility checks.
+Unapproved differences still fail; offline acceptance never implies RF
+qualification.
+
+### C13 - Strengthen runtime component contracts
+
+**Prerequisites:** C06, C08, C12.
+
+**Optional deeper refactoring:** pursue only where concrete ownership or
+testability benefits justify the risk; file size alone is not a reason.
+
+- [ ] Inventory implicit state, ordering and lexical control-flow dependencies
+  between unity-composed runtime fragments, especially command dispatch
+  and station TX.
+- [ ] Define narrow inputs, outputs, state ownership and error propagation
+  for selected responsibilities; add focused tests around those contracts.
+- [ ] Extract cohesive helpers or test seams where they remove real coupling.
+  Do not mechanically split files, duplicate logic or add pointer contexts
+  merely to simulate encapsulation.
+- [ ] Retain freestanding isolation, bounded behavior, observability,
+  diagnostic gating and existing wire contracts.
+- [ ] Prefer byte/storage-layout preservation. Handle any intentional
+  differences through C12 rather than labeling them harmless reorganization.
+
+**Acceptance:** selected components have explicit, tested contracts and
+demonstrably reduced implicit coupling. Retained profiles pass the relevant
+controller and consumer gates; byte/layout changes receive documented
+analysis and any required separate hardware qualification.

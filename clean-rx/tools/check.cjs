@@ -45,7 +45,8 @@ function inputHashes() {
         'Makefile', 'src/tools/diagnostics_logic.c', 'src/tools/diagnostics_logic.h',
         'src/shared/bytes.h', 'src/shared/stdint.h',
     ]).filter(file =>
-        /(?:\.(?:c|h|S|ld|mk|inc|cjs|sh)|\/Makefile)$/.test(file) && fs.existsSync(path.join(root, file))))]
+        /(?:\.(?:c|h|S|ld|mk|inc|cjs|sh|md)|\/Makefile)$/.test(file) &&
+        fs.existsSync(path.join(root, file))))]
         .sort().map(file => [file, hash(fs.readFileSync(path.join(root, file)))]));
 }
 
@@ -82,6 +83,7 @@ function check(outputArgument) {
         const tests = fs.readdirSync(__dirname).filter(file => file.endsWith('.test.cjs'))
             .sort().map(file => path.join(__dirname, file));
         stage('tooling', process.execPath, ['--test', ...tests]);
+        stage('documentation', process.execPath, [path.join(__dirname, 'documentation.cjs')]);
         stage('isolation', process.execPath, [path.join(__dirname, 'c02-isolation.cjs'), path.join(output, 'isolation')]);
         stage('runtime', process.execPath, [path.join(__dirname, 'c06-runtime.cjs'), path.join(output, 'runtime')]);
         stage('matrix', process.execPath, [path.join(__dirname, 'c01-baseline.cjs'), path.join(output, 'matrix')]);

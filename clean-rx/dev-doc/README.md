@@ -10,7 +10,8 @@ only. Development procedures, validation, history, hypotheses, bugs, open
 questions and requested changes belong here, not in that reference.
 
 - [Development and offline acceptance](DEVELOPMENT.md): toolchain,
-  native tests, validation commands and boundary enforcement.
+  native tests, validation commands, documentation scope/review and boundary
+  enforcement.
 - [Open feature and reliability questions](STATUS.md): unresolved behavior,
   missing capabilities and hardware qualification.
 - [HT20 diagnostic development notes](HT20_DIAGNOSTIC_NOTES.md): copy,
@@ -38,6 +39,8 @@ questions and requested changes belong here, not in that reference.
   selections, firmware-only targets and development-tool migration.
 - [C08 final acceptance record](C08_OFFLINE_ACCEPTANCE.md): boundary
   mutation tests, final matrix results and unperformed hardware gates.
+- [Cleanup roadmap](../cleanup.md): completed cleanup summaries and pending
+  structural work; this is development documentation, not firmware reference.
 - [HT20 implementation and investigations](HT20_IMPLEMENTATION.md):
   D1/D2/D3 milestones, API development, receive failures, contention
   diagnostics, watchdog work, association/runtime peer profiles and
