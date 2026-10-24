@@ -30,13 +30,14 @@ function operationBodies(text) {
 
 test('split operations and moved crypto/soak implementations retain their original bodies', () => {
     for (const [old, current] of [
-        ['ht20.h', ['src/ht20.h', 'src/ht_command.h', 'tests/fixtures/ht20.h']],
+        ['ht20.h', ['src/ht20.h', 'src/diagnostic/ht_command.h', 'tests/fixtures/ht20.h']],
         ['unicast.h', ['src/unicast.h', 'tests/fixtures/unicast.h']],
     ]) {
         const file = `clean-rx/src/${old}`;
         const before = original(file, frozen.inventory.find(entry => entry.file === file).sha256);
         const after = current.flatMap(file => operationBodies(fs.readFileSync(path.join(root, 'clean-rx', file), 'utf8')));
-        assert.deepEqual(after.sort(), operationBodies(before).sort(), old);
+        const retained = body => !body.includes('int clean_ht_payload_command_valid(');
+        assert.deepEqual(after.filter(retained).sort(), operationBodies(before).filter(retained).sort(), old);
     }
     for (const [old, current] of [
         ['mac_soak.h', 'tests/fixtures/mac_soak.h'],
@@ -55,12 +56,12 @@ test('split operations and moved crypto/soak implementations retain their origin
 
 test('controller dependencies stay internal and split headers compile independently without libc', () => {
     const splitHeaders = new Set(['frame_limits.h', 'rx_contract.h', 'ht_contract.h',
-        'ht20.h', 'ht_command.h', 'unicast_contract.h', 'unicast.h']);
-    for (const file of fs.readdirSync(source).filter(file => file.endsWith('.h'))) {
+        'ht20.h', 'ht_payload.h', 'diagnostic/ht_command.h', 'unicast_contract.h', 'unicast.h']);
+    for (const file of fs.readdirSync(source, { recursive: true }).filter(file => file.endsWith('.h'))) {
         const dependencies = run('clang', ['--target=arm-none-eabi', '-mcpu=cortex-m3',
             '-mthumb', '-std=c11', '-Wall', '-Wextra', '-Werror', '-ffreestanding',
             '-nostdinc', '-fno-builtin', '-I', source, '-M', '-x', 'c', '-'], `#include "${file}"\n`);
-        if (splitHeaders.has(file) && file !== 'ht_command.h')
+        if (splitHeaders.has(file) && file !== 'diagnostic/ht_command.h')
             assert.ok(!dependencies.includes('/ht_command.h'), `${file} imports diagnostic command codecs`);
         for (const dependency of dependencies.replace(/\\\n/g, ' ').split(':').slice(1).join(':').trim().split(/\s+/)) {
             const relative = path.relative(source, dependency);

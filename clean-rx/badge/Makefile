@@ -1,12 +1,15 @@
 ROOT := ../..
 BUILD ?= $(ROOT)/build/clean-rx/badge
 CONTROLLER_BIN ?= $(ROOT)/build/clean-rx/cyw43_rx_fw.bin
+PROFILE ?= diagnostic
+include ../src/firmware.mk
 CC := clang
 CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-Wall -Wextra -Werror -Oz -ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
 	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u -DLIVE_USB_CLEAN
-CFLAGS += $(EXTRA_CFLAGS)
+HOST_FLAGS := $(PROFILE_FLAGS) $(EXTRA_CFLAGS)
+CFLAGS += $(HOST_FLAGS)
 SOURCES := main.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../peer/network.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/arch/rp2350/nametag_clock.c \
@@ -18,7 +21,7 @@ SOURCES := main.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/bloc
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
-HEADERS := $(wildcard *.h ../src/*.h ../host/*.h ../tests/fixtures/*.h $(ROOT)/src/tools/diagnostics_logic.h \
+HEADERS := $(wildcard *.h ../src/*.h ../src/diagnostic/*.h ../host/*.h ../tests/fixtures/*.h $(ROOT)/src/tools/diagnostics_logic.h \
 	../peer/frame.h ../peer/protocol.h ../peer/lifecycle.h ../peer/network.h ../peer/network_json.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test station_lifecycle_test)
@@ -31,7 +34,7 @@ all: $(BUILD)/clean_rx.uf2 $(BUILD)/collector
 
 ifeq ($(abspath $(CONTROLLER_BIN)),$(abspath $(ROOT)/build/clean-rx/cyw43_rx_fw.bin))
 controller:
-	$(MAKE) -C ../src CC=clang BUILD=../../build/clean-rx EXTRA_CFLAGS='$(EXTRA_CFLAGS)'
+	$(MAKE) -C ../src CC=clang BUILD=../../build/clean-rx PROFILE=$(PROFILE) EXTRA_CFLAGS='$(EXTRA_CFLAGS)'
 else
 controller:
 	@test -f "$(CONTROLLER_BIN)" || { echo "Build the supplied CONTROLLER_BIN first" >&2; exit 1; }
@@ -42,7 +45,7 @@ $(BUILD):
 
 $(BUILD)/build_id.h: force controller | $(BUILD)
 	@id=$$({ shasum -a 256 $(SOURCES) $(HEADERS) collector.c assets.S Makefile $(CONTROLLER_BIN); \
-		printf '%s\n' '$(EXTRA_CFLAGS)'; } | shasum -a 256 | cut -c1-8); \
+		printf '%s\n' '$(HOST_FLAGS)'; } | shasum -a 256 | cut -c1-8); \
 	printf '#define USB_REPORT_BUILD_ID 0x%su\n' "$$id" > $@.tmp; \
 	if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
@@ -72,7 +75,7 @@ $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
 
 $(BUILD)/collector: collector.c frames.h station.h ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
-	cc -std=c11 -Wall -Wextra -Werror -O2 $(EXTRA_CFLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
+	cc -std=c11 -Wall -Wextra -Werror -O2 $(HOST_FLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
 		$< ../peer/network.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
@@ -100,25 +103,25 @@ test: $(NATIVE_TESTS) $(BUILD)/collector
 $(NATIVE_TESTS): $(HEADERS) $(ROOT)/src/tools/diagnostics_logic.c $(BUILD)/build_id.h | $(BUILD)
 
 $(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../host/wpa2_crypto.c ../host/wpa2_crypto.h ../src/mac.c ../src/block_ack.c
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined wpa2_test.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(HOST_FLAGS) -fsanitize=address,undefined wpa2_test.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 		$(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/secret_test: secret_test.c $(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb.h \
 		$(ROOT)/src/radio/wifi_trace.c $(ROOT)/src/shared/usb_report.c | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined -DLIVE_USB_CLEAN \
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(HOST_FLAGS) -fsanitize=address,undefined -DLIVE_USB_CLEAN \
 		secret_test.c $(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/radio/wifi_trace.c \
 		$(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/loader_strict_test: $(LOADER_TEST_SOURCES) | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O2 $(EXTRA_CFLAGS) -DCLEAN_RX_STRICT_TEST $(LOADER_TEST_SOURCES) -o $@
+	cc -std=c11 -Wall -Wextra -Werror -O2 $(HOST_FLAGS) -DCLEAN_RX_STRICT_TEST $(LOADER_TEST_SOURCES) -o $@
 
 $(BUILD)/loader_test: $(LOADER_TEST_SOURCES) | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O2 $(EXTRA_CFLAGS) $(LOADER_TEST_SOURCES) -o $@
+	cc -std=c11 -Wall -Wextra -Werror -O2 $(HOST_FLAGS) $(LOADER_TEST_SOURCES) -o $@
 
 $(BUILD)/ht20_test: ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(HOST_FLAGS) -fsanitize=address,undefined \
 		ht20_test.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/station_lifecycle_test: station_lifecycle_test.c station_lifecycle.h ../peer/lifecycle.h | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(HOST_FLAGS) -fsanitize=address,undefined \
 		$< $(ROOT)/src/tools/diagnostics_logic.c -o $@

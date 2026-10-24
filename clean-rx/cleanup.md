@@ -151,16 +151,16 @@ Implementation, diagnostic-codec ownership and offline evidence:
 
 **Prerequisites:** C03, C04.
 
-- [ ] Extract synthetic SDIO traffic into an explicit diagnostic variant.
-- [ ] Isolate ACK suppression and other deliberate fault injection from the
+- [x] Extract synthetic SDIO traffic into an explicit diagnostic variant.
+- [x] Isolate ACK suppression and other deliberate fault injection from the
   ordinary runtime command path.
-- [ ] Separate passive runtime observability from active experimental
+- [x] Separate passive runtime observability from active experimental
   behavior; retain necessary fault evidence and recovery safeguards.
-- [ ] Give diagnostic code a distinct location and select it through explicit
+- [x] Give diagnostic code a distinct location and select it through explicit
   source lists or narrowly scoped hooks, not implicit host/tool dependencies.
-- [ ] Preserve access to existing experiments through named profiles and
+- [x] Preserve access to existing experiments through named profiles and
   document which commands each profile supports.
-- [ ] Make ordinary builds reject diagnostic-only commands explicitly using
+- [x] Make ordinary builds reject diagnostic-only commands explicitly using
   the established error-reporting mechanism.
 
 **Acceptance:** ordinary firmware cannot generate synthetic test traffic or
@@ -168,6 +168,11 @@ activate fault injection. Diagnostic variants remain freestanding and
 identifiable. Removing default diagnostic behavior is an intentional
 behavior change with tests, documented compatibility impact and a separate
 hardware acceptance gate.
+
+Implementation and offline validation:
+[C05 diagnostic profiles](dev-doc/C05_DIAGNOSTIC_PROFILES.md).
+The implementation is complete; hardware acceptance remains a separate,
+unperformed gate requiring new authorization.
 
 ### C06 - Decompose controller orchestration and PSM composition
 

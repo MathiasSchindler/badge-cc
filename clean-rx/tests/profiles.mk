@@ -10,8 +10,8 @@ RECOVERY_FLAGS := $(EARLY_RX_FLAGS) -DCLEAN_RX_HT_ORDERED_FLUSH=1 -DCLEAN_RX_HT_
 
 .PHONY: test-copy-scope test-early-rx test-recovery
 test-copy-scope:
-	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/copy-scope EXTRA_CFLAGS='$(COPY_SCOPE_FLAGS)' test copy-scope-test
+	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/copy-scope PROFILE=diagnostic EXTRA_CFLAGS='$(COPY_SCOPE_FLAGS)' test copy-scope-test
 test-early-rx:
-	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/early-rx EXTRA_CFLAGS='$(EARLY_RX_FLAGS)' test early-rx-test
+	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/early-rx PROFILE=diagnostic EXTRA_CFLAGS='$(EARLY_RX_FLAGS)' test early-rx-test
 test-recovery:
-	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/recovery EXTRA_CFLAGS='$(RECOVERY_FLAGS)' test early-rx-test
+	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/recovery PROFILE=diagnostic EXTRA_CFLAGS='$(RECOVERY_FLAGS)' test early-rx-test

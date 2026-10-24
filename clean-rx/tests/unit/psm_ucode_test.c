@@ -1482,6 +1482,7 @@ static void acknowledgements(void) {
         base_regs[CLEAN_SHM_FRAME + 9u + i] = (uint16_t)(0x2002u + i);
         base_regs[CLEAN_ACK_PEER + i] = base_regs[CLEAN_SHM_FRAME + 9u + i];
     }
+#if CLEAN_RX_DIAGNOSTIC
     memcpy(regs, base_regs, sizeof(regs));
     regs[CLEAN_SHM_FRAME + 4u] = 0x0108u;
     regs[CLEAN_SHM_FRAME + 1u] = 10u;
@@ -1561,6 +1562,32 @@ static void acknowledgements(void) {
                    regs[CLEAN_ACK_TEST_LIMIT_SEEN] == limit);
         }
     }
+#else
+    assert(instruction(ACK_PREPARE) ==
+           WORD(0x77fu,0x1780u,0x1780u,ACK_PREAMBLE));
+    for (uint32_t pc = ACK_TEST_NORMAL; pc < ACK_PREAMBLE; ++pc)
+        assert(instruction(pc) == WORD(0x77fu,0x1780u,0x1780u,ACK_PREAMBLE));
+    for (uint32_t limit = 0u; limit <= CLEAN_TEST_ACK_MAX + 1u; ++limit) {
+        for (uint32_t corrupt = 0u; corrupt < 4u; ++corrupt) {
+            memcpy(regs, base_regs, sizeof(regs));
+            regs[CLEAN_SHM_FRAME + 4u] = 0x0108u;
+            regs[CLEAN_SHM_FRAME + 1u] = 10u;
+            regs[CLEAN_ACK_TEST_LIMIT] = (uint16_t)limit;
+            regs[CLEAN_TEST_ACK_REMAINING] = corrupt == 1u ? 65535u : (uint16_t)limit;
+            regs[CLEAN_TEST_ACK_DROPPED] = corrupt == 2u ? 65535u : 0u;
+            regs[CLEAN_ACK_TEST_FAULT] = corrupt == 3u ? 65535u : 0u;
+            uint16_t remaining = regs[CLEAN_TEST_ACK_REMAINING];
+            uint16_t dropped = regs[CLEAN_TEST_ACK_DROPPED];
+            uint16_t fault = regs[CLEAN_ACK_TEST_FAULT];
+            assert(ack_run(regs, 1) == 198u && regs[CLEAN_ACK_SENT] == 1u);
+            assert(!regs[CLEAN_ACK_ERROR]);
+            assert(regs[CLEAN_TEST_ACK_REMAINING] == remaining);
+            assert(regs[CLEAN_TEST_ACK_DROPPED] == dropped);
+            assert(regs[CLEAN_ACK_TEST_FAULT] == fault);
+        }
+    }
+    puts("PSM: runtime ACKs ignore valid and corrupt suppression controls; injection slots inert");
+#endif
     static const uint8_t cck[4] = {10u,20u,55u,110u};
     for (uint32_t rate = 0u; rate < 12u; ++rate) {
         memcpy(regs, base_regs, sizeof(regs));
@@ -1585,6 +1612,7 @@ static void acknowledgements(void) {
         assert(ack_run(regs, 1) == 198u && !regs[CLEAN_TEST_ACK_DROPPED]);
         assert(regs[CLEAN_TEST_ACK_REMAINING] == CLEAN_TEST_ACK_MAX);
         regs[CLEAN_SHM_FRAME + 9u] ^= 1u;
+#if CLEAN_RX_DIAGNOSTIC
         for (uint32_t dropped = 1u; dropped <= CLEAN_TEST_ACK_MAX; ++dropped) {
             assert(ack_run(regs, 1) == 198u && !regs[CLEAN_ACK_SENT]);
             assert(regs[CLEAN_TEST_ACK_REMAINING] == CLEAN_TEST_ACK_MAX - dropped);
@@ -1595,6 +1623,13 @@ static void acknowledgements(void) {
         assert(regs[CLEAN_ACK_SENT] == 1u && !regs[CLEAN_ACK_ERROR]);
         assert(regs[CLEAN_TEST_ACK_DROPPED] == CLEAN_TEST_ACK_MAX &&
                !regs[CLEAN_TEST_ACK_REMAINING] && !regs[CLEAN_ACK_TEST_PHASE]);
+#else
+        ack_run(regs, 1);
+        assert(regs[CLEAN_ACK_SENT] == 1u && !regs[CLEAN_ACK_ERROR]);
+        assert(regs[CLEAN_TEST_ACK_REMAINING] == CLEAN_TEST_ACK_MAX);
+        assert(!regs[CLEAN_TEST_ACK_DROPPED]);
+        regs[CLEAN_TEST_ACK_REMAINING] = 0u;
+#endif
         assert(regs[CLEAN_ACK_KINDS] == 1u);
         assert(regs[0x108a] == phy && regs[0x1086] == (rate >= 4u ? 0x41u : 0x40u));
         assert(regs[0x10b5] == 16u && regs[0x10b4] == 0x0826u);
@@ -2959,6 +2994,10 @@ int main(void) {
     }
 #endif
     puts("PSM: image identity, capture bounds, RX streaming and startup flush OK");
+#if CLEAN_RX_DIAGNOSTIC
     puts("PSM: single-SHM inputs, pinned ACK/CTS addresses, bounded ACK suppression at all 12 rates and 100000 native ACK rearms OK; NOT RF timing");
+#else
+    puts("PSM: single-SHM inputs, pinned ACK/CTS addresses, unsuppressed ACKs at all 12 rates and 100000 native ACK rearms OK; NOT RF timing");
+#endif
     return 0;
 }

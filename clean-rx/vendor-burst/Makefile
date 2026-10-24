@@ -40,7 +40,8 @@ REF_VOBJS := $(addprefix $(REF_BUILD)/vendor/,$(notdir $(REF_VENDOR:.c=.o))) \
 	$(REF_BUILD)/vendor/assets.o $(REF_BUILD)/picobin.o
 REF_OOBJS := $(addprefix $(REF_BUILD)/observer/,$(notdir $(REF_OBSERVER:.c=.o))) \
 	$(REF_BUILD)/observer/assets.o $(REF_BUILD)/picobin.o
-REF_HEADERS := $(wildcard $(REF_DIR)/*.h clean-rx/src/*.h clean-rx/tests/fixtures/*.h clean-rx/badge/loader.h \
+DIAGNOSTIC_FLAGS := -DCLEAN_RX_DIAGNOSTIC=1
+REF_HEADERS := $(wildcard $(REF_DIR)/*.h clean-rx/src/*.h clean-rx/src/diagnostic/*.h clean-rx/tests/fixtures/*.h clean-rx/badge/loader.h \
 	$(SHARED_DIR)/*.h src/usb/*.h $(RADIO_DIR)/*.h $(PLATFORM_DIR)/*.h $(ARCH_DIR)/*.h)
 VPATH := $(sort $(dir $(REF_VENDOR) $(REF_OBSERVER)))
 
@@ -200,15 +201,15 @@ reference-park:
 reference-stimulus-park-test:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 REF_FLAGS='-DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_RESET=1 -DCLEAN_RX_HT_REARM_PARK=1 -DCLEAN_RX_HT_REARM_INJECT=1' reference reference-test
 reference-controller:
-	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' all test
+	$(MAKE) -C clean-rx/src CC=clang PROFILE=diagnostic BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' all test
 ifeq ($(REF_SCOPE),1)
-	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' copy-scope-test
+	$(MAKE) -C clean-rx/src CC=clang PROFILE=diagnostic BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' copy-scope-test
 endif
 ifeq ($(REF_EARLY),1)
-	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' early-rx-test
+	$(MAKE) -C clean-rx/src CC=clang PROFILE=diagnostic BUILD=../../$(REF_BUILD)/controller EXTRA_CFLAGS='$(REF_FLAGS)' early-rx-test
 endif
 ifeq ($(REF_STIMULUS),1)
-	$(MAKE) -C clean-rx/src CC=clang BUILD=../../$(REF_BUILD)/stimulus-controller EXTRA_CFLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=$(if $(filter 1,$(REF_HANDOFF)),0,1) -DCLEAN_RX_HT_HANDOFF_STIMULUS=$(REF_HANDOFF) -DCLEAN_RX_HT_HANDOFF_GUARD=$(REF_GUARD) -DCLEAN_RX_HT_VARIABLE=$(REF_VARIABLE)' all test
+	$(MAKE) -C clean-rx/src CC=clang PROFILE=diagnostic BUILD=../../$(REF_BUILD)/stimulus-controller EXTRA_CFLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=$(if $(filter 1,$(REF_HANDOFF)),0,1) -DCLEAN_RX_HT_HANDOFF_STIMULUS=$(REF_HANDOFF) -DCLEAN_RX_HT_HANDOFF_GUARD=$(REF_GUARD) -DCLEAN_RX_HT_VARIABLE=$(REF_VARIABLE)' all test
 endif
 
 $(REF_BUILD)/build_id.h: reference-force reference-controller $(WIFI_ASSET_FILES)
@@ -222,39 +223,39 @@ $(REF_BUILD)/build_id.h: reference-force reference-controller $(WIFI_ASSET_FILES
 
 $(REF_BUILD)/vendor/%.o: %.c $(REF_BUILD)/build_id.h $(REF_HEADERS)
 	@mkdir -p $(dir $@)
-	$(RP2350_CC) $(REF_CFLAGS) -c $< -o $@
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -c $< -o $@
 $(REF_BUILD)/observer/%.o: %.c $(REF_BUILD)/build_id.h $(REF_HEADERS)
 	@mkdir -p $(dir $@)
-	$(RP2350_CC) $(REF_CFLAGS) -c $< -o $@
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -c $< -o $@
 $(REF_BUILD)/vendor/main.o $(REF_BUILD)/observer/main.o: $(REF_DIR)/main.c $(REF_BUILD)/build_id.h $(REF_HEADERS)
 	@mkdir -p $(dir $@)
-	$(RP2350_CC) $(REF_CFLAGS) -c $< -o $@
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -c $< -o $@
 $(REF_BUILD)/vendor/assets.o: $(RADIO_DIR)/wifi_assets.S $(REF_BUILD)/build_id.h
 ifeq ($(REF_STIMULUS),1)
-	$(RP2350_CC) $(REF_CFLAGS) -DCLEAN_CONTROLLER_PATH='"$(abspath $(REF_BUILD)/stimulus-controller/cyw43_rx_fw.bin)"' -c clean-rx/badge/assets.S -o $@
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -DCLEAN_CONTROLLER_PATH='"$(abspath $(REF_BUILD)/stimulus-controller/cyw43_rx_fw.bin)"' -c clean-rx/badge/assets.S -o $@
 else
-	$(RP2350_CC) $(REF_CFLAGS) -DWIFI_FIRMWARE_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_firmware.bin)"' \
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -DWIFI_FIRMWARE_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_firmware.bin)"' \
 		-DWIFI_NVRAM_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_nvram.bin)"' \
 		-DWIFI_CLM_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_clm.bin)"' -c $< -o $@
 endif
 $(REF_BUILD)/observer/assets.o: clean-rx/badge/assets.S $(REF_BUILD)/build_id.h
 ifeq ($(REF_MONITOR),1)
-	$(RP2350_CC) $(REF_CFLAGS) -DWIFI_FIRMWARE_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_firmware.bin)"' \
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -DWIFI_FIRMWARE_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_firmware.bin)"' \
 		-DWIFI_NVRAM_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_nvram.bin)"' \
 		-DWIFI_CLM_BIN='"$(abspath $(WIFI_ASSET_DIR)/wifi_clm.bin)"' -c $(RADIO_DIR)/wifi_assets.S -o $@
 else
-	$(RP2350_CC) $(REF_CFLAGS) -DCLEAN_CONTROLLER_PATH='"$(abspath $(REF_CONTROLLER))"' -c $< -o $@
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -DCLEAN_CONTROLLER_PATH='"$(abspath $(REF_CONTROLLER))"' -c $< -o $@
 endif
 $(REF_BUILD)/picobin.o: $(ARCH_DIR)/picobin.S
 	@mkdir -p $(dir $@)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
 $(REF_BUILD)/vendor.elf: $(REF_VOBJS) $(ARCH_DIR)/memmap_report.ld
-	$(RP2350_CC) $(REF_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
 		-T$(ARCH_DIR)/memmap_report.ld $(REF_VOBJS) -Wl,-Map=$(REF_BUILD)/vendor.map -o $@
 	@test -z "$$($(RP2350_NM) -u $@)"
 	$(RP2350_SIZE) $@
 $(REF_BUILD)/observer.elf: $(REF_OOBJS) $(ARCH_DIR)/memmap_report.ld
-	$(RP2350_CC) $(REF_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
+	$(RP2350_CC) $(REF_CFLAGS) $(DIAGNOSTIC_FLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
 		-T$(ARCH_DIR)/memmap_report.ld $(REF_OOBJS) -Wl,-Map=$(REF_BUILD)/observer.map -o $@
 	@test -z "$$($(RP2350_NM) -u $@)"
 	$(RP2350_SIZE) $@
@@ -263,7 +264,7 @@ $(REF_BUILD)/%.bin: $(REF_BUILD)/%.elf
 $(REF_BUILD)/%.uf2: $(REF_BUILD)/%.bin $(BIN2UF2)
 	$(BIN2UF2) $< $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
 $(REF_BUILD)/collector: $(REF_DIR)/collector.c $(REF_BUILD)/build_id.h $(REF_HEADERS)
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 $(REF_FLAGS) -DWIFI_TRACE_SIZE=5888u \
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 $(REF_FLAGS) $(DIAGNOSTIC_FLAGS) -DWIFI_TRACE_SIZE=5888u \
 		-I$(REF_BUILD) $$(pkg-config --cflags libusb-1.0) $< $(SHARED_DIR)/usb_report.c \
 		$(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_trace.c clean-rx/src/mac.c clean-rx/src/block_ack.c \
 		$(RADIO_DIR)/wifi_control.c \
@@ -277,9 +278,9 @@ ifeq ($(REF_MONITOR)$(REF_HANDOFF),10)
 	$(REF_BUILD)/monitor_test
 endif
 $(REF_BUILD)/monitor_test: $(REF_DIR)/monitor_test.c $(REF_DIR)/monitor.c $(REF_HEADERS) $(REF_BUILD)/build_id.h
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) -fsanitize=address,undefined \
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) $(DIAGNOSTIC_FLAGS) -fsanitize=address,undefined \
 		$< $(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_control.c $(SHARED_DIR)/usb_report.c -o $@
 $(REF_BUILD)/protocol_test: $(REF_DIR)/protocol_test.c $(REF_HEADERS) $(REF_BUILD)/build_id.h
 	@mkdir -p $(dir $@)
-	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) $(if $(filter 1,$(REF_STIMULUS)),-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=1 -DCLEAN_RX_HT_HANDOFF_STIMULUS=1) -fsanitize=address,undefined \
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g $(REF_FLAGS) $(DIAGNOSTIC_FLAGS) $(if $(filter 1,$(REF_STIMULUS)),-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_STIMULUS=1 -DCLEAN_RX_HT_HANDOFF_STIMULUS=1) -fsanitize=address,undefined \
 		$< $(TOOLS_DIR)/diagnostics_logic.c $(PLATFORM_DIR)/graphics.c clean-rx/src/mac.c clean-rx/src/block_ack.c $(RADIO_DIR)/wifi_control.c -o $@

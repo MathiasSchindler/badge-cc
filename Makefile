@@ -181,7 +181,7 @@ MICRO_SIGNAL_SOURCES := $(TOOLS_DIR)/micro-signal.c $(TOOLS_DIR)/diagnostics_log
 MICRO_SIGNAL_HEADERS := $(TOOLS_DIR)/micro-signal.h $(TOOLS_DIR)/micro-signal-mtu.h \
 	$(TOOLS_DIR)/micro-signal-ofdm.h clean-rx/src/phy_rates.h \
 	clean-rx/src/frame_limits.h $(TOOLS_DIR)/diagnostics_logic.h \
-	clean-rx/badge/loader.h clean-rx/badge/frames.h clean-rx/src/tx_diag.h clean-rx/src/sdio_ring.h clean-rx/src/sdio_test.h \
+	clean-rx/badge/loader.h clean-rx/badge/frames.h clean-rx/src/tx_diag.h clean-rx/src/sdio_ring.h clean-rx/src/diagnostic/sdio_test.h \
 	$(wildcard $(ARCH_DIR)/*.h $(SHARED_DIR)/*.h $(PLATFORM_DIR)/*.h $(RADIO_DIR)/*.h)
 MICRO_SIGNAL_TEST_USB := src/usb/live_usb_control.c src/usb/live_usb_hw.c \
 	$(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
@@ -203,23 +203,23 @@ micro-signal-transport-credit-test: $(UF2_DIR)/micro-signal-transport-credit-tes
 
 $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-test \
-		EXTRA_CFLAGS=-DCLEAN_SDIO_SELF_TEST
+		PROFILE=sdio-test
 
 $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-paced-test \
-		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_PACED'
+		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_PACED'
 
 $(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window-test \
-		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION'
+		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION'
 
 $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window32-test \
-		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION -DCLEAN_SDIO_SELF_TEST_DMA32'
+		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION -DCLEAN_SDIO_SELF_TEST_DMA32'
 
 $(BUILD_DIR)/clean-rx-sdio-credit-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-credit-test \
-		EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST -DCLEAN_SDIO_SELF_TEST_WINDOW=CLEAN_SDIO_WINDOW -DCLEAN_SDIO_SELF_TEST_DMA32 -DCLEAN_SDIO_SELF_TEST_LARGE'
+		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_WINDOW=CLEAN_SDIO_WINDOW -DCLEAN_SDIO_SELF_TEST_DMA32 -DCLEAN_SDIO_SELF_TEST_LARGE'
 
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin
@@ -301,7 +301,7 @@ micro-signal-self-test: $(MICRO_SIGNAL_DIR)/collect
 $(MICRO_SIGNAL_DIR)/collect: $(HOST_TOOLS_SRC_DIR)/micro_signal_collect.c \
 		$(TOOLS_DIR)/micro-signal-ofdm.h $(TOOLS_DIR)/micro-signal-mtu.h \
 		$(TOOLS_DIR)/micro-signal.h clean-rx/badge/frames.h clean-rx/src/phy_rates.h clean-rx/src/tx_diag.h \
-		clean-rx/src/sdio_test.h clean-rx/src/sdio_ring.h clean-rx/src/frame_limits.h \
+		clean-rx/src/diagnostic/sdio_test.h clean-rx/src/sdio_ring.h clean-rx/src/frame_limits.h \
 		$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h $(TOOLS_DIR)/diagnostics_logic.c \
 		$(TOOLS_DIR)/diagnostics_logic.h $(SHARED_DIR)/bytes.h $(SHARED_DIR)/usb_report.h \
 		$(RADIO_DIR)/wifi_trace.h src/usb/live_usb.h | $(MICRO_SIGNAL_DIR)

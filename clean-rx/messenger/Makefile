@@ -32,7 +32,7 @@ pair:
 	$(MAKE) ROLE=1 all
 	$(MAKE) ROLE=2 all
 controller:
-	$(MAKE) -C ../src CC=clang BUILD=$(abspath $(BUILD)/controller) EXTRA_CFLAGS='$(FLAGS)'
+	$(MAKE) -C ../src CC=clang BUILD=$(abspath $(BUILD)/controller) PROFILE=runtime EXTRA_CFLAGS='$(FLAGS)'
 $(BUILD) $(BUILD)/role$(ROLE):
 	mkdir -p $@
 $(BUILD)/build_id.h: force controller | $(BUILD)

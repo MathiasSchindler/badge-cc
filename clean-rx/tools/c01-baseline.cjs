@@ -67,6 +67,10 @@ const sourceRoles = {
     'unicast.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
     'unicast_contract.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
     'ht20.h': ['shared-abi-portable-runtime'],
+    'ht_payload.h': ['shared-abi-portable-runtime'],
+    'firmware_profile.h': ['controller-runtime'],
+    'firmware_command.h': ['controller-runtime'],
+    'profile_checks.h': ['controller-runtime'],
     'ht_contract.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
     'ht_command.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
     'ht_observer.h': ['controller-runtime', 'firmware-side-diagnostic'],
@@ -101,7 +105,8 @@ function classify(file) {
     const name = path.basename(file);
     if (file.endsWith('.md')) return ['documentation'];
     if (name === 'Makefile') return ['build-infrastructure'];
-    if (file === 'clean-rx/tests/profiles.mk') return ['build-infrastructure'];
+    if (file === 'clean-rx/tests/profiles.mk' || file === 'clean-rx/src/firmware.mk') return ['build-infrastructure'];
+    if (file.startsWith('clean-rx/src/diagnostic/')) return ['firmware-side-diagnostic'];
     if (file.startsWith('clean-rx/tests/fixtures/')) return ['development-tool', 'shared-test-fixture'];
     if (file.startsWith('clean-rx/tests/')) return ['native-test'];
     if (name.endsWith('_test.c') || name.endsWith('.test.cjs')) return ['native-test'];
@@ -188,13 +193,13 @@ function captureProfile(profile, output) {
     fs.mkdirSync(build);
     const flags = profile.defines.map(value => `-D${value}`).join(' ');
     const tests = [...ordinaryTests, ...(profile.extraTests || [])];
-    const args = ['-C', controller, 'CC=clang', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
+    const args = ['-C', controller, 'CC=clang', 'PROFILE=diagnostic', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
         'all'];
     run('make', args, root, path.join(build, 'build.log'));
-    const testArgs = ['-C', nativeTests, `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
+    const testArgs = ['-C', nativeTests, 'PROFILE=diagnostic', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
         ...tests.map(test => path.join(build, test))];
     run('make', testArgs, root, path.join(build, 'test-build.log'));
-    run('make', ['-C', nativeTests, `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`, 'runtime-test'],
+    run('make', ['-C', nativeTests, 'PROFILE=diagnostic', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`, 'runtime-test'],
         root, path.join(build, 'runtime-test.log'));
     const buildFlags = fs.readFileSync(path.join(build, 'build_flags'), 'utf8').trim().split('\n');
     const compilerFlags = buildFlags[1].trim().split(/\s+/);
@@ -228,7 +233,7 @@ function captureProfile(profile, output) {
     const testResults = allTests.map(test => {
         if (!tests.includes(test)) return { test, status: 'not-selected', reason: 'Requires a dedicated diagnostic profile.' };
         const testOutput = run(path.join(build, test), [], root, path.join(build, `${test}.log`));
-        const dep = run('cc', ['-std=c11', ...profile.defines.map(value => `-D${value}`),
+        const dep = run('cc', ['-std=c11', '-DCLEAN_RX_DIAGNOSTIC=1', ...profile.defines.map(value => `-D${value}`),
             '-I../src', '-Isupport', '-MM', testSources[test]], nativeTests);
         fs.writeFileSync(path.join(build, `${test}.d`), dep);
         return { test, status: testStatus(testOutput), logSha256: sha256(testOutput),
@@ -239,7 +244,8 @@ function captureProfile(profile, output) {
     const files = ['cyw43_rx_fw.bin', 'cyw43_rx_fw.elf', 'cyw43_rx_fw.map', ...(psm ? ['psm.bin'] : []),
         ...inputs.map(input => input.object)];
     return {
-        ...profile, flags, command: ['make', ...args], testCommand: ['make', ...testArgs], compilerFlags, inputs,
+        ...profile, flags, firmwareProfile: 'diagnostic', comparison: 'C01 legacy diagnostic behavior',
+        command: ['make', ...args], testCommand: ['make', ...testArgs], compilerFlags, inputs,
         linkerScript: 'clean-rx/src/cyw43.ld',
         externalIncludes: [...new Set(inputs.flatMap(input => input.dependencies)
             .filter(file => !file.startsWith('clean-rx/src/')))].sort(),

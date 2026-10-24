@@ -2,7 +2,7 @@
 #define MICRO_SIGNAL_MTU_H
 
 #include "micro-signal.h"
-#include "../../clean-rx/src/sdio_test.h"
+#include "../../clean-rx/src/diagnostic/sdio_test.h"
 
 /* Broadcast Data with 2240..2304-byte MSDUs, including LLC/SNAP, plus header/FCS. */
 static inline uint32_t micro_mtu_length(const micro_signal_event_t *event) {

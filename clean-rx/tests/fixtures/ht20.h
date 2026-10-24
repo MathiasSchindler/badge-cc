@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_FIXTURE_HT20_H
 #define CLEAN_RX_FIXTURE_HT20_H
 
-#include "../../src/ht_command.h"
+#include "../../src/diagnostic/ht_command.h"
 
 static inline int clean_ht_ampdu_ba_match(const uint8_t *m, uint32_t length,
                                           const uint8_t nonce[14]) {

@@ -2,7 +2,7 @@
 #include "micro-signal-mtu.h"
 #include "micro-signal-ofdm.h"
 #include "../../clean-rx/src/sdio_ring.h"
-#include "../../clean-rx/src/sdio_test.h"
+#include "../../clean-rx/src/diagnostic/sdio_test.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

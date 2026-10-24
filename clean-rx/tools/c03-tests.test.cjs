@@ -50,8 +50,9 @@ test('unit/model suites build with only production source and unit/support tests
         const isolatedTests = path.join(directory, 'tests');
         fs.mkdirSync(source);
         fs.mkdirSync(isolatedTests);
-        for (const file of fs.readdirSync(path.join(root, 'clean-rx/src'))) {
-            if (/\.(c|h|S|ld)$/.test(file) || file === 'Makefile') {
+        for (const file of fs.readdirSync(path.join(root, 'clean-rx/src'), { recursive: true })) {
+            if (/\.(c|h|S|ld|mk|inc)$/.test(file) || file === 'Makefile') {
+                fs.mkdirSync(path.dirname(path.join(source, file)), { recursive: true });
                 fs.copyFileSync(path.join(root, 'clean-rx/src', file), path.join(source, file));
             }
         }

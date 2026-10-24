@@ -80,7 +80,8 @@ function referenceProfileUnchanged(current, original) {
 
 function buildProfile(source, build, flags, isolated) {
     fs.mkdirSync(build);
-    const args = ['-C', source, 'CC=clang', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`, 'all'];
+    const args = ['-C', source, 'CC=clang', ...(isolated ? ['PROFILE=diagnostic'] : []),
+        `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`, 'all'];
     run('make', args, root, path.join(build, 'build.log'));
     const compilerFlags = fs.readFileSync(path.join(build, 'build_flags'), 'utf8').trim().split('\n')[1].trim().split(/\s+/);
     const sourceList = /^SRCS\s*:=\s*(.+)$/m.exec(fs.readFileSync(path.join(source, 'Makefile'), 'utf8'));
@@ -134,6 +135,7 @@ function verify(outputArgument, recordArgument) {
     const report = {
         schemaVersion: 1, capturedAt: new Date().toISOString(), status: 'in-progress',
         baselineRevision: frozen.provenance.revision, worktree: run('git', ['status', '--short']),
+        currentFirmwareProfile: 'diagnostic', comparison: 'C01 legacy diagnostic behavior, not the C05 runtime default',
         tools: Object.fromEntries(['clang', 'cc', 'ld.lld', 'llvm-objcopy', 'llvm-nm', 'llvm-size', 'make']
             .map(tool => [tool, run(tool, ['--version']).trim()])),
         sourceHashes: {}, referenceSelections: [], profiles: [],
@@ -146,7 +148,7 @@ function verify(outputArgument, recordArgument) {
         const after = path.join(temporary, 'after/source');
         fs.mkdirSync(before, { recursive: true });
         fs.mkdirSync(after, { recursive: true });
-        const productionFile = file => /(?:\.(c|h|S|ld)|\/Makefile)$/.test(file) && !file.endsWith('_test.c');
+        const productionFile = file => /(?:\.(c|h|S|ld|inc|mk)|\/Makefile)$/.test(file) && !file.endsWith('_test.c');
         for (const entry of frozen.inventory.filter(entry => entry.file.startsWith('clean-rx/src/') && productionFile(entry.file))) {
             const text = run('git', ['show', `${frozen.provenance.revision}:${entry.file}`]);
             if (hash(text) !== entry.sha256) throw new Error(`Cannot reconstruct frozen C01 input: ${entry.file}`);
@@ -159,9 +161,10 @@ function verify(outputArgument, recordArgument) {
             fs.mkdirSync(path.dirname(destination), { recursive: true });
             fs.writeFileSync(destination, text);
         }
-        for (const file of fs.readdirSync(path.join(root, 'clean-rx/src')).filter(file => productionFile(`src/${file}`))) {
+        for (const file of fs.readdirSync(path.join(root, 'clean-rx/src'), { recursive: true }).filter(file => productionFile(`src/${file}`))) {
             const bytes = fs.readFileSync(path.join(root, 'clean-rx/src', file));
             report.sourceHashes[file] = hash(bytes);
+            fs.mkdirSync(path.dirname(path.join(after, file)), { recursive: true });
             fs.writeFileSync(path.join(after, file), bytes);
         }
         const resolver = resolverMakefile(ownerText);

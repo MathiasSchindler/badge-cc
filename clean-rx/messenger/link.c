@@ -1,5 +1,5 @@
 #include "link.h"
-#include "../src/ht_command.h"
+#include "../src/ht_payload.h"
 
 static int due(uint32_t now, uint32_t deadline) {
     return now - deadline < 0x80000000u;
@@ -60,7 +60,7 @@ int msg_template(uint8_t packet[MSG_STORAGE], const uint8_t frame[MSG_MPDU]) {
     packet[4] = MSG_MPDU;
     if (!clean_ht20_sig(packet+8u, MSG_MPDU, MSG_MCS)) return 0;
     badger_bytes_copy(packet+14u, frame, MSG_MPDU);
-    return clean_ht_data_command_valid(
+    return clean_ht_payload_command_valid(
         CLEAN_HT_DATA_CMD | clean_tx_length_bits(MSG_MPDU+6u) | (1u<<19u),
         CLEAN_RX_HT_DATA, 0u, packet);
 }

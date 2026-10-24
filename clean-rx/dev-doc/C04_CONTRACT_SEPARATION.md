@@ -40,6 +40,12 @@ not host-only test helpers. They remain shared in `ht_command.h`; moving
 them out of the standalone tree would introduce a test dependency, and
 copying them would create two implementations of the same contract.
 
+C05 subsequently moved this codec to `src/diagnostic/ht_command.h` and kept
+normal HT v1 admission in `src/ht_payload.h`. See
+[C05 diagnostic profiles](C05_DIAGNOSTIC_PROFILES.md) for the intentional
+default-policy change. The C04 history and evidence below describe the
+pre-C05 behavior.
+
 Host-only HT packet generators and expected/evidence checks move to
 `tests/fixtures/ht20.h`. Soak generation, nonce patterns, reassembly checks
 and campaign status live entirely in `tests/fixtures/mac_soak.h`.

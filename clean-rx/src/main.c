@@ -4,13 +4,19 @@
 #include "phy_rates.h"
 #include "unicast.h"
 #include "mac.h"
-#include "ht_command.h"
+#include "firmware_command.h"
+#include "profile_checks.h"
+#if CLEAN_RX_DIAGNOSTIC
+#include "diagnostic/ht_command.h"
+#else
+#include "ht_payload.h"
+#endif
 #include "ht_observer.h"
 #include "observer_dma.h"
 #include "early_rx.h"
 #include "bytes.h"
 #ifdef CLEAN_SDIO_SELF_TEST
-#include "sdio_test.h"
+#include "diagnostic/sdio_test.h"
 #endif
 
 #define MBOX  ((volatile fw_mbox_t *)FW_MBOX_ADDR)
@@ -720,8 +726,12 @@ static int station_policy_word(uint32_t word, uint16_t expected) {
     return actual == expected ? 1 : fail(0x85u, word, actual);
 }
 
-static int station_ack_test_configure(uint16_t count) {
-    ack_test_configured = count;
+#if CLEAN_RX_DIAGNOSTIC
+#include "diagnostic/ack_configure.inc"
+#define station_response_evidence_reset() station_ack_test_configure(0u)
+#else
+static int station_response_evidence_reset(void) {
+    ack_test_configured = 0u;
     ++ack_test_epoch;
     ack_expiry_at = ack_expiry_started = ack_expiry_window = 0u;
     for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
@@ -730,20 +740,21 @@ static int station_ack_test_configure(uint16_t count) {
         shm_write16(CLEAN_ACK_ARITH_SHM + i, 0u);
     for (uint32_t i = 0u; i < CLEAN_ACK_TEST_WORDS; ++i)
         shm_write16(CLEAN_ACK_TEST_SHM + i, 0u);
-    shm_write16(CLEAN_TEST_ACK_REMAINING, count);
+    shm_write16(CLEAN_TEST_ACK_REMAINING, 0u);
     shm_write16(CLEAN_TEST_ACK_DROPPED, 0u);
-    shm_write16(CLEAN_ACK_TEST_LIMIT, count);
+    shm_write16(CLEAN_ACK_TEST_LIMIT, 0u);
     shm_write16(CLEAN_ACK_TEST_EPOCH, ack_test_epoch);
     for (uint32_t i = 0u; i < CLEAN_ACK_TEST_WORDS; ++i)
         if (!station_policy_word(CLEAN_ACK_TEST_SHM + i,
-                i == 0u ? count : i == 9u ? ack_test_epoch : 0u)) return 0;
+                i == 0u ? 0u : i == 9u ? ack_test_epoch : 0u)) return 0;
     for (uint32_t i = 0u; i < CLEAN_ACK_OBSERVE_WORDS; ++i)
         if (!station_policy_word(CLEAN_ACK_OBSERVE_SHM + i, 0u)) return 0;
     for (uint32_t i = 0u; i < 3u; ++i)
         if (!station_policy_word(CLEAN_ACK_ARITH_SHM + i, 0u)) return 0;
-    return station_policy_word(CLEAN_TEST_ACK_REMAINING, count) &&
+    return station_policy_word(CLEAN_TEST_ACK_REMAINING, 0u) &&
         station_policy_word(CLEAN_TEST_ACK_DROPPED, 0u);
 }
+#endif
 
 static void snapshot_ack_test(void) {
     volatile clean_ack_test_status_t *s =
@@ -1376,11 +1387,14 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     uint16_t ack_sent = shm_read16(CLEAN_ACK_SENT);
     uint16_t cts_sent = shm_read16(CLEAN_CTS_SENT);
     if (ht_probe) {
+#if CLEAN_RX_DIAGNOSTIC
         uint32_t aggregate_probe = ht_probe == 2u && CLEAN_RX_AMPDU_PROBE &&
             ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_AMPDU_PROBE_VERSION;
+#endif
         uint32_t ht_length = total_len - CLEAN_PLCP_BYTES;
         clean_ht20_config_t config;
         if (!(ht_probe == 2u ? CLEAN_RX_HT_DATA : CLEAN_RX_HT_PROBE) ||
+#if CLEAN_RX_DIAGNOSTIC
             !(aggregate_probe ? clean_ht_ampdu_probe_sig_valid(tx_buf, ht_length) :
               CLEAN_RX_HT_STIMULUS &&
               ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_STIMULUS_VERSION ?
@@ -1389,6 +1403,9 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
               ((const volatile uint8_t *)FW_TX_BUF_ADDR)[0] == CLEAN_HT_HANDOFF_VERSION ?
                   clean_ht_handoff_sig_valid(tx_buf, ht_length) :
                                 clean_ht20_sig_valid(tx_buf, ht_length)) ||
+#else
+            !clean_ht20_sig_valid(tx_buf, ht_length) ||
+#endif
             !clean_ht20_configure(&config, ht_length, tx_buf[0], CLEAN_HT20_MCS_MASK))
             return fail(0x83u, FW_TX_BUF_ADDR, total_len);
         ht_tx = config.controls;
@@ -1950,7 +1967,7 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
     for (uint32_t i = 0u; i < 32u; ++i)  shm_write16(0x600u + i, 0u);
     for (uint32_t i = 0u; i < 480u; ++i) shm_write16(0x620u + i, 0u);
     ack_test_epoch = 0u;
-    if (!station_ack_test_configure(0u)) return 0;
+    if (!station_response_evidence_reset()) return 0;
 #if CLEAN_RX_AMPDU_PROBE
     for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i)
         shm_write16(CLEAN_AMPDU_PROBE_SHM + i, 0u);
@@ -2109,68 +2126,7 @@ void cyw43_main(void) {
     }
 
 #ifdef CLEAN_SDIO_SELF_TEST
-    _Static_assert(__builtin_offsetof(fw_mbox_t, f2_consumed) == CLEAN_SDIO_TEST_ACK_OFFSET,
-                   "Transport acknowledgement offset");
-    _Static_assert(__builtin_offsetof(fw_mbox_t, rc_adc) == CLEAN_SDIO_TEST_WINDOW_OFFSET,
-                   "Transport window offset");
-    _Static_assert(__builtin_offsetof(fw_mbox_t, rc_dacbuf) == CLEAN_SDIO_TEST_PATTERN_OFFSET,
-                   "Transport pattern offset");
-#ifdef CLEAN_SDIO_SELF_TEST_LARGE
-    const uint32_t test_pattern = 2u;
-#elif defined(CLEAN_SDIO_SELF_TEST_TRANSITION)
-    const uint32_t test_pattern = 1u;
-#else
-    const uint32_t test_pattern = 0u;
-#endif
-    if (!sdio_f2_init()) return;
-    MBOX->rc_lpf = 0u;
-    MBOX->rc_adc = CLEAN_SDIO_SELF_TEST_WINDOW;
-    MBOX->rc_dacbuf = test_pattern;
-#ifdef CLEAN_SDIO_SELF_TEST_PACED
-    MBOX->fw_substage = CLEAN_SDIO_TEST_PACING_TICKS;
-#else
-    MBOX->fw_substage = 0u;
-#endif
-    MBOX->fw_state = FW_STATE_PSM_READY;
-    while (MBOX->host_cmd < 2u) __asm__ volatile("nop");
-    MBOX->fw_state = FW_STATE_RX_ACTIVE;
-    uint32_t sequence = 0u;
-    while (1) {
-        uint32_t command = MBOX->host_cmd;
-        if ((command & 255u) != 7u) continue;
-        uint32_t count = command >> 8u;
-        if (count < 1u || count > 16u) {
-            (void)fail(0x88u, FW_MBOX_ADDR + 24u, command);
-            return;
-        }
-        for (uint32_t i = 0u; i < count; ++i) {
-#if CLEAN_SDIO_SELF_TEST_WINDOW > 0u
-            uint32_t waits = 0u;
-            while (!clean_sdio_test_window_open(sequence, MBOX->f2_consumed,
-                                                CLEAN_SDIO_SELF_TEST_WINDOW) &&
-                   waits < 20000000u) ++waits;
-            if (waits == 20000000u) {
-                (void)fail(0x8au, FW_MBOX_ADDR + CLEAN_SDIO_TEST_ACK_OFFSET, MBOX->f2_consumed);
-                return;
-            }
-#endif
-            volatile fw_frame_slot_t *slot = &MULTI->frames[0];
-            uint32_t length = clean_sdio_test_pattern_length(++sequence, test_pattern);
-            slot->rxe_len = (uint16_t)(length + 6u);
-            for (uint32_t byte = 0u; byte < length; ++byte)
-                slot->raw[8u + byte] = clean_sdio_test_byte(sequence, byte);
-            sdio_f2_send_frame(slot, 6u);
-            if (MBOX->fw_state == FW_STATE_ERROR) return;
-#ifdef CLEAN_SDIO_SELF_TEST_PACED
-            if (!delay_ticks(CLEAN_SDIO_TEST_PACING_TICKS)) {
-                (void)fail(0x89u, 0x18003090u, CLEAN_SDIO_TEST_PACING_TICKS);
-                return;
-            }
-#endif
-        }
-        MBOX->host_cmd = 2u;
-        __asm__ volatile("dsb" ::: "memory");
-    }
+#include "diagnostic/sdio_run.inc"
 #endif
 
     /* 3. Release D11 & PHY from reset, load ROM board tables, and run Radio 20691 + LCN20 PHY calibration */
@@ -2265,6 +2221,14 @@ void cyw43_main(void) {
             station_publish_mac();
         }
         uint32_t cmd = MBOX->host_cmd;
+#if !CLEAN_RX_DIAGNOSTIC
+        uint8_t version = (cmd & 255u) == CLEAN_HT_DATA_CMD ?
+            *(const volatile uint8_t *)FW_TX_BUF_ADDR : 0u;
+        if (!clean_runtime_command_allowed(cmd, version)) {
+            fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
+            break;
+        }
+#endif
 #if CLEAN_RX_HT_OBSERVER_FIFO
         if (!station_publish_capture(channel)) break;
 #endif
@@ -2383,14 +2347,20 @@ void cyw43_main(void) {
             const volatile uint8_t *packet = (const volatile uint8_t *)FW_TX_BUF_ADDR;
             uint32_t ht_probe = (cmd & 255u) == CLEAN_HT_DATA_CMD ? 2u :
                 (cmd & 255u) == CLEAN_HT_PROBE_CMD ? 1u : 0u;
-            uint32_t ht_clocked = ht_probe == 2u && packet[0] == CLEAN_HT_CLOCKED_VERSION;
+            uint32_t ht_clocked = CLEAN_RX_DIAGNOSTIC &&
+                ht_probe == 2u && packet[0] == CLEAN_HT_CLOCKED_VERSION;
             const volatile uint8_t *frame = packet + (ht_probe == 2u ? CLEAN_HT_DATA_HEADER : 0u);
+#if CLEAN_RX_DIAGNOSTIC
             if ((ht_probe == 1u && !clean_ht_probe_command_valid(cmd, CLEAN_RX_HT_PROBE,
                                                                station_enabled, packet)) ||
                 (ht_probe == 2u && !(ht_clocked ?
                     clean_ht_clocked_command_valid(cmd, CLEAN_RX_HT_DATA,
                         station_hw ? 3u : 0u, packet) :
                     clean_ht_data_command_valid(cmd, CLEAN_RX_HT_DATA, station_enabled, packet)))) {
+#else
+            if (ht_probe && (ht_probe != 2u || station_enabled ||
+                !clean_ht_payload_command_valid(cmd, CLEAN_RX_HT_DATA, 0u, packet))) {
+#endif
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
                 break;
             }
@@ -2662,7 +2632,7 @@ void cyw43_main(void) {
             TX_COMPLETION->timeouts = 0u;
             *(volatile uint32_t *)CLEAN_TX_START_HANDOFFS_ADDR = 0u;
             *(volatile uint32_t *)CLEAN_TX_COMPLETION_HANDOFFS_ADDR = 0u;
-            if (!station_ack_test_configure(0u)) break;
+            if (!station_response_evidence_reset()) break;
             shm_write16(CLEAN_ACK_ENABLE, 1u);
             station_enabled = 1u;
             station_mac = (uint8_t)(p[15] >= 2u);
@@ -2789,35 +2759,9 @@ void cyw43_main(void) {
             policy_command = cmd;
             continue;
         }
-        if ((cmd & 0xffu) == 9u) {
-            int count = clean_test_ack_count(cmd, MAC_RADIO->profile);
-            if (!station_hw || count < 0) {
-                fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
-                break;
-            }
-            uint16_t ack_fault = shm_read16(CLEAN_ACK_TEST_FAULT);
-            uint16_t ack_phase = shm_read16(CLEAN_ACK_TEST_PHASE);
-            if (ack_fault || ack_phase > 2u) {
-                fail(0x87u, ack_fault ? CLEAN_ACK_TEST_FAULT : CLEAN_ACK_TEST_PHASE,
-                     ack_fault ? ack_fault : ack_phase);
-                break;
-            }
-            if (!station_policy_boundary(shm_read16(0x601u))) continue;
-            mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
-            (void)mmio_read32(D11_MACCONTROL);
-            if (!station_policy_boundary(shm_read16(0x601u)) || station_phy_busy() ||
-                shm_read16(CLEAN_ACK_TEST_PHASE)) {
-                mmio_write32(D11_MACCONTROL, mac_en);
-                (void)mmio_read32(D11_MACCONTROL);
-                continue;
-            }
-            shm_write16(CLEAN_DCF_IDLE_VALID, 0u);
-            if (!station_ack_test_configure((uint16_t)count)) break;
-            mmio_write32(D11_MACCONTROL, mac_en);
-            MBOX->host_cmd = 2u;
-            __asm__ volatile("dsb" ::: "memory");
-            continue;
-        }
+#if CLEAN_RX_DIAGNOSTIC
+#include "diagnostic/ack_command.inc"
+#endif
         if ((cmd & 0xffu) == 6u) {
             if (station_enabled) {
                 fail(0x85u, FW_MBOX_ADDR + 24u, cmd);
