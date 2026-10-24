@@ -7,7 +7,7 @@ CC := clang
 CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-Wall -Wextra -Werror -Oz -ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
-	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u -DLIVE_USB_CLEAN
+	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2092u -DLIVE_USB_CLEAN
 HOST_FLAGS := $(PROFILE_FLAGS) $(SELECTION_FLAGS) $(EXTRA_CFLAGS)
 DEV := ../tools/badge
 CFLAGS += $(HOST_FLAGS)
@@ -78,7 +78,7 @@ $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
 
 $(BUILD)/collector: $(DEV)/collector.c frames.h station.h ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
-	cc -std=c11 -Wall -Wextra -Werror -O2 $(HOST_FLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
+	cc -std=c11 -Wall -Wextra -Werror -O2 $(HOST_FLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2092u $$(pkg-config --cflags libusb-1.0) \
 		$< ../peer/network.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
@@ -90,6 +90,7 @@ test: $(NATIVE_TESTS) $(BUILD)/collector
 	$(BUILD)/ht20_test
 	$(BUILD)/station_lifecycle_test
 	node $(DEV)/network_verify.cjs --self-test
+	node ../tools/ampdu_verify.cjs --self-test $(BUILD)/collector
 	node $(DEV)/lifecycle_verify.cjs --self-test
 	node $(DEV)/qualification_verify.cjs --self-test
 	node $(DEV)/wpa2_verify.cjs --self-test $(BUILD)/collector

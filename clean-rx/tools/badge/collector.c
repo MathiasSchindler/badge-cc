@@ -25,6 +25,8 @@
 _Static_assert(!CLEAN_RX_AMPDU_DELIVERY ||
                CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * CLEAN_HT_AMPDU_PROBE_MPDU <= WIFI_TRACE_SIZE,
                "Aggregate payload evidence must fit the actual USB trace");
+_Static_assert(CLEAN_SNAPSHOT_DETAIL + CLEAN_SNAPSHOT_BYTES <= WIFI_TRACE_SIZE,
+               "Snapshot result must fit the USB trace");
 
 static int ap_bssid_decode(const char *text, uint8_t bssid[6]) {
     static const char digits[] = "0123456789abcdef";
@@ -74,17 +76,38 @@ static int peer_challenge_decode(const char *hex, uint8_t challenge[14]) {
     return 1;
 }
 
+static int snapshot_result(const uint8_t *snapshot, uint32_t operation_error) {
+    uint32_t status = usb_report_u32(snapshot + 4u);
+    uint32_t error = usb_report_u32(snapshot + 8u);
+    if (usb_report_u32(snapshot) != CLEAN_SNAPSHOT_MAGIC ||
+        (status != CLEAN_SNAPSHOT_COMPLETE && status != CLEAN_SNAPSHOT_FAILED &&
+         status != CLEAN_SNAPSHOT_SKIPPED) || error > CLEAN_INPUT ||
+        (status == CLEAN_SNAPSHOT_FAILED ? error == CLEAN_OK : error != CLEAN_OK)) {
+        fputs("Invalid snapshot result\n", stderr);
+        return 0;
+    }
+    if (status == CLEAN_SNAPSHOT_FAILED)
+        fprintf(stderr, "Snapshot failed: error=%u address=%08x actual=%u; operation error=%u\n",
+                usb_report_u32(snapshot + 8u), usb_report_u32(snapshot + 12u),
+                usb_report_u32(snapshot + 16u), operation_error);
+    return 1;
+}
+
 static int inspect_peer(const char *path, const char *hex) {
-    uint8_t challenge[14], detail[2048];
+    uint8_t challenge[14], detail[WIFI_TRACE_SIZE];
     if (!peer_challenge_decode(hex, challenge)) return 0;
     FILE *file = fopen(path, "rb");
     if (file == NULL) { perror(path); return 0; }
-    int ok = fread(detail, 1u, sizeof(detail), file) == sizeof(detail) && fgetc(file) == EOF;
+    size_t length = fread(detail, 1u, sizeof(detail), file);
+    int ok = (length == CLEAN_SNAPSHOT_DETAIL || length == 2068u || length == sizeof(detail)) &&
+             !ferror(file) && fgetc(file) == EOF;
     if (fclose(file) != 0) ok = 0;
     if (!ok || usb_report_u32(detail) != CLEAN_DETAIL_MAGIC) {
         fputs("Invalid peer evidence file\n", stderr);
         return 0;
     }
+    if (length >= 2068u &&
+        !snapshot_result(detail + CLEAN_SNAPSHOT_DETAIL, usb_report_u32(detail + 8u))) return 0;
     ok = detail[2000u] == 13u && clean_peer_received(detail, challenge);
     printf("{\"peer_rx_confirmed\":%s,\"peer_frames\":%u,\"channel\":%u}\n",
            ok ? "true" : "false", usb_report_u32(detail + 1996u),
@@ -133,11 +156,15 @@ static int inspect(const char *path, const char *credentials) {
     uint8_t detail[WIFI_TRACE_SIZE];
     FILE *file = fopen(path, "rb");
     if (file == NULL) { perror(path); return 0; }
-    int ok = fread(detail, 1u, sizeof(detail), file) == sizeof(detail) && fgetc(file) == EOF;
+    size_t length = fread(detail, 1u, sizeof(detail), file);
+    int ok = (length == CLEAN_SNAPSHOT_DETAIL || length == 2068u || length == sizeof(detail)) &&
+             !ferror(file) && fgetc(file) == EOF;
     if (fclose(file) != 0) ok = 0;
     if (!ok || usb_report_u32(detail) != CLEAN_DETAIL_MAGIC) {
         fputs("Invalid evidence file\n", stderr); return 0;
     }
+    if (length >= 2068u &&
+        !snapshot_result(detail + CLEAN_SNAPSHOT_DETAIL, usb_report_u32(detail + 8u))) return 0;
     uint32_t rxe = (uint32_t)detail[522] | ((uint32_t)detail[523] << 8u);
     uint32_t f2 = usb_report_u32(detail + 1088u);
     int raw_valid = rxe >= 6u && rxe <= 510u && clean_frame_valid(detail + 584u, rxe - 6u);
@@ -294,6 +321,24 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                    uint8_t tx, const uint8_t *challenge, const uint8_t *target,
                    const char *serial, const char *credentials, uint32_t lifecycle_seconds) {
     uint8_t info[12], nonce[16], request[64], report[64], detail[WIFI_TRACE_SIZE];
+    uint64_t submit_before = 0u, submit_after = 0u, report_at = 0u;
+    int soak = tx == 19u || tx == 20u;
+    if (device == NULL) {
+        FILE *file = fopen(path, "rb");
+        if (!file) { perror(path); return 0; }
+        int valid = fread(detail, 1u, sizeof(detail), file) == sizeof(detail) &&
+                    !ferror(file) && fgetc(file) == EOF;
+        if (fclose(file)) valid = 0;
+        if (!valid) { fputs("Invalid aggregate evidence file\n", stderr); return 0; }
+        tx = detail[2000u]; channel = detail[2001u];
+        if (usb_report_u32(detail) != CLEAN_DETAIL_MAGIC ||
+            (tx != CLEAN_HT_AMPDU_PROBE_TX_MODE && tx != CLEAN_HT_AMPDU_PROBE_RX_MODE) ||
+            channel < 1u || channel > 11u) {
+            fputs("Invalid aggregate evidence file\n", stderr); return 0;
+        }
+        memcpy(nonce, challenge, 14u); nonce[14] = tx; nonce[15] = channel;
+        goto evidence_ready;
+    }
     if (!transfer(device, 0xc0u, LIVE_USB_INFO, info, sizeof(info))) return 0;
     const uint8_t prefix[] = {'U','2','6','L',1,0,64,0};
     if (memcmp(info, prefix, 8u) || usb_report_u32(info + 8u) != USB_REPORT_BUILD_ID) {
@@ -330,8 +375,6 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         if (!valid) return 0;
     }
     usb_report_request_for_test(request, USB_REPORT_BUILD_ID, nonce, WIFI_USB_TEST_ID);
-    int soak = tx == 19u || tx == 20u;
-    uint64_t submit_before = 0u, submit_after = 0u, report_at = 0u;
     if (soak && !monotonic_us(&submit_before)) return 0;
     if (!transfer(device, 0x40u, LIVE_USB_WIFI_PIO_SUBMIT, request, sizeof(request))) return 0;
     if (soak && !monotonic_us(&submit_after)) return 0;
@@ -388,6 +431,9 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     ok = fwrite(detail, 1u, sizeof(detail), out) == sizeof(detail);
     if (fclose(out) != 0) ok = 0;
     if (!ok) { fputs("Evidence write failed\n", stderr); return 0; }
+evidence_ready:
+    if (!snapshot_result(detail + CLEAN_SNAPSHOT_DETAIL, usb_report_u32(detail + 8u)) &&
+        tx != CLEAN_HT_AMPDU_PROBE_TX_MODE && tx != CLEAN_HT_AMPDU_PROBE_RX_MODE) return 0;
     if (tx == CLEAN_NETWORK_MODE) {
         clean_network_report_t n;
         clean_lifecycle_report_t life;
@@ -444,15 +490,62 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
     if (tx == CLEAN_HT_AMPDU_PROBE_TX_MODE || tx == CLEAN_HT_AMPDU_PROBE_RX_MODE) {
         clean_ampdu_probe_trace_t trace;
         memcpy(&trace,detail+CLEAN_AMPDU_PROBE_DETAIL,sizeof(trace));
+        uint32_t required = CLEAN_SNAPSHOT_AGGREGATE |
+            (CLEAN_RX_AMPDU_INTERFACE ? CLEAN_SNAPSHOT_INTERFACE : 0u);
+        int evidence_valid = clean_snapshot_available(detail, nonce, required);
+        int completed = evidence_valid && !usb_report_u32(detail+8u) &&
+            usb_report_u32(detail+36u)==10u;
+        int submitted = completed && usb_report_u32(detail+1092u)==1u &&
+            usb_report_u32(detail+1096u)==1u;
+        if (!evidence_valid || trace.magic != CLEAN_AMPDU_PROBE_MAGIC ||
+            (CLEAN_RX_AMPDU_INTERFACE &&
+             usb_report_u32(detail+CLEAN_AMPDU_IF_DETAIL)!=CLEAN_AMPDU_IF_MAGIC)) {
+            int returned = evidence_valid &&
+                usb_report_u32(detail+CLEAN_AMPDU_BA_RX_DETAIL)==CLEAN_AMPDU_BA_RX_MAGIC &&
+                usb_report_u32(detail+CLEAN_AMPDU_BA_RX_DETAIL+4u)>0u &&
+                clean_ht_ampdu_ba_match(detail+CLEAN_AMPDU_BA_RX_DETAIL+8u,32u,nonce);
+            int receipt_available = evidence_valid && CLEAN_RX_AMPDU_BA &&
+                tx==CLEAN_HT_AMPDU_PROBE_TX_MODE &&
+                usb_report_u32(detail+CLEAN_AMPDU_BA_RX_DETAIL)==CLEAN_AMPDU_BA_RX_MAGIC;
+            char bitmap[12];
+            snprintf(bitmap,sizeof(bitmap),"%u",returned?detail[CLEAN_AMPDU_BA_RX_DETAIL+28u]:0u);
+            printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"mode\":\"ampdu-probe-%s\","
+                   "\"channel\":%u,\"mcs\":%u,\"error\":%u,"
+                   "\"snapshot\":{\"valid\":%s,\"status\":%u,\"error\":%u,\"sections\":%u},"
+                   "\"capture_available\":false,\"lease_available\":false,"
+                   "\"fw_error\":null,\"fw_error_addr\":null,\"fw_error_value\":null,"
+                   "\"local_tx_submission\":%s,\"fresh_radio_capture\":null,"
+                   "\"terminal_aggregate_sig\":null,\"aggregate_observations\":null,"
+                   "\"rxe_length\":null,\"outcome\":null,\"status1\":null,\"status2\":null,"
+                   "\"phy\":null,\"subframe_status2\":null,\"retained_subframe_bitmap\":null,"
+                   "\"standalone_subframe\":null,\"chipcommon_id\":null,"
+                   "\"actual_multi_mpdu_delivery\":false,\"all_subframes_delivered\":false,"
+                   "\"dma_experiment_enabled\":%s,\"shm_delivery_enabled\":%s,"
+                   "\"delivery_payloads_valid\":null,\"delivered_subframe_bitmap\":null,"
+                   "\"reported_delivered_subframe_bitmap\":null,\"delivered_subframes\":null,"
+                   "\"delivered_duplicates\":null,\"multi_mpdu_radio_capture\":null,"
+                   "\"fixture_bad_fcs_mask\":%u,\"shm_terminal\":null,\"interface\":null,"
+                   "\"ba_experiment\":{\"enabled\":%s,\"available\":false,\"bitmap\":null,"
+                   "\"attempts\":null,\"started\":null,\"errors\":null,"
+                   "\"returned_ba\":%s,\"returned_bitmap\":%s},"
+                   "\"immediate_ba\":false,\"sifs_timing_qualified\":false,\"ht_qualified\":false}\n",
+                   serial,USB_REPORT_BUILD_ID,tx==CLEAN_HT_AMPDU_PROBE_TX_MODE?"tx":"rx",
+                   channel,nonce[13],usb_report_u32(detail+8u),evidence_valid?"true":"false",
+                   usb_report_u32(detail+CLEAN_SNAPSHOT_DETAIL+4u),
+                   usb_report_u32(detail+CLEAN_SNAPSHOT_DETAIL+8u),
+                   usb_report_u32(detail+CLEAN_SNAPSHOT_DETAIL+20u),submitted?"true":"false",
+                   CLEAN_RX_AMPDU_DMA?"true":"false",CLEAN_RX_AMPDU_SHM?"true":"false",
+                   CLEAN_RX_AMPDU_BAD_FCS,CLEAN_RX_AMPDU_BA?"true":"false",
+                   receipt_available?(returned?"true":"false"):"null",
+                   receipt_available?bitmap:"null");
+            return tx==CLEAN_HT_AMPDU_PROBE_TX_MODE && submitted;
+        }
         int sig = trace.magic == CLEAN_AMPDU_PROBE_MAGIC && trace.count &&
             (trace.phy & 3u) == 2u && trace.raw[2u] == nonce[13] &&
             clean_ht_ampdu_probe_sig_valid(trace.raw+2u,CLEAN_HT_AMPDU_PROBE_BYTES);
         uint32_t mask = clean_ht_ampdu_probe_trace_mask(&trace,nonce);
         int single = mask && trace.count == 1u ?
             clean_ht_ampdu_probe_sequence(trace.raw+8u,80u,nonce) : -1;
-        int completed = !usb_report_u32(detail+8u) && usb_report_u32(detail+36u)==10u;
-        int submitted = completed && usb_report_u32(detail+1092u)==1u &&
-            usb_report_u32(detail+1096u)==1u;
         int received = completed && mask;
         uint32_t reported_delivered = usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+4u);
         uint32_t delivered = 0u;
@@ -461,7 +554,16 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         if (delivered_valid)
             delivered=clean_ht_ampdu_delivery_mask(detail+CLEAN_AMPDU_DMA_PAYLOAD_DETAIL,
                 3u*CLEAN_HT_AMPDU_PROBE_MPDU,reported_delivered,nonce);
-        delivered_valid = delivered_valid && reported_delivered==delivered;
+        uint32_t unique = (delivered & 1u) + ((delivered >> 1u) & 1u) +
+                          ((delivered >> 2u) & 1u);
+        delivered_valid = delivered_valid && reported_delivered==delivered &&
+            usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+8u) ==
+                unique + usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+12u);
+        char delivered_text[12], reported_text[12], count_text[12], duplicate_text[12];
+        snprintf(delivered_text,sizeof(delivered_text),"%u",delivered);
+        snprintf(reported_text,sizeof(reported_text),"%u",reported_delivered);
+        snprintf(count_text,sizeof(count_text),"%u",usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+8u));
+        snprintf(duplicate_text,sizeof(duplicate_text),"%u",usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+12u));
         printf("{\"serial\":\"%s\",\"build\":\"%08x\",\"mode\":\"ampdu-probe-%s\","
                "\"channel\":%u,\"mcs\":%u,\"error\":%u,\"fw_error\":%u,"
                "\"fw_error_addr\":%u,\"fw_error_value\":%u,\"local_tx_submission\":%s,"
@@ -473,9 +575,9 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                "\"chipcommon_id\":%u,\"actual_multi_mpdu_delivery\":%s,"
                "\"all_subframes_delivered\":%s,"
                "\"dma_experiment_enabled\":%s,\"shm_delivery_enabled\":%s,"
-               "\"delivered_subframe_bitmap\":%u,"
-               "\"reported_delivered_subframe_bitmap\":%u,\"delivery_payloads_valid\":%s,"
-               "\"delivered_subframes\":%u,\"delivered_duplicates\":%u,"
+               "\"delivered_subframe_bitmap\":%s,"
+               "\"reported_delivered_subframe_bitmap\":%s,\"delivery_payloads_valid\":%s,"
+               "\"delivered_subframes\":%s,\"delivered_duplicates\":%s,"
                "\"multi_mpdu_radio_capture\":%s,"
                "\"fixture_bad_fcs_mask\":%u,"
                "\"immediate_ba\":false,\"sifs_timing_qualified\":false,\"ht_qualified\":false",
@@ -494,11 +596,30 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
                delivered_valid && delivered==7u ? "true" : "false",
                CLEAN_RX_AMPDU_DMA ? "true" : "false",
                CLEAN_RX_AMPDU_SHM ? "true" : "false",
-               delivered,reported_delivered,delivered_valid ? "true" : "false",
-               usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+8u),
-               usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL+12u),
+               delivered_valid?delivered_text:"null",
+               usb_report_u32(detail+CLEAN_AMPDU_DMA_DETAIL)==CLEAN_AMPDU_DMA_MAGIC?reported_text:"null",
+               delivered_valid ? "true" : "false",
+               delivered_valid?count_text:"null",delivered_valid?duplicate_text:"null",
                received && (mask & (mask-1u)) ? "true" : "false",
                CLEAN_RX_AMPDU_BAD_FCS);
+        printf(",\"snapshot\":{\"valid\":true,\"status\":1,\"error\":0,\"sections\":%u},"
+               "\"capture_available\":true,\"lease_available\":%s",
+               usb_report_u32(detail+CLEAN_SNAPSHOT_DETAIL+20u),
+               CLEAN_RX_AMPDU_INTERFACE &&
+               usb_report_u32(detail+CLEAN_AMPDU_IF_DETAIL)==CLEAN_AMPDU_IF_MAGIC?"true":"false");
+        uint32_t observed = 0u;
+        for (uint32_t i=0u;i<trace.count && i<3u;++i) {
+            uint8_t expected[80];
+            const uint8_t *raw=trace.raw+i*CLEAN_HT_AMPDU_PROBE_SLOT_BYTES;
+            for (uint32_t sequence=0u;sequence<3u;++sequence) {
+                if (!clean_ht_ampdu_probe_mpdu(expected,nonce,sequence)) continue;
+                if (CLEAN_RX_AMPDU_BAD_FCS & (1u<<sequence)) expected[79]^=0x80u;
+                if (raw[2u]==nonce[13] &&
+                    clean_ht_ampdu_probe_sig_valid(raw+2u,CLEAN_HT_AMPDU_PROBE_BYTES) &&
+                    !memcmp(expected,raw+8u,80u)) observed |= 1u<<sequence;
+            }
+        }
+        printf(",\"observed_fixture_bitmap\":%u",observed);
 #if CLEAN_RX_AMPDU_DMA
         printf(",\"last_dma_publication_delay_us\":%u",
                trace.raw[270u]|((uint32_t)trace.raw[271u]<<8u));
@@ -532,15 +653,23 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         uint16_t ba_words[CLEAN_AMPDU_BA_WORDS];
         memcpy(ba_words,ba,sizeof(ba_words));
         int returned_ba=usb_report_u32(detail+CLEAN_AMPDU_BA_RX_DETAIL)==CLEAN_AMPDU_BA_RX_MAGIC &&
+            usb_report_u32(detail+CLEAN_AMPDU_BA_RX_DETAIL+4u)>0u &&
             clean_ht_ampdu_ba_match(detail+CLEAN_AMPDU_BA_RX_DETAIL+8u,32u,nonce);
-        printf(",\"ba_experiment\":{\"enabled\":%s,\"bitmap\":%u,\"attempts\":%u,"
+        int receipt_available=tx==CLEAN_HT_AMPDU_PROBE_TX_MODE &&
+            usb_report_u32(detail+CLEAN_AMPDU_BA_RX_DETAIL)==CLEAN_AMPDU_BA_RX_MAGIC;
+        char returned_text[12];
+        snprintf(returned_text,sizeof(returned_text),"%u",
+                 returned_ba?detail[CLEAN_AMPDU_BA_RX_DETAIL+28u]:0u);
+        printf(",\"ba_experiment\":{\"enabled\":%s,\"available\":true,\"bitmap\":%u,\"attempts\":%u,"
                "\"started\":%u,\"errors\":%u,\"observed_eof_tsf\":%u,"
                "\"tx_active_tsf\":%u,\"tx_end_tsf\":%u,\"eof_status\":%u,"
-               "\"tx_status\":%u,\"returned_ba\":%s,\"returned_bitmap\":%u}",
-               ba_words[0]?"true":"false",ba_words[1],ba_words[2],ba_words[3],ba_words[4],
+               "\"tx_status\":%u,\"returned_ba\":%s,\"returned_bitmap\":%s}",
+               CLEAN_RX_AMPDU_BA?"true":"false",ba_words[1],ba_words[2],ba_words[3],ba_words[4],
                usb_report_u32(ba+10u),usb_report_u32(ba+14u),usb_report_u32(ba+18u),
-               ba_words[11],ba_words[12],returned_ba?"true":"false",
-               returned_ba?detail[CLEAN_AMPDU_BA_RX_DETAIL+28u]:0u);
+               ba_words[11],ba_words[12],receipt_available?(returned_ba?"true":"false"):"null",
+               receipt_available?returned_text:"null");
+#else
+        printf(",\"ba_experiment\":{\"enabled\":false}");
 #endif
 #if CLEAN_RX_AMPDU_INTERFACE
         clean_ampdu_interface_t interface;
@@ -603,7 +732,9 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
         printf("}");
 #endif
         puts("}");
-        return tx==CLEAN_HT_AMPDU_PROBE_TX_MODE ? submitted : received;
+        return tx==CLEAN_HT_AMPDU_PROBE_TX_MODE ? submitted :
+            received || (CLEAN_RX_AMPDU_BAD_FCS==7u && completed && observed==7u &&
+                         delivered_valid && delivered==0u);
     }
     if (tx == CLEAN_PEER_RX_MODE) {
         if (clean_peer_cck(nonce)) {
@@ -1463,6 +1594,11 @@ static int collect(libusb_device_handle *device, const char *path, uint8_t chann
 }
 
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--inspect-ampdu")) {
+        uint8_t challenge[14];
+        if (!peer_challenge_decode(argv[3], challenge)) return 1;
+        return collect(NULL, argv[2], 0u, 0u, challenge, NULL, "offline", NULL, 0u) ? 0 : 1;
+    }
     if (argc==4 && !strcmp(argv[1],"--derive-psk")) return derive_psk(argv[2],argv[3])?0:1;
     if (argc == 4 && strcmp(argv[1], "--inspect-peer") == 0)
         return inspect_peer(argv[2], argv[3]) ? 0 : 1;

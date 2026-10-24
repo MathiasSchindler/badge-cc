@@ -117,12 +117,16 @@ test('development tools are separated and firmware-only builds do not invoke the
     }
 });
 
-test('relocation preserves collector, runner and verifier bodies apart from paths', () => {
+test('unevolved relocated tools preserve their bodies apart from paths', () => {
     const moves = [];
     for (const app of ['badge', 'messenger', 'peer', 'vendor-burst'])
         for (const file of fs.readdirSync(path.join(root, 'clean-rx/tools', app)))
             moves.push([`clean-rx/${app}/${file}`, `clean-rx/tools/${app}/${file}`]);
     for (const [before, after] of moves) {
+        // R02 evolves these tools; their native/oracle suites cover the new report trailer.
+        if (['badge/collector.c', 'badge/lifecycle_verify.cjs', 'badge/network_verify.cjs',
+            'badge/wpa2_verify.cjs', 'badge/wpa2_rekey_verify.cjs', 'badge/ht_probe.sh']
+            .some(file => after === `clean-rx/tools/${file}`)) continue;
         let expected = run('git', ['show', `fb493e321ddf23c4a7caebd26c5e9b8202498233:${before}`]);
         if (before.endsWith('.c')) expected = expected.replace(/^#include "([^"]+)"$/gm, (line, include) =>
             include === 'build_id.h' ? line : `#include "${path.posix.relative(path.posix.dirname(after),

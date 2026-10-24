@@ -78,17 +78,35 @@ The earlier one-device C04 receive-only test does not close this gate.
 
 ### Aggregate diagnostic host deadline and incomplete reports
 
-**Status:** reproducible acceptance failure in the
-[2026-10-24 regression](../experiments/HARDWARE_REGRESSION_2026-10-24.md#experimental-aggregate-and-ba-failures).
-SHM/BA receivers exhaust the cumulative six-second loader budget before
+**Status:** the original deadline/report-validity defects are fixed; aggregate
+acceptance still has separate reliability failures. The
+[2026-10-24 regression](../experiments/HARDWARE_REGRESSION_2026-10-24.md#experimental-aggregate-and-ba-failures)
+recorded SHM/BA receivers exhausting the cumulative six-second loader budget before
 completing their final snapshots, including fresh channel-1 controls.
 Valid independently returned BA frames do not make the incomplete receiver
 reports pass. DMA also exposed a separate controller `0x8d` fault.
 
-**Next evidence:** correct and test the operation/snapshot deadline accounting
-without removing bounded recovery, then rerun matched positive and bad-FCS
-controls with valid frozen payload/lease evidence. Retain the DMA fault as
-a separate investigation. General HT/BA and physical timing gates stay open.
+The [R01 implementation](../experiments/todo.md#r01-implementation) now budgets
+healthy aggregate reception and completion separately from the startup limit,
+with native boundary/cancellation coverage and serviced watchdog recovery.
+The [R02 implementation](../experiments/todo.md#r02-implementation) adds a separate,
+fixed one-second fault-readback allowance and an explicit snapshot result,
+while retaining the original operation failure and cancellation behavior.
+The [R03 implementation](../experiments/todo.md#r03-implementation) adds
+per-section validity, exact nonce/controller-generation binding and explicit
+zero/missing receipt records, with exclusive aggregate report ownership.
+The [hardware rerun](../experiments/HARDWARE_REGRESSION_R03_2026-10-24.md)
+produced complete valid snapshots for all 48 final pairs on both endpoints,
+including failed operations. Bad-middle and all-bad controls passed 4/4 each.
+Initial strict acceptance was SHM 17/18, normal BA 16/18 and DMA 0/4;
+fresh repeats did not clear every failure. DMA still exposed `0x8d` and
+missing-third-body behavior.
+
+**Next evidence:** investigate R06 DMA and remaining intermittent fixture/BA
+loss without weakening exact-byte, receipt or terminal-lease acceptance.
+R05 was rerun, not passed. R04 repository orchestration hardening remains
+open; temporary campaign guards do not complete it. General HT/BA and
+physical timing gates stay open.
 
 ### Badge silicon identification
 

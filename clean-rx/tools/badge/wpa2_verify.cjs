@@ -21,7 +21,8 @@ function validate(s,a,rawS,rawA,timing,channel,mode,stationSerial,apSerial) {
     assert.equal(s.serial,stationSerial); assert.equal(a.serial,apSerial);
     assert.match(s.build,/^[0-9a-f]{8}$/); assert.match(a.build,/^[0-9a-f]{8}$/);
     assert.equal(a.test,'e1-ap-result');
-    assert.equal(rawS.length,2048); assert.equal(rawA.length,320);
+    assert.ok([2048,2068,2092].includes(rawS.length), 'unexpected station report length');
+    assert.equal(rawA.length,320);
     for (const [key,offset] of Object.entries(stationFields))
         assert.equal(rawS.readUInt32LE(offset),s[key],`station raw ${key}`);
     for (const [key,offset] of Object.entries(apFields))
@@ -135,6 +136,11 @@ function selfTest(collector) {
     Buffer.from(a.bssid.replaceAll(':',''),'hex').copy(rawA,184);
     const run=()=>validate(s,a,rawS,rawA,timing,1,'passphrase',s.serial,a.serial);
     assert.equal(run().valid,true);
+    const extended=Buffer.concat([rawS,Buffer.alloc(20)]);
+    extended.writeUInt32LE(0x31504e53,2048); extended.writeUInt32LE(1,2052);
+    assert.equal(validate(s,a,extended,rawA,timing,1,'passphrase',s.serial,a.serial).valid,true);
+    assert.throws(()=>validate(s,a,extended.subarray(0,2067),rawA,timing,1,
+        'passphrase',s.serial,a.serial));
     for (const offset of [8,30,31,84,92,96,100,104,152,156,160,164,168,172,176,180,184,190,212]) {
         rawA[offset]^=1; assert.throws(run,assert.AssertionError); rawA[offset]^=1;
     }
@@ -188,6 +194,44 @@ function selfTest(collector) {
         const dir=fs.mkdtempSync(path.join(os.tmpdir(),'clean-e1-'));
         const input=path.join(dir,'input'), output=path.join(dir,'output');
         try {
+            const evidence=Buffer.alloc(2068);
+            evidence.writeUInt32LE(0x31585243);
+            evidence.writeUInt32LE(2,8);
+            evidence.writeUInt32LE(0x31504e53,2048);
+            evidence.writeUInt32LE(0x20040,2060);
+            evidence.writeUInt32LE(5,2064);
+            for (const status of [1,2,3,4]) {
+                evidence.writeUInt32LE(status,2052);
+                evidence.writeUInt32LE(status===2?1:0,2056);
+                fs.writeFileSync(output,evidence);
+                const result=spawnSync(collector,['--inspect-peer',output,'01'.repeat(14)],
+                    {encoding:'utf8'});
+                assert.equal(result.status,1);
+                if (status===2)
+                    assert.match(result.stderr,/Snapshot failed: error=1 address=00020040 actual=5; operation error=2/);
+                else if (status===4) assert.match(result.stderr,/Invalid snapshot result/);
+                else assert.equal(result.stderr,'');
+            }
+            for (const [magic,status,error] of [[0,1,0],[0x31504e53,2,0],
+                [0x31504e53,1,1],[0x31504e53,3,1],[0x31504e53,2,99]]) {
+                evidence.writeUInt32LE(magic,2048);
+                evidence.writeUInt32LE(status,2052);
+                evidence.writeUInt32LE(error,2056);
+                fs.writeFileSync(output,evidence);
+                const result=spawnSync(collector,['--inspect-peer',output,'01'.repeat(14)],
+                    {encoding:'utf8'});
+                assert.equal(result.status,1);
+                assert.match(result.stderr,/Invalid snapshot result/);
+            }
+            for (const length of [2048,2067,2069]) {
+                fs.writeFileSync(output,Buffer.concat([evidence,Buffer.alloc(1)]).subarray(0,length));
+                const result=spawnSync(collector,['--inspect-peer',output,'01'.repeat(14)],
+                    {encoding:'utf8'});
+                assert.equal(result.status,1);
+                if (length===2048) assert.equal(result.stderr,'');
+                else assert.match(result.stderr,/Invalid peer evidence file/);
+            }
+            fs.unlinkSync(output);
             const known='f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e';
             const vectors=['password',known,known.toUpperCase()]
                 .map(credential=>({ssid:'IEEE',credential,expected:known}));

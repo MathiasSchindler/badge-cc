@@ -42,7 +42,8 @@ function verify(station, ap, seconds) {
 }
 function archive(path,offset,n,size) {
     const raw = fs.readFileSync(path);
-    assert.equal(raw.length,size);
+    assert.ok(raw.length===size || (size===2048 && [2068,2092].includes(raw.length)),
+        'unexpected archived report length');
     fields.forEach((name,i)=>assert.equal(raw.readUInt32LE(offset+i*4),n[name],name));
     const mac = at=>[...raw.subarray(offset+at,offset+at+6)]
         .map(byte=>byte.toString(16).padStart(2,'0')).join(':');
@@ -79,6 +80,30 @@ if (process.argv[2]==='--self-test') {
         ['latency_samples',99]])
         assert.throws(()=>verify(s,{...a,network:{...a.network,[key]:value}},30));
     assert.throws(()=>verify({...s,host_stalls:0},a,30));
+    const saved={...n,mac:'02:01:02:03:04:05',peer:'02:06:07:08:09:0a',role:1};
+    for (const name of fields) if (saved[name]===undefined) saved[name]=0;
+    const raw=Buffer.alloc(2068), offset=1280;
+    raw.writeUInt32LE(0x31504e53,2048); raw.writeUInt32LE(3,2052);
+    fields.forEach((name,i)=>raw.writeUInt32LE(saved[name],offset+i*4));
+    Buffer.from(saved.mac.replaceAll(':',''),'hex').copy(raw,offset+108);
+    Buffer.from(saved.peer.replaceAll(':',''),'hex').copy(raw,offset+114);
+    Buffer.from(saved.session,'hex').copy(raw,offset+120);
+    raw[offset+126]=saved.role; raw[offset+127]=saved.bound;
+    raw.writeUInt32LE(saved.epoch,offset+128);
+    ['large_generated','large_acknowledged','large_delivered','latency_max_us','latency_samples']
+        .forEach((key,i)=>raw.writeUInt32LE(saved[key],offset+132+i*4));
+    raw[2000]=33; raw.writeUInt32LE(1,612); raw.writeUInt32LE(30000000,616);
+    const directory=fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(),'b2-archive-'));
+    const file=`${directory}/station.bin`;
+    try {
+        for (const length of [2048,2068,2067]) {
+            fs.writeFileSync(file,raw.subarray(0,length));
+            if (length===2067) assert.throws(()=>archive(file,offset,saved,2048));
+            else archive(file,offset,saved,2048);
+        }
+    } finally {
+        fs.unlinkSync(file); fs.rmdirSync(directory);
+    }
     console.log('B2 oracle: bidirectional counts/hashes, stale session, loss, bounds and duration gates pass');
 } else {
     assert.equal(process.argv.length,4,'Usage: node network_verify.cjs PREFIX SECONDS');

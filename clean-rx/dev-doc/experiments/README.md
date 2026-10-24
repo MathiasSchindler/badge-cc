@@ -8,6 +8,11 @@ Use [current issues](../issues/README.md) for what remains open.
 
 ## Cross-board and capability regressions
 
+- [R03 hardware rerun](HARDWARE_REGRESSION_R03_2026-10-24.md):
+  explicit fresh evidence, corrected report ownership, final RX/TX and
+  aggregate matrices, remaining failures and full-flash restoration.
+- [Campaign follow-up work](todo.md): R01-R10 work items and acceptance criteria
+  from the 2026-10-24 regression, separate from historical experiment reports.
 - [2026-10-24 badge/Pico RX/TX regression](HARDWARE_REGRESSION_2026-10-24.md):
   raw cross-board exchanges, badge legacy/HT and station/security tests,
   experimental aggregate/BA failures and complete flash restoration.

@@ -16,7 +16,8 @@ function validate(s,a,rs,ra,timing,station,ap,trafficOnly) {
     assert.notEqual(station,ap);
     assert.equal(s.serial,station); assert.equal(a.serial,ap);
     assert.match(s.build,/^[0-9a-f]{8}$/); assert.match(a.build,/^[0-9a-f]{8}$/);
-    assert.equal(rs.length,2048); assert.equal(ra.length,320);
+    assert.ok([2048,2068,2092].includes(rs.length), 'unexpected station report length');
+    assert.equal(ra.length,320);
     assert.equal(rs[2000],34); assert.ok(ra[30]===7 || ra[30]===8);
     assert.equal(rs.readUInt32LE(1520),0x324b4552);
     assert.equal(rs.readUInt32LE(1640),0x32575043);
@@ -125,6 +126,12 @@ function selfTest() {
     Buffer.from(s.protected_token,'hex').copy(ra,196);
     const check=(traffic=false)=>validate(s,a,rs,ra,'station_exit=0\nap_exit=0\n',s.serial,a.serial,traffic);
     assert.equal(check().milestone_qualified,true);
+    const extended=Buffer.concat([rs,Buffer.alloc(20)]);
+    extended.writeUInt32LE(0x31504e53,2048); extended.writeUInt32LE(1,2052);
+    assert.equal(validate(s,a,extended,ra,'station_exit=0\nap_exit=0\n',
+        s.serial,a.serial,false).milestone_qualified,true);
+    assert.throws(()=>validate(s,a,extended.subarray(0,2067),ra,'station_exit=0\nap_exit=0\n',
+        s.serial,a.serial,false));
     for (const at of [...Object.values(stationFields),1520,1640,1564,1972,1980,2000]) {
         rs[at]^=1; assert.throws(()=>check()); rs[at]^=1;
     }

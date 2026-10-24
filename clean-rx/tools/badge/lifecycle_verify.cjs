@@ -32,7 +32,7 @@ function verifyFiles(prefix, cycles, channel) {
     assert.ok(ap, 'missing AP result');
     const rawStation = fs.readFileSync(`${prefix}-station.bin`);
     const rawAp = fs.readFileSync(`${prefix}-ap.bin`);
-    assert.equal(rawStation.length, 2048);
+    assert.ok([2048,2068,2092].includes(rawStation.length), 'unexpected station report length');
     assert.equal(rawStation.readUInt32LE(520), 0x314c5342);
     assert.equal(rawStation.readUInt32LE(544), station.connections);
     assert.equal(rawStation.readUInt32LE(548), station.data_connections);
@@ -126,6 +126,13 @@ if (require.main === module && process.argv[2] === '--self-test') {
         fs.writeFileSync(`${prefix}-station.bin`,rawStation);
         fs.writeFileSync(`${prefix}-ap.bin`,rawAp);
         assert.equal(verifyFiles(prefix,0,6).test,'b3-pair');
+        const extended=Buffer.concat([rawStation,Buffer.alloc(20)]);
+        extended.writeUInt32LE(0x31504e53,2048); extended.writeUInt32LE(3,2052);
+        fs.writeFileSync(`${prefix}-station.bin`,extended);
+        assert.equal(verifyFiles(prefix,0,6).test,'b3-pair');
+        fs.writeFileSync(`${prefix}-station.bin`,extended.subarray(0,2067));
+        assert.throws(()=>verifyFiles(prefix,0,6));
+        fs.writeFileSync(`${prefix}-station.bin`,rawStation);
         for (const offset of [31,84,92,96,100,104,156,160,164,172,176,180,192,198,212]) {
             rawAp[offset]^=1; fs.writeFileSync(`${prefix}-ap.bin`,rawAp);
             assert.throws(()=>verifyFiles(prefix,0,6));

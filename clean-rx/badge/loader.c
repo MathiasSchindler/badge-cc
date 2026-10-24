@@ -27,7 +27,7 @@ void clean_loader_init(clean_loader_t *l, const wifi_wire_t *wire,
     l->started = wire->now_us(wire->context);
     l->serviced_at = l->started;
     l->elapsed_us = 0u;
-    l->budget_us = 6000000u;
+    l->budget_us = CLEAN_LOADER_DEFAULT_BUDGET_US;
     l->window = l->error = l->address = l->actual = l->verified = l->stage = 0u;
     l->window_valid = 0u;
     l->rx_checked = l->started;
@@ -36,6 +36,57 @@ void clean_loader_init(clean_loader_t *l, const wifi_wire_t *wire,
     l->rx_consumed = 0u;
     l->rx_credit = 0u;
     l->rx_stalled = l->rx_retries = 0u;
+}
+
+int clean_loader_begin_aggregate_rx(clean_loader_t *l) {
+    /* Startup must finish within its original limit before adding RX time. */
+    if (!clean_service(l)) return 0;
+    l->budget_us = CLEAN_AMPDU_RX_BUDGET_US;
+    return 1;
+}
+
+int clean_loader_begin_snapshot(const clean_loader_t *operation, clean_loader_t *snapshot) {
+    badger_bytes_copy((uint8_t *)snapshot, (const uint8_t *)operation, sizeof(*snapshot));
+    snapshot->window_valid = 0u;
+    snapshot->address = snapshot->actual = 0u;
+    if (operation->error == CLEAN_CANCELLED) return 0;
+    if (operation->error != CLEAN_OK) {
+        uint32_t now = snapshot->wire->now_us(snapshot->wire->context);
+        snapshot->elapsed_us += (uint32_t)(now - snapshot->serviced_at);
+        snapshot->serviced_at = now;
+        snapshot->budget_us = snapshot->elapsed_us + CLEAN_LOADER_SNAPSHOT_BUDGET_US;
+        snapshot->error = CLEAN_OK;
+    }
+    return clean_service(snapshot);
+}
+
+void clean_loader_finish_snapshot(clean_loader_t *operation, clean_loader_t *snapshot,
+                                  uint8_t report[CLEAN_SNAPSHOT_BYTES]) {
+    (void)clean_service(snapshot);
+    badger_bytes_store_u32(report, CLEAN_SNAPSHOT_MAGIC);
+    badger_bytes_store_u32(report + 4u, snapshot->error == CLEAN_OK ?
+                          CLEAN_SNAPSHOT_COMPLETE : CLEAN_SNAPSHOT_FAILED);
+    badger_bytes_store_u32(report + 8u, snapshot->error);
+    badger_bytes_store_u32(report + 12u, snapshot->address);
+    badger_bytes_store_u32(report + 16u, snapshot->actual);
+    operation->elapsed_us = snapshot->elapsed_us;
+    operation->serviced_at = snapshot->serviced_at;
+    if (operation->error == CLEAN_OK) {
+        operation->error = snapshot->error;
+        operation->address = snapshot->address;
+        operation->actual = snapshot->actual;
+    }
+}
+
+int clean_snapshot_block(clean_loader_t *l, uint32_t address, uint8_t *bytes,
+                          uint32_t length, uint32_t *sections, uint32_t section) {
+    *sections &= ~section;
+    if (!clean_block(l, address, bytes, length, 0u)) {
+        badger_bytes_zero(bytes, length);
+        return 0;
+    }
+    *sections |= section;
+    return 1;
 }
 
 static int reg_write(clean_loader_t *l, uint8_t fn, uint32_t addr,

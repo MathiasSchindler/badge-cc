@@ -83,7 +83,7 @@ campaign evidence rather than treating report booleans as general capability.
 - `shm_delivery_enabled` and `dma_experiment_enabled` identify distinct
   paths. SHM delivery reports `shm_delivery_enabled:true` and
   `dma_experiment_enabled:false`. Saved bytes occupy detail offsets `1664 + 80 * sequence` in this
-  mode's 2,048-byte report, replacing its beacon inventory.
+  mode's original 2,048-byte report body, replacing its beacon inventory.
 - `shm_terminal` reports publication/claim/release counters, claimed state,
   PSM TSF timestamps and controller snapshot hold time. These use the TSF
   domain, not an independent physical EOF/SIFS clock.
@@ -99,3 +99,97 @@ The finite three-MPDU collector options are `--ht-ampdu-probe-tx` and
 MCS0..7. The paired runner is `clean-rx/tools/badge/ht_probe.sh` with
 `TX_SERIAL RX_SERIAL NEW_PREFIX MCS --ampdu-probe`. These are hardware
 operations subject to the trial protocol, not offline checks.
+
+### Aggregate receive deadlines
+
+The badge gives startup and BA setup the original six-second loader budget.
+After successful setup, aggregate RX uses an 11.4-second total limit measured
+from loader initialization: six seconds startup, the 4.2-second receive
+window, the 0.2-second stop allowance and one second reserved for the final
+report readback. The report reserve is shared headroom within that total,
+not a new deadline granted after a failure. Other modes retain their budgets.
+
+Aggregate RX refreshes the existing eight-second BOOTSEL watchdog every four
+seconds while USB servicing remains healthy. Cancellation and the operation
+limit still stop work; a stalled application cannot keep refreshing recovery.
+The desktop collector's existing 15-second alarm is unchanged.
+
+These bounds have native boundary tests and bounded hardware evidence in the
+[R03 rerun](../experiments/HARDWARE_REGRESSION_R03_2026-10-24.md);
+they are not general reliability qualification. A returned BA alone does not
+qualify an incomplete receiver report.
+
+### Fault snapshot recovery
+
+After a failed operation, fault readback has a separate one-second total
+allowance, including any stop attempt. The operation's error, address and
+actual value remain authoritative. Recovery uses its own loader context
+and a fixed deadline; it cannot restart or extend the operation. Healthy
+readback keeps the existing operation deadline. Cancellation is not
+cleared: already cancelled operations perform no recovery I/O, and a
+cancellation during readback stops further access. Servicing and watchdog
+refresh stop when this recovery allowance expires as well.
+
+The aggregate operation limit plus recovery allowance is 12.4 seconds,
+leaving host/report-transfer headroom under the unchanged 15-second
+collector alarm. Native tests check that an additional 2.5 seconds of
+headroom fits. These are loader deadlines, not a replacement for bounded
+USB orchestration or a hardware watchdog test.
+
+Current badge reports contain 2,092 bytes. The original 2,048-byte body
+retains its field offsets; the appended fields are:
+
+| Offset | Meaning |
+| --- | --- |
+| 2048 | Snapshot result magic `0x31504e53` (`SNP1`) |
+| 2052 | Status: 1 = readback complete, 2 = failed, 3 = deliberately skipped |
+| 2056 | Snapshot error using the loader error enum |
+| 2060 | Snapshot address |
+| 2064 | Snapshot actual value |
+| 2068 | Complete-read section bits: frozen = 1, mailbox = 2, multi-capture = 4, HT = 8, aggregate = 16, interface/lease = 32 |
+| 2072 | Exact 16-byte request nonce, including mode and channel |
+| 2088 | Expected controller generation; must match the mailbox generation |
+
+Lifecycle/network modes retain their own reports and mark generic readback
+skipped. A completed readback means the requested reads finished; it does
+not assert freshness, frozen state, valid payload delivery or lease release.
+The original operation error remains at offset 8, address at 12 and actual
+value at 16. A snapshot failure is also printed to collector stderr with
+its separate error/address/actual and the original operation error.
+
+The collector's offline inspectors and the station pair verifiers also
+accept historical 2,048/2,068-byte files; those lack the R03 section/binding fields.
+New live collection requires a matched rebuilt badge image and collector.
+Aggregate reports expose `snapshot.valid`, `capture_available` and
+`lease_available`. Unavailable capture, delivery and lease values are JSON
+`null`; they do not mean no reception. `observed_fixture_bitmap` separately
+checks the exact configured good/bad-FCS bodies against the request.
+`delivery_payloads_valid` also checks the total/unique/duplicate relationship.
+Controller generation is the first little-endian nonce word OR 1, not the
+USB application's generation counter.
+
+Aggregate modes exclude generic packet/inventory writes from aggregate-owned
+report regions. A BA transmitter initializes the 40-byte receipt record at
+offset 1480: magic `0x31524241`, count at 1484 and 32-byte frame at 1488.
+Count zero is explicit no returned BA; missing receipt magic produces
+`returned_ba: null` and `returned_bitmap: null`, never a known-zero claim.
+Positive pair verification requires count one and the exact fresh BA.
+An absent delivery record also leaves the reported delivery bitmap `null`.
+
+The aggregate paired runner uses `clean-rx/tools/ampdu_verify.cjs` to
+cross-check the JSON against complete, fresh raw reports, independently
+generated payloads/FCS and terminal lease/BA evidence. It rejects historical,
+partial and stale reports for aggregate acceptance. For a bad-FCS mask of
+7, actual observed bad bodies and terminal release are required alongside
+zero delivery and no BA; absence is not a passing negative control.
+
+Offline aggregate inspection uses a matched collector:
+
+```sh
+build/clean-rx/badge/collector --inspect-ampdu REPORT.bin CHALLENGE_HEX_28
+```
+
+An explicitly invalid/incomplete aggregate report still produces diagnostic
+JSON and a nonzero exit status. R05's hardware matrix has been rerun, but
+its full acceptance gate remains open; see the
+[hardware record](../experiments/HARDWARE_REGRESSION_R03_2026-10-24.md).

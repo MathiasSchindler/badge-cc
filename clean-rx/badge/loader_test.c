@@ -29,6 +29,8 @@ static uint32_t f2_expected_credit;
 static uint8_t ram[0x80000u];
 static uint32_t command_delay, command_reads;
 static int command_simulated, command_replaced;
+static uint32_t service_calls;
+static uint32_t bus_error_call, transfer_us, cancel_call;
 
 static uint32_t now(void *context) {
     (void)context;
@@ -53,6 +55,7 @@ static uint8_t read_signal(void *context) {
 
 static int service(void *context) {
     (void)context;
+    ++service_calls;
     return !cancel;
 }
 
@@ -60,7 +63,9 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
                                        uint32_t tx_length, uint8_t *rx, uint32_t rx_length) {
     (void)wire;
     ++calls;
-    if (bus_error) return WIFI_BUS_TRANSFER_TIMEOUT;
+    ticks += transfer_us;
+    if (calls == cancel_call) cancel = 1;
+    if (bus_error || calls == bus_error_call) return WIFI_BUS_TRANSFER_TIMEOUT;
     uint32_t cmd = badger_bytes_load_u32(tx);
     uint32_t addr = (cmd >> 11u) & 0x1ffffu, count = cmd & 0x7ffu;
     uint32_t function = (cmd >> 28u) & 3u;
@@ -1055,6 +1060,227 @@ static void command_completion(const wifi_wire_t *wire) {
     puts("Controller command completion: delayed commit, timeout, replacement, failed controller, cancellation, bus error and timer wrap pass");
 }
 
+static void aggregate_deadlines(const wifi_wire_t *wire) {
+    clean_loader_t l;
+    uint8_t snapshot[448];
+    assert(CLEAN_AMPDU_RX_BUDGET_US == 11400000u);
+    assert(CLEAN_BADGE_RECOVERY_MS == 8000u);
+    assert(CLEAN_BADGE_RECOVERY_REFRESH_US == 4000000u);
+    assert(CLEAN_AMPDU_RX_BUDGET_US + CLEAN_LOADER_SNAPSHOT_BUDGET_US + 2500000u < 15000000u);
+    const uint32_t starts[] = {0u, UINT32_MAX - 1000000u};
+    const uint32_t startup[] = {2000000u, CLEAN_LOADER_DEFAULT_BUDGET_US - 1u};
+    for (uint32_t i = 0u; i < sizeof(starts) / sizeof(starts[0]); ++i) {
+        for (uint32_t j = 0u; j < sizeof(startup) / sizeof(startup[0]); ++j) {
+            ticks = starts[i];
+            clean_loader_init(&l, wire, service, NULL);
+            assert(l.budget_us == CLEAN_LOADER_DEFAULT_BUDGET_US);
+            ticks = l.started + startup[j];
+            assert(clean_loader_begin_aggregate_rx(&l));
+            assert(l.elapsed_us == startup[j] && l.budget_us == CLEAN_AMPDU_RX_BUDGET_US);
+            ticks += CLEAN_AMPDU_RX_WINDOW_US;
+            assert(clean_service(&l) && l.elapsed_us > CLEAN_LOADER_DEFAULT_BUDGET_US);
+            ticks += CLEAN_LOADER_STOP_TIMEOUT_US - 1u;
+            state = 10u;
+            assert(clean_write(&l, CLEAN_MBOX + 24u, 3u));
+            assert(clean_wait_state(&l, 10u, CLEAN_LOADER_STOP_TIMEOUT_US));
+            assert(clean_block(&l, CLEAN_MBOX, snapshot, sizeof(snapshot), 0u));
+            assert(l.error == CLEAN_OK);
+            ticks = l.started + CLEAN_AMPDU_RX_BUDGET_US - 1u;
+            assert(clean_service(&l) && l.elapsed_us == CLEAN_AMPDU_RX_BUDGET_US - 1u);
+            uint32_t before = service_calls;
+            assert(!clean_service(&l) && l.error == CLEAN_TIMEOUT);
+            assert(l.elapsed_us == CLEAN_AMPDU_RX_BUDGET_US && service_calls == before);
+            assert(!clean_loader_begin_aggregate_rx(&l) && service_calls == before);
+        }
+    }
+    ticks = 0u;
+    clean_loader_init(&l, wire, service, NULL);
+    ticks = CLEAN_LOADER_DEFAULT_BUDGET_US;
+    assert(!clean_loader_begin_aggregate_rx(&l) && l.error == CLEAN_TIMEOUT);
+    assert(l.budget_us == CLEAN_LOADER_DEFAULT_BUDGET_US);
+    const uint32_t cancelled_at[] = {
+        0u, CLEAN_LOADER_DEFAULT_BUDGET_US + 1u,
+        CLEAN_LOADER_DEFAULT_BUDGET_US + CLEAN_AMPDU_RX_WINDOW_US,
+        CLEAN_AMPDU_RX_BUDGET_US - 100000u
+    };
+    for (uint32_t i = 0u; i < sizeof(cancelled_at) / sizeof(cancelled_at[0]); ++i) {
+        ticks = 0u;
+        clean_loader_init(&l, wire, service, NULL);
+        if (i) assert(clean_loader_begin_aggregate_rx(&l));
+        ticks = cancelled_at[i];
+        cancel = 1;
+        uint32_t before = calls;
+        assert(!clean_block(&l, CLEAN_MBOX, snapshot, sizeof(snapshot), 0u));
+        assert(l.error == CLEAN_CANCELLED && calls == before);
+        assert(!clean_loader_begin_aggregate_rx(&l) && l.error == CLEAN_CANCELLED);
+        cancel = 0;
+    }
+    ticks = state = 0u;
+    puts("Aggregate deadlines: slow startup, full RX/stop/snapshot, exact limits, timer wrap and cancellation pass");
+}
+
+static void fault_snapshots(const wifi_wire_t *wire) {
+    clean_loader_t operation, snapshot;
+    uint8_t bytes[448], report[CLEAN_SNAPSHOT_BYTES];
+    const uint32_t starts[] = {0u, UINT32_MAX - CLEAN_LOADER_DEFAULT_BUDGET_US};
+    const uint32_t errors[] = {
+        CLEAN_TIMEOUT, CLEAN_CONTROLLER, CLEAN_BUS, CLEAN_READBACK, CLEAN_INPUT
+    };
+    assert(CLEAN_LOADER_SNAPSHOT_BUDGET_US == 1000000u);
+    for (uint32_t i = 0u; i < sizeof(starts) / sizeof(starts[0]); ++i) {
+        for (uint32_t j = 0u; j < sizeof(errors) / sizeof(errors[0]); ++j) {
+            for (uint32_t outcome = 0u; outcome < 5u; ++outcome) {
+                ticks = starts[i];
+                clean_loader_init(&operation, wire, service, NULL);
+                ticks = operation.started + CLEAN_LOADER_DEFAULT_BUDGET_US;
+                assert(!clean_service(&operation) && operation.error == CLEAN_TIMEOUT);
+                operation.error = errors[j];
+                operation.address = 0x1234u;
+                operation.actual = 0xabcdu;
+                operation.stage = 7u;
+                operation.verified = 128u;
+                ticks += 500000u;
+                assert(clean_loader_begin_snapshot(&operation, &snapshot));
+                assert(operation.error == errors[j] && operation.address == 0x1234u &&
+                       operation.actual == 0xabcdu);
+                assert(snapshot.budget_us - snapshot.elapsed_us ==
+                       CLEAN_LOADER_SNAPSHOT_BUDGET_US - 1u);
+                uint64_t deadline = snapshot.budget_us;
+                memset(bytes, 0x5a, sizeof(bytes));
+                if (outcome == 0u) {
+                    assert(clean_block(&snapshot, CLEAN_MBOX, bytes, sizeof(bytes), 0u));
+                    assert(!memcmp(bytes, ram + CLEAN_MBOX, sizeof(bytes)));
+                    ticks = snapshot.serviced_at + (uint32_t)(deadline - snapshot.elapsed_us) - 1u;
+                } else if (outcome == 1u) {
+                    bus_error_call = calls + 5u;
+                    assert(!clean_block(&snapshot, CLEAN_MBOX, bytes, sizeof(bytes), 0u));
+                    assert(!memcmp(bytes, ram + CLEAN_MBOX, 64u) && bytes[64] == 0x5au);
+                    bus_error_call = 0u;
+                } else if (outcome == 2u) {
+                    ticks = snapshot.serviced_at + (uint32_t)(deadline - snapshot.elapsed_us);
+                    uint32_t before = calls, serviced = service_calls;
+                    assert(!clean_block(&snapshot, CLEAN_MBOX, bytes, sizeof(bytes), 0u));
+                    assert(calls == before && service_calls == serviced);
+                    assert(!clean_service(&snapshot) && snapshot.budget_us == deadline);
+                } else if (outcome == 3u) {
+                    cancel_call = calls + 4u;
+                    assert(!clean_block(&snapshot, CLEAN_MBOX, bytes, sizeof(bytes), 0u));
+                    assert(!memcmp(bytes, ram + CLEAN_MBOX, 64u) && bytes[64] == 0x5au);
+                    cancel_call = 0u;
+                    cancel = 0;
+                } else {
+                    uint32_t value;
+                    assert(clean_read(&snapshot, CLEAN_MBOX, &value));
+                    ticks = snapshot.serviced_at + (uint32_t)(deadline - snapshot.elapsed_us) - 10u;
+                    transfer_us = 20u;
+                    assert(clean_block(&snapshot, CLEAN_MBOX, bytes, 4u, 0u));
+                    transfer_us = 0u;
+                }
+                clean_loader_finish_snapshot(&operation, &snapshot, report);
+                uint32_t expected = outcome == 0u ? CLEAN_OK :
+                    outcome == 1u ? CLEAN_BUS : outcome == 3u ? CLEAN_CANCELLED : CLEAN_TIMEOUT;
+                assert(badger_bytes_load_u32(report) == CLEAN_SNAPSHOT_MAGIC);
+                assert(badger_bytes_load_u32(report + 4u) == (outcome == 0u ?
+                       CLEAN_SNAPSHOT_COMPLETE : CLEAN_SNAPSHOT_FAILED));
+                assert(badger_bytes_load_u32(report + 8u) == expected);
+                assert(badger_bytes_load_u32(report + 12u) == snapshot.address);
+                assert(badger_bytes_load_u32(report + 16u) == snapshot.actual);
+                assert(operation.error == errors[j] && operation.address == 0x1234u &&
+                       operation.actual == 0xabcdu && operation.stage == 7u &&
+                       operation.verified == 128u &&
+                       operation.budget_us == CLEAN_LOADER_DEFAULT_BUDGET_US);
+                assert(snapshot.budget_us == deadline);
+                uint32_t before = calls, serviced = service_calls;
+                assert(!clean_read(&operation, CLEAN_MBOX, &state) &&
+                       calls == before && service_calls == serviced);
+                if (expected != CLEAN_OK)
+                    assert(!clean_read(&snapshot, CLEAN_MBOX, &state) &&
+                           calls == before && service_calls == serviced);
+            }
+        }
+    }
+    for (uint32_t i = 0u; i < 2u; ++i) {
+        clean_loader_init(&operation, wire, service, NULL);
+        operation.error = i ? CLEAN_TIMEOUT : CLEAN_CANCELLED;
+        cancel = 1;
+        uint32_t before = calls, serviced = service_calls;
+        assert(!clean_loader_begin_snapshot(&operation, &snapshot));
+        clean_loader_finish_snapshot(&operation, &snapshot, report);
+        assert(calls == before && service_calls == serviced + i);
+        assert(operation.error == (i ? CLEAN_TIMEOUT : CLEAN_CANCELLED));
+        assert(badger_bytes_load_u32(report + 8u) == CLEAN_CANCELLED);
+        cancel = 0;
+    }
+    clean_loader_init(&operation, wire, service, NULL);
+    assert(clean_loader_begin_snapshot(&operation, &snapshot));
+    assert(snapshot.budget_us == operation.budget_us);
+    assert(clean_block(&snapshot, CLEAN_MBOX, bytes, sizeof(bytes), 0u));
+    clean_loader_finish_snapshot(&operation, &snapshot, report);
+    assert(operation.error == CLEAN_OK &&
+           badger_bytes_load_u32(report + 4u) == CLEAN_SNAPSHOT_COMPLETE);
+    clean_loader_init(&operation, wire, service, NULL);
+    ticks = operation.started + CLEAN_LOADER_DEFAULT_BUDGET_US;
+    assert(!clean_loader_begin_snapshot(&operation, &snapshot));
+    clean_loader_finish_snapshot(&operation, &snapshot, report);
+    assert(operation.error == CLEAN_TIMEOUT &&
+           snapshot.budget_us == CLEAN_LOADER_DEFAULT_BUDGET_US &&
+           badger_bytes_load_u32(report + 4u) == CLEAN_SNAPSHOT_FAILED);
+    ticks = state = 0u;
+    puts("Fault snapshots: exhausted deadlines, partial bus failure, exact recovery limit, late final I/O, timer wrap, cancellation and original-error preservation pass");
+}
+
+static void snapshot_validity(const wifi_wire_t *wire) {
+    uint8_t detail[CLEAN_SNAPSHOT_DETAIL + CLEAN_SNAPSHOT_BYTES] = {0};
+    uint8_t nonce[16] = {1u,2u,3u};
+    uint8_t *s=detail+CLEAN_SNAPSHOT_DETAIL;
+    badger_bytes_store_u32(detail+32u,0x4f505258u);
+    assert(clean_request_generation(nonce)==0x00030201u);
+    badger_bytes_store_u32(detail+64u,clean_request_generation(nonce));
+    badger_bytes_store_u32(s,CLEAN_SNAPSHOT_MAGIC);
+    badger_bytes_store_u32(s+4u,CLEAN_SNAPSHOT_COMPLETE);
+    badger_bytes_store_u32(s+20u,63u);
+    badger_bytes_copy(s+24u,nonce,16u);
+    badger_bytes_store_u32(s+40u,clean_request_generation(nonce));
+    assert(clean_snapshot_available(detail,nonce,63u));
+    const uint32_t offsets[]={32u,64u,CLEAN_SNAPSHOT_DETAIL,CLEAN_SNAPSHOT_DETAIL+4u,
+        CLEAN_SNAPSHOT_DETAIL+8u,CLEAN_SNAPSHOT_DETAIL+20u,CLEAN_SNAPSHOT_DETAIL+24u,
+        CLEAN_SNAPSHOT_DETAIL+40u};
+    for (uint32_t i=0u;i<sizeof(offsets)/sizeof(offsets[0]);++i) {
+        detail[offsets[i]]^=1u;
+        assert(!clean_snapshot_available(detail,nonce,63u));
+        detail[offsets[i]]^=1u;
+    }
+    clean_loader_t l;
+    clean_loader_init(&l,wire,service,NULL);
+    uint8_t bytes[128];
+    memset(bytes,0x5a,sizeof(bytes));
+    uint32_t sections=CLEAN_SNAPSHOT_MAILBOX;
+    bus_error_call=calls+5u;
+    assert(!clean_snapshot_block(&l,CLEAN_MBOX,bytes,sizeof(bytes),
+                                 &sections,CLEAN_SNAPSHOT_MULTI));
+    assert(sections==CLEAN_SNAPSHOT_MAILBOX);
+    for (uint32_t i=0u;i<sizeof(bytes);++i) assert(bytes[i]==0u);
+    bus_error_call=0u;
+    clean_loader_init(&l,wire,service,NULL);
+    assert(clean_snapshot_block(&l,CLEAN_MBOX,bytes,sizeof(bytes),
+                                &sections,CLEAN_SNAPSHOT_MULTI));
+    assert(sections==(CLEAN_SNAPSHOT_MAILBOX|CLEAN_SNAPSHOT_MULTI));
+    uint8_t packet[CLEAN_DETAIL_PACKET_BYTES];
+    memset(packet,0xa5,sizeof(packet));
+    for (uint32_t mode=CLEAN_HT_AMPDU_PROBE_TX_MODE;mode<=CLEAN_HT_AMPDU_PROBE_RX_MODE;++mode) {
+        detail[2000u]=(uint8_t)mode;
+        memset(detail+1104u,0x5a,CLEAN_DETAIL_PACKET_BYTES);
+        clean_record_raw_packet(detail,packet,sizeof(packet));
+        for (uint32_t i=0u;i<CLEAN_DETAIL_PACKET_BYTES;++i) assert(detail[1104u+i]==0x5au);
+    }
+    detail[2000u]=13u;
+    clean_record_raw_packet(detail,packet,80u);
+    assert(badger_bytes_load_u32(detail+1088u)==80u);
+    assert(!memcmp(detail+1104u,packet,80u));
+    for (uint32_t i=80u;i<CLEAN_DETAIL_PACKET_BYTES;++i) assert(detail[1104u+i]==0u);
+    puts("Snapshot validity: exact read sections, partial-read clearing, frozen state, nonce and controller generation gates pass");
+}
+
 int main(void) {
     cck_rates();
     ht_probe_tests();
@@ -1063,6 +1289,9 @@ int main(void) {
     wifi_wire_t wire = {.now_us = now, .transfer = mock_transfer,
         .write = write_signal, .data_output = output, .read_data = read_signal};
     command_completion(&wire);
+    aggregate_deadlines(&wire);
+    fault_snapshots(&wire);
+    snapshot_validity(&wire);
     fragments(&wire);
     ht_transport(&wire);
     protected_aggregate_transport(&wire);

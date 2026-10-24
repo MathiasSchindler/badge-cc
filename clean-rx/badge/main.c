@@ -33,6 +33,8 @@ static int32_t usb_error;
 volatile int32_t clean_boot_error;
 static uint32_t generation;
 static uint8_t detail[WIFI_TRACE_SIZE];
+_Static_assert(CLEAN_SNAPSHOT_DETAIL + CLEAN_SNAPSHOT_BYTES <= sizeof(detail),
+               "Snapshot result must fit the USB trace");
 _Static_assert(!CLEAN_RX_AMPDU_DELIVERY ||
                CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * CLEAN_HT_AMPDU_PROBE_MPDU <= sizeof(detail),
                "Aggregate payload evidence must fit the actual USB trace");
@@ -89,7 +91,8 @@ static void screen(const char *status, uint32_t packets, uint32_t error) {
 }
 
 static void beacon(const uint8_t *packet, uint32_t size) {
-    if (CLEAN_RX_AMPDU_DELIVERY && detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE) return;
+    if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_TX_MODE ||
+        detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE) return;
     if (station_mode())
         clean_station_discover(packet, size, station_target, &station_ap, &station_ap_status);
     uint8_t entry[40];
@@ -235,10 +238,7 @@ static int receive_for(clean_loader_t *l, uint32_t duration, uint8_t after_tx) {
                 (ack && !(after_tx == 15u && badger_bytes_load_u32(detail + 1960u))) || peer ||
                 (candidate && !badger_bytes_load_u32(detail + 1960u) &&
                  !badger_bytes_load_u32(detail + 1992u))) {
-                badger_bytes_store_u32(detail + 1088u, size);
-                uint32_t saved = size < CLEAN_DETAIL_PACKET_BYTES ? size : CLEAN_DETAIL_PACKET_BYTES;
-                badger_bytes_zero(detail + 1104u, CLEAN_DETAIL_PACKET_BYTES);
-                badger_bytes_copy(detail + 1104u, packet, saved);
+                clean_record_raw_packet(detail, packet, size);
             }
             if (response) {
                 uint32_t responses = badger_bytes_load_u32(detail + 1960u);
@@ -267,11 +267,12 @@ static int service(void *unused) {
     (void)unused;
     usb_error = live_usb_hw_poll(&control);
     if (!usb_error && (soak_mode() || lifecycle_mode() || detail[2000u] == CLEAN_PEER_RX_MODE ||
-                      detail[2000u] == CLEAN_WPA_REKEY_MODE)) {
+                      detail[2000u] == CLEAN_WPA_REKEY_MODE ||
+                      detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE)) {
         const wifi_wire_t *wire = wifi_board_wire();
         uint32_t now = wire->now_us(wire->context);
-        if (now - soak_watchdog_at >= 4000000u) {
-            usb_error = badger_schedule_bootsel(8000u);
+        if (now - soak_watchdog_at >= CLEAN_BADGE_RECOVERY_REFRESH_US) {
+            usb_error = badger_schedule_bootsel(CLEAN_BADGE_RECOVERY_MS);
             if (!usb_error) soak_watchdog_at = now;
         }
     }
@@ -1053,7 +1054,7 @@ static void run(const uint8_t nonce[16]) {
     if (nonce[14]==CLEAN_WPA_REKEY_MODE) l.budget_us=CLEAN_WPA_REKEY_BUDGET_US;
     if (nonce[14] == CLEAN_PEER_RX_MODE) l.budget_us = 10000000u;
     soak_watchdog_at = l.wire->now_us(l.wire->context);
-    if (badger_schedule_bootsel(8000u) != 0) l.error = CLEAN_CANCELLED;
+    if (badger_schedule_bootsel(CLEAN_BADGE_RECOVERY_MS) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
     clean_mac_rx_init(&station_rx);
     if (CLEAN_RX_WMM) clean_qos_rx_init(&station_qos);
@@ -1097,7 +1098,7 @@ static void run(const uint8_t nonce[16]) {
     badger_bytes_store_u32(detail + 2004u, nonce[14] == 8u || nonce[14] == 10u);
     badger_bytes_store_u32(detail + 2008u, nonce[14] == 9u || nonce[14] == 10u);
     if (l.error == CLEAN_OK &&
-        clean_boot(&l, clean_image, length, channel, badger_bytes_load_u32(nonce) | 1u,
+        clean_boot(&l, clean_image, length, channel, clean_request_generation(nonce),
                    nonce[14] != 0u && nonce[14] != 2u && nonce[14] != 13u &&
                    nonce[14] != 17u &&
                    nonce[14] != 22u && nonce[14] != 23u &&
@@ -1145,10 +1146,21 @@ static void run(const uint8_t nonce[16]) {
                 (void)station_command(&l, parameters, sizeof(parameters), CLEAN_EDCA_CMD);
             }
         }
+#if CLEAN_RX_AMPDU_BA
+        if (nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE && l.error == CLEAN_OK) {
+            badger_bytes_zero(detail + CLEAN_AMPDU_BA_RX_DETAIL, 40u);
+            badger_bytes_store_u32(detail + CLEAN_AMPDU_BA_RX_DETAIL, CLEAN_AMPDU_BA_RX_MAGIC);
+        }
+#endif
         if (lifecycle_mode()) station_lifecycle_run(&l, nonce);
         else if (soak_mode()) mac_soak_run(&l, nonce);
-        else (void)receive_for(&l, nonce[14] == CLEAN_PEER_RX_MODE ||
-                              nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE ? 4200000u :
+        else if (nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE) {
+            if (clean_loader_begin_aggregate_rx(&l)) {
+                badger_bytes_store_u32(detail + CLEAN_AMPDU_DMA_DETAIL, CLEAN_AMPDU_DMA_MAGIC);
+                (void)receive_for(&l, CLEAN_AMPDU_RX_WINDOW_US, 0u);
+            }
+        }
+        else (void)receive_for(&l, nonce[14] == CLEAN_PEER_RX_MODE ? 4200000u :
                               nonce[14] == 13u || nonce[14] == 17u ||
                               nonce[14] == 22u || nonce[14] == 23u ||
                               nonce[14] == 25u || nonce[14] == 27u ? 2500000u : 700000u, 0u);
@@ -1292,24 +1304,38 @@ static void run(const uint8_t nonce[16]) {
             }
         }
         if (l.error == CLEAN_OK && !lifecycle_mode() && clean_write(&l, CLEAN_MBOX + 24u, 3u) &&
-            clean_wait_state(&l, 10u, 200000u)) l.stage = 8u;
+            clean_wait_state(&l, 10u, CLEAN_LOADER_STOP_TIMEOUT_US)) l.stage = 8u;
     }
     if (station_mode()) clean_station_ht_report(&station_ap, nonce[15], detail);
-    uint32_t saved_error = l.error, saved_addr = l.address, saved_actual = l.actual;
-    /* Collect fault evidence even after a failed stage, still under a deadline. */
-    l.error = CLEAN_OK;
+    clean_loader_t operation;
+    badger_bytes_copy((uint8_t *)&operation, (const uint8_t *)&l, sizeof(operation));
     int snapshot = 1;
+    uint32_t elapsed;
     uint32_t snapshot_flags = l.stage == 8u ? CLEAN_SOAK_SNAPSHOT_FROZEN : 0u;
     uint32_t snapshot_stop_error = CLEAN_OK;
+    uint32_t sections = l.stage == 8u ? CLEAN_SNAPSHOT_FROZEN : 0u;
+    badger_bytes_store_u32(detail + CLEAN_SNAPSHOT_DETAIL, CLEAN_SNAPSHOT_MAGIC);
+    badger_bytes_store_u32(detail + CLEAN_SNAPSHOT_DETAIL + 4u, CLEAN_SNAPSHOT_SKIPPED);
+    badger_bytes_copy(detail + CLEAN_SNAPSHOT_DETAIL + 24u, nonce, 16u);
+    badger_bytes_store_u32(detail + CLEAN_SNAPSHOT_DETAIL + 40u, clean_request_generation(nonce));
     if (lifecycle_mode()) goto snapshot_done;
-    if ((soak_mode() || nonce[14] == 28u) && saved_error != CLEAN_OK) {
+    snapshot = clean_loader_begin_snapshot(&operation, &l);
+    if (snapshot && (soak_mode() || nonce[14] == 28u ||
+                     nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE ||
+                     nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE) && operation.error != CLEAN_OK) {
         uint32_t state;
         snapshot = clean_read(&l, CLEAN_MBOX + 4u, &state);
-        if (snapshot && state == 255u) snapshot_flags |= CLEAN_SOAK_SNAPSHOT_FROZEN;
+        if (snapshot && state == 255u) {
+            snapshot_flags |= CLEAN_SOAK_SNAPSHOT_FROZEN;
+            sections |= CLEAN_SNAPSHOT_FROZEN;
+        }
         if (snapshot && state != 255u) {
             snapshot = clean_write(&l, CLEAN_MBOX + 24u, 3u) &&
-                       clean_wait_state(&l, 10u, 200000u);
-            if (snapshot) snapshot_flags |= CLEAN_SOAK_SNAPSHOT_FROZEN;
+                       clean_wait_state(&l, 10u, CLEAN_LOADER_STOP_TIMEOUT_US);
+            if (snapshot) {
+                snapshot_flags |= CLEAN_SOAK_SNAPSHOT_FROZEN;
+                sections |= CLEAN_SNAPSHOT_FROZEN;
+            }
             else if (soak_mode() && (l.error == CLEAN_TIMEOUT || l.error == CLEAN_CONTROLLER)) {
                 snapshot_stop_error = l.error;
                 l.error = CLEAN_OK;
@@ -1317,26 +1343,31 @@ static void run(const uint8_t nonce[16]) {
             }
         }
     }
-    snapshot = snapshot && clean_block(&l, CLEAN_MBOX, detail + 32u, 448u, 0u);
+    snapshot = snapshot && clean_snapshot_block(&l, CLEAN_MBOX, detail + 32u, 448u,
+                                                &sections, CLEAN_SNAPSHOT_MAILBOX);
     if (snapshot) snapshot_flags |= CLEAN_SOAK_SNAPSHOT_MAILBOX;
-    snapshot = snapshot && clean_block(&l, CLEAN_MULTI, detail + 480u, 40u, 0u);
+    snapshot = snapshot && clean_snapshot_block(&l, CLEAN_MULTI, detail + 480u, 40u,
+                                                &sections, CLEAN_SNAPSHOT_MULTI);
     if (snapshot && !station_mode() && !soak_mode() && nonce[14] != 17u && !ht_probe_mode())
         snapshot = clean_block(&l, CLEAN_MULTI + 40u, detail + 520u, 568u, 0u);
-    if (snapshot && ht_probe_mode())
+    if (snapshot && ht_probe_mode()) {
         snapshot = clean_block(&l, CLEAN_HT_RX_ADDR, detail + CLEAN_HT_DETAIL,
                                sizeof(clean_ht_rx_t), 0u) &&
                    clean_block(&l, CLEAN_HT_DIAG_ADDR, detail + CLEAN_HT_DIAG_DETAIL,
                                sizeof(clean_ht_diag_t), 0u);
+        if (snapshot) sections |= CLEAN_SNAPSHOT_HT;
+    }
     if (snapshot && (nonce[14] == CLEAN_HT_AMPDU_PROBE_TX_MODE ||
                      nonce[14] == CLEAN_HT_AMPDU_PROBE_RX_MODE)) {
         uint32_t chip_id;
-        snapshot = clean_block(&l, CLEAN_AMPDU_PROBE_ADDR, detail + CLEAN_AMPDU_PROBE_DETAIL,
-                               sizeof(clean_ampdu_probe_trace_t), 0u) &&
+        snapshot = clean_snapshot_block(&l, CLEAN_AMPDU_PROBE_ADDR, detail + CLEAN_AMPDU_PROBE_DETAIL,
+                               sizeof(clean_ampdu_probe_trace_t), &sections, CLEAN_SNAPSHOT_AMPDU) &&
                    clean_read(&l, 0x18000000u, &chip_id);
         if (snapshot) badger_bytes_store_u32(detail + 680u, chip_id);
 #if CLEAN_RX_AMPDU_INTERFACE
-        if (snapshot) snapshot = clean_block(&l, CLEAN_AMPDU_IF_ADDR,
-            detail + CLEAN_AMPDU_IF_DETAIL, sizeof(clean_ampdu_interface_t), 0u);
+        if (snapshot) snapshot = clean_snapshot_block(&l, CLEAN_AMPDU_IF_ADDR,
+            detail + CLEAN_AMPDU_IF_DETAIL, sizeof(clean_ampdu_interface_t),
+            &sections, CLEAN_SNAPSHOT_INTERFACE);
 #endif
 #if CLEAN_RX_AMPDU_DMA
         uint32_t fault_address = badger_bytes_load_u32(detail + 48u);
@@ -1438,13 +1469,13 @@ static void run(const uint8_t nonce[16]) {
         badger_bytes_store_u32(detail + CLEAN_SOAK_PROGRESS_DETAIL +
             __builtin_offsetof(clean_soak_progress_t, snapshot_stop_error), snapshot_stop_error);
     }
+    if (l.error == CLEAN_OK && !snapshot) l.error = CLEAN_READBACK;
+    if (l.error == CLEAN_OK && snapshot_stop_error != CLEAN_OK) l.error = snapshot_stop_error;
+    clean_loader_finish_snapshot(&operation, &l, detail + CLEAN_SNAPSHOT_DETAIL);
+    badger_bytes_store_u32(detail + CLEAN_SNAPSHOT_DETAIL + 20u, sections);
+    badger_bytes_copy((uint8_t *)&l, (const uint8_t *)&operation, sizeof(l));
 snapshot_done:
-    if (saved_error != CLEAN_OK) {
-        l.error = saved_error;
-        l.address = saved_addr;
-        l.actual = saved_actual;
-    } else if (!snapshot && l.error == CLEAN_OK) l.error = CLEAN_READBACK;
-    uint32_t elapsed = l.wire->now_us(l.wire->context) - l.started;
+    elapsed = l.wire->now_us(l.wire->context) - l.started;
     wifi_wire_power_off(l.wire);
     wpa_wipe(wpa_secret,sizeof(wpa_secret)); wpa_wipe(&wpa,sizeof(wpa));
     badger_bytes_store_u32(detail, CLEAN_DETAIL_MAGIC);
@@ -1494,7 +1525,7 @@ snapshot_done:
 }
 
 void bare_main(void) {
-    int32_t recovery = badger_schedule_bootsel(8000u);
+    int32_t recovery = badger_schedule_bootsel(CLEAN_BADGE_RECOVERY_MS);
     nametag_clock_snapshot(clock_before);
     clean_boot_error = recovery == 0 ? nametag_clock_reference() : recovery;
     if (clean_boot_error == 0)

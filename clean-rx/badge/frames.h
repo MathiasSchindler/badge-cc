@@ -5,6 +5,17 @@
 #include "../../src/tools/diagnostics_logic.h"
 #include "../src/tx_diag.h"
 #include "../src/phy_rates.h"
+#include "../src/ht_contract.h"
+
+static inline void clean_record_raw_packet(uint8_t detail[2048], const uint8_t *packet,
+                                           uint32_t size) {
+    if (detail[2000u] == CLEAN_HT_AMPDU_PROBE_TX_MODE ||
+        detail[2000u] == CLEAN_HT_AMPDU_PROBE_RX_MODE) return;
+    uint32_t saved = size < CLEAN_DETAIL_PACKET_BYTES ? size : CLEAN_DETAIL_PACKET_BYTES;
+    badger_bytes_store_u32(detail + 1088u, size);
+    badger_bytes_zero(detail + 1104u, CLEAN_DETAIL_PACKET_BYTES);
+    badger_bytes_copy(detail + 1104u, packet, saved);
+}
 
 static inline int clean_frame_valid(const uint8_t *mpdu, uint32_t length) {
     return length >= 14u && length <= CLEAN_MPDU_BYTES &&

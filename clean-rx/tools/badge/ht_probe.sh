@@ -162,39 +162,7 @@ if [[ $tx_result -ne 0 || $rx_result -ne 0 ]]; then
 fi
 pair_mode=ht-pair
 if [[ $mode == ampdu-probe ]]; then
-    if jq -e '.ba_experiment.enabled == true' "$prefix-rx.json" >/dev/null; then
-        if ! jq -ne --slurpfile tx "$prefix-tx.json" --slurpfile rx "$prefix-rx.json" \
-            '$rx[0].ba_experiment.errors==0 and
-             $rx[0].ba_experiment.attempts==1 and $rx[0].ba_experiment.started==1 and
-             $rx[0].ba_experiment.bitmap>0 and $rx[0].shm_terminal.valid and
-             $tx[0].ba_experiment.returned_ba==true and
-             $tx[0].ba_experiment.returned_bitmap==$rx[0].ba_experiment.bitmap and
-             $rx[0].delivered_subframe_bitmap==$rx[0].ba_experiment.bitmap' >/dev/null; then
-            echo "Diagnostic BA failed: retained delivery and a matching returned BA are required; local TX counters are insufficient" >&2
-            exit 1
-        fi
-    fi
-    jq -n --slurpfile tx "$prefix-tx.json" --slurpfile rx "$prefix-rx.json" \
-        '{mode:"ampdu-probe-pair",channel:$tx[0].channel,mcs:$tx[0].mcs,
-          local_tx_submission:$tx[0].local_tx_submission,
-          fresh_radio_capture:$rx[0].fresh_radio_capture,
-          retained_subframe_bitmap:$rx[0].retained_subframe_bitmap,
-          fixture_bad_fcs_mask:$tx[0].fixture_bad_fcs_mask,
-          multi_mpdu_radio_capture:$rx[0].multi_mpdu_radio_capture,
-          all_subframes_retained:($rx[0].retained_subframe_bitmap==7),
-          dma_experiment_enabled:$rx[0].dma_experiment_enabled,
-          shm_delivery_enabled:$rx[0].shm_delivery_enabled,
-          shm_terminal:$rx[0].shm_terminal,
-          ba_experiment:$rx[0].ba_experiment,
-          compressed_ba_return:$tx[0].ba_experiment,
-          delivered_subframe_bitmap:$rx[0].delivered_subframe_bitmap,
-          delivered_subframes:$rx[0].delivered_subframes,
-          actual_multi_mpdu_delivery:($tx[0].local_tx_submission and
-                                     $rx[0].actual_multi_mpdu_delivery),
-          all_subframes_delivered:($tx[0].local_tx_submission and
-                                  $rx[0].all_subframes_delivered),
-          immediate_ba:false,sifs_timing_qualified:false,ht_qualified:false}' \
-        | tee "$prefix-pair.json"
+    node clean-rx/tools/ampdu_verify.cjs "$prefix" | tee "$prefix-pair.json"
     exit "$?"
 fi
 if [[ $mode == data ]]; then pair_mode=ht-data-pair; fi
