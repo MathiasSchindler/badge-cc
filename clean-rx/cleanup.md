@@ -67,7 +67,7 @@ work; detailed implementation and validation records remain linked.
 Inventoried source ownership, dependencies, profiles and experiments.
 Captured immutable controller/PSM hashes, geometry and native-test outcomes,
 distinguishing executed, disabled and unselected coverage.
-See [the baseline record](dev-doc/C01_BASELINE.md) and
+See [the baseline record](dev-doc/history/cleanup/C01_BASELINE.md) and
 [capture tool](tools/c01-baseline.cjs).
 
 ### C02 - Make controller source independent
@@ -76,7 +76,7 @@ Replaced external types/byte helpers and removed production dependencies
 outside `src/`. All 74 selected flag sets build from a standalone source copy
 without libc or undefined symbols and retain C01 controller/PSM bytes.
 On-chip ROM calibration tables remain a documented silicon dependency.
-See [the isolation record](dev-doc/C02_ISOLATION.md).
+See [the isolation record](dev-doc/history/cleanup/C02_ISOLATION.md).
 
 ### C03 - Separate native tests and integration tests
 
@@ -85,14 +85,14 @@ from badge/peer integration and test-owned helpers. Preserved assertions,
 sanitizers and named copy-scope, early-RX and recovery coverage; production
 builds need no test tree.
 See [the test guide](tests/README.md) and
-[validation record](dev-doc/C03_TEST_SEPARATION.md).
+[validation record](dev-doc/history/cleanup/C03_TEST_SEPARATION.md).
 
 ### C04 - Separate portable runtime, ABI and fixture helpers
 
 Separated portable operations, shared ABI contracts, diagnostic codecs,
 synthetic fixtures and host-only crypto without duplicating implementations.
 Updated consumers and checked unchanged command values, layouts, bounds and
-versions. See [the contract/fixture record](dev-doc/C04_CONTRACT_SEPARATION.md).
+versions. See [the contract/fixture record](dev-doc/history/cleanup/C04_CONTRACT_SEPARATION.md).
 
 ### C05 - Isolate firmware-side tests and experimental profiles
 
@@ -100,8 +100,8 @@ Introduced explicit runtime, diagnostic and SDIO-test behavior profiles.
 Ordinary firmware rejects diagnostic commands and cannot activate synthetic
 traffic or ACK suppression; passive evidence and recovery remain available.
 This deliberately changed runtime behavior. Implementation and offline tests
-are complete; [hardware acceptance](dev-doc/C05_DIAGNOSTIC_PROFILES.md#separate-hardware-acceptance-gate-not-run)
-remains unperformed. See [the profile record](dev-doc/C05_DIAGNOSTIC_PROFILES.md).
+are complete; [hardware acceptance](dev-doc/guides/HARDWARE_TRIALS.md#runtime-profile-acceptance)
+remains unperformed. See [the profile record](dev-doc/history/cleanup/C05_DIAGNOSTIC_PROFILES.md).
 
 ### C06 - Decompose controller orchestration and PSM composition
 
@@ -110,7 +110,7 @@ with explicit state-owner namespaces and local geometry assertions.
 Deliberately retained unity compilation and flat storage: 74 diagnostic
 selections match C01 bytes; six runtime selections match C05 bytes and mutable
 storage layouts. Namespaces do not provide separate-module encapsulation.
-See [the composition record](dev-doc/C06_CONTROLLER_COMPOSITION.md).
+See [the composition record](dev-doc/history/cleanup/C06_CONTROLLER_COMPOSITION.md).
 
 ### C07 - Separate development tooling and centralize profile ownership
 
@@ -119,7 +119,7 @@ Centralized named selections in `src/profiles.mk`, moved desktop tools under
 targets/flags, documented tool-path migration and removed collector source
 from firmware identities. Validated affected host consumers and retained
 controller/PSM baselines.
-See [the tooling/profile record](dev-doc/C07_TOOL_AND_PROFILE_OWNERSHIP.md).
+See [the tooling/profile record](dev-doc/history/cleanup/C07_TOOL_AND_PROFILE_OWNERSHIP.md).
 
 ### C08 - Enforce boundaries and complete documentation
 
@@ -128,7 +128,7 @@ acceptance. The final run passed 32 tooling tests, 74 diagnostic comparisons,
 six runtime comparisons, seven historical profiles and native suites.
 Historical coverage remains 24 passed, six disabled and twelve unselected;
 the C01 baseline is unchanged. Updated contributor/reference documentation.
-See [the acceptance record](dev-doc/C08_OFFLINE_ACCEPTANCE.md).
+See [the acceptance record](dev-doc/history/cleanup/C08_OFFLINE_ACCEPTANCE.md).
 
 Repeat with fresh evidence:
 
@@ -137,7 +137,7 @@ make -C clean-rx check BUILD=../build/clean-rx/acceptance-NEW
 ```
 
 **C01-C08 structural cleanup is complete.** Remaining
-[feature/reliability limits](dev-doc/STATUS.md) and the separate C05 hardware
+[feature/reliability limits](dev-doc/issues/README.md) and the separate C05 hardware
 acceptance gate remain open. No new hardware/RF qualification was performed.
 
 ### C09 - Formalize and check the documentation boundary
@@ -150,12 +150,13 @@ anchors, HTML anchors and prohibited reference-to-development links.
 Reviewed all four reference guides against the scope policy and replaced
 the ignored local datasheet link with public manufacturer documentation.
 
-`make -C clean-rx check-docs` passes for 36 Markdown files and 402 local
-links; all 38 tooling tests pass. The full acceptance runner also invokes the
+At C09 completion, documentation checks passed for 36 Markdown files and
+402 local links, and all 38 tooling tests passed. Rerun
+`make -C clean-rx check-docs` for the current tree. The full acceptance runner also invokes the
 documentation check and hashes Markdown inputs. Checks use only Node's
 built-in modules, with no npm packages or framework. No controller inputs
 or hardware behavior changed.
-See [contributor guidance](dev-doc/DEVELOPMENT.md#documentation-boundary-and-review)
+See [contributor guidance](dev-doc/guides/DEVELOPMENT.md#documentation-boundary-and-review)
 for setup, scope and review criteria. This is not a new full firmware-matrix
 or hardware qualification result.
 

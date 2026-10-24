@@ -57,7 +57,7 @@ node --test clean-rx/tools/c04-contracts.test.cjs
 They compare constants, every structure field offset, alignment and size,
 and the layout manifest with hash-checked C01 headers, including extended
 RX, handoff, streaming and aggregate-delivery selections. See
-[the C04 record](../dev-doc/C04_CONTRACT_SEPARATION.md).
+[the C04 record](../dev-doc/history/cleanup/C04_CONTRACT_SEPARATION.md).
 
 The MAC suite contains both portable-MAC checks and badge station/fixture
 checks. It is conservatively classified as integration in full, rather than
@@ -125,8 +125,8 @@ runtime and legacy diagnostic matrices, and all named native profiles.
 It fails if required copy-scope, early-RX or ordered-recovery coverage is
 missing/disabled. Historical disabled/unselected cases remain explicit,
 not counted as passes. Evidence directories must be new.
-See [the development guide](../dev-doc/DEVELOPMENT.md).
+See [the development guide](../dev-doc/guides/DEVELOPMENT.md).
 
 These are native/model/integration tests, not RF emulation, physical timing
 qualification, or permission to flash devices. See
-[the C03 validation record](../dev-doc/C03_TEST_SEPARATION.md).
+[the C03 validation record](../dev-doc/history/cleanup/C03_TEST_SEPARATION.md).

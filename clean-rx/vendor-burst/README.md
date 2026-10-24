@@ -78,7 +78,7 @@ tests execute the sequence on both badges with exact delivery, but
 the injected fault is software state, not a physical `0x804` wedge.
 No natural 250-us prefix recovery triggered. All these profiles remain
 diagnostic; HT association stays disabled.
-See the [matched boundary and recovery evidence](../dev-doc/HT20_IMPLEMENTATION.md#next-mpdu-command-and-bounded-rx-recovery-experiments-2026-10-20).
+See the [matched boundary and recovery evidence](../dev-doc/experiments/ht20/NEXT_MPDU_AND_VARIABLE_LENGTH.md#next-mpdu-command-and-bounded-rx-recovery-experiments-2026-10-20).
 
 ## Variable-length boundary microscope
 
@@ -137,7 +137,7 @@ Matched experimental controls, all default off:
 The 50-trial campaign retains all failures: 39 exact selected pairs,
 726/800 controls, one delivery-integrity failure, and only 13 existing
 collector-policy passes. See the
-[variable-length evidence](../dev-doc/HT20_IMPLEMENTATION.md#variable-length-boundaries-and-initial-stream-state-2026-10-20).
+[variable-length evidence](../dev-doc/experiments/ht20/NEXT_MPDU_AND_VARIABLE_LENGTH.md#variable-length-boundaries-and-initial-stream-state-2026-10-20).
 General N-body delimiter/EOF handling and repeated buffering/backpressure
 remain open.
 
@@ -191,7 +191,7 @@ remain in the 64-trial evidence; the final native-count guard is also
 tested against the reproduced 243-versus-387 count mismatch.
 This is not N-body buffering, all-rate qualification or permission to
 advertise HT. See the
-[hint follow-up evidence](../dev-doc/HT20_IMPLEMENTATION.md#verified-hint-follow-up-shm-limits-short-first-streaming-and-admission-2026-10-20).
+[hint follow-up evidence](../dev-doc/experiments/ht20/NEXT_MPDU_AND_VARIABLE_LENGTH.md#verified-hint-follow-up-shm-limits-short-first-streaming-and-admission-2026-10-20).
 
 ## Experimental observer FIFO
 
@@ -236,7 +236,7 @@ accounting rules. WND9 is unchanged.
 
 Profile flags now participate in the build ID so host-only pause switches
 cannot reuse another profile's RP images or collector.
-See the [FIFO qualification record](../dev-doc/HT20_IMPLEMENTATION.md#passive-observer-fifo-qualification-2026-10-19)
+See the [FIFO qualification record](../dev-doc/experiments/ht20/EARLY_CAPTURE_AND_FIFO.md#passive-observer-fifo-qualification-2026-10-19)
 for retained failures, pre-prefix losses and short bad-FCS exits. This gate
 does not fix persistent RXE busy states or qualify general aggregate RX.
 
@@ -284,7 +284,7 @@ after a fresh second eight-byte prefix in both roles/orders, not a complete
 pair. The separate [deferred-streaming repair](#deferred-streaming-handoff-repair)
 now restores exact bounded pairs. Baseline failures and trials missing
 required controls still return nonzero and retain their reports.
-See the [controlled handoff evidence](../dev-doc/HT20_IMPLEMENTATION.md#controlled-handoff-stimulus-and-reproducible-continuation-failure).
+See the [controlled handoff evidence](../dev-doc/experiments/ht20/HANDOFF_AND_COPY_WAIT.md#controlled-handoff-stimulus-and-reproducible-continuation-failure).
 Do not reuse an evidence prefix or rebuild the shared images during a run.
 Save full badge originals before flashing; restore and independently
 readback-verify both complete flashes afterward.
@@ -340,7 +340,7 @@ waveform, not all possible source failures. It narrows the continuation
 defect to clean receive/configuration; it does not identify a particular
 RXE register or qualify general aggregation, loss rates, BA or HT negotiation.
 Vendor-internal drops remain unknown. See the
-[full evidence and restoration record](../dev-doc/HT20_IMPLEMENTATION.md#independent-vendor-raw-receiver-2026-10-20).
+[full evidence and restoration record](../dev-doc/experiments/ht20/VENDOR_REFERENCE_AND_STREAMING.md#independent-vendor-raw-receiver-2026-10-20).
 
 ### Deferred-streaming handoff repair
 
@@ -377,7 +377,7 @@ complete deliberately corrupted second body, not a generic bad-FCS exit.
 Malformed-delimiter and overlong-body cases remain diagnostic-only, with
 all failures and later-control losses retained. D2 and HT association
 remain open. See the
-[complete causal campaign](../dev-doc/HT20_IMPLEMENTATION.md#deferred-pre-handoff-streaming-repair-2026-10-20).
+[complete causal campaign](../dev-doc/experiments/ht20/VENDOR_REFERENCE_AND_STREAMING.md#deferred-pre-handoff-streaming-repair-2026-10-20).
 
 For matched A/B runs, `CLEAN_RX_REFERENCE_BUILD=ARCHIVED_IMAGE_DIRECTORY`
 selects the archived matching `vendor.uf2`, `observer.uf2` and collector.
@@ -431,7 +431,7 @@ bodies in inspected DMA buffers and no second-body prefixes. All four
 deferred controls retain exact valid second bodies in SHM. Early controls
 and abort/recovery losses remain visible, and ordinary/default firmware is
 unchanged. See the
-[complete investigation and limits](../dev-doc/HT20_IMPLEMENTATION.md#streaming-byte-destination-and-dma-discriminator-2026-10-20).
+[complete investigation and limits](../dev-doc/experiments/ht20/VENDOR_REFERENCE_AND_STREAMING.md#streaming-byte-destination-and-dma-discriminator-2026-10-20).
 
 ### Matched continuation-streaming controls
 
@@ -471,7 +471,7 @@ Twenty-six RF trials retain sixteen exact pairs; twelve also pass every
 control-receipt gate. Control losses, watchdogs and an explicit abort stay
 failed trials. These controls do not generalize streaming-safe delivery
 to larger bodies or qualify HT association. See the
-[phase/copy-boundary evidence](../dev-doc/HT20_IMPLEMENTATION.md#continuation-streaming-and-moving-copy-boundary-2026-10-20).
+[phase/copy-boundary evidence](../dev-doc/experiments/ht20/COPY_PROGRESS_AND_PLACEMENT.md#continuation-streaming-and-moving-copy-boundary-2026-10-20).
 
 ### Streaming copy-state and immediate retrigger control
 
@@ -503,7 +503,7 @@ canonical bytes. Programmed base/end and sampled context stay correct.
 All four short-body trials retain exact pairs; only one receives every
 required control. This is a failed immediate-retrigger discriminator,
 not a recovery repair or a test of later post-stall rearm.
-See the [copy-state evidence and limits](../dev-doc/HT20_IMPLEMENTATION.md#streaming-copy-state-and-immediate-retrigger-discriminator-2026-10-20).
+See the [copy-state evidence and limits](../dev-doc/experiments/ht20/COPY_PROGRESS_AND_PLACEMENT.md#streaming-copy-state-and-immediate-retrigger-discriminator-2026-10-20).
 
 ### Measured post-stall replay
 
@@ -540,7 +540,7 @@ raw-report rechecks and independent byte mapping verify activation
 without converting any aborted body to success. This demonstrates
 separate source/read progress and SHM write placement, not a safe
 destination adjustment or segmented receive repair. See the
-[post-stall evidence](../dev-doc/HT20_IMPLEMENTATION.md#measured-post-stall-replay-and-suffix-overwrite-2026-10-20).
+[post-stall evidence](../dev-doc/experiments/ht20/COPY_PROGRESS_AND_PLACEMENT.md#measured-post-stall-replay-and-suffix-overwrite-2026-10-20).
 
 ### Bounded copy-destination placement
 
@@ -576,7 +576,7 @@ pairs, two with all required controls.
 This verifies the tested destination displacement, not endpoint/count
 units, safe segmented recovery or D2 completion. Adding zero is itself a
 register write, not a hardware no-op. See the
-[placement evidence](../dev-doc/HT20_IMPLEMENTATION.md#bounded-copy-destination-placement-2026-10-20).
+[placement evidence](../dev-doc/experiments/ht20/COPY_PROGRESS_AND_PLACEMENT.md#bounded-copy-destination-placement-2026-10-20).
 
 ### Replay endpoint and remaining-byte control
 
@@ -605,7 +605,7 @@ remaining-endpoint A trials finish at 178 with bad FCS, and B aborts
 at 68/69. All four short controls skip the action and deliver exact
 pairs with all required controls. This remaining-length adjustment is
 not a repair; the 32-byte fresh-copy limit remains unexplained. See the
-[endpoint evidence](../dev-doc/HT20_IMPLEMENTATION.md#replay-endpoint-versus-remaining-bytes-2026-10-20).
+[endpoint evidence](../dev-doc/experiments/ht20/COPY_PROGRESS_AND_PLACEMENT.md#replay-endpoint-versus-remaining-bytes-2026-10-20).
 
 ### Focused copy microscope
 
@@ -647,7 +647,7 @@ These remain diagnostic-only profiles with runner exit 1.
 This is a causal streaming-ownership result, not a fixed 32-byte copy
 capacity or D2 completion. Native count/FCS lifecycle and safe FIFO
 publication remain unresolved. See the
-[focused microscope evidence](../dev-doc/HT20_IMPLEMENTATION.md#focused-copy-microscope-and-current-epoch-stream-ownership-2026-10-20).
+[focused microscope evidence](../dev-doc/experiments/ht20/EPOCH_REPLAY_AND_FCS.md#focused-copy-microscope-and-current-epoch-stream-ownership-2026-10-20).
 
 ### Nonterminal guard-body and copy-end controls
 
@@ -702,7 +702,7 @@ stream-field experiment. Its readbacks occupy probe words 42/43;
 the probe is now 44 words within the unchanged early SHM export.
 Mask zero without a committed sample is not overwrite evidence.
 
-See the [terminal-boundary campaign](../dev-doc/HT20_IMPLEMENTATION.md#nonterminal-second-body-and-copy-end-boundary-controls-2026-10-20)
+See the [terminal-boundary campaign](../dev-doc/experiments/ht20/HANDOFF_AND_COPY_WAIT.md#nonterminal-second-body-and-copy-end-boundary-controls-2026-10-20)
 for the 20 retained RF trials, USB-only exclusions and complete
 restoration checks. No complete pair or D2 handoff qualification resulted.
 
@@ -751,7 +751,7 @@ six wait fields. Phase 1 is armed, 3 is a committed terminal snapshot,
 5 is explicit wait failure; version 1 is the probe, 2 is the wait control.
 The RP-only `FCP1` fault record occupies trace bytes 5792..5823, beyond
 that export. It does not change normal F2 or station receive ABI.
-See the [copy-progress campaign](../dev-doc/HT20_IMPLEMENTATION.md#second-body-overwrite-probe-and-rejected-fresh-count-wait).
+See the [copy-progress campaign](../dev-doc/experiments/ht20/HANDOFF_AND_COPY_WAIT.md#second-body-overwrite-probe-and-rejected-fresh-count-wait).
 
 ## Build and run
 
@@ -888,7 +888,7 @@ geometry establish the actual multi-body opportunity. There is no third
 receiver, no per-attempt independent RF denominator and no qualification
 of the second body's reception or protected AP interoperability.
 
-The [fixed-stimulus campaign](../dev-doc/HT20_IMPLEMENTATION.md#fixed-stimulus-early-capture-qualification-2026-10-19)
+The [fixed-stimulus campaign](../dev-doc/experiments/ht20/EARLY_CAPTURE_AND_FIFO.md#fixed-stimulus-early-capture-qualification-2026-10-19)
 records 24/24 corrected trials with an exact early body, 13/24 passing the
 stricter all-control gate, and continuing natural RXE recovery failures.
 
@@ -923,7 +923,7 @@ bytes and ending count 134/watchdog, whereas replay copies the full
 count to 58 and ends count 176/bad FCS. All four short controls deliver
 exact pairs, but only one receives every ordinary control. No long
 continuation reaches normal F2; native admission is not waived.
-See the [matched evidence and collector correction](../dev-doc/HT20_IMPLEMENTATION.md#quiet-only-versus-copy-replay-at-the-original-destination-2026-10-20).
+See the [matched evidence and collector correction](../dev-doc/experiments/ht20/EPOCH_REPLAY_AND_FCS.md#quiet-only-versus-copy-replay-at-the-original-destination-2026-10-20).
 
 ### Compound replay field and native-length quarantine
 
@@ -965,7 +965,7 @@ but inconsistent complete-body length produces explicit length outcome
 Snapshot outcome 1/status `0x4100` still records native FCS success.
 Unrelated frames and exact short continuations retain ordinary behavior.
 No normal full-body F2 repair or D2 qualification is claimed. See the
-[field, corruption and guarded RF evidence](../dev-doc/HT20_IMPLEMENTATION.md#compound-replay-command-fcs-state-and-copy-local-length-2026-10-20).
+[field, corruption and guarded RF evidence](../dev-doc/experiments/ht20/EPOCH_REPLAY_AND_FCS.md#compound-replay-command-fcs-state-and-copy-local-length-2026-10-20).
 
 ### Fixed-source vendor raw control
 
@@ -1004,7 +1004,7 @@ exactly 30 raw packets. Two 100-ms trials extend this to 41/42 but still
 miss expected bodies; a 10-ms test times out. Therefore these captures
 cannot attribute clean pre-prefix misses to RF interference or prove
 absence over the complete source sequence. See the
-[baseline evidence and exclusions](../dev-doc/HT20_IMPLEMENTATION.md#fixed-source-vendor-baseline-and-pre-prefix-discriminator-2026-10-20).
+[baseline evidence and exclusions](../dev-doc/experiments/ht20/EPOCH_REPLAY_AND_FCS.md#fixed-source-vendor-baseline-and-pre-prefix-discriminator-2026-10-20).
 
 ### Repeated early FIFO delivery
 
@@ -1064,7 +1064,7 @@ retained. Collector output keeps `reliability_qualified:false` and
 `ht_station_qualified:false`, including finite fixture passes. The
 sixteen-prefix observer limit and fixed MCS0/554-byte source do not
 qualify sustained/variable aggregate reception. See the
-[complete campaign and audit](../dev-doc/HT20_IMPLEMENTATION.md#repeated-early-mpdu-fifo-delivery-and-complete-packet-archives-2026-10-20).
+[complete campaign and audit](../dev-doc/experiments/ht20/EPOCH_REPLAY_AND_FCS.md#repeated-early-mpdu-fifo-delivery-and-complete-packet-archives-2026-10-20).
 
 The screen shows badge role, operation and experimental mode before radio
 start, then stopped/error status, capture count and first-fault RXCTL after
@@ -1728,7 +1728,7 @@ remain in BOOTSEL.
 
 Full intermediate controls, corrupted-byte diagnosis, timing measurements,
 exact positive-frame identity and USB readiness failure are recorded in the
-[D2 development record](../dev-doc/HT20_IMPLEMENTATION.md#first-complete-live-two-body-capture-2026-10-19).
+[D2 development record](../dev-doc/experiments/ht20/ADVANCE_AND_DELIVERY.md#first-complete-live-two-body-capture-2026-10-19).
 
 ### Exact-size retention follow-up
 
@@ -1747,7 +1747,7 @@ A vendor-only assembly FIFO control showed no useful submission-pacing
 gain and was removed. The preserved old baseline also reproduces the
 missing-capture direction. Detailed controls, limits and live bad-frame
 recovery are in the
-[retention follow-up record](../dev-doc/HT20_IMPLEMENTATION.md#shorter-live-retention-and-transport-pacing-control-2026-10-19).
+[retention follow-up record](../dev-doc/experiments/ht20/ADVANCE_AND_DELIVERY.md#shorter-live-retention-and-transport-pacing-control-2026-10-19).
 
 Both complete originals were restored after this follow-up, with independent
 16-MiB readbacks and byte/hash comparisons against the verified
@@ -1768,7 +1768,7 @@ Only one of six trials passes; other runs lack an eligible early body or
 retain a corrupt continuation. Earlier zero-HT loss did not recur and
 remains unexplained. Neither this result nor transport accounting qualifies
 repeatability, physical abort recovery or production aggregate reception.
-See the [frozen delivery-state record](../dev-doc/HT20_IMPLEMENTATION.md#frozen-delivery-state-and-reverse-role-pair-2026-10-19).
+See the [frozen delivery-state record](../dev-doc/experiments/ht20/ADVANCE_AND_DELIVERY.md#frozen-delivery-state-and-reverse-role-pair-2026-10-19).
 Both complete originals were restored and independently reread/byte/hash-
 verified against fresh full-flash backups after all six trials. Both badges
 are in BOOTSEL.
@@ -1782,7 +1782,7 @@ controls were tested and removed because none qualified a complete pair.
 Zero-HT loss recurs twice with no transport drop, pending credit or host
 resync, locating that failure upstream of F2/USB delivery. No RF fix or D2
 completion is claimed. Detailed controls and limits are in the
-[handoff-state record](../dev-doc/HT20_IMPLEMENTATION.md#handoff-state-controls-and-zero-ht-delivery-exclusion-2026-10-19).
+[handoff-state record](../dev-doc/experiments/ht20/RXE_DRAIN_CONTROLS.md#handoff-state-controls-and-zero-ht-delivery-exclusion-2026-10-19).
 
 Both complete original flashes were restored and independently reread as
 `build/clean-rx/vendor-handoff-state/restored-{A,B}-full.bin`.
@@ -1798,7 +1798,7 @@ destination. No complete pair qualifies. Same-destination reuse alone
 does not explain these failures; the unqualified control was removed.
 Exact tested images/source and all failed evidence are preserved in
 `build/clean-rx/vendor-alt-buffer/`.
-See the [alternate-buffer record](../dev-doc/HT20_IMPLEMENTATION.md#alternate-receive-buffer-control-2026-10-19).
+See the [alternate-buffer record](../dev-doc/experiments/ht20/RXE_DRAIN_CONTROLS.md#alternate-receive-buffer-control-2026-10-19).
 
 The retained collector now enforces complete capture/post/drop/consume
 accounting, including magic values, packed counter saturation and the
@@ -1814,7 +1814,7 @@ both badges remain in BOOTSEL.
 
 ### Early-capture cause investigation
 
-The [development record](../dev-doc/HT20_IMPLEMENTATION.md#early-capture-causes-and-hardware-controls-2026-10-19)
+The [development record](../dev-doc/experiments/ht20/RXE_DRAIN_CONTROLS.md#early-capture-causes-and-hardware-controls-2026-10-19)
 documents the 182-header retrospective audit, 29 focused RF trials,
 calibration comparisons and hardware limits. Both badge roles repeatedly
 retain valid complete 170/298-byte nonterminal bodies; one role also
@@ -1831,7 +1831,7 @@ byte/hash-match the fresh verified backups; both badges remain in BOOTSEL.
 
 ### Zero-HT follow-up
 
-The [follow-up record](../dev-doc/HT20_IMPLEMENTATION.md#zero-ht-reproduction-and-phy-control-comparison-2026-10-19)
+The [follow-up record](../dev-doc/experiments/ht20/RXE_RECOVERY.md#zero-ht-reproduction-and-phy-control-comparison-2026-10-19)
 adds 20 complete RF trials and reproduces zero-HT reception with actual
 stopped-state evidence. Three low-RX cases on B differ from one HT-only
 miss on A with 818 ordinary deliveries. Final PSM states/debug overlap
@@ -1845,7 +1845,7 @@ byte/hash-match the fresh verified backups; both badges remain in BOOTSEL.
 
 ### Burst-window and RXE rearm investigation
 
-The [development record](../dev-doc/HT20_IMPLEMENTATION.md#burst-window-diagnosis-rxe-rearm-and-fault-recovery-2026-10-19)
+The [development record](../dev-doc/experiments/ht20/RXE_RECOVERY.md#burst-window-diagnosis-rxe-rearm-and-fault-recovery-2026-10-19)
 retains 23 completed capture trials, five deliberately non-restarting fault
 controls and one separate readiness failure in
 `build/clean-rx/burst-window-investigation/`.
@@ -1868,7 +1868,7 @@ acknowledgement into its adjacent fault block. The native model incorrectly
 made that conditional branch unconditional. These trials do not show that
 a longer hardware wait is insufficient. The corrected guard explicitly
 resumes on both event outcomes and tests the actual conditional behavior.
-See the [decision-level correction](../dev-doc/HT20_IMPLEMENTATION.md#rearm-decision-capture-and-conditional-drain-correction-2026-10-19).
+See the [decision-level correction](../dev-doc/experiments/ht20/RXE_RECOVERY.md#rearm-decision-capture-and-conditional-drain-correction-2026-10-19).
 
 Seven new retained nonterminal bodies independently pass FCS/session checks:
 six 298-byte bodies and one 554-byte body on observer A. The 554-byte byte
@@ -1945,7 +1945,7 @@ both `0x804`, the remaining wait count is zero, outcome is busy fault,
 and the controller reports SHM reason 3 with zero restart attempts.
 This is distinct from the previous false conditional-drain faults.
 Full counters, qualification limits and the next recovery test are in the
-[decision-level record](../dev-doc/HT20_IMPLEMENTATION.md#fixed-rf-comparison-and-a-genuine-exhausted-rearm).
+[decision-level record](../dev-doc/experiments/ht20/RXE_RECOVERY.md#fixed-rf-comparison-and-a-genuine-exhausted-rearm).
 All 72 raw reports pass independent CRC/length checks; 360 timeline rows
 are retained without capacity loss. The one faulted frozen capture remains
 an explicit failure. No production recovery fix is claimed.
@@ -1953,7 +1953,7 @@ an explicit failure. No production recovery fix is claimed.
 ### One-shot recovery and both-role 554-byte captures
 
 The preceding gated experiment is recorded in the
-[one-shot recovery development record](../dev-doc/HT20_IMPLEMENTATION.md#one-shot-rxe-event-drainreflush-experiment-2026-10-19).
+[one-shot recovery development record](../dev-doc/experiments/ht20/RXE_DRAIN_CONTROLS.md#one-shot-rxe-event-drainreflush-experiment-2026-10-19).
 Four injected RF controls (`6d4ba8e4`) execute recovery and resume reception
 without restart; they do not simulate a physical busy RXE.
 Four strict 512-byte controls (`9c377cb3`) include two real exhausted
@@ -1986,7 +1986,7 @@ earlier restoration attempt.
 
 ### Parked PHY reset: one real recovery, two persistent failures
 
-The [instrumented PHY-reset record](../dev-doc/HT20_IMPLEMENTATION.md#parked-one-shot-phy-receive-reset-2026-10-19)
+The [instrumented PHY-reset record](../dev-doc/experiments/ht20/RXE_RECOVERY.md#parked-one-shot-phy-receive-reset-2026-10-19)
 adds four injected execution controls, four reflush controls and ten
 natural reset trials. Three natural busy timeouts invoke the new reset:
 one clears RXCTL `0x804` to `0x800` and resumes reception, while two remain

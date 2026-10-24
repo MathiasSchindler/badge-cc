@@ -23,7 +23,7 @@ borrowed badge flash with verified readbacks.
 Implementation details, build IDs, measurements, findings and experiments
 belong in [development documentation](clean-rx/dev-doc/README.md).
 Earlier detailed records are preserved in
-[milestone history](clean-rx/dev-doc/MILESTONE_HISTORY.md).
+[milestone history](clean-rx/dev-doc/history/README.md).
 
 ## A. Reliable ordinary Wi-Fi MAC operation
 
@@ -33,7 +33,7 @@ See [MAC implementation and evidence](clean-rx/badge/README.md#milestone-a-mac-i
 ### A1. Correct medium access
 
 Bounded backoff/timeout implementation and native NAV/EIFS/overlap controls
-are recorded in [MAC reliability recovery](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md).
+are recorded in [MAC reliability recovery](clean-rx/dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md).
 Controlled RF contention and timing qualification remain open.
 
 - [ ] Complete carrier/NAV sensing, interframe spacing, random backoff,
@@ -45,7 +45,7 @@ Controlled RF contention and timing qualification remain open.
 
 Fired-request ownership and explicit, bounded recovery of quiescent
 TX-completion timeouts are implemented and hardware-tested; see
-[recovery evidence and unresolved causes](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md).
+[recovery evidence and unresolved causes](clean-rx/dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md).
 Failed attempts remain TIMEOUTs, not successful completions.
 Completed automatic-response status is never credited as Data success.
 Follow-up localization fixes timer reference, response-retirement ownership
@@ -59,7 +59,7 @@ replaces the physical-tail ACK clock with PHY start while keeping the shorter
 window. A real sum-mismatch fault with otherwise consistent retained counters
 also prompted register-only comparisons and explicit computed-sum/limit
 evidence. This does not prove the earlier spontaneous suppression cause fixed.
-See the [A2 follow-up and retained failures](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#a2-follow-up-suppression-invariants-and-cck-ack-clock-ownership).
+See the [A2 follow-up and retained failures](clean-rx/dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md#a2-follow-up-suppression-invariants-and-cck-ack-clock-ownership).
 The CCK follow-up preserves prepare/armed/fired/error ownership evidence and
 retires known `0x0010`/`0x0020`/`0x0030` idle incomplete transmissions through
 checked abort/rearm, still as failed attempts/TIMEOUTs. Stable sticky error
@@ -77,7 +77,7 @@ They also expose an unqualified `0x0028` baseline / `0x0038` error (bit
 Final-source focused controls pass 1,000 cyclic 2-Mbps and 100 short-preamble
 MSDUs/direction; its reverse exhaustion control records five suppressions for
 eight attempts and is not a controlled-negative pass.
-See [CCK provenance, retirement and retained failures](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#cck-phy-error-retirement-and-retained-provenance).
+See [CCK provenance, retirement and retained failures](clean-rx/dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md#cck-phy-error-retirement-and-retained-provenance).
 A2 remains open for the remaining PHY/RX/ACK failures and independent RF
 timing/full-credit qualification; the silicon meaning/cause of the observed
 PHY status is not established.
@@ -110,7 +110,7 @@ Default build `66bf3b9c` also passes both exact exhaustion negatives and both-ro
 TIMEOUTs remain unexplained after subtracting intentional peer suppressions
 and the one known-status retirement; successful retries are not proof that the
 underlying missing receptions/ACKs are fixed.
-See [PHY/RX provenance and retained failed controls](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
+See [PHY/RX provenance and retained failed controls](clean-rx/dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
 
 - [ ] Complete response-rate/preamble selection, turnaround, bounded retries
   and meaningful completion reporting.
@@ -124,9 +124,9 @@ See [PHY/RX provenance and retained failed controls](clean-rx/dev-doc/MAC_RELIAB
 ### A3. Receive correctness and interoperability
 
 Bounded legacy fragmentation/retry implementation and paired-badge evidence
-are recorded in [fragmentation qualification](clean-rx/dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
+are recorded in [fragmentation qualification](clean-rx/dev-doc/experiments/mac/LEGACY_FRAGMENTATION.md).
 This is partial A2/A3 progress, not the sustained/interoperability gate below.
-Follow-up [recovery trials](clean-rx/dev-doc/MAC_RELIABILITY_RECOVERY.md)
+Follow-up [recovery trials](clean-rx/dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md)
 passed 1,000 maximum-size MSDUs per direction for both two- and
 sixteen-fragment profiles, including explicit completion-timeout recovery.
 Earlier sixteen-fragment and 5,000-per-direction mixed-size controls passed;
@@ -205,7 +205,7 @@ independently delivered and acknowledged, with zero loss, corruption,
 RX overflow or abandoned work. It exercised scheduled idle and 3/5 actual
 host stalls; 6/8 application retries remain visible. This is not a 60-minute
 qualification. See [usage](clean-rx/badge/README.md#b2-continuous-static-address-networking)
-and [evidence](clean-rx/dev-doc/MILESTONE_HISTORY.md#b2-continuous-application-data).
+and [evidence](clean-rx/dev-doc/history/STATION_MILESTONES.md#b2-continuous-application-data).
 
 The full-sized `b2-20261023/hardware/soak02-*` real 3600-second run was
 **rejected**, not qualified: station 13,214 generated / 13,211 acknowledged
@@ -235,14 +235,14 @@ timeouts, four echo timeouts and seven BUSY returns remain visible; this does
 not close A or the failed B2 soak. Software-WPA2 persistence (after E),
 separate mesh nodes, additional AP implementations and roaming remain unqualified.
 See [B3 usage and boundaries](clean-rx/badge/README.md#b3-reproducible-ap-configuration-qualification)
-and [hardware evidence](clean-rx/dev-doc/MILESTONE_HISTORY.md#b3-reproducible-station-qualification).
+and [hardware evidence](clean-rx/dev-doc/history/STATION_MILESTONES.md#b3-reproducible-station-qualification).
 
 ## C. Complete 802.11b operation
 
 ### C1. All legacy DSSS/CCK rates
 
 **Status: rate/preamble support implemented; full-sized 1-Mbps RX remains open.**
-See [implementation, matrices and investigation](clean-rx/dev-doc/MILESTONE_HISTORY.md#c1-all-legacy-dssscck-rates).
+See [implementation, matrices and investigation](clean-rx/dev-doc/history/LEGACY_PHY_MILESTONES.md#c1-all-legacy-dssscck-rates).
 The latest investigation adds a fixed 1,600-byte reproducer and independent
 vendor-monitor controls, but does not establish a safe repair or close this gate.
 
@@ -269,7 +269,7 @@ vendor-monitor controls, but does not establish a safe repair or close this gate
 **Status: complete for the conservative control/framing target.**
 This is not HT-station or receive-reliability qualification, nor identification
 of the badge's exact silicon version/revision.
-See [target mapping and evidence](clean-rx/dev-doc/HT20_IMPLEMENTATION.md).
+See [target mapping and evidence](clean-rx/dev-doc/experiments/ht20/README.md).
 
 - [x] Map HT20, one-stream MCS0..7, BCC and 800-ns GI to controls, framing,
   receive status and firmware requirements.
@@ -281,7 +281,7 @@ See [target mapping and evidence](clean-rx/dev-doc/HT20_IMPLEMENTATION.md).
 **Status: in progress; HT station advertisement remains disabled.**
 Live aggregate reception, mandatory MAC integration and negotiated operation
 are not yet qualified. Implementation details and qualification limits are in
-the [D2 development record](clean-rx/dev-doc/HT20_IMPLEMENTATION.md#d2-qualification-checkpoint-2026-10-19).
+the [D2 development record](clean-rx/dev-doc/experiments/ht20/ADVANCE_AND_DELIVERY.md#d2-qualification-checkpoint-2026-10-19).
 
 #### Completed foundations
 

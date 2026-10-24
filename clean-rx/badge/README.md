@@ -168,7 +168,7 @@ traffic and idle, timer wrap, duplicate suppression, queue saturation and
 resumption, checksum/payload corruption, binding poisoning, reconnect epochs,
 stale traffic, retry exhaustion and maximum-sized MPDU conversion.
 Real qualification and its exact scope are recorded in
-[the milestone history](../dev-doc/MILESTONE_HISTORY.md#b2-continuous-application-data)
+[the milestone history](../dev-doc/history/STATION_MILESTONES.md#b2-continuous-application-data)
 and [the roadmap](../../todo.md#b2-continuous-application-data).
 The 30-second full-sized control passed; the real 60-minute run failed:
 five beacon-loss recoveries coincided with application loss (3 station,
@@ -270,7 +270,7 @@ complete 802.11b/g MAC operation or general-purpose station reliability.
 The separate controlled WPA2 qualification
 below proves a bounded encrypted exchange, not sustained networking.
 
-**802.11n:** D1's [HT20 implementation target](../dev-doc/HT20_IMPLEMENTATION.md)
+**802.11n:** D1's [HT20 implementation target](../dev-doc/experiments/ht20/README.md)
 defines the conservative mixed-mode, single-stream MCS0-MCS7 profile and
 maps current firmware gaps. Ordinary HT operation is not enabled or
 advertised. Tested framing helpers, a default-disabled one-frame TX probe,
@@ -292,7 +292,7 @@ bounded retry/restart handling; it does not enable HT station association
 or qualify D2 reliability.
 
 For an independent vendor-to-clean HT receive control, see
-[the controlled receive record](../dev-doc/CONTROLLED_HT_RECEIVE.md).
+[the controlled receive record](../dev-doc/experiments/rx/CONTROLLED_HT_RECEIVE.md).
 The clean collector's `--vendor-ht-rx CHALLENGE_HEX_28 MCS:0-7` validates
 fresh broadcast fixtures, their complete FCS and terminal HT metadata;
 the vendor companion and paired runner live in [peer/](../peer/).
@@ -318,7 +318,7 @@ Bounded BA agreements, A-MPDU delimiter-stream parsing and ciphertext
 reordering now have native integration with WPA2 delivery. They are not
 called by the live station dispatcher: general live aggregate delivery and
 SIFS-timed Immediate BA are still missing, and negotiated HT stays disabled.
-See [the implementation boundary and tests](../dev-doc/BLOCK_ACK_IMPLEMENTATION.md).
+See [the implementation boundary and tests](../dev-doc/history/BLOCK_ACK_SOFTWARE.md).
 The separate `CLEAN_RX_AMPDU_PROBE=1` gate requires HT data and extended RX
 and adds a finite, nonstation aggregate diagnostic. Use matching images
 and collector with `ht_probe.sh TX RX PREFIX MCS --ampdu-probe`.
@@ -365,9 +365,9 @@ The collector exposes `ba_experiment`; armed positive pairs require an
 actual matching returned BA and delivery bitmap. These are fixed
 three-by-80-byte tests, not production agreement/reorder installation,
 measured RF SIFS or negotiated HT. The existing qualification flags stay
-false. See [BA build gate, command/evidence ABI and full results](../dev-doc/AMPDU_INTERFACE_INVESTIGATION.md#diagnostic-compressed-ba-return-2026-10-19).
-See [interface profiles and measured limitations](../dev-doc/AMPDU_INTERFACE_INVESTIGATION.md).
-See [build commands, evidence layout and failed continuations](../dev-doc/AMPDU_RADIO_INVESTIGATION.md).
+false. See [BA build gate, command/evidence ABI and full results](../dev-doc/experiments/ampdu/INTERFACE_AND_DELIVERY.md#diagnostic-compressed-ba-return-2026-10-19).
+See [interface profiles and measured limitations](../dev-doc/experiments/ampdu/INTERFACE_AND_DELIVERY.md).
+See [build commands, evidence layout and failed continuations](../dev-doc/experiments/ampdu/INITIAL_RADIO.md).
 The first D2 PHY/association item is now split into completed software
 pieces and pending activation/qualification. A conservative unadvertised
 HT20 target IE, constrained AP/runtime MCS candidate and shared per-frame
@@ -436,13 +436,13 @@ cells completed strict ACKs: five corrupt frames, two no-candidate misses
 and two zero-attempt access faults remain. New halted counter evidence
 (`dcf_guard_latched`, `dcf_final_slots`) confirms that access faults can
 still occur; they are not receive losses or a completed backoff repair.
-See the [follow-up evidence and limits](../dev-doc/HT20_IMPLEMENTATION.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog).
+See the [follow-up evidence and limits](../dev-doc/experiments/ht20/CLOCKED_ACK_AND_RX_FAILURES.md#further-investigation-stable-corruption-rx-aborts-and-idle-watchdog).
 RF SIFS/reliability qualification, complete EDCA scheduling, HT protection
 and Block ACK remain open. The separate opt-in
-[non-HT WMM integration](../dev-doc/EDCA_IMPLEMENTATION.md#ap-driven-non-ht-wmm-integration)
+[non-HT WMM integration](../dev-doc/experiments/mac/EDCA_AND_WMM.md#ap-driven-non-ht-wmm-integration)
 has bounded independent-AP association and protected-exchange evidence;
 neither it nor a response counter enables HT association.
-See [D2 API, build instructions and remaining gates](../dev-doc/HT20_IMPLEMENTATION.md#d2-implementation-bounded-packet-api-and-peer-profiling).
+See [D2 API, build instructions and remaining gates](../dev-doc/history/HT20_FOUNDATIONS.md#d2-implementation-bounded-packet-api-and-peer-profiling).
 
 ## Source layout and maintenance
 
@@ -530,7 +530,7 @@ barrier, not acknowledgement of deferred queueing.
 `wmm_policy_queued_updates` JSON name remains an equal compatibility alias.
 Readback, timeout and command-replacement failures are explicit. This does
 not enable HT advertisement or qualify the missing live MAC/BA obligations;
-see the [policy commit campaign](../dev-doc/EDCA_IMPLEMENTATION.md#readback-verified-policy-commit-campaign-2026-10-18).
+see the [policy commit campaign](../dev-doc/experiments/mac/EDCA_AND_WMM.md#readback-verified-policy-commit-campaign-2026-10-18).
 
 For a reproducible two-badge test, first load the vendor `usb-wifi-link` image
 on the AP and this image on the station, leaving both in BOOTSEL, then run:
@@ -1267,7 +1267,7 @@ these are partial frame observations, not passing reference qualifications.
 They exclude a simple reference packet-size cap at 1,628 MPDU bytes, but do
 not distinguish incomplete 1-Mbps TX from receive-duration limitations.
 The clean paired boundary failure still reproduces. See
-[the current investigation](../dev-doc/MILESTONE_HISTORY.md#c1-independent-boundary-investigation).
+[the current investigation](../dev-doc/history/LEGACY_PHY_MILESTONES.md#c1-independent-boundary-investigation).
 
 #### Pico vendor-managed CCK source
 
@@ -1337,7 +1337,7 @@ data-TX counters remain zero at both rates despite host submissions, and
 the final source fails explicitly. The vendor badge monitor also receives
 the 1636-byte fixture at 2 Mbps but not 1 Mbps. A complete long 1-Mbps
 waveform is therefore still unproven, even with official vendor endpoints.
-See [the retained reference campaign](../dev-doc/MILESTONE_HISTORY.md#c1-pico-vendor-reference-campaign).
+See [the retained reference campaign](../dev-doc/history/LEGACY_PHY_MILESTONES.md#c1-pico-vendor-reference-campaign).
 
 #### Associated vendor CCK receiver
 
@@ -1390,7 +1390,7 @@ Simultaneous vendor/clean receivers both pass their short-1-Mbps and
 long-2-Mbps controls, then both miss all eight long-1-Mbps frames in two
 trials. Reverse badge-to-Pico reception also loses positive-control frames,
 so it is not a qualified reference direction.
-See [the associated-reference evidence](../dev-doc/MILESTONE_HISTORY.md#c1-associated-vendor-reference-investigation).
+See [the associated-reference evidence](../dev-doc/history/LEGACY_PHY_MILESTONES.md#c1-associated-vendor-reference-investigation).
 Always restore and compare each complete original flash after testing.
 
 ### Bounded legacy fragmentation fixture
@@ -1442,7 +1442,7 @@ sixteen-fragment target failed at the existing controller TX-completion fault;
 an earlier two-fragment attempt also exhausted retries. Native templates
 cover all existing PHY/preamble selections, but this new RF evidence is only
 6 Mbps OFDM on channel 1. See the
-[complete trial/failure record](../dev-doc/LEGACY_FRAGMENTATION_QUALIFICATION.md).
+[complete trial/failure record](../dev-doc/experiments/mac/LEGACY_FRAGMENTATION.md).
 A1/A2/A3 remain incomplete.
 
 ### Quiescent TX-completion timeout recovery
@@ -1491,7 +1491,7 @@ Its exact-challenge 100,000 retry failed immediately without eligible peer
 receptions. Its exhaustion negative correctly bounded eight attempts but
 suppressed only six eligible ACKs, not eight. These failures are retained;
 the sustained gate remains open.
-See [all trials, failed approaches and unresolved causes](../dev-doc/MAC_RELIABILITY_RECOVERY.md).
+See [all trials, failed approaches and unresolved causes](../dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md).
 The physical cause of the missing TXE event and a separate first-no-reception
 failure remain unresolved; this is explicit bounded recovery, not a claim that
 those underlying RF/event conditions have been eliminated.
@@ -1537,7 +1537,7 @@ a successful final control; three role/profile combinations still fail.
 The failed CCK responders have missing MAC-done and PHY error `0x0010`,
 explicitly excluded by the existing incomplete-completion recovery guard.
 No final suppression invariant faults occur. See the
-[final A2 qualification and retained failures](../dev-doc/MAC_RELIABILITY_RECOVERY.md#final-rf-qualification-b0aedeee).
+[final A2 qualification and retained failures](../dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md#final-rf-qualification-b0aedeee).
 The known 1-Mbps/full-size truncation, sustained and independent ACK/SIFS/
 full-credit gates remain open. Both original full flashes were restored and
 independently verified; Pico is unchanged.
@@ -1581,7 +1581,7 @@ corruption or an earlier RX abort, and a prefix cannot prove full-frame FCS.
 Snapshots occupy detail offsets 1040 and 1616 respectively, without changing
 existing packet/status records. No rejected frame is ACKed or delivered and
 the unknown-error guard remains intact. Use matching firmware and collector.
-See [PHY/RX provenance and retained failed controls](../dev-doc/MAC_RELIABILITY_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
+See [PHY/RX provenance and retained failed controls](../dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md#phy-bit-0x08-and-missing-rx-provenance-follow-up).
 Targeted build `77bae4fe` passes four 2,000-MSDU/direction 2-Mbps stress
 pairs, four exact exhaustion negatives and a zero-injected-loss control.
 Its original diagnostic saved three matching SHM prefixes at RXE length 62,
@@ -1616,7 +1616,7 @@ fix the failures. The first guarded candidate recovers an actual `0x0010`
 event and passes six exact/repeated 100-MSDU controls. This does not establish
 the silicon meaning of those bits or eliminate the separate no-first-RX,
 1-Mbps truncation, sustained and independent RF-timing gates.
-See [provenance, guard and retained trials](../dev-doc/MAC_RELIABILITY_RECOVERY.md#cck-phy-error-retirement-and-retained-provenance).
+See [provenance, guard and retained trials](../dev-doc/experiments/mac/COMPLETION_AND_RECOVERY.md#cck-phy-error-retirement-and-retained-provenance).
 
 Broad-campaign build `a4eefd5a` retires 12 real PHY errors, including a sticky
 `0x0020` baseline followed by `0x0030`. Its 34-case campaign has 29 passing
@@ -1685,7 +1685,7 @@ incomplete reception. The exact initiating PHY/RXE condition remains unknown;
 no hardware watchdog or timeout-register fix has been established.
 On the retained build, `2-long`, `11-long` and `ofdm6` each pass 30
 cyclic-size frames per direction, including full-size MSDUs.
-See the [investigation and excluded causes](../dev-doc/MILESTONE_HISTORY.md#c1-all-legacy-dssscck-rates).
+See the [investigation and excluded causes](../dev-doc/history/LEGACY_PHY_MILESTONES.md#c1-all-legacy-dssscck-rates).
 
 Failure collection stops the soak before reading diagnostics and preserves
 the original failure code. Reports now include `tx_diagnostic`, `psm_diag`,
@@ -1694,7 +1694,7 @@ the original failure code. Reports now include `tx_diagnostic`, `psm_diag`,
 diagnostics, not additional success criteria. Trace timing is meaningful
 only when the retained PLCP LENGTH matches the failed LENGTH; low TSF
 differences wrap modulo 65,536 us. See the
-[trace layout and limitations](../dev-doc/HARDWARE_DEVELOPMENT.md#1-mbps-receive-truncation-diagnostics).
+[trace layout and limitations](../dev-doc/history/HARDWARE_BRINGUP.md#1-mbps-receive-truncation-diagnostics).
 
 Intermediate build `786ad5ee`, prefix `c1-matrix-*`, exposed one valid OFDM
 frame paired with stale DMA PHY status and had an interrupted OFDM full-size

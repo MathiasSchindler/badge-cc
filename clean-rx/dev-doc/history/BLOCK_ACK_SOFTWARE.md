@@ -1,0 +1,191 @@
+# Bounded Block ACK software and remaining hardware integration
+
+> Historical implementation record. Results, commands, status statements and
+> unclosed gates apply to the builds and conditions recorded here, not
+> automatically to current firmware. Use [the development index](../README.md)
+> for current guidance and work.
+
+## Status
+
+The recipient-side agreement, reorder, delimiter-stream and protected
+delivery software is implemented and native-tested. **General live station A-MPDU reception
+and SIFS-timed Immediate Block ACK are not implemented.** Negotiated HT
+remains disabled. This work does not complete D2 or D3.
+
+A subsequent [finite radio investigation](../experiments/ampdu/INITIAL_RADIO.md)
+retained the first delimiter-stripped MPDU of a three-MPDU diagnostic
+aggregate. It did not recover the others or establish an EOF response
+event. Its finite probe is retained; unsuccessful rearm variants are not.
+The newer [interface campaign](../experiments/ampdu/INTERFACE_AND_DELIVERY.md) separates
+early MPDU completion from the later terminal latch. Its one-copy handoff
+now retains all three complete diagnostic MPDUs at MCS0..7 in both
+directions, with controlled bad-FCS rejection and continuation. This is
+still not live recipient/transport integration or SIFS-timed BA.
+
+The subsequent default-disabled
+[per-MPDU DMA/F2 experiment](../experiments/ampdu/INTERFACE_AND_DELIVERY.md#per-mpdu-dma-to-f2-delivery-follow-up)
+does deliver two distinct complete MPDUs to the RP2350 from one PPDU.
+Its six MCS0/3/7 direction controls all miss the final MPDU; it remains
+a fixed fixture, not the production BA recipient. Bad-middle controls
+reject that MPDU without delivery. No BA or protection qualification
+is implied, and the live integration prerequisite remains unchecked.
+The final independently saved-byte campaign validates two deliveries in
+6/7 normal trials, retains one RF miss, and validates both bad-middle
+rejections. Its host independently checks all 14 saved SDIO MPDUs and FCS;
+no trial delivers the complete aggregate.
+
+The newer alternative
+[retained-SHM delivery](../experiments/ampdu/INTERFACE_AND_DELIVERY.md#retained-shm-to-f2-delivery-2026-10-19)
+now delivers all three complete fixture MPDUs through SRAM/F2 to the badge
+at MCS0..7 in both directions: initially 16/16 fresh trials, exactly three deliveries
+and no duplicates. It preserves actual radio bytes instead of trying to
+repair the undocumented per-MPDU DMA/EOF transition. This remains a finite,
+fixed-size, one-PPDU path, not the production agreement/reorder recipient,
+and does not transmit BA or qualify SIFS.
+
+An [explicit terminal lease](../experiments/ampdu/INTERFACE_AND_DELIVERY.md#explicit-terminal-ownership-2026-10-19)
+now replaces the ordinary held-frame dependency. Producer state 16,
+controller claim and PSM release are verified for good-last, bad-last and
+all-bad controls, including zero delivery of the all-bad bodies. This
+removes the need for later ordinary traffic to obtain the finite snapshot;
+it does not establish a general RF EOF/BAR response event or SIFS timing.
+
+The newer default-disabled
+[compressed BA experiment](../experiments/ampdu/INTERFACE_AND_DELIVERY.md#diagnostic-compressed-ba-return-2026-10-19)
+does transmit a real PSM compressed BA for the pinned three-by-80-byte
+fixture, and the transmitting badge receives the matching complete
+response over the air. Command 17 arms that diagnostic, not an agreement.
+The final 48-trial campaign independently validates 28 returned BA frames,
+including one partial normal response. All normal MCS/direction cells
+have a complete delivery/return control after repeats; bad-final reverse
+MCS7 still has no qualifying capture. Physical SIFS remains unqualified.
+
+There is no production controller BA-install command, station ADDBA
+activation, general PSM aggregate response path or independent-peer qualification.
+The new software is not called by the live station receive dispatcher.
+Merely linking its source into the builds does not activate it; unreferenced
+functions and storage are removed by section garbage collection.
+
+## Implemented components
+
+- [block_ack.h](../../src/block_ack.h) and
+  [block_ack.c](../../src/block_ack.c): a caller-owned recipient for one pinned
+  station/AP pair, all 16 TIDs, an eight-entry per-TID window and a shared
+  pool of 16 complete ciphertext MPDUs. Pool exhaustion returns explicit
+  backpressure without setting a receipt bit for the rejected frame.
+- Immediate-policy ADDBA request validation and a positive response
+  serializer. Parsing only prepares the request. Explicit activation is
+  required before a positive response can be constructed. A live caller
+  must first install and verify the corresponding hardware response state.
+  Matching retransmissions are idempotent; conflicting active renegotiation
+  is rejected. A-MSDU-in-A-MPDU and delayed BA are not negotiated.
+- Single-TID compressed BAR and a 32-byte compressed BA serializer, including
+  FCS. The receipt bitmap is separate from the delivery head, so delivered
+  MPDUs remain acknowledged. These functions do not transmit responses.
+- Bounded sequence/window movement, duplicate filtering, 12-bit wrap,
+  a 100-ms gap timeout, negotiated inactivity timeout and DELBA handling.
+  DELBA stops new admission and uses polling to flush admitted frames in
+  sequence order before freeing the agreement, respecting sink backpressure.
+  Explicit session reset instead wipes queued ciphertext.
+- Incremental A-MPDU parsing through the 8,191-byte exponent-zero bound,
+  using one MPDU scratch buffer rather than an aggregate-sized allocation.
+  It checks delimiter CRC/signature/reserved bits, lengths, per-MPDU FCS,
+  padding, null delimiters and truncated input. A bad MPDU FCS is counted and
+  skipped at its trusted delimiter boundary. A bad delimiter aborts
+  explicitly; speculative byte resynchronization is not implemented.
+- [wpa2.c](../../badge/wpa2.c) adapters connect the delimiter stream to the
+  bounded ciphertext queue and ordered release to the actual CCMP path.
+  Per-TID PN replay checks and authenticated duplicate/delivery processing
+  run on ordered release, not out-of-order arrival.
+  [mac.c](../../src/mac.c) has a separate authenticated BA-policy entry;
+  ordinary receive paths still reject unsupported BA policy.
+
+The shared pool bounds total storage, not 16 independent full windows.
+Admission can fail when other TIDs occupy the pool. Such a frame must not
+be acknowledged by a future hardware bitmap implementation.
+Individual MPDUs retain the selected build's 2,400- or 3,896-byte bound;
+the 8,191-byte aggregate limit does not increase that individual bound.
+
+## API and lifecycle requirements
+
+Initialize BA state with the actual local MAC and associated AP. Route
+validated action frames through `clean_ba_action`; do not call
+`clean_ba_activate` in production until controller/PSM state and resources
+are installed and read back. No live caller currently does so.
+
+For encrypted traffic, `clean_wpa_ba_receive`, `clean_wpa_ba_bar` and
+`clean_wpa_ba_poll` use the installed WPA state and verify matching pinned
+addresses. `clean_wpa_ampdu_feed` connects a prepared delimiter stream to
+that same path. The ordinary protected receiver remains unchanged.
+Fragmentation, HT Control and A-MSDU-in-A-MPDU are excluded from this path.
+
+Sink results are 1 for consumed, 0 for backpressure and -1 for abort.
+Do not reset or reenter the queue from its callback. A sink error is
+propagated, not converted to successful delivery. A MIC failure wipes the
+WPA key state through its existing failure path; the outer session owner
+must then reset BA state after the callback returns.
+
+The sink's timestamp is the **release** time. Stored arrival times are
+used only for gap expiry. Passing an older arrival time into the live WPA
+expiry code after a later release could incorrectly expire another TID's
+fragment assembly.
+
+Call polling regularly for gaps, timeouts and DELBA flushing. Incoming
+data/BAR also checks inactivity expiry, so late traffic cannot revive an
+expired agreement simply because polling was delayed.
+
+Reset and wipe all agreements/stream state on departure, cancellation,
+key replacement, peer change or failure. BA storage is caller-owned and
+does not independently track key epochs. The station/controller integration
+must supply this lifecycle before enabling negotiation.
+
+For stream backpressure, retain the stream and retry only the unconsumed
+tail indicated by `*used`, including a zero-byte tail if the final complete
+MPDU is waiting on admission. Never silently discard a pending stream or
+acknowledge its unadmitted MPDU.
+
+## Native validation
+
+[block_ack_test.c](../../tests/unit/block_ack_test.c) covers:
+
+- ADDBA preparation/activation, matching retransmissions, conflicts,
+  malformed policy/fragment/FCS fields and all TIDs;
+- wrap, BAR, separate BA receipt history and bitmap bit 63;
+- full windows/shared pool, backpressure, explicit sink errors and wiping;
+- timer wrap, receive/BAR inactivity expiry and DELBA flushing under stall;
+- 1,024 shuffled eight-frame windows: 8,192 ordered deliveries and 8,192
+  duplicates, crossing the 12-bit sequence space twice;
+- multiple maximum-sized MPDUs, chunk sizes from one byte through the
+  aggregate bound, and an exact 8,191-byte/128-MPDU stream;
+- independent bit-order CRC calculation, invalid delimiters, truncation,
+  oversized input, bad per-MPDU FCS and final-tail resumption.
+
+[wpa2_test.c](../../badge/wpa2_test.c) uses keys from its actual four-way
+handshake and real encrypted MPDUs. It tests higher PN arriving first,
+ordered PN commitment, sequence wrap, independent TIDs, duplicates,
+replayed PN at a fresh sequence, gap/BAR release and explicit MIC failure.
+It also runs chunked delimiter stream -> ciphertext reorder -> CCMP ->
+authenticated delivery end to end.
+
+Default and extended HT/EDCA/WMM builds use the existing controller and
+badge native suites, including AddressSanitizer and UndefinedBehaviorSanitizer.
+Representative isolated commands from the repository root:
+
+```sh
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx-ba-default all test
+make -C clean-rx/badge BUILD=../../build/clean-rx/badge/ba-default \
+  CONTROLLER_BIN=../../build/clean-rx-ba-default/cyw43_rx_fw.bin all test
+
+make -C clean-rx/src CC=clang BUILD=../../build/clean-rx-ba-gated \
+  EXTRA_CFLAGS='-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_RESPONSE=1 -DCLEAN_RX_EDCA=1 -DCLEAN_RX_WMM=1' all test
+make -C clean-rx/badge BUILD=../../build/clean-rx/badge/ba-gated \
+  CONTROLLER_BIN=../../build/clean-rx-ba-gated/cyw43_rx_fw.bin \
+  EXTRA_CFLAGS='-DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_RESPONSE=1 -DCLEAN_RX_EDCA=1 -DCLEAN_RX_WMM=1' all test
+```
+
+Logs are retained under `build/clean-rx/badge/ba-{default,gated}-{controller,badge}.log`.
+These are software tests, not independent OTA evidence. No badge flash was
+written for the software-only stage. The subsequent radio campaign and
+full-flash preservation are recorded in the linked investigation.
+
+

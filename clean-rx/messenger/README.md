@@ -160,4 +160,4 @@ Both badges were verified-flashed and **left running the demo**, as requested.
 The retained RF results demonstrate this small application's operation;
 they do not qualify sustained Wi-Fi reliability, aggregation, negotiated
 HT association, protection or MAC timing. See the
-[HT20 implementation record](../dev-doc/HT20_IMPLEMENTATION.md).
+[HT20 implementation record](../dev-doc/experiments/ht20/README.md).
