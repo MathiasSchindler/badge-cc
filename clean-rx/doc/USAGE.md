@@ -24,6 +24,15 @@ embeds it and produces `build/clean-rx/badge/clean_rx.uf2` and the USB
 `collector`. The controller and badge use freestanding C and project-owned
 code. Building the collector requires the host's libusb development files.
 
+The controller production build is self-contained: copying `clean-rx/src/`
+is sufficient to build its binary with the tools above. It requires no
+other repository source, SDK, libc or downloaded firmware executable.
+Native tests and RP2350 host applications have separate source/tool
+dependencies. See [the isolation checks](../dev-doc/C02_ISOLATION.md) for
+standalone builds and byte-for-byte comparison against the pre-cleanup
+controller profiles. On-chip ROM calibration tables remain a hardware
+dependency.
+
 For an application embedding the controller directly, place the binary in
 a read-only assembly section using `.incbin`, and expose start/end symbols
 to the host loader. The controller loads at SRAM address `0x00000000`.

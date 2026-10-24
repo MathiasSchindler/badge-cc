@@ -8,7 +8,7 @@
 #include "ht_observer.h"
 #include "observer_dma.h"
 #include "early_rx.h"
-#include "../../src/shared/bytes.h"
+#include "bytes.h"
 #ifdef CLEAN_SDIO_SELF_TEST
 #include "sdio_test.h"
 #endif
@@ -790,11 +790,11 @@ static void station_apply_policy(uint32_t mac_en) {
     if (!policy_pending || !station_policy_boundary(shm_read16(0x601u))) return;
     uint32_t now = mac_now();
     clean_edca_t next_edca;
-    badger_bytes_copy((uint8_t *)&next_edca, (const uint8_t *)&station_edca, sizeof(next_edca));
+    clean_bytes_copy((uint8_t *)&next_edca, (const uint8_t *)&station_edca, sizeof(next_edca));
     clean_dcf_t next_legacy, previous;
-    badger_bytes_copy((uint8_t *)&next_legacy, (const uint8_t *)&station_legacy_dcf,
+    clean_bytes_copy((uint8_t *)&next_legacy, (const uint8_t *)&station_legacy_dcf,
                       sizeof(next_legacy));
-    badger_bytes_copy((uint8_t *)&previous, (const uint8_t *)&station_dcf, sizeof(previous));
+    clean_bytes_copy((uint8_t *)&previous, (const uint8_t *)&station_dcf, sizeof(previous));
     if (policy_edca_pending) {
         if (!clean_edca_configure(&next_edca, policy_edca, now,
                                   previous.random, policy_short_slot)) {
@@ -838,8 +838,8 @@ static void station_apply_policy(uint32_t mac_en) {
                 ((uint16_t)station_address[2u*i + 1u] << 8u))) ||
             !station_policy_word(CLEAN_ACK_PEER + i, (uint16_t)(station_peer[2u*i] |
                 ((uint16_t)station_peer[2u*i + 1u] << 8u)))) return;
-    badger_bytes_copy((uint8_t *)&station_edca, (const uint8_t *)&next_edca, sizeof(station_edca));
-    badger_bytes_copy((uint8_t *)&station_legacy_dcf, (const uint8_t *)&next_legacy,
+    clean_bytes_copy((uint8_t *)&station_edca, (const uint8_t *)&next_edca, sizeof(station_edca));
+    clean_bytes_copy((uint8_t *)&station_legacy_dcf, (const uint8_t *)&next_legacy,
                       sizeof(station_legacy_dcf));
     station_hw_slot();
     station_hw_backoff();

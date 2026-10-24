@@ -1,6 +1,6 @@
 #include "wpa2_crypto.h"
 #include "frame_limits.h"
-#include "../../src/shared/bytes.h"
+#include "bytes.h"
 
 void wpa_wipe(void *p, uint32_t n) {
     volatile uint8_t *b = p;
@@ -79,9 +79,9 @@ void wpa_secret_binding(const uint8_t secret[64], const uint8_t bssid[6],
 
 void wpa_hmac(const uint8_t *key, uint32_t kn, const uint8_t *p, uint32_t n, uint8_t out[20]) {
     uint8_t block[64], digest[20];
-    badger_bytes_zero(block,sizeof(block));
+    clean_bytes_zero(block,sizeof(block));
     if (kn > 64u) { wpa_sha1(key,kn,block); kn=20u; }
-    else badger_bytes_copy(block,key,kn);
+    else clean_bytes_copy(block,key,kn);
     for (uint32_t i=0u;i<64u;++i) block[i]^=0x36u;
     wpa_sha1_t s;
     wpa_sha1_init(&s); wpa_sha1_update(&s,block,64u); wpa_sha1_update(&s,p,n); wpa_sha1_final(&s,digest);
@@ -93,17 +93,17 @@ void wpa_hmac(const uint8_t *key, uint32_t kn, const uint8_t *p, uint32_t n, uin
 int wpa_pmk(const uint8_t *password, uint32_t n, const uint8_t *ssid, uint32_t sn, uint8_t pmk[32]) {
     if (n < 8u || n > 63u || !sn || sn > 32u) { wpa_wipe(pmk,32u); return 0; }
     uint8_t salt[36], u[20], t[20];
-    badger_bytes_zero(salt,sizeof(salt));
-    badger_bytes_copy(salt,ssid,sn);
+    clean_bytes_zero(salt,sizeof(salt));
+    clean_bytes_copy(salt,ssid,sn);
     for (uint32_t block=1u;block<=2u;++block) {
         salt[sn+3u]=(uint8_t)block;
         wpa_hmac(password,n,salt,sn+4u,u);
-        badger_bytes_copy(t,u,20u);
+        clean_bytes_copy(t,u,20u);
         for (uint32_t round=1u;round<4096u;++round) {
             wpa_hmac(password,n,u,20u,u);
             for (uint32_t i=0u;i<20u;++i) t[i]^=u[i];
         }
-        badger_bytes_copy(pmk+(block-1u)*20u,t,block==1u?20u:12u);
+        clean_bytes_copy(pmk+(block-1u)*20u,t,block==1u?20u:12u);
     }
     wpa_wipe(salt,sizeof(salt)); wpa_wipe(u,sizeof(u)); wpa_wipe(t,sizeof(t));
     return 1;
@@ -137,17 +137,17 @@ void wpa_ptk(const uint8_t pmk[32], const uint8_t ap[6], const uint8_t sta[6],
     static const uint8_t label[]="Pairwise key expansion";
     uint8_t input[100], digest[20];
     uint32_t at=sizeof(label);
-    badger_bytes_copy(input,label,at);
+    clean_bytes_copy(input,label,at);
     int order=less(ap,sta,6u);
-    badger_bytes_copy(input+at,order?ap:sta,6u); at+=6u;
-    badger_bytes_copy(input+at,order?sta:ap,6u); at+=6u;
+    clean_bytes_copy(input+at,order?ap:sta,6u); at+=6u;
+    clean_bytes_copy(input+at,order?sta:ap,6u); at+=6u;
     order=less(anonce,snonce,32u);
-    badger_bytes_copy(input+at,order?anonce:snonce,32u); at+=32u;
-    badger_bytes_copy(input+at,order?snonce:anonce,32u); at+=32u;
+    clean_bytes_copy(input+at,order?anonce:snonce,32u); at+=32u;
+    clean_bytes_copy(input+at,order?snonce:anonce,32u); at+=32u;
     for (uint32_t i=0u;i<3u;++i) {
         input[at]=(uint8_t)i;
         wpa_hmac(pmk,32u,input,at+1u,digest);
-        badger_bytes_copy(ptk+20u*i,digest,i==2u?8u:20u);
+        clean_bytes_copy(ptk+20u*i,digest,i==2u?8u:20u);
     }
     wpa_wipe(input,sizeof(input)); wpa_wipe(digest,sizeof(digest));
 }
@@ -172,11 +172,11 @@ void wpa_aes_init(wpa_aes_t *a, const uint8_t key[16]) {
         for (uint32_t i=1u;i<=4u;++i) s^=(uint8_t)((v<<i)|(v>>(8u-i)));
         s^=0x63u; a->box[x]=s; a->inverse[s]=(uint8_t)x;
     }
-    badger_bytes_copy(a->round,key,16u);
+    clean_bytes_copy(a->round,key,16u);
     uint8_t rc=1u;
     for (uint32_t at=16u;at<176u;at+=4u) {
         uint8_t t[4];
-        badger_bytes_copy(t,a->round+at-4u,4u);
+        clean_bytes_copy(t,a->round+at-4u,4u);
         if (!(at&15u)) {
             uint8_t first=t[0];
             t[0]=a->box[t[1]]^rc; t[1]=a->box[t[2]]; t[2]=a->box[t[3]]; t[3]=a->box[first];
@@ -210,7 +210,7 @@ static void aes_block(const wpa_aes_t *a, const uint8_t in[16], uint8_t out[16],
         }
         if (!inverse) for (uint32_t i=0u;i<16u;++i) s[i]^=a->round[16u*round+i];
     }
-    badger_bytes_copy(out,s,16u); wpa_wipe(s,sizeof(s)); wpa_wipe(t,sizeof(t));
+    clean_bytes_copy(out,s,16u); wpa_wipe(s,sizeof(s)); wpa_wipe(t,sizeof(t));
 }
 
 void wpa_aes_encrypt(const wpa_aes_t *a, const uint8_t in[16], uint8_t out[16]) {
@@ -222,15 +222,15 @@ int wpa_unwrap(const uint8_t key[16], const uint8_t *in, uint32_t n, uint8_t *ou
     wpa_aes_t aes;
     wpa_aes_init(&aes,key);
     uint8_t a[8], block[16];
-    badger_bytes_copy(a,in,8u); badger_bytes_copy(out,in+8u,n-8u);
+    clean_bytes_copy(a,in,8u); clean_bytes_copy(out,in+8u,n-8u);
     uint32_t count=n/8u-1u;
     for (uint32_t round=6u;round>0u;--round) for (uint32_t i=count;i>0u;--i) {
-        badger_bytes_copy(block,a,8u);
+        clean_bytes_copy(block,a,8u);
         uint32_t t=count*(round-1u)+i;
         for (uint32_t b=0u;b<4u;++b) block[7u-b]^=(uint8_t)(t>>(8u*b));
-        badger_bytes_copy(block+8u,out+8u*(i-1u),8u);
+        clean_bytes_copy(block+8u,out+8u*(i-1u),8u);
         aes_block(&aes,block,block,1);
-        badger_bytes_copy(a,block,8u); badger_bytes_copy(out+8u*(i-1u),block+8u,8u);
+        clean_bytes_copy(a,block,8u); clean_bytes_copy(out+8u*(i-1u),block+8u,8u);
     }
     uint8_t difference=0u;
     for (uint32_t i=0u;i<8u;++i) difference|=a[i]^0xa6u;
@@ -256,26 +256,26 @@ int wpa_ccmp(const uint8_t key[16], const uint8_t *header, uint32_t hn,
     wpa_aes_t aes;
     wpa_aes_init(&aes,key);
     uint8_t nonce[13], block[16], mac[16], stream[16], aad[32], expected[8];
-    badger_bytes_zero(block,sizeof(block)); badger_bytes_zero(mac,sizeof(mac)); badger_bytes_zero(aad,sizeof(aad));
+    clean_bytes_zero(block,sizeof(block)); clean_bytes_zero(mac,sizeof(mac)); clean_bytes_zero(aad,sizeof(aad));
     nonce[0]=hn==26u?(header[24]&15u):0u;
-    badger_bytes_copy(nonce+1u,header+10u,6u);
+    clean_bytes_copy(nonce+1u,header+10u,6u);
     for (uint32_t i=0u;i<6u;++i) nonce[7u+i]=pn[5u-i];
-    block[0]=0x59u; badger_bytes_copy(block+1u,nonce,13u);
+    block[0]=0x59u; clean_bytes_copy(block+1u,nonce,13u);
     block[14]=(uint8_t)(n>>8u); block[15]=(uint8_t)n; cbc(&aes,mac,block);
     aad[1]=(uint8_t)(hn-2u);
     aad[2]=header[0]&0x8fu; aad[3]=header[1]&0xc7u;
-    badger_bytes_copy(aad+4u,header+4u,18u); aad[22]=header[22]&15u;
+    clean_bytes_copy(aad+4u,header+4u,18u); aad[22]=header[22]&15u;
     if (hn==26u) aad[24]=nonce[0];
     cbc(&aes,mac,aad); cbc(&aes,mac,aad+16u);
     block[0]=1u; block[14]=block[15]=0u;
     wpa_aes_encrypt(&aes,block,stream);
-    badger_bytes_copy(expected,stream,8u);
+    clean_bytes_copy(expected,stream,8u);
     for (uint32_t at=0u;at<n;at+=16u) {
         uint32_t count=n-at<16u?n-at:16u, counter=at/16u+1u;
         block[14]=(uint8_t)(counter>>8u); block[15]=(uint8_t)counter;
         wpa_aes_encrypt(&aes,block,stream);
         uint8_t plain[16];
-        badger_bytes_zero(plain,sizeof(plain));
+        clean_bytes_zero(plain,sizeof(plain));
         for (uint32_t i=0u;i<count;++i) {
             plain[i]=decrypt?(in[at+i]^stream[i]):in[at+i];
             out[at+i]=decrypt?plain[i]:(plain[i]^stream[i]);
@@ -284,7 +284,7 @@ int wpa_ccmp(const uint8_t key[16], const uint8_t *header, uint32_t hn,
     }
     for (uint32_t i=0u;i<8u;++i) expected[i]^=mac[i];
     int ok=!decrypt || wpa_equal(tag,expected,8u);
-    if (!decrypt) badger_bytes_copy(tag,expected,8u);
+    if (!decrypt) clean_bytes_copy(tag,expected,8u);
     if (!ok) wpa_wipe(out,n);
     wpa_wipe(&aes,sizeof(aes)); wpa_wipe(mac,sizeof(mac)); wpa_wipe(stream,sizeof(stream));
     wpa_wipe(expected,sizeof(expected));

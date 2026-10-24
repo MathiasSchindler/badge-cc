@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_PHY_RATES_H
 #define CLEAN_RX_PHY_RATES_H
 
-#include "../../src/shared/stdint.h"
+#include "types.h"
 #include "frame_limits.h"
 
 #define CLEAN_CCK_RATES 4u

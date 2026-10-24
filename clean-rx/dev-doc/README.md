@@ -5,6 +5,12 @@ failures, open questions and qualification. Its historical records describe
 the builds and conditions named in each entry, not necessarily the current
 firmware.
 
+- [C01 cleanup inventory and baseline](C01_BASELINE.md): file ownership,
+  profile catalogue, dependency boundaries, reproducible offline capture,
+  frozen hashes and explicit test-coverage gaps.
+- [C02 controller source isolation](C02_ISOLATION.md): local types/byte
+  helpers, standalone production builds and before/after controller/PSM
+  comparison across retained reference selections.
 - [HT20 implementation and investigations](HT20_IMPLEMENTATION.md):
   D1/D2/D3 milestones, API development, receive failures, contention
   diagnostics, watchdog work, association/runtime peer profiles and

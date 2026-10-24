@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_SDIO_RING_H
 #define CLEAN_RX_SDIO_RING_H
 
-#include "../../src/shared/stdint.h"
+#include "types.h"
 
 #define CLEAN_SDIO_DMA_CONTROL 0x00060801u
 #define CLEAN_SDIO_WINDOW 1u

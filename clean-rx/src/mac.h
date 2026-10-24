@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_MAC_H
 #define CLEAN_RX_MAC_H
 
-#include "../../src/shared/stdint.h"
+#include "types.h"
 #include "frame_limits.h"
 
 #define CLEAN_MAC_CW_MAX 1023u

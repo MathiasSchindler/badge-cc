@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_TX_DIAG_H
 #define CLEAN_RX_TX_DIAG_H
 
-#include "../../src/shared/stdint.h"
+#include "types.h"
 #include "frame_limits.h"
 
 /* Keep legacy length bits 8..17; use unused bits 29..30 for the extension. */

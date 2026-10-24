@@ -1,7 +1,7 @@
 #ifndef CLEAN_RX_SDIO_TEST_H
 #define CLEAN_RX_SDIO_TEST_H
 
-#include "../../src/shared/stdint.h"
+#include "types.h"
 #include "sdio_ring.h"
 #include "frame_limits.h"
 

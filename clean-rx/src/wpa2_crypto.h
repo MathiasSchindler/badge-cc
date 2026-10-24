@@ -1,7 +1,7 @@
 #ifndef CLEAN_WPA2_CRYPTO_H
 #define CLEAN_WPA2_CRYPTO_H
 
-#include "../../src/shared/stdint.h"
+#include "types.h"
 
 typedef struct {
     uint32_t h[5], bytes;

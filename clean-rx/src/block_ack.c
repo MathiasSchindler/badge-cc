@@ -1,5 +1,5 @@
 #include "block_ack.h"
-#include "../../src/shared/bytes.h"
+#include "bytes.h"
 
 static uint16_t load16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8u));
@@ -15,33 +15,33 @@ static uint16_t distance(uint16_t sequence, uint16_t start) {
 }
 
 static int addresses(const clean_ba_rx_t *s, const uint8_t *m) {
-    return badger_bytes_equal(m + 4u, s->own, 6u) &&
-           badger_bytes_equal(m + 10u, s->peer, 6u);
+    return clean_bytes_equal(m + 4u, s->own, 6u) &&
+           clean_bytes_equal(m + 10u, s->peer, 6u);
 }
 
 static void finish(uint8_t *frame, uint32_t bytes) {
-    badger_bytes_store_u32(frame + bytes - 4u, clean_mac_fcs(frame, bytes - 4u));
+    clean_bytes_store_u32(frame + bytes - 4u, clean_mac_fcs(frame, bytes - 4u));
 }
 
 void clean_ba_init(clean_ba_rx_t *s, const uint8_t own[6], const uint8_t peer[6]) {
-    badger_bytes_zero((uint8_t *)s, sizeof(*s));
-    badger_bytes_copy(s->own, own, 6u);
-    badger_bytes_copy(s->peer, peer, 6u);
+    clean_bytes_zero((uint8_t *)s, sizeof(*s));
+    clean_bytes_copy(s->own, own, 6u);
+    clean_bytes_copy(s->peer, peer, 6u);
 }
 
 int clean_ba_close(clean_ba_rx_t *s, uint32_t tid) {
     if (tid >= CLEAN_BA_TIDS) return CLEAN_BA_INVALID;
     for (uint32_t i = 0u; i < CLEAN_BA_SLOTS; ++i)
         if (s->slot[i].used && s->slot[i].tid == tid)
-            badger_bytes_zero((uint8_t *)&s->slot[i], sizeof(s->slot[i]));
-    badger_bytes_zero((uint8_t *)&s->tid[tid], sizeof(s->tid[tid]));
+            clean_bytes_zero((uint8_t *)&s->slot[i], sizeof(s->slot[i]));
+    clean_bytes_zero((uint8_t *)&s->tid[tid], sizeof(s->tid[tid]));
     return CLEAN_BA_ACCEPTED;
 }
 
 int clean_ba_action(clean_ba_rx_t *s, const uint8_t *m, uint32_t n) {
     if (!m || n < 30u || !clean_mac_valid(m, n)) return CLEAN_BA_INVALID;
     if (m[0] != 0xd0u || (m[1] & ~8u) || !addresses(s, m) ||
-        !badger_bytes_equal(m + 16u, s->peer, 6u) || (m[22] & 15u) || m[24] != 3u)
+        !clean_bytes_equal(m + 16u, s->peer, 6u) || (m[22] & 15u) || m[24] != 3u)
         return CLEAN_BA_IGNORED;
     if (m[25] == 2u) {
         if (n != 34u) return CLEAN_BA_INVALID;
@@ -100,11 +100,11 @@ uint32_t clean_ba_addba_response(const clean_ba_rx_t *s, uint32_t tid,
     if (tid >= CLEAN_BA_TIDS || sequence > 4095u ||
         !s->tid[tid].active || s->tid[tid].closing) return 0u;
     const clean_ba_tid_t *t = &s->tid[tid];
-    badger_bytes_zero(response, 37u);
+    clean_bytes_zero(response, 37u);
     response[0] = 0xd0u;
-    badger_bytes_copy(response + 4u, s->peer, 6u);
-    badger_bytes_copy(response + 10u, s->own, 6u);
-    badger_bytes_copy(response + 16u, s->peer, 6u);
+    clean_bytes_copy(response + 4u, s->peer, 6u);
+    clean_bytes_copy(response + 10u, s->own, 6u);
+    clean_bytes_copy(response + 16u, s->peer, 6u);
     store16(response + 22u, (uint16_t)(sequence << 4u));
     response[24] = 3u;
     response[25] = 1u;
@@ -130,7 +130,7 @@ static int release(clean_ba_rx_t *s, uint32_t tid, uint16_t until, uint32_t now,
         if (slot) {
             int result = sink(context, slot->mpdu, slot->length, now);
             if (result <= 0) return result < 0 ? CLEAN_BA_SINK_ERROR : CLEAN_BA_BUSY;
-            badger_bytes_zero((uint8_t *)slot, sizeof(*slot));
+            clean_bytes_zero((uint8_t *)slot, sizeof(*slot));
             ++s->delivered;
         } else ++s->skipped;
         t->head = (uint16_t)((t->head + 1u) & 4095u);
@@ -212,7 +212,7 @@ int clean_ba_receive(clean_ba_rx_t *s, const uint8_t *m, uint32_t n,
     for (uint32_t i = 0u; i < CLEAN_BA_SLOTS; ++i)
         if (!s->slot[i].used) { slot = &s->slot[i]; break; }
     if (!slot) { ++s->pressure; return CLEAN_BA_BUSY; }
-    badger_bytes_copy(slot->mpdu, m, n);
+    clean_bytes_copy(slot->mpdu, m, n);
     slot->sequence = sequence;
     slot->length = (uint16_t)n;
     slot->tid = (uint8_t)tid;
@@ -287,13 +287,13 @@ int clean_ba_bar(clean_ba_rx_t *s, const uint8_t *m, uint32_t n,
 
 uint32_t clean_ba_response(const clean_ba_rx_t *s, uint32_t tid, uint8_t response[32]) {
     if (tid >= CLEAN_BA_TIDS || !s->tid[tid].active || s->tid[tid].closing) return 0u;
-    badger_bytes_zero(response, 32u);
+    clean_bytes_zero(response, 32u);
     response[0] = 0x94u;
-    badger_bytes_copy(response + 4u, s->peer, 6u);
-    badger_bytes_copy(response + 10u, s->own, 6u);
+    clean_bytes_copy(response + 4u, s->peer, 6u);
+    clean_bytes_copy(response + 10u, s->own, 6u);
     store16(response + 16u, (uint16_t)(4u | (tid << 12u)));
     store16(response + 18u, (uint16_t)(s->tid[tid].bitmap_start << 4u));
-    badger_bytes_copy(response + 20u, s->tid[tid].bitmap, 8u);
+    clean_bytes_copy(response + 20u, s->tid[tid].bitmap, 8u);
     finish(response, 32u);
     return 32u;
 }
@@ -309,7 +309,7 @@ uint8_t clean_ampdu_delimiter_crc(const uint8_t bytes[2]) {
 }
 
 int clean_ampdu_begin(clean_ampdu_stream_t *s, uint32_t bytes) {
-    badger_bytes_zero((uint8_t *)s, sizeof(*s));
+    clean_bytes_zero((uint8_t *)s, sizeof(*s));
     if (bytes < 4u || bytes > CLEAN_AMPDU_BYTES) {
         s->failed = 1u;
         return CLEAN_BA_INVALID;

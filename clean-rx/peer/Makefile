@@ -48,7 +48,8 @@ $(HT_PEER_BUILD)/live_usb_control.o: src/usb/live_usb_control.c src/usb/live_usb
 $(HT_PEER_BUILD)/live_usb_hw.o: src/usb/live_usb_hw.c src/usb/live_usb.h | $(HT_PEER_BUILD)
 	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_FIRMWARE -DLIVE_USB_CLEAN -c $< -o $@
 
-$(HT_PEER_BUILD)/wpa2_crypto.o: clean-rx/src/wpa2_crypto.c clean-rx/src/wpa2_crypto.h | $(HT_PEER_BUILD)
+$(HT_PEER_BUILD)/wpa2_crypto.o: clean-rx/src/wpa2_crypto.c clean-rx/src/wpa2_crypto.h \
+		clean-rx/src/types.h clean-rx/src/bytes.h | $(HT_PEER_BUILD)
 	$(RP2350_CC) $(RP2350_CFLAGS) -fstack-usage -c $< -o $@
 
 $(HT_PEER_BUILD)/authenticator.o: $(HT_PEER_DIR)/authenticator.c $(HT_PEER_DIR)/authenticator.h | $(HT_PEER_BUILD)
@@ -99,7 +100,7 @@ $(HT_PEER_BUILD)/authenticator_test: $(HT_PEER_DIR)/authenticator_test.c $(HT_PE
 		$< $(HT_PEER_DIR)/authenticator.c clean-rx/badge/wpa2.c clean-rx/src/wpa2_crypto.c \
 		clean-rx/src/mac.c clean-rx/src/block_ack.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
 
-$(HT_PEER_BUILD)/qualification_test: $(HT_PEER_DIR)/qualification_test.c $(HT_PEER_DIR)/qualification.h $(HT_PEER_DIR)/protected_ap.h clean-rx/src/wpa2_crypto.c $(RADIO_DIR)/wifi_link.c $(RADIO_DIR)/wifi_link.h | $(HT_PEER_BUILD)
+$(HT_PEER_BUILD)/qualification_test: $(HT_PEER_DIR)/qualification_test.c $(HT_PEER_DIR)/qualification.h $(HT_PEER_DIR)/protected_ap.h clean-rx/src/wpa2_crypto.c clean-rx/src/types.h clean-rx/src/bytes.h $(RADIO_DIR)/wifi_link.c $(RADIO_DIR)/wifi_link.h | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
 		$< $(RADIO_DIR)/wifi_link.c clean-rx/src/wpa2_crypto.c -o $@
 
