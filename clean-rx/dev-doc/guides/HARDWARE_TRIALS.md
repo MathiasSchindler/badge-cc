@@ -17,6 +17,10 @@ bindings, hashes and trial results belong in the relevant experiment record.
    readback. Establish a restoration/recovery procedure before flashing.
 5. Use a new evidence prefix. Keep credentials private and out of reports.
    An offline build/test command must not discover, flash or run devices.
+6. Build the [bounded USB host tooling](HOST_TOOLS.md#bounded-usb-orchestration).
+   Use the shared readiness/deadline runners rather than adding enumeration
+   sleeps. A timeout stops dependent work; retain logs, recover the devices
+   and choose a new evidence prefix before another authorized attempt.
 
 ## During and after a trial
 
@@ -56,4 +60,3 @@ errors without traffic injection. Separately qualify diagnostic ACK-loss,
 HT/aggregate and SDIO campaigns only within their authorized scope.
 Record matched host/controller profile, flags, hashes and independent
 on-device evidence; native/byte-identity results do not substitute for it.
-

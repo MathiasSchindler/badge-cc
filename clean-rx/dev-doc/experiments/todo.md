@@ -1,9 +1,12 @@
 # Hardware regression follow-up work
 
 Work items from the [2026-10-24 hardware regression](HARDWARE_REGRESSION_2026-10-24.md).
-R01-R03 are implemented and validated offline and on hardware. The
-[R03 rerun](HARDWARE_REGRESSION_R03_2026-10-24.md) performed R05's matrix,
-but aggregate acceptance still has failures. R04 and R06-R10 remain pending.
+R01-R03 are implemented and validated offline and on hardware. The [R03 rerun](HARDWARE_REGRESSION_R03_2026-10-24.md) exposed separate
+aggregate failures. R04 is implemented with offline failure-path validation
+and was used in the completed
+[R05 acceptance rerun](HARDWARE_ACCEPTANCE_R05_2026-10-24.md):
+42/44 initial passes, then 2/2 passing fresh repeats. Intermittent reception
+remains unresolved; R06-R10 remain pending.
 This is the campaign-specific follow-up list, not a
 replacement for the [functional roadmap](../../../todo.md).
 
@@ -15,9 +18,9 @@ aggregate reliability.
 | R01 | High | **Correct aggregate operation deadlines. Implemented; native and hardware validated.** Account for startup, the 4.2-second receive window, shutdown and report collection, not simply an arbitrary larger timeout. | Native tests cover slow startup and deadline boundaries; healthy aggregate runs finish within a documented finite budget. Cancellation and watchdog recovery remain bounded. |
 | R02 | High | **Make fault snapshots work after an operation timeout. Implemented; native and hardware validated.** Use a separate, bounded recovery/snapshot allowance while preserving the original error. | Injected operation timeout still produces either a valid snapshot or an explicit snapshot failure; the original failure is never overwritten. |
 | R03 | High | **Make incomplete evidence unambiguous. Implemented; native and hardware validated.** Distinguish unavailable capture/lease fields from valid zero values in raw reports, collector JSON and pair verification. | Missing, partial and stale snapshots cannot appear successful or imply "no reception." Tests reject misleading delivery counters and invalid lease evidence. |
-| R04 | High | **Harden USB orchestration.** Replace fixed enumeration sleeps with bounded readiness checks; impose real subprocess deadlines on picotool and collectors. | Delayed enumeration, hung reboot, disconnect and cancellation terminate predictably, retain logs and stop dependent operations. No unbounded subprocess waits. |
-| R05 | High | **Repeat aggregate acceptance after R01-R03. Matrix rerun; acceptance still failing.** Complete snapshots now distinguish intermittent SHM/BA loss and persistent DMA failures; both bad-FCS controls passed 4/4. | Independently validate delivered bytes, exact bitmaps, duplicate counts and terminal lease release. All-bad reception must complete with zero delivery and zero BA, not merely time out. Preserve every failed attempt. |
-| R06 | High | **Investigate the separate DMA `0x8d` fault and missing final body.** Preserve the failing descriptor/header, buffer ownership and DMA completion state. | A regression test reproduces the fault mechanism; a subsequent fix passes independent payload checks. Do not count two-body delivery as three-body success. |
+| R04 | High | **Harden USB orchestration. Implemented; offline failure-path validated.** Replace fixed enumeration sleeps with bounded readiness checks; impose real subprocess deadlines on picotool and collectors. | Delayed enumeration, hung reboot, disconnect and cancellation terminate predictably, retain logs and stop dependent operations. No unbounded subprocess waits. |
+| R05 | High | **Repeat aggregate acceptance after R01-R04. Completed bounded rerun.** SHM 18/18, BA 16/18 initially plus 2/2 passing fresh repeats, both bad-FCS controls 4/4. All 44 cells have a strict passing attempt; initial failures remain retained, not loss-free acceptance. DMA was excluded under R06. | Independently validate delivered bytes, exact bitmaps, duplicate counts and terminal lease release. All-bad reception must complete with zero delivery and zero BA, not merely time out. Preserve every failed attempt. |
+| R06 | High | **Repair the separate DMA `0x8d` fault and missing final body. Implemented; bounded hardware validated.** Correct format-zero admission, the DMA next-MPDU command and its explicit physical layout; freeze descriptor/header/ownership/completion state. | Native regressions reproduce the rejected header and wrong command/layout. Independent three-body checks pass at MCS0/3/7 both directions, with bad-middle/all-bad controls. Retained empty captures and fresh repeats are not loss-free acceptance. |
 | R07 | Medium | **Investigate intermittent HT reception.** Start with the minimum-length Data, extended A-MSDU and clocked-ACK cells that failed initially. | Separate missing transmission, missing reception, corrupt capture and missing ACK using independent evidence. Report first-attempt results separately from successful repeats. |
 | R08 | Medium | **Measure retry and host-stall behavior.** Investigate the 31 retried cross-board exchanges and networking stall events before changing retry policy. | Report per-link first-attempt success, retry distribution, latency and stall duration against predefined limits. Demonstrate whether stalls correlate with RF loss. |
 | R09 | Medium | **Add diagnostic-selection preflight.** Detect missing feature gates and image/collector mismatches before starting a positive RF trial. | Fixed-probe tests require the explicit probe gate; intentional disabled-gate controls remain supported and clearly classified. |
@@ -25,8 +28,10 @@ aggregate reliability.
 
 ## Suggested sequence
 
-Complete R01-R04 before R05. Investigate R06 independently, then address
-R07-R10.
+R01-R05 are complete within their recorded scopes. Use the shared bounded
+orchestration for further authorized trials. R06's bounded DMA repair is
+also complete; address R07-R10 without treating a successful finite fixture
+as general qualification.
 
 ## R01 implementation
 
@@ -119,6 +124,76 @@ receipt records. Missing receipts remain `null`, not evidence of no BA.
 All 48 final aggregate pairs had valid complete readback on both endpoints;
 all-bad controls passed 4/4. SHM/BA intermittency and DMA failures remain
 separate from report validity. Every original flash was restored and verified.
+
+## R04 implementation
+
+The repository runners now share a dependency-free Node subprocess supervisor
+and a libusb readiness probe. BOOTSEL discovery, reboot, application protocol
+readiness, flashing and collectors all have finite deadlines. Readiness
+checks configure USB if needed and read `LIVE_USB_INFO` without starting RF.
+Both endpoints are prepared and immediately rechecked before paired radio
+windows start; fixed USB enumeration sleeps are removed. Deliberate radio
+staging delays remain distinct from enumeration.
+
+Timeouts and cancellation terminate the owned child process group with
+TERM/KILL escalation, retain endpoint/readiness/boot logs and suppress
+dependent commands. Pair failures stop the other endpoint; matrices stop
+at the failed trial. Expected wrong-password exit 1 remains distinct from
+timeout 124. The legacy WPA2 entry point delegates to the hardened runner
+instead of maintaining another USB startup implementation.
+
+Offline tests inject delayed enumeration, protocol mismatch, a vanished
+endpoint, hung info/reboot, failed flashing, cancellation during flashing
+and collection, TERM-resistant descendants and disconnects. They exercise
+all runner entry points, evidence preservation, credential cleanup and
+known negative-control exits. The real C readiness probe is tested against
+USB stubs and built against existing libusb. No hardware was accessed or
+reflashed for R04; this does not add an RF qualification result.
+See [bounds and operator behavior](../guides/HOST_TOOLS.md#bounded-usb-orchestration).
+
+## R05 implementation
+
+The [authorized R05 campaign](HARDWARE_ACCEPTANCE_R05_2026-10-24.md)
+used R04's repository runners for 44 SHM/BA/bad-FCS cells and two fresh
+repeats. Independent raw/JSON verification confirmed exact payloads, bitmaps,
+duplicates and terminal leases for every accepted cell. All-bad controls
+observed the actual three bad bodies and completed with zero delivery/BA.
+All 92 endpoint snapshots were valid and all 46 challenges unique.
+
+Two initial BA reception failures remain retained: an empty A-to-B MCS1
+capture and three nonmatching retained observations B-to-A at MCS7.
+Both fresh repeats passed; this is not a 44/44 first-attempt reliability
+result. R06 DMA and R07 reception investigation remain separate.
+Both complete original badge flashes were restored, independently reread
+and byte/hash verified; both badges were left in BOOTSEL. The Pico was
+not accessed.
+
+## R06 implementation
+
+The [R06 investigation](DMA_REPAIR_R06_2026-10-24.md) isolated two defects:
+valid aggregate PHY format 0 was rejected as `0x8d`, and DMA continuation
+used body-start `0x83` instead of next-MPDU `0xc3`. That transition retains
+a six-byte zero prefix, now checked explicitly with native length 86 and
+header tag `0xda16`. Complete MAC/FCS checks and exact three-body acceptance
+remain strict. No SHM substitution or crypto-reset bypass was used.
+
+The controller freezes first-fault descriptor/header, ring indices, DMA
+status and PSM/RXE/copy state before reclamation/reset, with a generation-bound
+record. The badge/collector preserve it without enlarging the report.
+Native regressions include the actual retained continuation and stale-state
+rejection; unaffected PSM/ABI/source-boundary checks remain in force.
+
+The authorized campaign used 31 trials. The first repaired image passed
+all six MCS0/3/7 direction cells. The exact final image passed 5/6 initially
+and its one fresh repeat; bad-middle/all-bad controls passed 4/4 each.
+The unchanged-SHM PSM control passed 3/4 initially plus its one fresh repeat.
+Both empty captures remain R07 evidence, not first-attempt success.
+All 18 distinct repaired/control cells have independent passing evidence;
+24 accepted pairs and all seven failed attempts are retained.
+Both complete original badge flashes were independently restored and
+byte/hash verified; both badges were left in BOOTSEL.
+
+## Further qualification
 
 Retries, correctly rejected disabled commands and passing short security
 trials are not themselves firmware defects. They respectively require

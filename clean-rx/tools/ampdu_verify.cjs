@@ -202,6 +202,30 @@ function selfTest(collector) {
             assert.equal(zeroReceipt.status,0,zeroReceipt.stderr);
             const zeroRecord=JSON.parse(zeroReceipt.stdout);
             assert.equal(zeroRecord.reported_delivered_subframe_bitmap,null);
+            if (zeroRecord.dma_experiment_enabled) {
+                const words=[0x10002,0x10000030,0x40,0,0x314d4441,3968,0x35000,0,
+                    0x10003,0x560002,0xa411922,0x8000002];
+                words.forEach((word,i)=>rxRaw.writeUInt32LE(word,720+4*i));
+                rxRaw.fill(0x5a,1480,1608);
+                rxRaw.writeUInt32LE(rxRaw.readUInt32LE(64),1608);
+                rxRaw.writeUInt32LE(0x8e,44);
+                for (const stale of [false,true]) {
+                    if (stale) rxRaw[1608]^=1;
+                    fs.writeFileSync(file,rxRaw);
+                    const report=spawnSync(collector,['--inspect-ampdu',file,config.challenge],{encoding:'utf8'});
+                    const record=JSON.parse(report.stdout);
+                    if (stale) {
+                        assert.equal(record.dma_state,null);
+                        assert.equal(record.dma_fault_prefix,null);
+                    } else {
+                        assert.deepEqual(record.dma_state,{generation:rxRaw.readUInt32LE(64),
+                            words,prefix:'5a'.repeat(128)});
+                        assert.equal(record.dma_fault_prefix,'5a'.repeat(128));
+                    }
+                }
+                rxRaw.fill(0,720,768); rxRaw.fill(0,1480,1612);
+                rxRaw.writeUInt32LE(0,44);
+            }
             if (zeroRecord.ba_experiment.enabled) {
                 assert.equal(zeroRecord.ba_experiment.returned_ba,false);
                 assert.equal(zeroRecord.ba_experiment.returned_bitmap,0);

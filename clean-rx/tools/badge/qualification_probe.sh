@@ -8,6 +8,7 @@ if [[ $# -lt 3 || $# -gt 4 || ! $1 =~ ^[0-9A-F]{16}$ ||
 fi
 cd "$(dirname "$0")/../../.." || exit 1
 station=$1 ap=$2 prefix=$3 rounds=${4:-3}
+source clean-rx/tools/usb-run.sh
 if [[ -e $prefix-matrix.json ]]; then echo "Matrix already exists: $prefix" >&2; exit 1; fi
 for channel in 1 6 11; do
     for ((round=1;round<=rounds;++round)); do
@@ -20,19 +21,21 @@ for channel in 1 6 11; do
 done
 child=
 cleanup() {
-    if [[ -n $child ]] && kill -0 "$child" 2>/dev/null; then
-        kill "$child"; wait "$child" 2>/dev/null
-    fi
+    usb_stop "$child"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
 failed=0
 for channel in 1 6 11; do
     for ((round=1;round<=rounds;++round)); do
         bash clean-rx/tools/badge/lifecycle_probe.sh "$station" "$ap" \
             "$prefix-ch$channel-$round" 0 --qualification "$channel" &
         child=$!
-        if ! wait "$child"; then failed=1; fi
+        if ! wait "$child"; then
+            echo "Qualification trial failed; stopping subsequent trials; evidence retained" >&2
+            exit 1
+        fi
         child=
     done
 done

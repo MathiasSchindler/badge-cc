@@ -56,6 +56,7 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
 #if CLEAN_RX_AMPDU_DMA
     shm_write16(CLEAN_AMPDU_DMA_PENDING, 0u);
     shm_write16(CLEAN_AMPDU_DMA_SUBMITTED, 0u);
+    ((volatile clean_ampdu_dma_state_t *)CLEAN_AMPDU_DMA_STATE_ADDR)->magic = 0u;
 #endif
     volatile uint32_t *tail = (volatile uint32_t *)(uintptr_t)CLEAN_TX_TAIL_ADDR;
     for (uint32_t i = 0u; i < 4u; ++i) tail[i] = 0u;
@@ -156,4 +157,3 @@ static int d11_restart_rx_psm(uint32_t channel) {
     for (uint32_t k = 0u; k < 8u; ++k) shm_write16(0x618u + k, saved_tk[k]);
     return 1;
 }
-

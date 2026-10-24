@@ -1370,14 +1370,17 @@ static void run(const uint8_t nonce[16]) {
             &sections, CLEAN_SNAPSHOT_INTERFACE);
 #endif
 #if CLEAN_RX_AMPDU_DMA
-        uint32_t fault_address = badger_bytes_load_u32(detail + 48u);
-        uint32_t fault_code = badger_bytes_load_u32(detail + 44u);
-        if (snapshot && fault_code >= 0x8du && fault_code <= 0x8fu &&
-            fault_address >= CLEAN_D11_BUFFER_ADDR + 38u &&
-            fault_address < CLEAN_D11_BUFFER_ADDR + 32u * CLEAN_D11_BUFFER_BYTES &&
-            (fault_address - CLEAN_D11_BUFFER_ADDR - 38u) % CLEAN_D11_BUFFER_BYTES == 0u) {
-            snapshot = clean_block(&l, fault_address - 38u, detail + 1480u, 128u, 0u);
-            if (snapshot) badger_bytes_store_u32(detail + 736u, CLEAN_AMPDU_DMA_MAGIC);
+        uint8_t dma_state[sizeof(clean_ampdu_dma_state_t)];
+        if (snapshot) {
+            snapshot = clean_block(&l, CLEAN_AMPDU_DMA_STATE_ADDR, dma_state,
+                                   sizeof(dma_state), 0u);
+            if (snapshot && badger_bytes_load_u32(dma_state + 16u) == CLEAN_AMPDU_DMA_MAGIC &&
+                badger_bytes_load_u32(dma_state + 176u) == badger_bytes_load_u32(detail + 64u)) {
+                badger_bytes_copy(detail + CLEAN_AMPDU_DMA_STATE_DETAIL, dma_state, 48u);
+                badger_bytes_copy(detail + CLEAN_AMPDU_BA_RX_DETAIL, dma_state + 48u, 128u);
+                badger_bytes_copy(detail + CLEAN_AMPDU_DMA_STATE_GENERATION_DETAIL,
+                                  dma_state + 176u, 4u);
+            }
         }
 #endif
     }

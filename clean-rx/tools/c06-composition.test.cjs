@@ -28,11 +28,17 @@ function writeSource(directory, sources) {
     }
 }
 
-test('extracted controller functions, control flow, storage types and ordering retain C05 bodies', () => {
+test('unmodified controller functions, control flow, storage types and ordering retain C05 bodies', () => {
     const before = expand('main.c', previousSource());
     const sources = currentSource();
-    const after = expand('main.c', sources);
+    const reviewed = new Map(sources);
+    reviewed.set('runtime/d11_start.inc', sources.get('runtime/d11_start.inc').replace(
+        '    ((volatile clean_ampdu_dma_state_t *)CLEAN_AMPDU_DMA_STATE_ADDR)->magic = 0u;\n', ''));
+    reviewed.set('runtime/shutdown.inc', sources.get('runtime/shutdown.inc').replace(
+        '#if CLEAN_RX_AMPDU_DMA\n    ampdu_dma_snapshot(mmio_read32(D11_RX_DMA_STATUS0));\n#endif\n', ''));
+    const after = expand('main.c', reviewed);
     const functions = text => [...text.matchAll(/^(?:static [^{;]+?|void cyw43_main\(void\)) \{[\s\S]*?^}/gm)]
+        .filter(match => !/\b(?:ampdu_dma_receive|ampdu_dma_snapshot|ampdu_dma_fail)\(/.test(match[0].split('{')[0]))
         .map(match => normalize(match[0]));
     assert.ok(functions(before).length > 50);
     assert.deepEqual(functions(after), functions(before));
@@ -68,7 +74,7 @@ test('mutable state references use declared owner namespaces rather than hidden 
     }
 });
 
-test('every PSM instruction tuple, enumerated label and hook target matches C05 composition', () => {
+test('PSM tuples and hook targets match C05 except the explicit R06 DMA transition', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-c06-psm-'));
     try {
         writeSource(path.join(directory, 'before'), previousSource());
@@ -91,7 +97,39 @@ test('every PSM instruction tuple, enumerated label and hook target matches C05 
                     probe, '-o', executable]);
                 outputs.push(run(executable, []));
             }
-            assert.equal(outputs[1], outputs[0], `${profile.mode}/${profile.id}: instruction or label changed`);
+            if (profile.id === 'aggregate-interface') {
+                const parse = output => {
+                    const lines = output.trim().split('\n');
+                    const [hook,end] = lines.shift().split(' ').map(Number);
+                    const rows = lines.map(line => {
+                        const [name,...values] = line.split(' ');
+                        const [address,op,a,b,d] = values.map(Number);
+                        return {name,address,op,a,b,d};
+                    });
+                    return {hook,end,rows};
+                };
+                const old = parse(outputs[0]), current = parse(outputs[1]);
+                const tuple = name => {
+                    const {op,a,b,d} = current.rows.find(row => row.name === name);
+                    return [op,a,b,d];
+                };
+                assert.deepEqual(tuple('AMPDU_DMA_LENGTH'),[0x3f0,0x1781,0x1800,0x7f4]);
+                assert.deepEqual(tuple('AMPDU_IF_ADV_BODY_COPY'),[0x376,0x18c3,0x1004,0x1004]);
+                const changed = new Set(['AMPDU_DMA_LENGTH','AMPDU_DMA_LENGTH_ORDINAL',
+                    'AMPDU_DMA_LENGTH_BODY','AMPDU_DMA_LENGTH_BODY_RETURN','AMPDU_DMA_LENGTH_FIRST',
+                    'AMPDU_IF_ADV_BODY_COPY']);
+                const normalizeProgram = program => {
+                    const labels = new Map(program.rows.map(row => [row.address,row.name]));
+                    labels.set(program.end,'ACK_PROGRAM_END');
+                    return {hook:labels.get(program.hook) ?? program.hook,
+                        rows:program.rows.filter(row => !changed.has(row.name)).map(({name,op,a,b,d}) =>
+                            [name,op,a,b,op>=0x400 || (op>=0xd0 && op<=0xdf) ? labels.get(d) ?? d : d])};
+                };
+                assert.deepEqual(normalizeProgram(current),normalizeProgram(old),
+                    'Only the reviewed R06 DMA length/next-copy tuples and relocated labels may differ');
+            } else {
+                assert.equal(outputs[1], outputs[0], `${profile.mode}/${profile.id}: instruction or label changed`);
+            }
         }
     } finally {
         fs.rmSync(directory, { recursive: true });

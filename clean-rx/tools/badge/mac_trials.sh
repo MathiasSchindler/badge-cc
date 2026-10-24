@@ -10,57 +10,53 @@ cd "$(dirname "$0")/../../.." || exit 1
 ap=$1
 station=$2
 prefix=$3
+picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/collector}
+ap_host=${CLEAN_RX_AP_COLLECTOR:-build/host-tools/usb_wifi_link_host}
+source clean-rx/tools/usb-run.sh
 summary=$prefix-summary.jsonl
 if [[ -e $summary ]]; then
     echo "Evidence summary already exists: $summary" >&2
     exit 1
 fi
-for tool in build/picotool-usb/picotool build/host-tools/usb_wifi_link_host build/clean-rx/badge/collector; do
+for tool in "$picotool" "$ap_host" "$collector"; do
     if [[ ! -x $tool ]]; then echo "Missing test tool: $tool" >&2; exit 1; fi
 done
 mkdir -p "$(dirname "$prefix")" || exit 1
 : > "$summary" || exit 1
 failures=0
 
-start_badge() {
-    local serial=$1 log=$2 attempt
-    for ((attempt=0;attempt<30;attempt++)); do
-        if build/picotool-usb/picotool reboot --ser "$serial" > "$log" 2>&1; then
-            sleep 1
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "Badge did not enter application mode: $serial" >&2
-    return 1
-}
+ap_pid= station_pid= child=
+cleanup() { usb_stop "$ap_pid" "$station_pid" "$child"; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 open_trial() {
-    local trial=$1 pid attempt bssid result
-    start_badge "$ap" "$trial-boot-$ap.log" || return 1
-    build/host-tools/usb_wifi_link_host --ap-only "$ap" --open \
+    local trial=$1 attempt bssid
+    usb_boot "$station" "$trial-boot-$station.log" &&
+        usb_boot "$ap" "$trial-boot-$ap.log" || return 1
+    usb_pair_ready "$station" "$ap" "$trial-ready-$station.log" "$trial-ready-$ap.log" || return 1
+    "${usb_command[@]}" 100 "$ap_host" --ap-only "$ap" --open \
         > "$trial-ap.jsonl" 2> "$trial-ap.stderr" &
-    pid=$!
+    ap_pid=$!
     for ((attempt=0;attempt<100;attempt++)); do
         if grep -q '"test":"ap-ready"' "$trial-ap.jsonl"; then break; fi
-        if ! ps -p "$pid" > /dev/null; then break; fi
+        if ! kill -0 "$ap_pid" 2>/dev/null; then break; fi
         sleep 0.1
     done
     bssid=$(sed -n 's/.*"test":"ap-ready".*"bssid":"\([^"]*\)".*/\1/p' "$trial-ap.jsonl")
     if [[ ! $bssid =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; then
         echo "Open AP did not become ready" >&2
-        wait "$pid" || true
+        usb_stop "$ap_pid"; ap_pid=
         return 1
     fi
-    if ! start_badge "$station" "$trial-boot-$station.log"; then
-        wait "$pid" || true
-        return 1
-    fi
-    build/clean-rx/badge/collector "$station" "$trial-station.bin" 1 --ap-assoc "$bssid" \
-        > "$trial-station.json" 2> "$trial-station.stderr"
-    result=$?
-    if ! wait "$pid"; then result=1; fi
-    return "$result"
+    if ! kill -0 "$ap_pid" 2>/dev/null; then echo "AP exited before station" >&2; return 1; fi
+    "${usb_command[@]}" 25 "$collector" "$station" "$trial-station.bin" 1 --ap-assoc "$bssid" \
+        > "$trial-station.json" 2> "$trial-station.stderr" &
+    station_pid=$!
+    usb_wait_pair "$station_pid" "$ap_pid" || return 1
+    station_pid= ap_pid=
 }
 
 for mode in wpa2 wrong-password open; do
@@ -73,9 +69,12 @@ for mode in wpa2 wrong-password open; do
             options=()
             if [[ $mode == wrong-password ]]; then options=(--wrong-password); fi
             bash src/host/tools/usb_wifi_clean_wpa2_run.sh "$ap" "$station" "$trial" \
-                "${options[@]}" > "$trial-run.log" 2>&1
+                "${options[@]}" > "$trial-run.log" 2>&1 &
+            child=$!
+            wait "$child"
         fi
         result=$?
+        child=
         python3 - "$trial" "$mode" "$i" "$result" <<'PY' | tee -a "$summary"
 import json
 import sys
@@ -118,7 +117,10 @@ except (OSError, ValueError, KeyError, TypeError) as error:
 print(json.dumps(row, separators=(",", ":")))
 sys.exit(0 if row["valid"] else 1)
 PY
-        if [[ $? -ne 0 ]]; then failures=$((failures + 1)); fi
+        if [[ $? -ne 0 ]]; then
+            echo "MAC trial failed; stopping subsequent trials and retaining evidence" >&2
+            exit 1
+        fi
     done
 done
 printf 'MAC connection regressions: %s/15 failed; not the 100000-frame OTA soak or RF timing qualification\n' "$failures"

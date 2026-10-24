@@ -8,6 +8,12 @@ Use [current issues](../issues/README.md) for what remains open.
 
 ## Cross-board and capability regressions
 
+- [R06 aggregate DMA repair](DMA_REPAIR_R06_2026-10-24.md):
+  format-zero fault, next-MPDU command and physical DMA layout, preserved
+  ownership/completion state, strict three-body/bad-FCS checks and restoration.
+- [R05 bounded aggregate acceptance rerun](HARDWARE_ACCEPTANCE_R05_2026-10-24.md):
+  44 planned SHM/BA/bad-FCS cells, two retained initial failures and passing
+  fresh repeats, independent evidence audit and verified badge restoration.
 - [R03 hardware rerun](HARDWARE_REGRESSION_R03_2026-10-24.md):
   explicit fresh evidence, corrected report ownership, final RX/TX and
   aggregate matrices, remaining failures and full-flash restoration.

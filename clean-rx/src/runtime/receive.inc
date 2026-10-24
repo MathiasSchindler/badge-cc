@@ -84,11 +84,49 @@ static int station_publish_capture(uint32_t channel) {
 }
 
 #if CLEAN_RX_AMPDU_DMA
+static void ampdu_dma_snapshot(uint32_t status) {
+    volatile clean_ampdu_dma_state_t *state =
+        (volatile clean_ampdu_dma_state_t *)CLEAN_AMPDU_DMA_STATE_ADDR;
+    if (state->magic == CLEAN_AMPDU_DMA_MAGIC && state->generation == MBOX->generation) return;
+    state->magic = 0u;
+    uint32_t consumer = TRANSPORT(dma_consumer);
+    const volatile uint32_t *descriptor =
+        (const volatile uint32_t *)(FW_D11_DMA_RING_ADDR + 16u * consumer);
+    const volatile uint8_t *buf = (const volatile uint8_t *)
+        (FW_D11_DMA_BUF_ADDR + consumer * FW_D11_DMA_BUF_BYTES);
+    state->indices = consumer | (TRANSPORT(dma_producer) << 16u);
+    state->status0 = status;
+    state->status1 = mmio_read32(D11_RX_DMA_STATUS1);
+    state->descriptor_flags = descriptor[0];
+    state->descriptor_bytes = descriptor[1];
+    state->descriptor_low = descriptor[2];
+    state->descriptor_high = descriptor[3];
+    state->ownership = shm_read16(0x601u) |
+        ((uint32_t)shm_read16(CLEAN_AMPDU_DMA_PENDING) << 16u);
+    state->progress = shm_read16(CLEAN_AMPDU_DMA_SUBMITTED) |
+        ((uint32_t)mmio_read16(0x18001418u) << 16u);
+    state->rxe_status = mmio_read16(0x1800141au) |
+        ((uint32_t)mmio_read16(0x1800141cu) << 16u);
+    state->copy_status = mmio_read16(0x18001412u) |
+        ((uint32_t)mmio_read16(0x18001408u) << 16u);
+    __asm__ volatile("dsb" ::: "memory");
+    for (uint32_t i = 0u; i < sizeof(state->prefix); ++i) state->prefix[i] = buf[i];
+    state->generation = MBOX->generation;
+    __asm__ volatile("dsb" ::: "memory");
+    state->magic = CLEAN_AMPDU_DMA_MAGIC;
+}
+
+static int ampdu_dma_fail(uint32_t error, uint32_t address, uint32_t value,
+                          uint32_t status) {
+    ampdu_dma_snapshot(status);
+    return fail(error, address, value);
+}
+
 static int ampdu_dma_receive(uint32_t rx_start) {
     uint32_t status = mmio_read32(D11_RX_DMA_STATUS0);
     uint32_t current = ((status & 0x1fffu) -
         (FW_D11_DMA_RING_ADDR & 0x1fffu)) >> 4u;
-    if (current >= 32u) return fail(0x8du, D11_RX_DMA_STATUS0, status);
+    if (current >= 32u) return ampdu_dma_fail(0x8du, D11_RX_DMA_STATUS0, status, status);
     if (current == TRANSPORT(dma_consumer)) return 1;
     const volatile uint8_t *buf = (const volatile uint8_t *)(uintptr_t)
         (FW_D11_DMA_BUF_ADDR + TRANSPORT(dma_consumer) * FW_D11_DMA_BUF_BYTES);
@@ -108,9 +146,9 @@ static int ampdu_dma_receive(uint32_t rx_start) {
     if (decoded != CLEAN_AMPDU_DMA_GOOD) {
         uint32_t error = decoded == CLEAN_AMPDU_DMA_FCS_ERROR ? 0x8eu :
             decoded == CLEAN_AMPDU_DMA_PREFIX_ERROR ? 0x8fu : 0x8du;
-        return fail(error, FW_D11_DMA_BUF_ADDR +
+        return ampdu_dma_fail(error, FW_D11_DMA_BUF_ADDR +
                     TRANSPORT(dma_consumer) * FW_D11_DMA_BUF_BYTES + 38u,
-                    (uint32_t)buf[0] | ((uint32_t)buf[1] << 8u));
+                    (uint32_t)buf[0] | ((uint32_t)buf[1] << 8u), status);
     }
     slot->frame_index = (uint16_t)(total + 1u);
     slot->rxe_len = CLEAN_HT_AMPDU_PROBE_MPDU + CLEAN_PLCP_BYTES;
@@ -121,7 +159,7 @@ static int ampdu_dma_receive(uint32_t rx_start) {
     slot->f2_received = 0u;
     slot->f2_sdpcm_len = 0u;
     if (!rx_dma_poll_and_reclaim(slot))
-        return fail(0x8du, D11_RX_DMA_STATUS0, status);
+        return ampdu_dma_fail(0x8du, D11_RX_DMA_STATUS0, status, status);
     __asm__ volatile("dsb" ::: "memory");
     MULTI->captured_frames = total + 1u;
     return 1;

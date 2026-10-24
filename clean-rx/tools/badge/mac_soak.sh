@@ -20,6 +20,7 @@ phy=${6:-ofdm6}
 payload=${7:-cycle}
 collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/collector}
 picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+source clean-rx/tools/usb-run.sh
 if [[ ! -x $collector || ! -x $picotool ]]; then
     echo "Build the matching collector and install its image first" >&2
     exit 1
@@ -48,40 +49,28 @@ if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]]; then
 fi
 printf '{"challenge":"%s","frames_per_direction":%s,"drop_acks_per_endpoint":%s,"channel":1,"phy":"%s","rate_mbps":%s,"payloads":[%s],"fragments_per_msdu":%s,"vendor_control":false}\n' \
     "$challenge" "$count" "$drop_acks" "$phy" "$rate" "$payloads" "$fragments" > "$prefix-config.json" || exit 1
-reply_pid=
+reply_pid= init_pid=
 cleanup() {
-    if [[ -n $reply_pid ]]; then
-        if kill -0 "$reply_pid" 2>/dev/null; then kill "$reply_pid"; fi
-        wait "$reply_pid" 2>/dev/null || true
-    fi
+    usb_stop "$reply_pid" "$init_pid"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-start_badge() {
-    local serial=$1 attempt
-    for ((attempt=0;attempt<30;attempt++)); do
-        if "$picotool" reboot --ser "$serial" > "$prefix-boot-$serial.log" 2>&1; then
-            sleep 0.5
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "Badge not available in BOOTSEL: $serial" >&2
-    return 1
-}
-start_badge "$responder" || exit 1
-"$collector" "$responder" "$prefix-reply.bin" 1 \
+usb_boot "$responder" "$prefix-boot-$responder.log" &&
+    usb_boot "$initiator" "$prefix-boot-$initiator.log" || exit 1
+usb_pair_ready "$responder" "$initiator" \
+    "$prefix-ready-$responder.log" "$prefix-ready-$initiator.log" || exit 1
+"${usb_command[@]}" 7240 "$collector" "$responder" "$prefix-reply.bin" 1 \
     --mac-soak-reply "$challenge" "$count" "$drop_acks" "$phy" "$payload" > "$prefix-reply.json" 2> "$prefix-reply.stderr" &
 reply_pid=$!
 sleep 1
-start_badge "$initiator" || exit 1
-"$collector" "$initiator" "$prefix-init.bin" 1 \
-    --mac-soak-init "$challenge" "$count" "$drop_acks" "$phy" "$payload" > "$prefix-init.json" 2> "$prefix-init.stderr"
-init_result=$?
-wait "$reply_pid"
-reply_result=$?
-reply_pid=
+if ! kill -0 "$reply_pid" 2>/dev/null; then echo "Responder exited before initiator" >&2; exit 1; fi
+"${usb_command[@]}" 7240 "$collector" "$initiator" "$prefix-init.bin" 1 \
+    --mac-soak-init "$challenge" "$count" "$drop_acks" "$phy" "$payload" > "$prefix-init.json" 2> "$prefix-init.stderr" &
+init_pid=$!
+usb_wait_pair "$reply_pid" "$init_pid" || exit 1
+reply_result=$usb_first_result init_result=$usb_second_result
+reply_pid= init_pid=
 cat "$prefix-init.json" "$prefix-reply.json"
 if [[ $init_result -ne 0 || $reply_result -ne 0 ]]; then
     cat "$prefix-init.stderr" "$prefix-reply.stderr" >&2

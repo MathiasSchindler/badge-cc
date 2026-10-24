@@ -73,6 +73,8 @@ static void capture_layout(uint8_t original[2360]) {
             WORD(0x3f0u,0x1800u,0x1800u,0x7f5u));
     restore(original,228u,WORD(0x3f0u,CLEAN_AMPDU_PROBE_SHM,0x1800u,0x7fdu),
             WORD(0x3f0u,0x1800u,0x1800u,0x7fdu));
+    restore(original,229u,WORD(0x3f0u,0x1816u,0x1800u,0x1782u),
+            WORD(0x3f0u,0x1815u,0x1800u,0x1782u));
     restore(original,252u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_DMA_DONE),
             WORD(0x3f0u,0x180eu,0x1800u,0x601u));
 #endif
@@ -2165,7 +2167,8 @@ static void aggregate_interface_trace(void) {
     assert(!early[CLEAN_AMPDU_DMA_PENDING] && early[CLEAN_AMPDU_DMA_SUBMITTED]==1u);
 #endif
 #if CLEAN_RX_AMPDU_HANDOFF == 2
-    assert(early[0x102au]==80u && early[0x1004u]==0x20c0u &&
+    assert(early[0x102au]==80u &&
+           early[0x1004u]==(CLEAN_RX_AMPDU_DMA ? 0x30c0u : 0x20c0u) &&
            early[0x1780u]==65535u && early[0x1001u]==CLEAN_SHM_FRAME);
     early[0x100du]=0x1822u;
     assert(psm_run(early,0,AMPDU_IF_BAD)==(CLEAN_RX_AMPDU_DMA ? 198u : 163u));
@@ -2893,12 +2896,14 @@ int main(void) {
                 r[CLEAN_AMPDU_DMA_SUBMITTED]=65535u;
                 r[0x1781u]=86u;
                 assert(psm_run(r,0,AMPDU_DMA_LENGTH)==220u);
-                assert(r[0x7f4u]==(!outcome || count==1u ? 86u : 80u));
+                assert(r[0x7f4u]==86u);
                 assert(psm_run(r,0,AMPDU_DMA_DONE)==
                        (!outcome ? 253u : count==3u || eof ? 266u : 163u));
                 assert(!r[CLEAN_AMPDU_DMA_PENDING]);
                 assert(r[CLEAN_AMPDU_DMA_SUBMITTED]==(outcome ? 0u : 65535u));
                 assert(r[0x601u]==(outcome ? 0u : 14u));
+                if (outcome && count<3u && !eof)
+                    assert((r[0x1004u]&0x3fc0u)==0x30c0u);
                 assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
             }
 #endif

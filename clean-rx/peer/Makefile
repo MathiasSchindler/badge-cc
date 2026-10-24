@@ -32,8 +32,10 @@ endif
 
 .PHONY: ht-peer ht-peer-firmware ht-peer-tools ht-peer-test ht-peer-force
 ht-peer: $(HT_PEER_BUILD)/vendor_ht.uf2 $(HT_PEER_BUILD)/collector
+	$(MAKE) -f clean-rx/tools/Makefile
 ht-peer-firmware: $(HT_PEER_BUILD)/vendor_ht.uf2
 ht-peer-tools: $(HT_PEER_BUILD)/collector
+	$(MAKE) -f clean-rx/tools/Makefile
 
 $(HT_PEER_BUILD):
 	mkdir -p $@

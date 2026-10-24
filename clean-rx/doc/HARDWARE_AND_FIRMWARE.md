@@ -71,6 +71,7 @@ are shared with the implementation.
 | Initial stack pointer | `0x1f000` | Same |
 | 480-byte mailbox | `0x20000` | Same |
 | Eight-word layout manifest | `0x203c0` | Same |
+| Aggregate DMA state, 180 bytes | `0x20b00` | Same |
 | Eight capture slots plus header | `0x20d80` | Same base |
 | MPDU capacity | 2,400 bytes | 3,896 bytes |
 | Capture SHM base, word index | `0x100` | `0x800` |

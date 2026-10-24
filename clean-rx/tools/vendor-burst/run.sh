@@ -12,7 +12,11 @@ fi
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
 build=${CLEAN_RX_REFERENCE_BUILD:-build/clean-rx/vendor-burst}
-picotool=build/picotool-usb/picotool
+picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+source clean-rx/tools/usb-run.sh
+trap 'usb_stop' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 prefix=$3
 credentials=${4:-ssid-data/ssid.txt}
 early=${5:-mixed}
@@ -25,24 +29,12 @@ if compgen -G "$prefix*" > /dev/null; then
     echo "Use a new evidence prefix; existing trials are never overwritten" >&2
     exit 1
 fi
-for serial in "$1" "$2"; do
-    ready=0
-    for ((i=0;i<100;i++)); do
-        if {
-            printf 'BOOTSEL readiness attempt %u\n' "$((i+1))"
-            "$picotool" info --ser "$serial"
-        } >> "$prefix-ready-$serial.log" 2>&1; then
-            ready=1
-            break
-        fi
-        sleep 0.1
-    done
-    if [[ $ready != 1 ]]; then echo "Badge not ready in BOOTSEL: $serial" >&2; exit 1; fi
-done
-"$picotool" load -v "$build/vendor.uf2" --ser "$1" > "$prefix-load-vendor.log" 2>&1
-"$picotool" load -v "$build/observer.uf2" --ser "$2" > "$prefix-load-observer.log" 2>&1
-"$picotool" reboot --ser "$1" > "$prefix-boot-vendor.log" 2>&1
-"$picotool" reboot --ser "$2" > "$prefix-boot-observer.log" 2>&1
-sleep 0.5
-"$build/collector" "$1" "$2" "$prefix" "$credentials" "$early" ${6+"$6"} ${7+"$7"} \
+usb_control run 15 "$picotool" info --ser "$1" >> "$prefix-ready-$1.log" 2>&1
+usb_control run 15 "$picotool" info --ser "$2" >> "$prefix-ready-$2.log" 2>&1
+usb_control run 300 "$picotool" load -v "$build/vendor.uf2" --ser "$1" > "$prefix-load-vendor.log" 2>&1
+usb_control run 300 "$picotool" load -v "$build/observer.uf2" --ser "$2" > "$prefix-load-observer.log" 2>&1
+usb_boot "$1" "$prefix-boot-vendor.log"
+usb_boot "$2" "$prefix-boot-observer.log"
+usb_pair_ready "$1" "$2" "$prefix-ready-$1.log" "$prefix-ready-$2.log"
+usb_control run 70 "$build/collector" "$1" "$2" "$prefix" "$credentials" "$early" ${6+"$6"} ${7+"$7"} \
     > "$prefix.jsonl" 2> "$prefix.stderr"

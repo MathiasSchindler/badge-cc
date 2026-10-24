@@ -6,6 +6,9 @@
     MBOX->rx_elapsed_ticks = ARM_CYCLE_COUNTER - LOOP(rx_start);
     MBOX->rx_polls = LOOP(polls);
 
+#if CLEAN_RX_AMPDU_DMA
+    ampdu_dma_snapshot(mmio_read32(D11_RX_DMA_STATUS0));
+#endif
     mmio_write32(D11_MACCONTROL, 0x04020400u);
     (void)mmio_read32(D11_MACCONTROL);
 #if CLEAN_RX_HT_PHY_SNAPSHOT

@@ -47,9 +47,11 @@ VPATH := $(sort $(dir $(REF_VENDOR) $(REF_OBSERVER)))
 .PHONY: reference-handoff-stall-control reference-handoff-stall-rearm
 .PHONY: reference-handoff-destination-control reference-handoff-destination-shift
 reference: $(REF_BUILD)/vendor.uf2 $(REF_BUILD)/observer.uf2 $(REF_BUILD)/collector
+	$(MAKE) -f clean-rx/tools/Makefile
 .PHONY: reference-firmware reference-tools
 reference-firmware: $(REF_BUILD)/vendor.uf2 $(REF_BUILD)/observer.uf2
 reference-tools: $(REF_BUILD)/collector
+	$(MAKE) -f clean-rx/tools/Makefile
 reference-early:
 	$(MAKE) -f $(REF_DIR)/Makefile REF_PROFILE=reference-early REF_FLAGS='$(CLEAN_PROFILE_reference-early)' reference reference-test
 reference-phy:

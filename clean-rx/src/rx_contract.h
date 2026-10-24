@@ -2,6 +2,7 @@
 #define CLEAN_RX_RX_CONTRACT_H
 
 #include "frame_limits.h"
+#include "types.h"
 
 #define CLEAN_HT_HANDOFF_VERSION (CLEAN_RX_HT_VARIABLE ? 9u : CLEAN_RX_HT_HANDOFF_GUARD ? 8u : 7u)
 #define CLEAN_HT_HANDOFF_PSDU (CLEAN_RX_HT_HANDOFF_GUARD ? 564u : 478u)
@@ -20,6 +21,17 @@
 #define CLEAN_AMPDU_DMA_DETAIL 704u
 #define CLEAN_AMPDU_DMA_PAYLOAD_DETAIL 1664u
 #define CLEAN_AMPDU_DMA_MAGIC 0x314d4441u
+#define CLEAN_AMPDU_DMA_TAG 0xda16u
+#define CLEAN_AMPDU_DMA_STATE_ADDR 0x20b00u
+#define CLEAN_AMPDU_DMA_STATE_DETAIL 720u
+#define CLEAN_AMPDU_DMA_STATE_GENERATION_DETAIL (CLEAN_AMPDU_BA_RX_DETAIL + 128u)
+typedef struct {
+    uint32_t indices, status0, status1, descriptor_flags;
+    uint32_t magic, descriptor_bytes, descriptor_low, descriptor_high;
+    uint32_t ownership, progress, rxe_status, copy_status;
+    uint8_t prefix[128];
+    uint32_t generation;
+} clean_ampdu_dma_state_t;
 #define CLEAN_AMPDU_HANDOFF_WORD 68u
 #define CLEAN_AMPDU_HANDOFF_WORDS 20u
 #define CLEAN_AMPDU_HANDOFF_COMMIT 128u
@@ -37,6 +49,13 @@ _Static_assert(80u + CLEAN_AMPDU_BA_WORDS <= CLEAN_AMPDU_HANDOFF_COMMIT &&
 #define CLEAN_AMPDU_PROBE_ADDR 0x20600u
 #define CLEAN_AMPDU_PROBE_DETAIL 768u
 #define CLEAN_AMPDU_PROBE_MAGIC 0x32504441u
+_Static_assert(sizeof(clean_ampdu_dma_state_t) == 180u &&
+               CLEAN_AMPDU_DMA_STATE_ADDR >= CLEAN_AMPDU_IF_ADDR + 4u + 2u*CLEAN_AMPDU_IF_WORDS &&
+               CLEAN_AMPDU_DMA_STATE_ADDR + sizeof(clean_ampdu_dma_state_t) <= 0x20d80u &&
+               CLEAN_AMPDU_DMA_STATE_DETAIL + 48u == CLEAN_AMPDU_PROBE_DETAIL,
+               "DMA state must fit reserved SRAM and report space");
+_Static_assert(CLEAN_AMPDU_DMA_STATE_GENERATION_DETAIL + 4u <= CLEAN_AMPDU_DMA_PAYLOAD_DETAIL,
+               "DMA generation must not overlap delivered payloads");
 /* SHM addresses are 16-bit word indices, not byte addresses. */
 #define CLEAN_SHM_CAPTURE_LIMIT 0x616u
 #define CLEAN_SHM_RXE_LIMIT 0x617u

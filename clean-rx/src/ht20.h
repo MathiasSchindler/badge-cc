@@ -166,19 +166,19 @@ static inline int clean_ht_ampdu_dma_decode(const volatile uint8_t *buf, uint32_
     uint16_t length = (uint16_t)(buf[0] | ((uint16_t)buf[1] << 8u));
     uint16_t ordinal = (uint16_t)(buf[18] | ((uint16_t)buf[19] << 8u));
     uint16_t magic = (uint16_t)(buf[20] | ((uint16_t)buf[21] << 8u));
-    uint32_t payload = ordinal == 1u ? 44u : 38u;
-    if (outcome > 2u || magic != 0xda15u || !ordinal || ordinal > 3u ||
-        length != (ordinal == 1u ? 86u : 80u) ||
+    uint32_t payload = 44u;
+    if (outcome > 2u || magic != CLEAN_AMPDU_DMA_TAG || !ordinal || ordinal > 3u ||
+        length != 86u ||
         bytes < payload + CLEAN_HT_AMPDU_PROBE_MPDU ||
-        ((buf[4] & 3u) != 1u && (buf[4] & 3u) != 2u) ||
+        (buf[4] & 3u) == 3u ||
         !clean_ht_ampdu_probe_sig_valid(buf + 12u, CLEAN_HT_AMPDU_PROBE_BYTES))
         return CLEAN_AMPDU_DMA_HEADER_ERROR;
     if (outcome == 2u) return CLEAN_AMPDU_DMA_BAD;
-    /* RXE retains the PPDU PLCP in its count; only the first DMA body
-     * carries those six bytes. Continuations begin with their MAC header. */
-    if (ordinal == 1u)
-        for (uint32_t i = 0u; i < CLEAN_PLCP_BYTES; ++i)
-            if (buf[38u + i] != buf[12u + i]) return CLEAN_AMPDU_DMA_PREFIX_ERROR;
+    /* The next-MPDU copy command retains a six-byte zero staging prefix.
+     * Only ordinal one carries the physical PPDU PLCP in that prefix. */
+    for (uint32_t i = 0u; i < CLEAN_PLCP_BYTES; ++i)
+        if (buf[38u + i] != (ordinal == 1u ? buf[12u + i] : 0u))
+            return CLEAN_AMPDU_DMA_PREFIX_ERROR;
     if (!clean_mac_valid(buf + payload, CLEAN_HT_AMPDU_PROBE_MPDU))
         return CLEAN_AMPDU_DMA_FCS_ERROR;
     raw[0] = raw[1] = 0u;
@@ -233,7 +233,7 @@ static inline int clean_ht_rx_metadata(uint8_t rate, uint8_t flags, uint8_t vers
 static inline uint8_t clean_ht_rx_version(uint32_t enabled, uint16_t phy,
         const volatile uint8_t sig[6], uint32_t length) {
 #if CLEAN_RX_AMPDU_DELIVERY
-    if (enabled && ((phy & 3u) == 1u || (phy & 3u) == 2u) &&
+    if (enabled && (phy & 3u) != 3u &&
         length == CLEAN_HT_AMPDU_PROBE_MPDU &&
         clean_ht_ampdu_probe_sig_valid(sig, CLEAN_HT_AMPDU_PROBE_BYTES))
         return CLEAN_HT_AMPDU_PROBE_VERSION;

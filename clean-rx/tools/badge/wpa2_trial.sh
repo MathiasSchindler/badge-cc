@@ -40,9 +40,10 @@ if [[ $group_traffic -ne 0 && ( $peer -ne 1 || $credential_mode == wrong-passwor
     echo "Traffic modes require --peer-ap and correct credentials" >&2; exit 2
 fi
 collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/collector}
-ap_host=build/host-tools/usb_wifi_link_host
+ap_host=${CLEAN_RX_AP_COLLECTOR:-build/host-tools/usb_wifi_link_host}
 if [[ $peer -eq 1 ]]; then ap_host=${CLEAN_RX_AP_COLLECTOR:-build/clean-rx/peer/collector}; fi
 picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+source clean-rx/tools/usb-run.sh
 if [[ ! -x $collector || ! -x $ap_host || ! -x $picotool ]]; then
     echo "Build the matching clean collector, vendor AP host and picotool first" >&2
     exit 1
@@ -58,37 +59,27 @@ private=$(mktemp -d "${prefix}.private.XXXXXX") || exit 1
 ap_pid=
 station_pid=
 cleanup() {
-    if [[ -n $station_pid ]]; then kill "$station_pid" 2>/dev/null || true; wait "$station_pid" || true; fi
-    if [[ -n $ap_pid ]]; then kill "$ap_pid" 2>/dev/null || true; wait "$ap_pid" || true; fi
+    usb_stop "$station_pid" "$ap_pid"
     rm -f -- "$private/credentials" "$private/wrong" "$private/raw"
     rmdir -- "$private"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-start_badge() {
-    local serial=$1 attempt
-    for ((attempt=0;attempt<50;attempt++)); do
-        if "$picotool" reboot --ser "$serial" \
-            >> "$prefix-boot-$serial.log" 2>&1; then return 0; fi
-        sleep 0.1
-    done
-    echo "Badge not available in BOOTSEL: $serial" >&2
-    return 1
-}
 # Boot both USB applications before starting the vendor AP's bounded window.
-start_badge "$station_serial" || exit 1
-start_badge "$ap_serial" || exit 1
-sleep 0.5
+usb_boot "$station_serial" "$prefix-boot-$station_serial.log" &&
+    usb_boot "$ap_serial" "$prefix-boot-$ap_serial.log" || exit 1
+usb_pair_ready "$station_serial" "$ap_serial" \
+    "$prefix-ready-$station_serial.log" "$prefix-ready-$ap_serial.log" || exit 1
 SECONDS=0
 if [[ $peer -eq 1 ]]; then
     ap_mode=--protected-ap; ap_seconds=16
     if [[ $group_traffic -ne 0 ]]; then ap_mode=--protected-traffic-ap; ap_seconds=45; fi
     if [[ $group_traffic -eq 2 ]]; then ap_mode=--protected-rekey-ap; fi
-    "$ap_host" "$ap_serial" "$prefix-ap.bin" "$ap_mode" "$channel" "$ap_seconds" "$private/credentials" \
+    "${usb_command[@]}" "$((ap_seconds + 50))" "$ap_host" "$ap_serial" "$prefix-ap.bin" "$ap_mode" "$channel" "$ap_seconds" "$private/credentials" \
         > "$prefix-ap.jsonl" 2> "$prefix-ap.stderr" &
 else
-    "$ap_host" --ap-only "$ap_serial" --credentials-out "$private/credentials" \
+    "${usb_command[@]}" 100 "$ap_host" --ap-only "$ap_serial" --credentials-out "$private/credentials" \
         > "$prefix-ap.jsonl" 2> "$prefix-ap.stderr" &
 fi
 ap_pid=$!
@@ -112,22 +103,22 @@ if [[ $credential_mode == wrong-password ]]; then
     (umask 077; printf '%s\n%s\n' "$ssid" deliberately-wrong-password > "$private/wrong") || exit 1
     credentials=$private/wrong
 elif [[ $credential_mode == raw-psk ]]; then
-    "$collector" --derive-psk "$credentials" "$private/raw" || exit 1
+    usb_control run 10 "$collector" --derive-psk "$credentials" "$private/raw" || exit 1
     credentials=$private/raw
 fi
 printf 'station_start_seconds=%s\n' "$SECONDS" >> "$prefix-timing.log"
+if ! kill -0 "$ap_pid" 2>/dev/null; then echo "AP exited before station; retain AP logs" >&2; exit 1; fi
 station_mode=--ap-wpa2
 if [[ $group_traffic -ne 0 ]]; then station_mode=--ap-wpa2-rekey; fi
-"$collector" "$station_serial" "$prefix-station.bin" "$channel" "$station_mode" "$bssid" "$credentials" \
+"${usb_command[@]}" 75 "$collector" "$station_serial" "$prefix-station.bin" "$channel" "$station_mode" "$bssid" "$credentials" \
     > "$prefix-station.json" 2> "$prefix-station.stderr" &
 station_pid=$!
-wait "$station_pid"
-station_result=$?
-station_pid=
+allowed=0
+if [[ $credential_mode == wrong-password ]]; then allowed=1; fi
+usb_wait_pair "$station_pid" "$ap_pid" "$allowed" || exit 1
+station_result=$usb_first_result ap_result=$usb_second_result
+station_pid= ap_pid=
 printf 'station_done_seconds=%s\nstation_exit=%s\n' "$SECONDS" "$station_result" >> "$prefix-timing.log"
-wait "$ap_pid"
-ap_result=$?
-ap_pid=
 printf 'ap_done_seconds=%s\nap_exit=%s\n' "$SECONDS" "$ap_result" >> "$prefix-timing.log"
 if [[ $peer -eq 1 ]]; then
     if [[ $group_traffic -ne 0 ]]; then

@@ -10,6 +10,7 @@ fi
 cd "$(dirname "$0")/../../.." || exit 1
 tx=$1 rx=$2 prefix=$3 mcs=$4
 picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+source clean-rx/tools/usb-run.sh
 tx_collector=${CLEAN_VENDOR_PEER_COLLECTOR:-build/clean-rx/peer/collector}
 rx_collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/d2-controlled/collector}
 for executable in "$picotool" "$tx_collector" "$rx_collector"; do
@@ -24,45 +25,27 @@ challenge=$challenge$(printf '%02x' "$mcs")
 if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]]; then echo "Fresh challenge generation failed" >&2; exit 1; fi
 printf '{"challenge":"%s","mcs":%s,"channel":1,"vendor_peer":true,"frames":8,"ethernet_bytes":62,"ht_qualified":false}\n' \
     "$challenge" "$mcs" > "$prefix-config.json" || exit 1
-rx_pid=
+rx_pid= tx_pid=
 cleanup() {
-    if [[ -n $rx_pid ]]; then
-        if kill -0 "$rx_pid" 2>/dev/null; then kill "$rx_pid"; fi
-        wait "$rx_pid" 2>/dev/null || true
-    fi
+    usb_stop "$rx_pid" "$tx_pid"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-for serial in "$tx" "$rx"; do
-    ready=0
-    for ((attempt=0;attempt<10;attempt++)); do
-        if "$picotool" info --ser "$serial" > "$prefix-ready-$serial.log" 2>&1; then
-            ready=1
-            break
-        fi
-        sleep 0.2
-    done
-    if [[ $ready -ne 1 ]]; then
-        echo "Badge not ready in BOOTSEL: $serial" >&2
-        exit 1
-    fi
-done
-"$picotool" reboot --ser "$rx" > "$prefix-boot-rx.log" 2>&1 || exit 1
-sleep 0.5
-"$rx_collector" "$rx" "$prefix-rx.bin" 1 --vendor-ht-rx "$challenge" "$mcs" \
+usb_boot "$rx" "$prefix-boot-rx.log" && usb_boot "$tx" "$prefix-boot-tx.log" || exit 1
+usb_pair_ready "$rx" "$tx" "$prefix-ready-$rx.log" "$prefix-ready-$tx.log" || exit 1
+"${usb_command[@]}" 25 "$rx_collector" "$rx" "$prefix-rx.bin" 1 --vendor-ht-rx "$challenge" "$mcs" \
     > "$prefix-rx.json" 2> "$prefix-rx.stderr" &
 rx_pid=$!
 # The clean radio cold-initializes before entering its four-second RX window.
 sleep 6
-"$picotool" reboot --ser "$tx" > "$prefix-boot-tx.log" 2>&1 || exit 1
-sleep 0.5
-"$tx_collector" "$tx" "$prefix-tx.bin" --tx-multicast "$challenge" \
-    > "$prefix-tx.json" 2> "$prefix-tx.stderr"
-tx_result=$?
-wait "$rx_pid"
-rx_result=$?
-rx_pid=
+if ! kill -0 "$rx_pid" 2>/dev/null; then echo "Receiver exited before vendor TX" >&2; exit 1; fi
+"${usb_command[@]}" 35 "$tx_collector" "$tx" "$prefix-tx.bin" --tx-multicast "$challenge" \
+    > "$prefix-tx.json" 2> "$prefix-tx.stderr" &
+tx_pid=$!
+usb_wait_pair "$rx_pid" "$tx_pid" || exit 1
+rx_result=$usb_first_result tx_result=$usb_second_result
+rx_pid= tx_pid=
 cat "$prefix-tx.json" "$prefix-rx.json"
 if [[ $tx_result -ne 0 || $rx_result -ne 0 ]]; then
     cat "$prefix-tx.stderr" "$prefix-rx.stderr" >&2

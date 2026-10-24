@@ -98,14 +98,35 @@ zero/missing receipt records, with exclusive aggregate report ownership.
 The [hardware rerun](../experiments/HARDWARE_REGRESSION_R03_2026-10-24.md)
 produced complete valid snapshots for all 48 final pairs on both endpoints,
 including failed operations. Bad-middle and all-bad controls passed 4/4 each.
-Initial strict acceptance was SHM 17/18, normal BA 16/18 and DMA 0/4;
+R03 initial strict acceptance was SHM 17/18, normal BA 16/18 and DMA 0/4;
 fresh repeats did not clear every failure. DMA still exposed `0x8d` and
-missing-third-body behavior.
+missing-third-body behavior in that R03 campaign.
 
-**Next evidence:** investigate R06 DMA and remaining intermittent fixture/BA
+**Next evidence:** investigate R07 reception and remaining intermittent fixture/BA
 loss without weakening exact-byte, receipt or terminal-lease acceptance.
-R05 was rerun, not passed. R04 repository orchestration hardening remains
-open; temporary campaign guards do not complete it. General HT/BA and
+The subsequent [R05 bounded acceptance rerun](../experiments/HARDWARE_ACCEPTANCE_R05_2026-10-24.md)
+completed all 44 authorized SHM/BA/bad-FCS cells: SHM 18/18, BA 16/18 initially
+and both bad-FCS variants 4/4. Both failed BA cells passed their one fresh
+repeat, with complete independently validated delivery/lease/BA evidence.
+Initial empty/nonmatching captures remain evidence of intermittent reception;
+this does not close R07 or qualify loss-free operation. DMA was not retested
+in R05.
+
+The [R06 DMA repair](../experiments/DMA_REPAIR_R06_2026-10-24.md) fixes the
+format-zero `0x8d` rejection and the missing next-MPDU command/layout.
+The first repaired image passed all six MCS0/3/7 direction cells; the exact
+final image passed 5/6 initially and its one fresh repeat. Bad-middle and
+all-bad DMA controls passed 4/4 each. First-fault descriptor/header,
+ownership and completion evidence is retained in a generation-bound record.
+One final-image DMA cell and one unchanged-SHM control had empty captures
+before passing their fresh repeats; those reception failures remain open,
+not evidence of loss-free operation. Both original badge flashes were
+restored and verified after the 31-trial campaign.
+
+R04 supplies
+[shared bounded orchestration](../guides/HOST_TOOLS.md#bounded-usb-orchestration)
+with offline failure-path tests; this is distinct from the earlier temporary
+campaign guards and supplies no new RF evidence. General HT/BA and
 physical timing gates stay open.
 
 ### Badge silicon identification

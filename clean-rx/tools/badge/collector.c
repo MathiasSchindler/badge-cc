@@ -621,13 +621,27 @@ evidence_ready:
         }
         printf(",\"observed_fixture_bitmap\":%u",observed);
 #if CLEAN_RX_AMPDU_DMA
+        uint32_t dma_generation=usb_report_u32(detail+CLEAN_AMPDU_DMA_STATE_GENERATION_DETAIL);
+        int dma_state_valid=usb_report_u32(detail+736u)==CLEAN_AMPDU_DMA_MAGIC &&
+            dma_generation!=0u && dma_generation==usb_report_u32(detail+64u);
         printf(",\"last_dma_publication_delay_us\":%u",
                trace.raw[270u]|((uint32_t)trace.raw[271u]<<8u));
         printf(",\"dma_fault_prefix\":");
-        if (usb_report_u32(detail+736u)==CLEAN_AMPDU_DMA_MAGIC) {
+        if (usb_report_u32(detail+736u)==CLEAN_AMPDU_DMA_MAGIC &&
+            (!dma_generation || dma_state_valid) &&
+            usb_report_u32(detail+44u)>=0x8du && usb_report_u32(detail+44u)<=0x8fu) {
             printf("\"");
             for (uint32_t i=0u;i<128u;++i) printf("%02x",detail[1480u+i]);
             printf("\"");
+        } else printf("null");
+        printf(",\"dma_state\":");
+        if (dma_state_valid) {
+            printf("{\"generation\":%u,\"words\":[",dma_generation);
+            for (uint32_t i=0u;i<12u;++i)
+                printf("%s%u",i?",":"",usb_report_u32(detail+CLEAN_AMPDU_DMA_STATE_DETAIL+4u*i));
+            printf("],\"prefix\":\"");
+            for (uint32_t i=0u;i<128u;++i) printf("%02x",detail[1480u+i]);
+            printf("\"}");
         } else printf("null");
 #endif
 #if CLEAN_RX_AMPDU_SHM

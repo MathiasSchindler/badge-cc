@@ -5,6 +5,66 @@ commands are separate from firmware builds and offline tests. Hardware
 execution requires [the trial protocol](HARDWARE_TRIALS.md), its own authorized
 scope and matched installed images.
 
+## Bounded USB orchestration
+
+Build the host-only readiness probe with the existing compiler/libusb tools:
+
+```sh
+make -f clean-rx/tools/Makefile
+```
+
+Badge `all`/`tools`, peer `ht-peer`/`ht-peer-tools` and reference
+`reference`/`reference-tools` also build it. Firmware-only targets do not.
+The runners use existing Node builtins, not npm, packages or a framework.
+`CLEAN_RX_USB_READY` overrides the default
+`build/clean-rx/tools/usb-ready` executable for isolated tests.
+
+The probe binds the exact serial, configures USB only if necessary and reads
+the live-report protocol header and build ID. It submits no radio command.
+The observed build ID is logged; this does not replace R09's diagnostic-gate
+and matched-image selection preflight.
+
+| Phase | External subprocess bound |
+| --- | --- |
+| BOOTSEL discovery and reboot | 30 seconds total; each info attempt at most 2 seconds; reboot at most 15 seconds within the remaining total |
+| Application readiness | 15 seconds total per endpoint, with 2-second attempt caps |
+| Final pair readiness recheck | One 2-second probe per endpoint; failure stops the pair |
+| Flash load | 300 seconds per operation |
+| Ordinary badge / independent peer collection | 25 / 35 seconds |
+| Lifecycle/network station | Requested station duration + 25 seconds |
+| Independent AP | Requested AP duration + 50 seconds |
+| General vendor AP / WPA2 station | 100 / 75 seconds |
+| MAC soak | 7240 seconds, retaining the native 7230-second ceiling |
+| Reference aggregate collector | 70 seconds |
+
+The supervisor adds at most a 0.5-second TERM-to-KILL grace period after
+expiry/cancellation and reaps the child before returning. It signals only its
+owned process group, including descendants. Timeout exits 124; INT/TERM exits
+130/143. Missing executables and unexpected child exits are explicit failures.
+Info/readiness retries share fixed total deadlines; hung subprocesses are
+not retried indefinitely. Reboot is not repeated after an ambiguous timeout.
+
+Paired runners boot and verify **both** applications before submitting RF
+commands, then immediately recheck both. The HT 200 ms RX lead, MAC one-second
+responder lead and independent-peer six-second radio staging are intentional
+protocol delays, not enumeration waits. An endpoint failure stops its partner;
+matrix runners stop subsequent trials. Expected wrong-password exit 1 is
+allowed only in that control, never as a replacement for a timeout.
+
+Boot/readiness logs append every attempt; raw reports, stdout and stderr
+remain under the chosen new prefix. Failed or cancelled runs do not generate
+a passing pair. Retry using a new prefix after recovering devices manually;
+the runners do not automatically restore or execute a timed-out image.
+The historical WPA2 script delegates to the same canonical runner.
+
+Offline failure-path coverage:
+
+```sh
+node --test clean-rx/tools/usb-orchestration.test.cjs
+```
+
+These tests use fake processes/USB stubs and do not enumerate or flash hardware.
+
 ## WPA2 collection
 
 The badge application's independent-peer receive diagnostic is RX-only.
@@ -180,8 +240,40 @@ The aggregate paired runner uses `clean-rx/tools/ampdu_verify.cjs` to
 cross-check the JSON against complete, fresh raw reports, independently
 generated payloads/FCS and terminal lease/BA evidence. It rejects historical,
 partial and stale reports for aggregate acceptance. For a bad-FCS mask of
-7, actual observed bad bodies and terminal release are required alongside
+7, actual observed bad bodies and, for SHM delivery, terminal release are required alongside
 zero delivery and no BA; absence is not a passing negative control.
+
+### Aggregate DMA state
+
+DMA builds freeze the first fault state before reclaim/reset, or save the
+next-consumer state immediately before shutdown when there is no fault.
+The generation-bound record lives at controller SRAM `0x20b00`; a complete
+snapshot copies its 48-byte context to detail `720..767`, its 128-byte
+physical buffer prefix to `1480..1607` and its controller generation to
+`1608..1611`. These regions are DMA-owned, not BA receipt storage.
+The report remains 2,092 bytes and delivered payload offsets do not move.
+
+`dma_state` is `null` without valid magic and a matching nonzero generation.
+Otherwise it contains `generation`, the physical `prefix` hex string and
+these twelve little-endian `words`:
+
+| Word | Meaning |
+| --- | --- |
+| 0 | Consumer index in low 16 bits; producer index in high 16 bits |
+| 1/2 | D11 DMA status 0/1, sampled before reclaim/shutdown |
+| 3 | Descriptor flags |
+| 4 | Commit magic `0x314d4441` |
+| 5/6/7 | Descriptor byte count and low/high buffer address |
+| 8 | PSM state / pending outcome, low/high 16 bits |
+| 9 | Submitted count / live RXE length, low/high 16 bits |
+| 10 | RXE status 1/2, low/high 16 bits |
+| 11 | PHY status / RX copy control, low/high 16 bits |
+
+The values are sampled in order, not a claim that every live register changes
+atomically. The first fault record is not replaced by later stopped state.
+`dma_fault_prefix` remains available for faults `0x8d..0x8f`; historical
+prefix-only reports remain inspectable without being promoted to complete
+DMA state. A mismatched nonzero generation suppresses both fields.
 
 Offline aggregate inspection uses a matched collector:
 
@@ -190,6 +282,11 @@ build/clean-rx/badge/collector --inspect-ampdu REPORT.bin CHALLENGE_HEX_28
 ```
 
 An explicitly invalid/incomplete aggregate report still produces diagnostic
-JSON and a nonzero exit status. R05's hardware matrix has been rerun, but
-its full acceptance gate remains open; see the
-[hardware record](../experiments/HARDWARE_REGRESSION_R03_2026-10-24.md).
+JSON and a nonzero exit status. The
+[R05 hardware matrix](../experiments/HARDWARE_ACCEPTANCE_R05_2026-10-24.md)
+completed with strict passing evidence for all 44 cells after two fresh
+repeats; initial acceptance was 42/44. This does not qualify loss-free
+reception, DMA or general HT/BA operation.
+The later [R06 campaign](../experiments/DMA_REPAIR_R06_2026-10-24.md)
+validates the repaired finite DMA fixture and bad-FCS controls; retained
+empty captures still prevent a loss-free reception claim.

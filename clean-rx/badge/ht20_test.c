@@ -11,19 +11,49 @@ static uint32_t ht_base_fallback(void) {
 }
 
 static void aggregate_dma_tests(void) {
+    const uint8_t captured[] =
+        "\x50\x00\x01\x00\x00\x00\xb1\x49\x23\x80\x40\x31\x00\xfc\x00\x0f"
+        "\xa8\x02\x02\x00\x15\xda\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x88\x02\x00\x00"
+        "\x02\x9f\xb0\x27\x3f\xb2\x02\x9f\xb0\x27\x3f\x32\x02\x9f\xb0\x27"
+        "\x3f\x32\x10\x00\x60\x00\x9f\xb0\x27\x3f\xb2\x12\xc8\xc6\xd8\x0b"
+        "\xcc\x50\x00\x00\x41\x4d\x50\x44\x55\x2d\x44\x32\xf9\xf6\xeb\x39"
+        "\xf9\x64\x37\x36\xa6\x88\x1c\x05\x8f\x2e\xf7\xf8\x99\x4b\x8f\x12"
+        "\x45\x44\xd8\xf6\x6e\x77\xf9\x58\x10\x5d\x0c\x5e\x00\x00\x00\x00";
+    uint8_t replay[128], decoded[88];
+    memcpy(replay,captured,sizeof(replay));
+    assert(!clean_mac_valid(replay+38u,80u) && clean_mac_valid(replay+44u,80u));
+    assert(clean_ht_ampdu_dma_decode(replay,sizeof(replay),decoded)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+    /* R06's retained continuation has PHY zero and six zero prefix bytes;
+     * update only the obsolete header contract, never the radio payload. */
+    replay[0]=86u;
+    replay[20]=(uint8_t)CLEAN_AMPDU_DMA_TAG;
+    assert(clean_ht_ampdu_dma_decode(replay,sizeof(replay),decoded)==CLEAN_AMPDU_DMA_GOOD);
+    assert(!memcmp(decoded+8u,captured+44u,80u));
     uint8_t nonce[14]={4u,3u,2u,1u,9u,8u,7u,6u,5u,4u,3u,80u,0u,0u};
     for (uint32_t mcs=0u;mcs<8u;++mcs)
         for (uint32_t ordinal=1u;ordinal<=3u;++ordinal) {
             uint8_t buf[128]={0}, raw[88], original[128], expected[80];
-            uint32_t payload=ordinal==1u ? 44u : 38u;
+            uint32_t payload=44u;
             nonce[13]=(uint8_t)mcs;
-            buf[0]=ordinal==1u ? 86u : 80u;
+            buf[0]=86u;
             buf[2]=1u; buf[4]=1u; buf[18]=(uint8_t)ordinal;
-            buf[20]=0x15u; buf[21]=0xdau;
+            buf[20]=(uint8_t)CLEAN_AMPDU_DMA_TAG;
+            buf[21]=(uint8_t)(CLEAN_AMPDU_DMA_TAG>>8u);
             assert(clean_ht_ampdu_probe_sig(buf+12u,mcs));
             assert(clean_ht_ampdu_probe_mpdu(expected,nonce,ordinal-1u));
             if (ordinal==1u) memcpy(buf+38u,buf+12u,6u);
             memcpy(buf+payload,expected,80u);
+            for (uint32_t phy=0u;phy<4u;++phy) {
+                buf[4]=(uint8_t)phy;
+                assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==
+                    (phy==3u ? CLEAN_AMPDU_DMA_HEADER_ERROR : CLEAN_AMPDU_DMA_GOOD));
+#if CLEAN_RX_AMPDU_DELIVERY
+                assert(clean_ht_rx_version(1u,(uint16_t)phy,buf+12u,80u)==
+                    (phy==3u ? 0u : CLEAN_HT_AMPDU_PROBE_VERSION));
+#endif
+            }
+            buf[4]=1u;
             memcpy(original,buf,sizeof(buf));
             assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_GOOD);
             assert(!raw[0] && !raw[1] && !memcmp(raw+2u,buf+12u,6u) &&
@@ -46,11 +76,15 @@ static void aggregate_dma_tests(void) {
                 assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
                 buf[20u+bit/8u]^=(uint8_t)(1u<<(bit%8u));
             }
-            if (ordinal==1u) {
-                buf[38]^=1u;
-                assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_PREFIX_ERROR);
-                buf[38]^=1u;
-            }
+            buf[38]^=1u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_PREFIX_ERROR);
+            buf[38]^=1u;
+            buf[20]=0x15u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            buf[20]=(uint8_t)CLEAN_AMPDU_DMA_TAG;
+            buf[0]=80u;
+            assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_HEADER_ERROR);
+            buf[0]=86u;
             buf[2]=0u;
             assert(clean_ht_ampdu_dma_decode(buf,sizeof(buf),raw)==CLEAN_AMPDU_DMA_NORMAL);
             buf[2]=2u; buf[payload]^=1u;
@@ -201,7 +235,8 @@ static void aggregate_probe_tests(void) {
         assert(!clean_ht_rx_version(0u,2u,packet+8u,80u));
         assert(clean_ht_rx_version(1u,1u,packet+8u,80u)==
                (CLEAN_RX_AMPDU_DELIVERY ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
-        assert(!clean_ht_rx_version(1u,0u,packet+8u,80u));
+        assert(clean_ht_rx_version(1u,0u,packet+8u,80u)==
+               (CLEAN_RX_AMPDU_DELIVERY ? CLEAN_HT_AMPDU_PROBE_VERSION : 0u));
         assert(!clean_ht_rx_version(1u,3u,packet+8u,80u));
         assert(!clean_ht_rx_version(1u,2u,packet+8u,79u));
         assert(!clean_ht_rx_version(1u,2u,packet+8u,81u));

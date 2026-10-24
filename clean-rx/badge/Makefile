@@ -30,10 +30,12 @@ LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../host/wpa2_crypto.c ../sr
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/tools/diagnostics_logic.c
 
-.PHONY: all firmware tools controller force test
-all: $(BUILD)/clean_rx.uf2 $(BUILD)/collector
+.PHONY: all firmware tools usb-tools controller force test
+all: $(BUILD)/clean_rx.uf2 $(BUILD)/collector usb-tools
 firmware: $(BUILD)/clean_rx.uf2
-tools: $(BUILD)/collector
+tools: $(BUILD)/collector usb-tools
+usb-tools:
+	$(MAKE) -f ../tools/Makefile
 
 ifeq ($(abspath $(CONTROLLER_BIN)),$(abspath $(ROOT)/build/clean-rx/cyw43_rx_fw.bin))
 controller:

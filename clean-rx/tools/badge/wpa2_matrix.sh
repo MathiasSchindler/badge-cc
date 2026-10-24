@@ -8,12 +8,13 @@ if [[ $# -ne 3 || ! $1 =~ ^[0-9A-F]{16}$ || ! $2 =~ ^[0-9A-F]{16}$ ||
 fi
 cd "$(dirname "$0")/../../.." || exit 1
 ap=$1; station=$2; prefix=$3
+source clean-rx/tools/usb-run.sh
 for file in "$prefix"-*; do
     if [[ -e $file || -L $file ]]; then echo "Evidence prefix already exists: $file" >&2; exit 1; fi
 done
 child=
 cleanup() {
-    if [[ -n $child ]]; then kill "$child" 2>/dev/null || true; wait "$child" || true; fi
+    usb_stop "$child"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -34,7 +35,10 @@ for ((i=1;i<=19;i++)); do
     bash clean-rx/tools/badge/wpa2_trial.sh "$ap" "$station" "$prefix-$i" \
         --peer-ap "$channel" "${mode[@]}" &
     child=$!
-    if ! wait "$child"; then echo "E1 trial $i failed; retaining evidence and continuing matrix" >&2; fi
+    if ! wait "$child"; then
+        echo "E1 trial $i failed; stopping matrix and retaining evidence" >&2
+        exit 1
+    fi
     child=
 done
 node clean-rx/tools/badge/wpa2_verify.cjs --matrix "$prefix" "$station" "$ap" > "$prefix-matrix.json"

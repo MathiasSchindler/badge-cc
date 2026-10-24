@@ -28,7 +28,7 @@ function operationBodies(text) {
     return [...text.matchAll(/^static inline [^{;]+?\{[\s\S]*?^}\n/gm)].map(match => match[0]);
 }
 
-test('split operations and moved crypto/soak implementations retain their original bodies', () => {
+test('unmodified split operations and moved crypto/soak implementations retain their original bodies', () => {
     for (const [old, current] of [
         ['ht20.h', ['src/ht20.h', 'src/diagnostic/ht_command.h', 'tests/fixtures/ht20.h']],
         ['unicast.h', ['src/unicast.h', 'tests/fixtures/unicast.h']],
@@ -36,7 +36,7 @@ test('split operations and moved crypto/soak implementations retain their origin
         const file = `clean-rx/src/${old}`;
         const before = original(file, frozen.inventory.find(entry => entry.file === file).sha256);
         const after = current.flatMap(file => operationBodies(fs.readFileSync(path.join(root, 'clean-rx', file), 'utf8')));
-        const retained = body => !body.includes('int clean_ht_payload_command_valid(');
+        const retained = body => !/\b(?:clean_ht_payload_command_valid|clean_ht_ampdu_dma_decode|clean_ht_rx_version)\(/.test(body.split('{')[0]);
         assert.deepEqual(after.filter(retained).sort(), operationBodies(before).filter(retained).sort(), old);
     }
     for (const [old, current] of [

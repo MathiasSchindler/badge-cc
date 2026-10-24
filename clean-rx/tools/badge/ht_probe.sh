@@ -44,6 +44,7 @@ elif [[ $# -ge 5 ]]; then
 fi
 collector=${CLEAN_RX_COLLECTOR:-$collector}
 picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+source clean-rx/tools/usb-run.sh
 if [[ ! -x $collector || ! -x $picotool ]]; then
     echo "Build the matching isolated ht-$mode collector and install its image first" >&2
     exit 1
@@ -105,56 +106,31 @@ subframes=1
 if [[ $mode == ampdu-probe ]]; then subframes=3; fi
 printf '{"challenge":"%s","mcs":%s,"channel":%s,"mpdu_bytes":%s,"tx_frames":1,"aggregate_subframes":%s,"vendor_peer":false,"ht_qualified":false}\n' \
     "$challenge" "$mcs" "$channel" "$mpdu" "$subframes" > "$prefix-config.json" || exit 1
-rx_pid=
+rx_pid= tx_pid=
 cleanup() {
-    if [[ -n $rx_pid ]]; then
-        if kill -0 "$rx_pid" 2>/dev/null; then kill "$rx_pid"; fi
-        wait "$rx_pid" 2>/dev/null || true
-    fi
+    usb_stop "$rx_pid" "$tx_pid"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-start_badge() {
-    local serial=$1 attempt
-    for ((attempt=0;attempt<30;attempt++)); do
-        if "$picotool" reboot --ser "$serial" > "$prefix-boot-$serial.log" 2>&1; then
-            sleep 0.5
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "Badge not available in BOOTSEL: $serial" >&2
-    return 1
-}
-wait_bootsel() {
-    local serial=$1 attempt
-    for ((attempt=0;attempt<100;attempt++)); do
-        if "$picotool" info --ser "$serial" > "$prefix-ready-$serial.log" 2>&1; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "Badge not ready in BOOTSEL before starting either collector: $serial" >&2
-    return 1
-}
-wait_bootsel "$tx" && wait_bootsel "$rx" || exit 1
-start_badge "$rx" || exit 1
+usb_boot "$rx" "$prefix-boot-$rx.log" &&
+    usb_boot "$tx" "$prefix-boot-$tx.log" || exit 1
+usb_pair_ready "$rx" "$tx" "$prefix-ready-$rx.log" "$prefix-ready-$tx.log" || exit 1
 args=("$challenge" "$mcs")
 if [[ $mode == data ]]; then args+=("$mpdu"); fi
-"$collector" "$rx" "$prefix-rx.bin" "$channel" "--ht-$mode-rx" "${args[@]}" \
+"${usb_command[@]}" 25 "$collector" "$rx" "$prefix-rx.bin" "$channel" "--ht-$mode-rx" "${args[@]}" \
     > "$prefix-rx.json" 2> "$prefix-rx.stderr" &
 rx_pid=$!
 sleep 0.2
-start_badge "$tx" || exit 1
+if ! kill -0 "$rx_pid" 2>/dev/null; then echo "Receiver exited before TX; retain RX logs" >&2; exit 1; fi
 tx_role="--ht-$mode-tx"
 if [[ $clocked == 1 ]]; then tx_role=--ht-ack-clocked-tx; fi
-"$collector" "$tx" "$prefix-tx.bin" "$channel" "$tx_role" "${args[@]}" \
-    > "$prefix-tx.json" 2> "$prefix-tx.stderr"
-tx_result=$?
-wait "$rx_pid"
-rx_result=$?
-rx_pid=
+"${usb_command[@]}" 25 "$collector" "$tx" "$prefix-tx.bin" "$channel" "$tx_role" "${args[@]}" \
+    > "$prefix-tx.json" 2> "$prefix-tx.stderr" &
+tx_pid=$!
+usb_wait_pair "$rx_pid" "$tx_pid" || exit 1
+rx_result=$usb_first_result tx_result=$usb_second_result
+rx_pid= tx_pid=
 cat "$prefix-tx.json" "$prefix-rx.json"
 if [[ $tx_result -ne 0 || $rx_result -ne 0 ]]; then
     cat "$prefix-tx.stderr" "$prefix-rx.stderr" >&2

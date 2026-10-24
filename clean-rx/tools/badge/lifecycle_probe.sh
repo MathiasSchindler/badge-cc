@@ -24,6 +24,7 @@ fi
 collector=${CLEAN_RX_COLLECTOR:-build/clean-rx/badge/collector}
 peer=${CLEAN_RX_PEER_COLLECTOR:-build/clean-rx/peer/collector}
 picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
+source clean-rx/tools/usb-run.sh
 for suffix in station.json station.bin ap.jsonl ap.bin pair.json station.stderr ap.stderr ap-boot.log station-boot.log; do
     if [[ -e $prefix-$suffix ]]; then echo "Evidence prefix already exists: $prefix" >&2; exit 1; fi
 done
@@ -39,27 +40,14 @@ challenge=$(od -An -N14 -tx1 /dev/urandom | tr -d ' \n') || exit 1
 if [[ ! $challenge =~ ^[0-9a-f]{28}$ ]]; then echo "Challenge generation failed" >&2; exit 1; fi
 ap_pid= station_pid=
 cleanup() {
-    local pid
-    for pid in "$station_pid" "$ap_pid"; do
-        if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid"
-            wait "$pid" 2>/dev/null
-        fi
-    done
+    usb_stop "$station_pid" "$ap_pid"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
-start_badge() {
-    local serial=$1 log=$2 attempt
-    for ((attempt=0;attempt<50;++attempt)); do
-        if "$picotool" reboot --ser "$serial" >> "$log" 2>&1; then return 0; fi
-        sleep 0.1
-    done
-    echo "Badge not available in BOOTSEL: $serial" >&2
-    return 1
-}
-start_badge "$ap" "$prefix-ap-boot.log" || exit 1
-sleep 0.7
+trap 'exit 130' INT
+trap 'exit 143' TERM
+usb_boot "$station" "$prefix-station-boot.log" &&
+    usb_boot "$ap" "$prefix-ap-boot.log" || exit 1
+usb_pair_ready "$station" "$ap" "$prefix-ready-$station.log" "$prefix-ready-$ap.log" || exit 1
 ap_args=(--lifecycle-ap "$challenge" "$ap_seconds" "$cycles")
 station_flag=--station-lifecycle ready_test=b1-ap-ready
 if (( network )); then
@@ -68,7 +56,7 @@ if (( network )); then
 elif (( qualification )); then
     ap_args=(--qualification-ap "$challenge" "$ap_seconds" "$channel")
 fi
-"$peer" "$ap" "$prefix-ap.bin" "${ap_args[@]}" \
+"${usb_command[@]}" "$((ap_seconds + 50))" "$peer" "$ap" "$prefix-ap.bin" "${ap_args[@]}" \
     > "$prefix-ap.jsonl" 2> "$prefix-ap.stderr" &
 ap_pid=$!
 ready=0
@@ -80,16 +68,13 @@ done
 if (( !ready )); then echo "AP failed to become ready; retain AP logs" >&2; exit 1; fi
 bssid=$(sed -n 's/.*"bssid":"\([0-9a-f:]*\)".*/\1/p' "$prefix-ap.jsonl")
 if [[ ! $bssid =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; then echo "Invalid AP BSSID" >&2; exit 1; fi
-start_badge "$station" "$prefix-station-boot.log" || exit 1
-sleep 0.7
+if ! kill -0 "$ap_pid" 2>/dev/null; then echo "AP exited before station; retain AP logs" >&2; exit 1; fi
 station_ok=0 ap_ok=0
-"$collector" "$station" "$prefix-station.bin" "$channel" "$station_flag" "$bssid" "$station_seconds" \
+"${usb_command[@]}" "$((station_seconds + 25))" "$collector" "$station" "$prefix-station.bin" "$channel" "$station_flag" "$bssid" "$station_seconds" \
     > "$prefix-station.json" 2> "$prefix-station.stderr" &
 station_pid=$!
-if wait "$station_pid"; then station_ok=1; fi
-station_pid=
-if wait "$ap_pid"; then ap_ok=1; fi
-ap_pid=
+usb_wait_pair "$station_pid" "$ap_pid" || exit 1
+station_ok=1 ap_ok=1 station_pid= ap_pid=
 if (( !station_ok || !ap_ok )); then echo "Station trial failed; retain both endpoint logs" >&2; exit 1; fi
 if (( network )); then
     node clean-rx/tools/badge/network_verify.cjs "$prefix" "$station_seconds" > "$prefix-pair.json"
