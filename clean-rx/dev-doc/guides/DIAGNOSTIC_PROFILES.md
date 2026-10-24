@@ -5,6 +5,11 @@ and [the HT20 reference](../../doc/HT20.md) for current command/descriptor
 contracts. This guide locates development evidence; it does not duplicate
 flag definitions, wire layouts or campaign results.
 
+The historical `clean-rx` name does not mean receive-only firmware.
+Diagnostics cover receive and transmit paths, including aggregate transmit
+stimuli and returned Block ACK frames. Qualification limits apply to each
+profile separately, not to transmission as a whole.
+
 Select diagnostics explicitly and keep host/controller/collector images
 matched. Offline validation is described in [the development guide](DEVELOPMENT.md).
 Hardware work additionally requires [the trial protocol](HARDWARE_TRIALS.md).

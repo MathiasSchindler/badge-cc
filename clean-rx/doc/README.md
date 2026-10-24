@@ -3,6 +3,9 @@
 This reference describes the source-built CYW43439 firmware, its RP2350
 host interface and the chip resources used by the implementation.
 
+The `clean-rx` name does not imply receive-only operation: the firmware
+supports both receiving and transmitting 802.11 frames.
+
 CYW43439 denotes the device family in these guides. The
 [manufacturer's documentation](https://www.infineon.com/part/CYW43439)
 provides family-level information, not a badge-specific silicon-version or

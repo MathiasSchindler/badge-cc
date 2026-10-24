@@ -1,7 +1,7 @@
 # Freestanding badge host for clean-rx
 
 This opt-in RP2350 application cold-loads the source-built CYW43439 image,
-receives raw 802.11 frames over Function 2, and reports evidence over the
+supports raw 802.11 transmission and Function-2 reception, and reports evidence over the
 project-owned USB control endpoint. Neither processor links libc, the Pico
 SDK, a downloaded vendor executable, NVRAM, or CLM. The controller still
 reads its on-chip ROM calibration tables.
