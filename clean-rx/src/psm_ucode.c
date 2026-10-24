@@ -1,6 +1,6 @@
 /* D11 Arch15 RX image with an opt-in, experimental ACK scheduler. */
 #include "types.h"
-#include "frame_limits.h"
+#include "rx_contract.h"
 #include "psm_ack.h"
 
 #define PSM_WORD(op, a, b, d) \

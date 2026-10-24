@@ -1,6 +1,6 @@
 #ifndef CLEAN_PEER_AUTHENTICATOR_H
 #define CLEAN_PEER_AUTHENTICATOR_H
-#include "../src/wpa2_crypto.h"
+#include "../host/wpa2_crypto.h"
 #include "../../src/shared/bytes.h"
 
 #define CLEAN_AUTH_RETRY_US 500000u

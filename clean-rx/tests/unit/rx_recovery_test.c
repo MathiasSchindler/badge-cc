@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "frame_limits.h"
+#include "rx_contract.h"
 #include "psm_ack.h"
 
 extern const uint8_t psm_ucode_bytes[];

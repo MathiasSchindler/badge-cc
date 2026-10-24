@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "crc32.h"
-#include "frame_limits.h"
+#include "rx_contract.h"
 #include "psm_ack.h"
 
 #define WORD(op,a,b,d) (((uint64_t)(op) << 39u) | ((uint64_t)(a) << 26u) | \

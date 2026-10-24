@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "mac.h"
-#include "mac_soak.h"
+#include "../fixtures/mac_soak.h"
 #include "sdio_ring.h"
 #include "tx_diag.h"
 #include "../../badge/station_rx.h"

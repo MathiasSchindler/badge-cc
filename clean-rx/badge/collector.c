@@ -12,15 +12,15 @@
 #include "loader.h"
 #include "frames.h"
 #include "station.h"
-#include "../src/ht20.h"
+#include "../tests/fixtures/ht20.h"
 #include "../peer/frame.h"
-#include "../src/wpa2_crypto.h"
+#include "../host/wpa2_crypto.h"
 #include "wpa2.h"
 #include "station_rx.h"
 #include "station_lifecycle.h"
 #include "../peer/network_json.h"
 #include "../src/tx_diag.h"
-#include "../src/mac_soak.h"
+#include "../tests/fixtures/mac_soak.h"
 
 _Static_assert(!CLEAN_RX_AMPDU_DELIVERY ||
                CLEAN_AMPDU_DMA_PAYLOAD_DETAIL + 3u * CLEAN_HT_AMPDU_PROBE_MPDU <= WIFI_TRACE_SIZE,

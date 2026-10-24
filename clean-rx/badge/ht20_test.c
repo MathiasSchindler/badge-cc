@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "ht_station.h"
-#include "../src/ht20.h"
+#include "../tests/fixtures/ht20.h"
 #include "station.h"
 
 static uint32_t ht_base_fallback(void) {

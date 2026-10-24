@@ -2,7 +2,7 @@
 #define CLEAN_PEER_QUALIFICATION_H
 #include "../../src/radio/wifi_link.h"
 #include "../../src/shared/bytes.h"
-#include "../src/wpa2_crypto.h"
+#include "../host/wpa2_crypto.h"
 
 #define CLEAN_QUALIFICATION_AP_MODE 5u
 

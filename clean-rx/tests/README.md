@@ -34,6 +34,31 @@ affected native executable.
 | [unit/](unit/) | Runtime byte/type compatibility, emitted PSM model, Block ACK and recovery model | Controller source, standard native headers/libraries and test-owned support only |
 | [support/](support/) | Independent bitwise CRC reference | Test code only; no firmware dependency on it |
 | [integration/](integration/) | MAC/station/soak suite, copy-scope capture/protocol suite, early-RX peer protocol suite | Controller code plus badge/peer fixture headers and general diagnostics explicitly listed in the test Makefile |
+| [fixtures/](fixtures/) | Host-only HT packet builders, expected-pattern/evidence checks, returned-ACK checks and soak/fragment campaigns | Native tests and RP2350 development applications; never imported by controller source |
+
+Fixture consumers include the badge diagnostic application, vendor-burst
+campaigns and independent peer monitor. This is development ownership, not
+a requirement that every consumer be a native test. Host software WPA2
+cryptography is shared separately under [host/](../host/).
+
+Controller-required command codecs remain in
+[ht_command.h](../src/ht_command.h). The controller validates some finite
+diagnostic commands by reconstructing their canonical bytes. Host fixture
+code reuses those codecs, not a second implementation. The portable HT
+header and ABI headers do not import that command layer. Isolating active
+diagnostic behavior from ordinary firmware remains C05; this move does
+not change which commands existing profiles accept.
+
+Run the boundary, implementation-preservation and ABI compatibility checks:
+
+```sh
+node --test clean-rx/tools/c04-contracts.test.cjs
+```
+
+They compare constants, every structure field offset, alignment and size,
+and the layout manifest with hash-checked C01 headers, including extended
+RX, handoff, streaming and aggregate-delivery selections. See
+[the C04 record](../dev-doc/C04_CONTRACT_SEPARATION.md).
 
 The MAC suite contains both portable-MAC checks and badge station/fixture
 checks. It is conservatively classified as integration in full, rather than

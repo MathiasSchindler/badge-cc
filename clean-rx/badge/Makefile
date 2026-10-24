@@ -7,7 +7,7 @@ CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -fstack-usage \
 	-I$(ROOT)/src/shared -I$(BUILD) -DWIFI_TRACE_SIZE=2048u -DLIVE_USB_CLEAN
 CFLAGS += $(EXTRA_CFLAGS)
-SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../peer/network.c \
+SOURCES := main.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../peer/network.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/arch/rp2350/nametag_clock.c \
 	$(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb_hw.c \
@@ -18,11 +18,11 @@ SOURCES := main.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
-HEADERS := $(wildcard *.h ../src/*.h $(ROOT)/src/tools/diagnostics_logic.h \
+HEADERS := $(wildcard *.h ../src/*.h ../host/*.h ../tests/fixtures/*.h $(ROOT)/src/tools/diagnostics_logic.h \
 	../peer/frame.h ../peer/protocol.h ../peer/lifecycle.h ../peer/network.h ../peer/network_json.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test station_lifecycle_test)
-LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
+LOADER_TEST_SOURCES := loader_test.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/tools/diagnostics_logic.c
 
@@ -71,9 +71,9 @@ $(ROOT)/build/host-tools/bin2uf2:
 $(BUILD)/clean_rx.uf2: $(BUILD)/clean_rx.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
 
-$(BUILD)/collector: collector.c frames.h station.h ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
+$(BUILD)/collector: collector.c frames.h station.h ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c ../src/tx_diag.h $(BUILD)/build_id.h
 	cc -std=c11 -Wall -Wextra -Werror -O2 $(EXTRA_CFLAGS) -I$(BUILD) -DWIFI_TRACE_SIZE=2048u $$(pkg-config --cflags libusb-1.0) \
-		$< ../peer/network.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
+		$< ../peer/network.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 		$(ROOT)/src/radio/wifi_trace.c $$(pkg-config --libs libusb-1.0) -o $@
 
 test: $(NATIVE_TESTS) $(BUILD)/collector
@@ -99,8 +99,8 @@ test: $(NATIVE_TESTS) $(BUILD)/collector
 
 $(NATIVE_TESTS): $(HEADERS) $(ROOT)/src/tools/diagnostics_logic.c $(BUILD)/build_id.h | $(BUILD)
 
-$(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../src/wpa2_crypto.c ../src/wpa2_crypto.h ../src/mac.c ../src/block_ack.c
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined wpa2_test.c wpa2.c ../src/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
+$(BUILD)/wpa2_test: wpa2_test.c wpa2.c wpa2.h station.h ../host/wpa2_crypto.c ../host/wpa2_crypto.h ../src/mac.c ../src/block_ack.c
+	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined wpa2_test.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/block_ack.c \
 		$(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/secret_test: secret_test.c $(ROOT)/src/usb/live_usb_control.c $(ROOT)/src/usb/live_usb.h \

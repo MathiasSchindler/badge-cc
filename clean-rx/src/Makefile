@@ -35,7 +35,7 @@ $(BUILD):
 $(BUILD)/startup.o: startup.S | $(BUILD)
 	$(CC) --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -nostdinc -c $< -o $@
 
-$(BUILD)/%.o: %.c cyw43_hw.h types.h bytes.h sdio_ring.h psm_ack.h ht_observer.h rx_recovery.h copy_scope.h observer_dma.h early_rx.h unicast.h mac.h block_ack.h tx_diag.h phy_rates.h ht20.h sdio_test.h frame_limits.h | $(BUILD)
+$(BUILD)/%.o: %.c cyw43_hw.h types.h bytes.h sdio_ring.h psm_ack.h ht_observer.h rx_recovery.h copy_scope.h observer_dma.h early_rx.h unicast.h unicast_contract.h mac.h block_ack.h tx_diag.h phy_rates.h ht20.h ht_contract.h ht_command.h sdio_test.h frame_limits.h rx_contract.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cyw43_rx_fw.elf: $(OBJS) cyw43.ld

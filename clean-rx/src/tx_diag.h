@@ -2,7 +2,7 @@
 #define CLEAN_RX_TX_DIAG_H
 
 #include "types.h"
-#include "frame_limits.h"
+#include "rx_contract.h"
 
 /* Keep legacy length bits 8..17; use unused bits 29..30 for the extension. */
 static inline uint32_t clean_tx_length_bits(uint32_t length) {

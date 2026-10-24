@@ -2,7 +2,7 @@
 #define CLEAN_BADGE_WPA2_H
 
 #include "station.h"
-#include "../src/wpa2_crypto.h"
+#include "../host/wpa2_crypto.h"
 #include "../src/mac.h"
 #include "../src/block_ack.h"
 

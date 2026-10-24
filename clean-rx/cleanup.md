@@ -129,20 +129,23 @@ run with their required flags.
 
 **Prerequisites:** C02, C03.
 
-- [ ] Split mixed headers such as `ht20.h`, `unicast.h` and `frame_limits.h`
+- [x] Split mixed headers such as `ht20.h`, `unicast.h` and `frame_limits.h`
   into cohesive runtime operations, shared contracts and test fixtures.
-- [ ] Keep controller-required shared contracts within the self-contained
+- [x] Keep controller-required shared contracts within the self-contained
   `src/` tree; make host consumers import them in that direction only.
-- [ ] Move synthetic frame generators, expected-pattern helpers and soak
+- [x] Move synthetic frame generators, expected-pattern helpers and soak
   fixtures to test/development ownership.
-- [ ] Move host-only cryptography out of the controller source tree after
+- [x] Move host-only cryptography out of the controller source tree after
   checking all badge, collector and peer consumers.
-- [ ] Preserve command values, structure sizes, offsets, memory bounds and
+- [x] Preserve command values, structure sizes, offsets, memory bounds and
   version identifiers with explicit compatibility checks.
 
 **Acceptance:** controller headers do not import fixtures or host code;
 host consumers still build and test against unchanged wire contracts.
 No implementation is duplicated merely to satisfy directory boundaries.
+
+Implementation, diagnostic-codec ownership and offline evidence:
+[C04 contract/fixture separation](dev-doc/C04_CONTRACT_SEPARATION.md).
 
 ### C05 - Isolate firmware-side tests and experimental profiles
 

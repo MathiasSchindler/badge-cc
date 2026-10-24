@@ -1,6 +1,6 @@
 #include "wpa2_crypto.h"
-#include "frame_limits.h"
-#include "bytes.h"
+#include "../src/frame_limits.h"
+#include "../src/bytes.h"
 
 void wpa_wipe(void *p, uint32_t n) {
     volatile uint8_t *b = p;

@@ -1,4 +1,5 @@
 #include "loader.h"
+#include "../src/rx_contract.h"
 #include "../../src/shared/bytes.h"
 #include "../../src/radio/wifi_probe.h"
 

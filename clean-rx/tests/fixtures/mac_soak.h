@@ -1,8 +1,8 @@
 #ifndef CLEAN_RX_MAC_SOAK_H
 #define CLEAN_RX_MAC_SOAK_H
 
-#include "mac.h"
-#include "phy_rates.h"
+#include "../../src/mac.h"
+#include "../../src/phy_rates.h"
 #include "unicast.h"
 
 #define CLEAN_SOAK_MAGIC 0x314b534du

@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "sdio_ring.h"
-#include "frame_limits.h"
+#include "rx_contract.h"
 
 #define CLEAN_SDIO_TEST_PACING_TICKS 500000u
 #define CLEAN_SDIO_TEST_ACK_OFFSET CLEAN_SDIO_ACK_OFFSET

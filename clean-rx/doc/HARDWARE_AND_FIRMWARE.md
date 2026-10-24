@@ -35,6 +35,7 @@ responses use the PSM to arbitrate the medium and trigger TX.
 ## Memory layout
 
 The definitions in [frame_limits.h](../src/frame_limits.h),
+[rx_contract.h](../src/rx_contract.h),
 [cyw43_hw.h](../src/cyw43_hw.h) and the [linker script](../src/cyw43.ld)
 are shared with the implementation.
 

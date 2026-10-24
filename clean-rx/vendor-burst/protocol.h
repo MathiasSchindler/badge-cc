@@ -6,7 +6,7 @@
 #include "../src/ht_observer.h"
 #include "../src/observer_dma.h"
 #include "../src/sdio_ring.h"
-#include "../src/ht20.h"
+#include "../tests/fixtures/ht20.h"
 
 #ifndef REF_CLEAN_STIMULUS
 #define REF_CLEAN_STIMULUS 0

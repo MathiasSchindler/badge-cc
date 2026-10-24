@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { flagKey, resolverMakefile, inside } = require('./c02-isolation.cjs');
+const { flagKey, resolverMakefile, referenceProfileUnchanged, inside } = require('./c02-isolation.cjs');
 
 test('flag deduplication ignores ordering, not definitions', () => {
     assert.equal(flagKey('-DB=2 -DA=1'), flagKey('-DA=1 -DB=2'));
@@ -38,4 +38,26 @@ test('standalone dependency containment rejects external and prefix-adjacent pat
     assert.ok(inside('/tmp/source', '/tmp/source/bytes.h'));
     assert.ok(!inside('/tmp/source', '../../src/shared/stdint.h'));
     assert.ok(!inside('/tmp/source', '/tmp/source-other/types.h'));
+});
+
+test('reference profile guard permits dependency moves but rejects selection and flag changes', () => {
+    const original = [
+        'REF_FLAGS := -DCLEAN_RX_HT_RX=1',
+        'REF_STIMULUS ?= 0',
+        'REF_HEADERS := old.h',
+        'reference: endpoint.uf2',
+        'reference-alias:',
+        '\t$(MAKE) -f $(REF_DIR)/Makefile REF_STIMULUS=1 reference reference-test',
+        'reference-controller:',
+        "\t$(MAKE) -C clean-rx/src EXTRA_CFLAGS='-DCLEAN_RX_HT_STIMULUS=$(REF_STIMULUS)' all test",
+        'reference-test: native',
+        '\tnative',
+    ].join('\n');
+    assert.ok(referenceProfileUnchanged(original.replace('old.h', 'new.h'), original));
+    for (const [from, to] of [
+        ['CLEAN_RX_HT_RX=1', 'CLEAN_RX_HT_RX=0'],
+        ['REF_STIMULUS=1 reference', 'REF_STIMULUS=0 reference'],
+        ['CLEAN_RX_HT_STIMULUS=$(REF_STIMULUS)', 'CLEAN_RX_HT_STIMULUS=0'],
+        ['reference-alias:', 'reference-renamed:'],
+    ]) assert.ok(!referenceProfileUnchanged(original.replace(from, to), original), from);
 });

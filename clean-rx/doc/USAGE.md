@@ -6,9 +6,17 @@ DMA and raw-frame operations. The badge host supplies station orchestration
 and software WPA2/CCMP.
 
 Shared protocol definitions are in [frame_limits.h](../src/frame_limits.h),
+[rx_contract.h](../src/rx_contract.h),
+[ht_contract.h](../src/ht_contract.h),
 [cyw43_hw.h](../src/cyw43_hw.h), [tx_diag.h](../src/tx_diag.h) and
-[unicast.h](../src/unicast.h). Use their constants and helpers rather than
+[unicast_contract.h](../src/unicast_contract.h). Use their constants and helpers rather than
 duplicating sizes or command bit fields.
+
+Portable HT and unicast operations are in [ht20.h](../src/ht20.h) and
+[unicast.h](../src/unicast.h). Diagnostic command codecs have an explicit
+[ht_command.h](../src/ht_command.h) include. Host-only campaign fixtures
+live under [tests/fixtures/](../tests/fixtures/) and software WPA2/CCMP
+under [host/](../host/); neither is a controller dependency.
 
 ## Building
 

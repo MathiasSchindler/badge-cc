@@ -3,7 +3,7 @@
 #include <string.h>
 #include "protocol.h"
 #include "monitor.h"
-#include "../src/ht20.h"
+#include "../tests/fixtures/ht20.h"
 #include "../../src/platform/badger/graphics.h"
 
 static void completed_dma_probe(void) {

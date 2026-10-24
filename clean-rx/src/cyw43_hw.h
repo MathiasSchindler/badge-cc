@@ -2,7 +2,7 @@
 #define CYW43_HW_H
 
 #include "types.h"
-#include "frame_limits.h"
+#include "rx_contract.h"
 
 /* Core Backplane Base Addresses */
 #define CC_BASE              0x18000000u /* ChipCommon + PMU + GCI */

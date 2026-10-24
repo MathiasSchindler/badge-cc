@@ -14,6 +14,9 @@ firmware.
 - [C03 native test separation](C03_TEST_SEPARATION.md): unit/model versus
   badge/peer integration ownership, named diagnostic profiles, compatibility
   entry points and production builds without a test tree.
+- [C04 contract and fixture separation](C04_CONTRACT_SEPARATION.md): portable
+  operations versus wire/layout contracts, explicit diagnostic codecs,
+  host-owned crypto/fixtures and frozen ABI compatibility checks.
 - [HT20 implementation and investigations](HT20_IMPLEMENTATION.md):
   D1/D2/D3 milestones, API development, receive failures, contention
   diagnostics, watchdog work, association/runtime peer profiles and

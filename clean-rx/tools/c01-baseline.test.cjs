@@ -12,6 +12,8 @@ test('classification distinguishes runtime, host-only code, tools and native tes
     assert.deepEqual(classify('clean-rx/src/pmu.c'), ['controller-runtime']);
     assert.deepEqual(classify('clean-rx/src/bytes.h'), ['shared-abi-portable-runtime']);
     assert.deepEqual(classify('clean-rx/src/wpa2_crypto.c'), ['host-runtime']);
+    assert.deepEqual(classify('clean-rx/host/wpa2_crypto.c'), ['host-runtime']);
+    assert.deepEqual(classify('clean-rx/tests/fixtures/mac_soak.h'), ['development-tool', 'shared-test-fixture']);
     assert.ok(classify('clean-rx/src/main.c').includes('firmware-side-diagnostic'));
     assert.deepEqual(classify('clean-rx/src/mac_test.c'), ['native-test']);
     assert.deepEqual(classify('clean-rx/tests/integration/mac_test.c'), ['native-test']);

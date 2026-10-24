@@ -4,7 +4,7 @@
 #include "phy_rates.h"
 #include "unicast.h"
 #include "mac.h"
-#include "ht20.h"
+#include "ht_command.h"
 #include "ht_observer.h"
 #include "observer_dma.h"
 #include "early_rx.h"

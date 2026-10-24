@@ -1,6 +1,6 @@
 #ifndef CLEAN_OBSERVER_DMA_H
 #define CLEAN_OBSERVER_DMA_H
-#include "frame_limits.h"
+#include "rx_contract.h"
 #include "mac.h"
 
 #define CLEAN_OBSERVER_DMA_ADDR 0x66000u

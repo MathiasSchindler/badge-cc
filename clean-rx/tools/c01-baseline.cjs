@@ -63,8 +63,12 @@ const sourceRoles = {
     'phy_rates.h': ['shared-abi-portable-runtime'],
     'tx_diag.h': ['shared-abi-portable-runtime'],
     'frame_limits.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
+    'rx_contract.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
     'unicast.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
-    'ht20.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic', 'development-tool'],
+    'unicast_contract.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
+    'ht20.h': ['shared-abi-portable-runtime'],
+    'ht_contract.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
+    'ht_command.h': ['shared-abi-portable-runtime', 'firmware-side-diagnostic'],
     'ht_observer.h': ['controller-runtime', 'firmware-side-diagnostic'],
     'psm_ack.h': ['controller-runtime', 'firmware-side-diagnostic'],
     'psm_ucode.c': ['controller-runtime', 'firmware-side-diagnostic'],
@@ -98,9 +102,11 @@ function classify(file) {
     if (file.endsWith('.md')) return ['documentation'];
     if (name === 'Makefile') return ['build-infrastructure'];
     if (file === 'clean-rx/tests/profiles.mk') return ['build-infrastructure'];
+    if (file.startsWith('clean-rx/tests/fixtures/')) return ['development-tool', 'shared-test-fixture'];
     if (file.startsWith('clean-rx/tests/')) return ['native-test'];
     if (name.endsWith('_test.c') || name.endsWith('.test.cjs')) return ['native-test'];
     if (file.startsWith('clean-rx/tools/')) return ['development-tool'];
+    if (file.startsWith('clean-rx/host/')) return ['host-runtime'];
     if (file.startsWith('clean-rx/src/')) {
         if (!sourceRoles[name]) throw new Error(`Unclassified controller file: ${file}`);
         return sourceRoles[name];

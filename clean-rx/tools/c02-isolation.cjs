@@ -47,7 +47,8 @@ function resolverMakefile(text) {
     }
     const stimulus = /EXTRA_CFLAGS='([^']*CLEAN_RX_HT_STIMULUS[^']*)'/.exec(text);
     if (!stimulus) throw new Error('Cannot find source stimulus-controller flags');
-    const assignments = text.split('\n').filter(line => /^REF_\w+\s*[:?+]?=/.test(line) && !line.endsWith('\\'));
+    const assignments = text.split('\n').filter(line => /^REF_\w+\s*[:?+]?=/.test(line) &&
+        !/^REF_HEADERS\s/.test(line) && !line.endsWith('\\'));
     const recipes = wrappers.map(entry => `${entry.target}:\n${entry.recipes.map(recipe => {
         if (!recipe.startsWith('$(MAKE) -f $(REF_DIR)/Makefile ')) throw new Error(`Unexpected wrapper recipe: ${recipe}`);
         return '\t' + recipe.replace('-f $(REF_DIR)/Makefile', '-f "$(C02_RESOLVER)"');
@@ -71,6 +72,10 @@ ${recipes}
 function inside(directory, file) {
     const relative = path.relative(directory, path.resolve(directory, file));
     return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function referenceProfileUnchanged(current, original) {
+    return resolverMakefile(current).text === resolverMakefile(original).text;
 }
 
 function buildProfile(source, build, flags, isolated) {
@@ -117,7 +122,11 @@ function verify(outputArgument, recordArgument) {
     const frozen = JSON.parse(fs.readFileSync(path.join(root, 'clean-rx/dev-doc/c01-baseline.json'), 'utf8'));
     const owner = 'clean-rx/vendor-burst/Makefile';
     const ownerText = fs.readFileSync(path.join(root, owner), 'utf8');
-    if (hash(ownerText) !== frozen.inventory.find(entry => entry.file === owner).sha256) {
+    const originalOwner = run('git', ['show', `${frozen.provenance.revision}:${owner}`]);
+    if (hash(originalOwner) !== frozen.inventory.find(entry => entry.file === owner).sha256) {
+        throw new Error('Cannot reconstruct frozen C01 reference owner.');
+    }
+    if (!referenceProfileUnchanged(ownerText, originalOwner)) {
         throw new Error('Reference owner changed since C01; review the profile catalogue before comparing.');
     }
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-c02-'));
@@ -203,7 +212,7 @@ function verify(outputArgument, recordArgument) {
         report.targetProbes = ['cortex-m3', 'cortex-m33'].map(cpu => {
             const args = ['--target=arm-none-eabi', `-mcpu=${cpu}`, '-mthumb', '-std=c11',
                 '-Wall', '-Wextra', '-Werror', '-ffreestanding', '-nostdinc', '-fno-builtin',
-                '-I', after, '-fsyntax-only', probeFile, path.join(after, 'wpa2_crypto.c')];
+                '-I', after, '-fsyntax-only', probeFile];
             run('clang', args);
             return { cpu, command: ['clang', ...args], status: 'passed' };
         });
@@ -224,7 +233,7 @@ function verify(outputArgument, recordArgument) {
     }
 }
 
-module.exports = { flagKey, resolverMakefile, inside };
+module.exports = { flagKey, resolverMakefile, referenceProfileUnchanged, inside };
 if (require.main === module) {
     try {
         if (process.argv.length < 3 || process.argv.length > 4) {

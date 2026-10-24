@@ -1,4 +1,5 @@
 #include "link.h"
+#include "../src/ht_command.h"
 
 static int due(uint32_t now, uint32_t deadline) {
     return now - deadline < 0x80000000u;

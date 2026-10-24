@@ -21,9 +21,9 @@ not the test/tool reorganization in later milestones.
   ranges are untouched; word access retains volatile byte operations for
   unaligned addresses. Helpers use the `clean_bytes_` namespace so consumers
   can also include the general-tree helpers without duplicate definitions.
-- Controller and portable crypto implementation files now include local
-  headers. Host-only cryptography remains in its existing location until
-  the planned ownership cleanup.
+- Controller and portable crypto implementation files use controller-local
+  headers. C04 subsequently moved host-only cryptography to
+  [host/](../host/) without changing that dependency direction.
 - The [Makefile](../src/Makefile) removes the external production include path
   and external object prerequisite. Local header dependencies trigger
   rebuilds. Native test targets still explicitly depend on general
@@ -67,8 +67,10 @@ The [isolation verifier](../tools/c02-isolation.cjs):
    SDIO-only firmware must explicitly omit the PSM rather than supplying an
    empty-image hash.
 6. Checks undefined symbols and unexpected libc entry points, retains link
-   logs/maps and dependency/symbol evidence, and checks local headers/crypto
-   with freestanding Cortex-M3 and Cortex-M33 syntax probes.
+   logs/maps and dependency/symbol evidence, and checks local type/byte
+   headers with freestanding Cortex-M3 and Cortex-M33 syntax probes.
+   Since C04, the separate [contract checks](../tools/c04-contracts.test.cjs)
+   also compile relocated host crypto for both targets without libc.
 7. Removes its specifically created temporary source tree, retaining evidence
    under the requested output directory.
 
@@ -79,9 +81,13 @@ retains available build logs, rather than issuing a success result.
 This checks named wrappers with their current default parameters, including
 their stimulus-controller selections. It is not an exhaustive Cartesian
 product of arbitrary user-provided flags, host-board overrides or runtime
-commands. The owning reference Makefile must still match its C01 hash; a
-future catalogue change requires review instead of silently comparing a
-different experiment set.
+commands. The original reference Makefile is reconstructed and checked
+against its C01 hash. Since C04, its current profile-resolver inputs must
+match that original, while header dependency moves are permitted. This
+checks retained variable assignments, wrapper names/recipes and stimulus
+flags; the firmware/profile definitions are not changed. A catalogue
+change still requires review instead of silently comparing a different
+experiment set.
 
 ## Validation and retained evidence
 

@@ -3,7 +3,7 @@
 
 #include "protocol.h"
 #include "frame.h"
-#include "../src/mac_soak.h"
+#include "../tests/fixtures/mac_soak.h"
 #include "../../src/shared/bytes.h"
 #include "../../src/radio/wifi_control.h"
 
