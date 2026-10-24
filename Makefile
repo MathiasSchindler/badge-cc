@@ -203,23 +203,23 @@ micro-signal-transport-credit-test: $(UF2_DIR)/micro-signal-transport-credit-tes
 
 $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-test \
-		PROFILE=sdio-test
+		PROFILE=sdio-test SELECTION=sdio-transport
 
 $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-paced-test \
-		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_PACED'
+		PROFILE=sdio-test SELECTION=sdio-paced
 
 $(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window-test \
-		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION'
+		PROFILE=sdio-test SELECTION=sdio-window
 
 $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window32-test \
-		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_WINDOW=1u -DCLEAN_SDIO_SELF_TEST_TRANSITION -DCLEAN_SDIO_SELF_TEST_DMA32'
+		PROFILE=sdio-test SELECTION=sdio-window32
 
 $(BUILD_DIR)/clean-rx-sdio-credit-test/cyw43_rx_fw.bin: force
 	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-credit-test \
-		PROFILE=sdio-test EXTRA_CFLAGS='-DCLEAN_SDIO_SELF_TEST_WINDOW=CLEAN_SDIO_WINDOW -DCLEAN_SDIO_SELF_TEST_DMA32 -DCLEAN_SDIO_SELF_TEST_LARGE'
+		PROFILE=sdio-test SELECTION=sdio-credit
 
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-paced-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin

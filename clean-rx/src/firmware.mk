@@ -1,3 +1,10 @@
+include $(dir $(lastword $(MAKEFILE_LIST)))profiles.mk
+SELECTION ?= default
+ifeq ($(filter $(SELECTION),$(CLEAN_PROFILE_NAMES)),)
+$(error Unknown SELECTION '$(SELECTION)'; see profiles.mk)
+endif
+SELECTION_FLAGS = $(CLEAN_PROFILE_$(SELECTION))
+
 PROFILE ?= runtime
 ifeq ($(PROFILE),runtime)
 PROFILE_ID := 0

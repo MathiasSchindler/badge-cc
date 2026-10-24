@@ -2,16 +2,16 @@
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
-#include "protected_ap.h"
-#include "protocol.h"
-#include "frame.h"
-#include "lifecycle.h"
-#include "network_json.h"
-#include "qualification.h"
+#include "../../peer/protected_ap.h"
+#include "../../peer/protocol.h"
+#include "../../peer/frame.h"
+#include "../../peer/lifecycle.h"
+#include "../../peer/network_json.h"
+#include "../../peer/qualification.h"
 #include "build_id.h"
-#include "cck_monitor.h"
-#include "../../src/host/tools/usb_live_transport.h"
-#include "../../src/shared/bytes.h"
+#include "../../peer/cck_monitor.h"
+#include "../../../src/host/tools/usb_live_transport.h"
+#include "../../../src/shared/bytes.h"
 
 static void deadline(int number) {
     (void)number;

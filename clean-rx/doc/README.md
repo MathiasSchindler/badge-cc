@@ -16,6 +16,8 @@ paths used by the firmware implementation.
   layout, initialization, PSM, DMA, transport and MAC behavior.
 - [HT20 interface](HT20.md): build profiles, frame descriptors and receive
   metadata.
+- [Tool and profile ownership](../dev-doc/C07_TOOL_AND_PROFILE_OWNERSHIP.md):
+  firmware-only builds, development-tool locations and campaign migration.
 
 Development history, experiments, investigations, qualification results and
 ongoing work are maintained separately in [dev-doc](../dev-doc/README.md).

@@ -19,7 +19,7 @@ test('classification distinguishes runtime, host-only code, tools and native tes
     assert.deepEqual(classify('clean-rx/tests/integration/mac_test.c'), ['native-test']);
     assert.deepEqual(classify('clean-rx/tests/support/crc32.h'), ['native-test']);
     assert.deepEqual(classify('clean-rx/tests/profiles.mk'), ['build-infrastructure']);
-    assert.deepEqual(classify('clean-rx/badge/collector.c'), ['development-tool']);
+    assert.deepEqual(classify('clean-rx/tools/badge/collector.c'), ['development-tool']);
     assert.deepEqual(classify('clean-rx/tools/c01-baseline.test.cjs'), ['native-test']);
     assert.throws(() => classify('clean-rx/src/unreviewed.h'), /Unclassified/);
 });

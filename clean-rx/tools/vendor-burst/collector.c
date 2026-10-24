@@ -2,11 +2,11 @@
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
-#include "protocol.h"
-#include "monitor.h"
-#include "../src/sdio_ring.h"
+#include "../../vendor-burst/protocol.h"
+#include "../../vendor-burst/monitor.h"
+#include "../../src/sdio_ring.h"
 #include "build_id.h"
-#include "../../src/host/tools/usb_live_transport.h"
+#include "../../../src/host/tools/usb_live_transport.h"
 
 static uint32_t clock_ticks[2], clock_frames[2];
 static uint8_t monitor_archive[REF_MONITOR_FIXED_SLOTS*REF_MONITOR_SLOT_BYTES];

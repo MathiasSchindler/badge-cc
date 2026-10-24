@@ -4,10 +4,10 @@ set -o pipefail
 
 if [[ $# -lt 3 || ! $1 =~ ^[0-9A-F]{16}$ ||
       ! $2 =~ ^[0-9A-F]{16}$ || $1 == "$2" ]]; then
-    echo "Usage: bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL NEW_PREFIX [--peer-ap CHANNEL:1,6,11] [--raw-psk|--wrong-password] [--group-traffic|--rekey]" >&2
+    echo "Usage: bash clean-rx/tools/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL NEW_PREFIX [--peer-ap CHANNEL:1,6,11] [--raw-psk|--wrong-password] [--group-traffic|--rekey]" >&2
     exit 2
 fi
-cd "$(dirname "$0")/../.." || exit 1
+cd "$(dirname "$0")/../../.." || exit 1
 ap_serial=$1
 station_serial=$2
 prefix=$3
@@ -133,11 +133,11 @@ if [[ $peer -eq 1 ]]; then
     if [[ $group_traffic -ne 0 ]]; then
         verification=()
         if [[ $group_traffic -eq 1 ]]; then verification=(--traffic-only); fi
-        node clean-rx/badge/wpa2_rekey_verify.cjs "$prefix" "$station_serial" "$ap_serial" "${verification[@]}" \
+        node clean-rx/tools/badge/wpa2_rekey_verify.cjs "$prefix" "$station_serial" "$ap_serial" "${verification[@]}" \
             > "$prefix-pair.json"
         exit $?
     fi
-    node clean-rx/badge/wpa2_verify.cjs "$prefix" "$channel" "$credential_mode" \
+    node clean-rx/tools/badge/wpa2_verify.cjs "$prefix" "$channel" "$credential_mode" \
         "$station_serial" "$ap_serial" > "$prefix-pair.json"
     exit $?
 fi

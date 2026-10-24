@@ -4,10 +4,10 @@ set -o pipefail
 
 if [[ $# -ne 4 || ! $1 =~ ^[0-9A-F]{16}$ || ! $2 =~ ^[0-9A-F]{16}$ ||
       $1 == "$2" || ! $4 =~ ^[0-7]$ ]]; then
-    echo "Usage: bash clean-rx/peer/run.sh VENDOR_TX_SERIAL CLEAN_RX_SERIAL NEW_PREFIX MCS:0-7" >&2
+    echo "Usage: bash clean-rx/tools/peer/run.sh VENDOR_TX_SERIAL CLEAN_RX_SERIAL NEW_PREFIX MCS:0-7" >&2
     exit 2
 fi
-cd "$(dirname "$0")/../.." || exit 1
+cd "$(dirname "$0")/../../.." || exit 1
 tx=$1 rx=$2 prefix=$3 mcs=$4
 picotool=${CLEAN_RX_PICOTOOL:-build/picotool-usb/picotool}
 tx_collector=${CLEAN_VENDOR_PEER_COLLECTOR:-build/clean-rx/peer/collector}

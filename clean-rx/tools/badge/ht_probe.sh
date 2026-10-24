@@ -5,7 +5,7 @@ set -o pipefail
 if [[ ( $# -ne 4 && $# -ne 5 && $# -ne 6 ) ||
       ! $1 =~ ^[0-9A-F]{16}$ || ! $2 =~ ^[0-9A-F]{16}$ ||
       $1 == "$2" || ! $4 =~ ^[0-7]$ || ( $# -eq 6 && $6 != --extended-rx ) ]]; then
-    echo "Usage: bash clean-rx/badge/ht_probe.sh TX_SERIAL RX_SERIAL NEW_PREFIX MCS:0-7 [MPDU_BYTES:28-2332 [--extended-rx]]" >&2
+    echo "Usage: bash clean-rx/tools/badge/ht_probe.sh TX_SERIAL RX_SERIAL NEW_PREFIX MCS:0-7 [MPDU_BYTES:28-2332 [--extended-rx]]" >&2
     echo "The extended RX build also accepts the fixed 3869-byte A-MSDU fixture" >&2
     echo "Use --ack for the clocked 60-byte normal-ACK fixture; --ack-raw retains the raw-TX control" >&2
     echo "Use --ampdu-probe for one diagnostic aggregate of three 80-byte MPDUs (no BA)" >&2
@@ -14,7 +14,7 @@ if [[ ( $# -ne 4 && $# -ne 5 && $# -ne 6 ) ||
     echo "HT_PROBE_CHALLENGE replays a matching 28-hex-digit challenge unchanged" >&2
     exit 2
 fi
-cd "$(dirname "$0")/../.." || exit 1
+cd "$(dirname "$0")/../../.." || exit 1
 tx=$1 rx=$2 prefix=$3 mcs=$4
 channel=${HT_PROBE_CHANNEL:-1}
 if [[ ! $channel =~ ^([1-9]|10|11)$ ]]; then

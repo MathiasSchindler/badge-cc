@@ -41,11 +41,11 @@ function resolverMakefile(text) {
     const targets = referenceTargets(text);
     const wrappers = targets.filter(entry => entry.recipes.some(recipe =>
         recipe.startsWith('$(MAKE) -f $(REF_DIR)/Makefile ')));
-    const leaves = new Set(['reference', 'reference-controller', 'reference-test']);
+    const leaves = new Set(['reference', 'reference-controller', 'reference-test', 'reference-firmware', 'reference-tools']);
     for (const entry of targets) {
         if (!leaves.has(entry.target) && !wrappers.includes(entry)) throw new Error(`Unknown reference entry: ${entry.target}`);
     }
-    const stimulus = /EXTRA_CFLAGS='([^']*CLEAN_RX_HT_STIMULUS[^']*)'/.exec(text);
+    const stimulus = /EXTRA_CFLAGS='([^']*(?:CLEAN_RX_HT_STIMULUS|CLEAN_PROFILE_reference-stimulus-controller)[^']*)'/.exec(text);
     if (!stimulus) throw new Error('Cannot find source stimulus-controller flags');
     const assignments = text.split('\n').filter(line => /^REF_\w+\s*[:?+]?=/.test(line) &&
         !/^REF_HEADERS\s/.test(line) && !line.endsWith('\\'));
@@ -55,7 +55,9 @@ function resolverMakefile(text) {
     }).join('\n')}`).join('\n');
     return {
         targets: ['reference', ...wrappers.map(entry => entry.target)],
-        text: `${assignments.join('\n')}
+        text: `${text.includes('include clean-rx/src/profiles.mk') ?
+            fs.readFileSync(path.join(root, 'clean-rx/src/profiles.mk'), 'utf8') : ''}
+${assignments.join('\n')}
 .PHONY: reference reference-test ${wrappers.map(entry => entry.target).join(' ')}
 reference:
 \t@printf '%s\\n' 'C02:observer:$(REF_FLAGS)'
@@ -75,7 +77,21 @@ function inside(directory, file) {
 }
 
 function referenceProfileUnchanged(current, original) {
-    return resolverMakefile(current).text === resolverMakefile(original).text;
+    const resolvers = [resolverMakefile(current), resolverMakefile(original)];
+    if (JSON.stringify(resolvers[0].targets) !== JSON.stringify(resolvers[1].targets)) return false;
+    if (resolvers[0].text === resolvers[1].text) return true;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-profile-guard-'));
+    try {
+        const resolved = resolvers.map((resolver, index) => {
+            const file = path.join(directory, `${index}.mk`);
+            fs.writeFileSync(file, resolver.text);
+            return resolver.targets.map(target => run('make',
+                ['--no-print-directory', '-s', '-f', file, `C02_RESOLVER=${file}`, target]));
+        });
+        return JSON.stringify(resolved[0]) === JSON.stringify(resolved[1]);
+    } finally {
+        fs.rmSync(directory, { recursive: true });
+    }
 }
 
 function buildProfile(source, build, flags, isolated, profile) {

@@ -3,6 +3,7 @@ include Makefile
 .DEFAULT_GOAL := ht-peer
 
 HT_PEER_DIR := clean-rx/peer
+HT_PEER_COLLECTOR := clean-rx/tools/peer/collector.c
 HT_PEER_BUILD := build/clean-rx/peer
 HT_PEER_PICO ?= 0
 HT_PEER_FLAGS := -DCLEAN_PEER_PICO=$(HT_PEER_PICO)
@@ -11,7 +12,7 @@ HT_PEER_SHARED := $(filter-out $(FIRMWARE_DIR)/usb_wifi_firmware.o \
 	$(FIRMWARE_DIR)/wifi_link.o $(HT_PEER_BUILD)/clock.o $(HT_PEER_BUILD)/network.o \
 	$(HT_PEER_BUILD)/live_usb_control.o $(HT_PEER_BUILD)/live_usb_hw.o $(HT_PEER_BUILD)/wpa2_crypto.o \
 	$(HT_PEER_BUILD)/authenticator.o
-HT_PEER_INPUTS := $(HT_PEER_DIR)/main.c $(HT_PEER_DIR)/collector.c \
+HT_PEER_INPUTS := $(HT_PEER_DIR)/main.c \
 	$(wildcard clean-rx/src/*.h clean-rx/src/psm/*.h clean-rx/host/*.h clean-rx/tests/fixtures/*.h) \
 	$(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/lifecycle.h \
 	$(HT_PEER_DIR)/lifecycle_usb.h $(HT_PEER_DIR)/Makefile \
@@ -29,8 +30,10 @@ else ifneq ($(HT_PEER_PICO),0)
 $(error HT_PEER_PICO must be 0 or 1)
 endif
 
-.PHONY: ht-peer ht-peer-test ht-peer-force
+.PHONY: ht-peer ht-peer-firmware ht-peer-tools ht-peer-test ht-peer-force
 ht-peer: $(HT_PEER_BUILD)/vendor_ht.uf2 $(HT_PEER_BUILD)/collector
+ht-peer-firmware: $(HT_PEER_BUILD)/vendor_ht.uf2
+ht-peer-tools: $(HT_PEER_BUILD)/collector
 
 $(HT_PEER_BUILD):
 	mkdir -p $@
@@ -79,7 +82,7 @@ $(HT_PEER_BUILD)/vendor_ht.bin: $(HT_PEER_BUILD)/vendor_ht.elf
 $(HT_PEER_BUILD)/vendor_ht.uf2: $(HT_PEER_BUILD)/vendor_ht.bin $(BIN2UF2)
 	$(BIN2UF2) $< $@ $(FLASH_BASE) $(RP2350_FAMILY_ID)
 
-$(HT_PEER_BUILD)/collector: $(HT_PEER_DIR)/collector.c $(HT_PEER_BUILD)/build_id.h
+$(HT_PEER_BUILD)/collector: $(HT_PEER_COLLECTOR) $(HT_PEER_BUILD)/build_id.h
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O2 -I$(HT_PEER_BUILD) \
 		$$(pkg-config --cflags libusb-1.0) $< $(HT_PEER_DIR)/network.c $(SHARED_DIR)/usb_report.c \
 		clean-rx/host/wpa2_crypto.c $(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_trace.c \

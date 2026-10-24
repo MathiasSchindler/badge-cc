@@ -3,10 +3,10 @@ set -u
 set -o pipefail
 
 if [[ $# -ne 3 || ! $1 =~ ^[0-9A-F]{16}$ || ! $2 =~ ^[0-9A-F]{16}$ || $1 == "$2" ]]; then
-    echo "Usage: bash clean-rx/badge/mac_trials.sh AP_SERIAL CLEAN_STATION_SERIAL NEW_EVIDENCE_PREFIX" >&2
+    echo "Usage: bash clean-rx/tools/badge/mac_trials.sh AP_SERIAL CLEAN_STATION_SERIAL NEW_EVIDENCE_PREFIX" >&2
     exit 2
 fi
-cd "$(dirname "$0")/../.." || exit 1
+cd "$(dirname "$0")/../../.." || exit 1
 ap=$1
 station=$2
 prefix=$3

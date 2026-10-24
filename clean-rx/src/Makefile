@@ -9,7 +9,7 @@ CFLAGS  := --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -std=c11 \
            -ffreestanding -nostdinc -fno-builtin \
            -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables \
            -ffunction-sections -fdata-sections -I.
-CFLAGS += $(PROFILE_FLAGS) $(EXTRA_CFLAGS)
+CFLAGS += $(PROFILE_FLAGS) $(SELECTION_FLAGS) $(EXTRA_CFLAGS)
 
 LDFLAGS := -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings -T cyw43.ld \
            -Wl,--defsym=clean_rx_profile_id=$(PROFILE_ID)
@@ -26,23 +26,23 @@ endif
 all: $(BUILD)/cyw43_rx_fw.bin $(BUILD)/profile.txt
 
 # Some supported Make versions compare timestamps only to whole seconds.
-FLAGS_CHANGED := $(shell printf '%s\n' '$(CC)' '$(CFLAGS)' '$(PROFILE)' | cmp -s - '$(BUILD)/build_flags' || printf changed)
+FLAGS_CHANGED := $(shell printf '%s\n' '$(CC)' '$(CFLAGS)' '$(PROFILE)' '$(SELECTION)' | cmp -s - '$(BUILD)/build_flags' || printf changed)
 ifneq ($(FLAGS_CHANGED),)
 $(OBJS) $(BUILD)/cyw43_rx_fw.elf $(BUILD)/cyw43_rx_fw.bin $(BUILD)/profile.txt: force
 endif
 
 $(BUILD)/profile.txt: $(BUILD)/cyw43_rx_fw.bin $(BUILD)/build_flags
-	@printf '%s\n' 'profile=$(PROFILE)' 'profile_id=$(PROFILE_ID)' 'flags=$(CFLAGS)' > $@
+	@printf '%s\n' 'profile=$(PROFILE)' 'profile_id=$(PROFILE_ID)' 'selection=$(SELECTION)' 'flags=$(CFLAGS)' > $@
 
 $(BUILD)/build_flags: force | $(BUILD)
-	@printf '%s\n' '$(CC)' '$(CFLAGS)' '$(PROFILE)' > $@.tmp; \
+	@printf '%s\n' '$(CC)' '$(CFLAGS)' '$(PROFILE)' '$(SELECTION)' > $@.tmp; \
 	if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
 $(OBJS): $(BUILD)/build_flags
 
 .PHONY: unit-test integration-test runtime-test copy-scope-test early-rx-test test-copy-scope test-early-rx test-recovery
 test unit-test integration-test runtime-test copy-scope-test early-rx-test test-copy-scope test-early-rx test-recovery:
-	$(MAKE) -C ../tests BUILD=$(abspath $(BUILD)) PROFILE=$(PROFILE) EXTRA_CFLAGS='$(EXTRA_CFLAGS)' $@
+	$(MAKE) -C ../tests BUILD=$(abspath $(BUILD)) PROFILE=$(PROFILE) SELECTION=$(SELECTION) EXTRA_CFLAGS='$(EXTRA_CFLAGS)' $@
 
 .PHONY: diagnostic sdio-test
 diagnostic sdio-test:
@@ -54,7 +54,7 @@ $(BUILD):
 $(BUILD)/startup.o: startup.S | $(BUILD)
 	$(CC) --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -nostdinc -c $< -o $@
 
-$(BUILD)/%.o: %.c $(HEADERS) firmware.mk | $(BUILD)
+$(BUILD)/%.o: %.c $(HEADERS) firmware.mk profiles.mk | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cyw43_rx_fw.elf: $(OBJS) cyw43.ld

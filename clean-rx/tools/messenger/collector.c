@@ -1,9 +1,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
-#include "link.h"
+#include "../../messenger/link.h"
 #include "build_id.h"
-#include "../../src/host/tools/usb_live_transport.h"
+#include "../../../src/host/tools/usb_live_transport.h"
 
 static libusb_device_handle *open_badge(libusb_context *context, const char *serial) {
     if (strlen(serial)!=16u || strspn(serial,"0123456789ABCDEF")!=16u) {

@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const { buildProfile } = require('./c02-isolation.cjs');
 const { matrix } = require('./c01-baseline.cjs');
+const { profileFlags } = require('./profile-flags.cjs');
 const root = path.resolve(__dirname, '../..');
 const revision = 'fb493e321ddf23c4a7caebd26c5e9b8202498233';
 const production = file => /(?:\.(c|h|S|ld|mk|inc)|\/Makefile)$/.test(file);
@@ -50,14 +51,15 @@ function storageLayout(elf) {
 
 function runtimeProfiles() {
     const defines = id => matrix.find(profile => profile.id === id).defines;
+    const flags = profileFlags(['passive-observer', 'passive-reset']);
+    const selected = id => flags[id].split(/\s+/).map(flag => flag.slice(2));
     return [
         { id: 'runtime', defines: [] },
         { id: 'ht-data', defines: defines('ht-data') },
         { id: 'wmm-edca', defines: defines('wmm-edca') },
-        { id: 'passive-observer', defines: ['CLEAN_RX_HT_RX=1', 'CLEAN_RX_HT_OBSERVER=1', 'CLEAN_RX_HT_EARLY_SAVE=1'] },
+        { id: 'passive-observer', defines: selected('passive-observer') },
         { id: 'early-recovery', defines: defines('early-prefix') },
-        { id: 'passive-reset', defines: [...defines('early-prefix').filter(value =>
-            !/^CLEAN_RX_HT_(ORDERED_FLUSH|PREFIX_RECOVERY)=/.test(value)), 'CLEAN_RX_HT_REARM_RESET=1'] },
+        { id: 'passive-reset', defines: selected('passive-reset') },
     ];
 }
 

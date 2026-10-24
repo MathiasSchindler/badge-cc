@@ -7,10 +7,10 @@ if [[ $# -lt 4 || $# -gt 7 || ! $1 =~ ^[0-9A-F]{16}$ || ! $2 =~ ^[0-9A-F]{16}$ |
       ! ${5:-0} =~ ^([0-9]|1[0-6])$ ||
       ! ${6:-ofdm6} =~ ^(ofdm6|1-long|(2|5\.5|11)-(long|short))$ ||
       ! ${7:-cycle} =~ ^(cycle|32|1500|1600|2304|cck-boundary|frag2|frag16)$ ]]; then
-    echo "Usage: bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL NEW_PREFIX COUNT:1-100000 [DROP_ACKS:0-16 [PHY:ofdm6|1/2/5.5/11-long|2/5.5/11-short [PAYLOAD:cycle|32|1500|1600|2304|cck-boundary|frag2|frag16]]]" >&2
+    echo "Usage: bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL NEW_PREFIX COUNT:1-100000 [DROP_ACKS:0-16 [PHY:ofdm6|1/2/5.5/11-long|2/5.5/11-short [PAYLOAD:cycle|32|1500|1600|2304|cck-boundary|frag2|frag16]]]" >&2
     exit 2
 fi
-cd "$(dirname "$0")/../.." || exit 1
+cd "$(dirname "$0")/../../.." || exit 1
 initiator=$1
 responder=$2
 prefix=$3

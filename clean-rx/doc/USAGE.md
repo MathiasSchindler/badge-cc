@@ -266,7 +266,7 @@ BOOTSEL. Run:
 
 ```sh
 CLEAN_RX_COLLECTOR=build/clean-rx/badge/collector \
-  bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/new-wpa2-trial
+  bash clean-rx/tools/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/new-wpa2-trial
 ```
 
 The runner boots both USB applications before starting the AP, starts

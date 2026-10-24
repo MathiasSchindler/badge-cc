@@ -5,7 +5,7 @@ ROOT := ../..
 include $(SRC)/firmware.mk
 NATIVE_FLAGS := -std=c11 -Wall -Wextra -Werror -O1 -g \
 	-fsanitize=address,undefined -I$(SRC) -Isupport
-NATIVE_FLAGS += $(PROFILE_FLAGS) $(EXTRA_CFLAGS)
+NATIVE_FLAGS += $(PROFILE_FLAGS) $(SELECTION_FLAGS) $(EXTRA_CFLAGS)
 UNIT_HEADERS := $(wildcard $(SRC)/*.h $(SRC)/psm/*.h $(SRC)/runtime/*.h $(SRC)/diagnostic/*.h support/*.h)
 INTEGRATION_HEADERS := $(UNIT_HEADERS) $(wildcard fixtures/*.h ../badge/*.h ../peer/*.h ../vendor-burst/*.h \
 	$(ROOT)/src/shared/*.h $(ROOT)/src/tools/*.h $(ROOT)/src/radio/*.h)
@@ -44,7 +44,7 @@ ifneq ($(FLAGS_CHANGED),)
 $(addprefix $(BUILD)/,$(UNIT_TESTS) mac_test copy_scope_test early_rx_test): force
 endif
 
-$(addprefix $(BUILD)/,$(UNIT_TESTS) mac_test copy_scope_test early_rx_test): $(BUILD)/test_flags Makefile profiles.mk $(SRC)/firmware.mk
+$(addprefix $(BUILD)/,$(UNIT_TESTS) mac_test copy_scope_test early_rx_test): $(BUILD)/test_flags Makefile profiles.mk $(SRC)/firmware.mk $(SRC)/profiles.mk
 
 $(BUILD)/runtime_test: unit/runtime_test.c $(UNIT_HEADERS) | $(BUILD)
 	$(HOST_CC) $(NATIVE_FLAGS) $< -o $@

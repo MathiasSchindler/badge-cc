@@ -26,7 +26,7 @@ Initial body commands and mid-body replay remain unchanged:
 make -f clean-rx/vendor-burst/Makefile \
   REF_BUILD=build/clean-rx/NEW_C3 reference-handoff-next-c3
 CLEAN_RX_REFERENCE_BUILD=build/clean-rx/NEW_C3 \
-  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
+  bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
 ```
 
 Use `256` for the reverse size order, or the existing named negative
@@ -90,7 +90,7 @@ receiver or HT association:
 make -f clean-rx/vendor-burst/Makefile \
   REF_BUILD=build/clean-rx/NEW_VARIABLE reference-handoff-variable
 CLEAN_RX_REFERENCE_BUILD=build/clean-rx/NEW_VARIABLE \
-  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good 0
+  bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good 0
 ```
 
 The final argument is a rotation selector, `0..7`, not a byte length:
@@ -157,7 +157,7 @@ The supported experimental improvement is narrower:
 make -f clean-rx/vendor-burst/Makefile \
   REF_BUILD=build/clean-rx/NEW_SAFE_VARIABLE reference-handoff-safe-variable
 CLEAN_RX_REFERENCE_BUILD=build/clean-rx/NEW_SAFE_VARIABLE \
-  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good 0
+  bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good 0
 ```
 
 This combines:
@@ -203,7 +203,7 @@ its own passive correlation ID, including the advance tag.
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-stimulus-fifo
-bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL \
+bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL \
     build/clean-rx/vendor-burst/NEW_FIFO_PREFIX - 512
 ```
 
@@ -247,7 +247,7 @@ from the existing one-shot next-body diagnostic:
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-handoff
-bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
+bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
 ```
 
 Use `128` for 170-to-298-byte MPDUs or `256` for the reverse order.
@@ -293,7 +293,7 @@ readback-verify both complete flashes afterward.
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-handoff-monitor
-bash clean-rx/vendor-burst/run.sh CLEAN_TX_SERIAL VENDOR_RX_SERIAL NEW_PREFIX - 128 good
+bash clean-rx/tools/vendor-burst/run.sh CLEAN_TX_SERIAL VENDOR_RX_SERIAL NEW_PREFIX - 128 good
 ```
 
 Use `256` instead of `128` for 298-to-170 rather than 170-to-298.
@@ -346,7 +346,7 @@ Vendor-internal drops remain unknown. See the
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-handoff-defer
-bash clean-rx/vendor-burst/run.sh CLEAN_TX_SERIAL CLEAN_RX_SERIAL NEW_PREFIX - 128 good
+bash clean-rx/tools/vendor-burst/run.sh CLEAN_TX_SERIAL CLEAN_RX_SERIAL NEW_PREFIX - 128 good
 ```
 
 Use `256` for the reverse body order. The default-disabled
@@ -662,7 +662,7 @@ version 7 remains the ordinary two-body fixture.
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-handoff-guard
-bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
+bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
 ```
 
 This tests a second body before the PPDU ends, not three-body delivery.
@@ -720,7 +720,7 @@ baseline controls, not a claim of nonintrusive general receive support.
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-handoff-copy
-bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
+bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128 good
 ```
 
 `handoff-copy-probe` reports owner/epoch, seed readback, phase and
@@ -759,7 +759,7 @@ From the repository root:
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference reference-test
-bash clean-rx/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL \
+bash clean-rx/tools/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL \
     build/clean-rx/vendor-burst/NEW_TRIAL_PREFIX
 ```
 
@@ -773,7 +773,7 @@ For early-body qualification without the next-body advance, use:
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-early
-bash clean-rx/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL \
+bash clean-rx/tools/vendor-burst/run.sh VENDOR_SERIAL OBSERVER_SERIAL \
     build/clean-rx/vendor-burst/NEW_EARLY_PREFIX ssid-data/ssid.txt 256
 ```
 
@@ -832,7 +832,7 @@ queue timing:
 
 ```sh
 make -f clean-rx/vendor-burst/Makefile reference-stimulus
-bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 512
+bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 512
 ```
 
 `reference-stimulus-reset` enables natural one-shot PHY recovery;
@@ -903,7 +903,7 @@ make -f clean-rx/vendor-burst/Makefile \
 make -f clean-rx/vendor-burst/Makefile \
   REF_BUILD=build/clean-rx/replay-control reference-handoff-scope-replay
 CLEAN_RX_REFERENCE_BUILD=build/clean-rx/quiet-control \
-  bash clean-rx/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128
+  bash clean-rx/tools/vendor-burst/run.sh TX_SERIAL RX_SERIAL NEW_PREFIX - 128
 ```
 
 Use a fresh evidence prefix per run; select the other archived build for

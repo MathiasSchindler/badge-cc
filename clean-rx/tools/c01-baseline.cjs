@@ -18,29 +18,24 @@ const testSources = {
     early_rx_test: 'integration/early_rx_test.c',
 };
 const referenceOwner = 'clean-rx/vendor-burst/Makefile';
-const ht = ['CLEAN_RX_HT_RX=1', 'CLEAN_RX_HT_DATA=1'];
-const observer = ['CLEAN_RX_HT_RX=1', 'CLEAN_RX_HT_OBSERVER=1', 'CLEAN_RX_HT_EARLY_SAVE=1'];
+const { profileFlags } = require('./profile-flags.cjs');
+const selections = profileFlags(['default', 'ht-data', 'wmm-edca', 'sdio-self-test', 'observer', 'copy-scope', 'early-prefix']);
+const defines = id => selections[id].split(/\s+/).filter(Boolean).map(flag => flag.slice(2));
 const matrix = [
-    { id: 'default', owner: 'clean-rx/src/Makefile', purpose: 'Ordinary controller', defines: [] },
-    { id: 'ht-data', owner: 'clean-rx/messenger/Makefile', purpose: 'Messenger extended HT payload API', defines: ht },
+    { id: 'default', owner: 'clean-rx/src/Makefile', purpose: 'Ordinary controller', defines: defines('default') },
+    { id: 'ht-data', owner: 'clean-rx/messenger/Makefile', purpose: 'Messenger extended HT payload API', defines: defines('ht-data') },
     { id: 'wmm-edca', owner: 'clean-rx/doc/HT20.md', purpose: 'HT response, EDCA and WMM policy gates',
-        defines: [...ht, 'CLEAN_RX_HT_RESPONSE=1', 'CLEAN_RX_EDCA=1', 'CLEAN_RX_WMM=1'] },
+        defines: defines('wmm-edca') },
     { id: 'sdio-self-test', owner: 'clean-rx/src/main.c', purpose: 'Synthetic SDIO boundary traffic; no RF validation',
-        defines: ['CLEAN_SDIO_SELF_TEST=1', 'CLEAN_SDIO_SELF_TEST_LARGE=1', 'CLEAN_SDIO_SELF_TEST_WINDOW=8'],
+        defines: defines('sdio-self-test'),
         psmNotLinked: true },
     { id: 'observer', owner: referenceOwner, purpose: 'Default reference observer controller',
-        defines: [...observer, 'CLEAN_RX_HT_ADVANCE=1', 'REF_CLEAN_STIMULUS=0'] },
+        defines: defines('observer') },
     { id: 'copy-scope', owner: referenceOwner, purpose: 'reference-handoff-scope-on controller',
-        defines: [...observer, 'REF_CLEAN_STIMULUS=1', 'REF_CLEAN_HANDOFF=1',
-            'CLEAN_RX_HT_ADVANCE=1', 'CLEAN_RX_HT_OBSERVER_FIFO=1', 'CLEAN_RX_HT_COPY_PROBE=1',
-            'CLEAN_RX_HT_COPY_DEFER_STREAM=1', 'CLEAN_RX_HT_COPY_STREAM_PHASE=2',
-            'CLEAN_RX_HT_COPY_STREAM_REARM=6', 'CLEAN_RX_HT_COPY_SCOPE=1'],
+        defines: defines('copy-scope'),
         extraTests: ['copy_scope_test'] },
     { id: 'early-prefix', owner: referenceOwner, purpose: 'reference-early-fifo-prefix controller',
-        defines: [...observer, 'REF_CLEAN_STIMULUS=1', 'CLEAN_RX_HT_WINDOW=1',
-            'CLEAN_RX_HT_REARM_WAIT=1', 'CLEAN_RX_HT_OBSERVER_FIFO=1', 'CLEAN_RX_HT_EARLY_FIFO=1',
-            'CLEAN_RX_HT_REARM_RECOVER=1', 'CLEAN_RX_HT_REARM_INJECT=0', 'CLEAN_RX_HT_ORDERED_FLUSH=1',
-            'CLEAN_RX_HT_PREFIX_RECOVERY=1'], extraTests: ['early_rx_test'] },
+        defines: defines('early-prefix'), extraTests: ['early_rx_test'] },
 ];
 const ordinaryTests = ['psm_ucode_test', 'mac_test', 'block_ack_test', 'rx_recovery_test'];
 const allTests = [...ordinaryTests, 'copy_scope_test', 'early_rx_test'];
@@ -105,7 +100,7 @@ function classify(file) {
     const name = path.basename(file);
     if (file.endsWith('.md')) return ['documentation'];
     if (name === 'Makefile') return ['build-infrastructure'];
-    if (file === 'clean-rx/tests/profiles.mk' || file === 'clean-rx/src/firmware.mk') return ['build-infrastructure'];
+    if (file === 'clean-rx/tests/profiles.mk' || /^clean-rx\/src\/\w+\.mk$/.test(file)) return ['build-infrastructure'];
     if (file.startsWith('clean-rx/src/diagnostic/')) return ['firmware-side-diagnostic'];
     if (file.startsWith('clean-rx/src/runtime/') || file.startsWith('clean-rx/src/psm/'))
         return ['controller-runtime'];
@@ -290,7 +285,7 @@ function capture(outputArgument, recordArgument) {
     const externalInputHashes = Object.fromEntries(externalInputPaths.map(file =>
         [file, sha256(fs.readFileSync(path.join(root, file)))]));
     const catalogue = referenceTargets(fs.readFileSync(path.join(root, referenceOwner), 'utf8'));
-    const flagReferences = inventory.filter(entry => /(?:Makefile|\.md|\.sh)$/.test(entry.file))
+    const flagReferences = inventory.filter(entry => /(?:Makefile|\.md|\.sh|\.mk)$/.test(entry.file))
         .flatMap(entry => fs.readFileSync(path.join(root, entry.file), 'utf8').split('\n')
             .flatMap((line, index) => /EXTRA_CFLAGS|CLEAN_(?:RX_\w+|SDIO_SELF_TEST\w*)\s*=/.test(line)
                 ? [{ file: entry.file, line: index + 1, text: line }] : []));

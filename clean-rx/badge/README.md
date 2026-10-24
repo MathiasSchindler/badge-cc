@@ -34,7 +34,7 @@ Build the badge and the independent vendor-radio AP fixture:
 ```sh
 make -C clean-rx/badge all test
 make -f clean-rx/peer/Makefile ht-peer ht-peer-test
-node clean-rx/badge/lifecycle_verify.cjs --self-test
+node clean-rx/tools/badge/lifecycle_verify.cjs --self-test
 ```
 
 After backing up both full flash images, install the matching badge image
@@ -42,8 +42,8 @@ and `build/clean-rx/peer/vendor_ht.uf2` on the station and AP respectively.
 Leave both in BOOTSEL, then run from the repository root:
 
 ```sh
-bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 0
-bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 5
+bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 0
+bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 5
 ```
 
 The runner never flashes or restores firmware. It boots the installed images,
@@ -134,9 +134,9 @@ Build with the same two commands as B1. After full-flash backup and installation
 of matching images, leave both badges in BOOTSEL and run:
 
 ```sh
-bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 30 --network
-bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 3600 --network
-node clean-rx/badge/network_verify.cjs --self-test
+bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 30 --network
+bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 3600 --network
+node clean-rx/tools/badge/network_verify.cjs --self-test
 ```
 
 The runner's build/tool overrides, signal cleanup and evidence retention are
@@ -210,7 +210,7 @@ and `build/clean-rx/pico-peer/vendor_ht.uf2` on the Pico. Leave both in BOOTSEL:
 
 ```sh
 CLEAN_RX_PEER_COLLECTOR=build/clean-rx/pico-peer/collector \
-  bash clean-rx/badge/qualification_probe.sh STATION_SERIAL PICO_SERIAL NEW_PREFIX 3
+  bash clean-rx/tools/badge/qualification_probe.sh STATION_SERIAL PICO_SERIAL NEW_PREFIX 3
 ```
 
 The final parameter is 1..10 cold rounds per configuration, default 3.
@@ -229,8 +229,8 @@ Neither vendor firmware nor shared platform/AP setup code is modified.
 The low-level paired runner is also available:
 
 ```sh
-bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL PICO_SERIAL NEW_PREFIX 0 --qualification 6
-node clean-rx/badge/qualification_verify.cjs MATRIX_PREFIX 3 STATION_SERIAL PICO_SERIAL
+bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL PICO_SERIAL NEW_PREFIX 0 --qualification 6
+node clean-rx/tools/badge/qualification_verify.cjs MATRIX_PREFIX 3 STATION_SERIAL PICO_SERIAL
 ```
 
 Both endpoint archives, JSON/JSONL, stderr and boot logs are retained.
@@ -536,9 +536,9 @@ For a reproducible two-badge test, first load the vendor `usb-wifi-link` image
 on the AP and this image on the station, leaving both in BOOTSEL, then run:
 
 ```sh
-bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/wpa2-trial
+bash clean-rx/tools/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/wpa2-trial
 # Negative control, with a fresh temporary network:
-bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/wpa2-wrong --wrong-password
+bash clean-rx/tools/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL build/wpa2-wrong --wrong-password
 ```
 
 The runner creates temporary credentials in a private directory, removes them
@@ -584,11 +584,11 @@ the runners below deliberately do not flash or restore devices.
 ```sh
 export CLEAN_RX_COLLECTOR=build/clean-rx/e1/badge/collector
 export CLEAN_RX_AP_COLLECTOR=build/clean-rx/e1/peer-pico/collector
-bash clean-rx/badge/wpa2_matrix.sh AP_SERIAL STATION_SERIAL NEW_PREFIX
-node clean-rx/badge/wpa2_verify.cjs --matrix NEW_PREFIX STATION_SERIAL AP_SERIAL
+bash clean-rx/tools/badge/wpa2_matrix.sh AP_SERIAL STATION_SERIAL NEW_PREFIX
+node clean-rx/tools/badge/wpa2_verify.cjs --matrix NEW_PREFIX STATION_SERIAL AP_SERIAL
 
 # One fresh protected connection, optionally using --raw-psk or --wrong-password:
-bash clean-rx/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL NEW_PREFIX \
+bash clean-rx/tools/badge/wpa2_trial.sh AP_SERIAL STATION_SERIAL NEW_PREFIX \
   --peer-ap 6 --raw-psk
 ```
 
@@ -658,7 +658,7 @@ make -f clean-rx/peer/Makefile HT_PEER_BUILD=build/clean-rx/e2-finish/peer-pico 
 
 CLEAN_RX_COLLECTOR=build/clean-rx/e2-finish/badge/collector \
 CLEAN_RX_AP_COLLECTOR=build/clean-rx/e2-finish/peer-pico/collector \
-bash clean-rx/badge/wpa2_trial.sh 6572BE3E4636AF51 08DA26F86E57F5EA \
+bash clean-rx/tools/badge/wpa2_trial.sh 6572BE3E4636AF51 08DA26F86E57F5EA \
   build/clean-rx/e2-finish/hardware/NEW_PREFIX --peer-ap 1 --rekey
 ```
 
@@ -679,7 +679,7 @@ The runner's `--group-traffic` is deliberately **traffic-only**, not an E2
 milestone pass. `--rekey` invokes the stronger verifier without that override:
 
 ```sh
-node clean-rx/badge/wpa2_rekey_verify.cjs PREFIX STATION_SERIAL AP_SERIAL
+node clean-rx/tools/badge/wpa2_rekey_verify.cjs PREFIX STATION_SERIAL AP_SERIAL
 ```
 
 Full acceptance requires three group and three pairwise rekeys, each with
@@ -1026,9 +1026,9 @@ Flash the same current clean image onto both badges, leave them in BOOTSEL,
 and use a fresh evidence prefix:
 
 ```sh
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-soak 5000
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-soak 5000
 # Optionally suppress the first two eligible ACKs at each endpoint:
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-loss 100 2
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-loss 100 2
 ```
 
 This does not flash or change the Mac's networking. It runs the responder
@@ -1133,10 +1133,10 @@ endpoint reports; the original cyclic-size coverage is not silently reduced.
 Collectors accept `[DROP_ACKS [PHY [PAYLOAD]]]` after `COUNT`.
 
 ```sh
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1500 100 0 1-long 1500
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-11-short 100 0 11-short
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-boundary 10 0 1-long cck-boundary
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1600 5 0 1-long 1600
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1500 100 0 1-long 1500
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-11-short 100 0 11-short
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-boundary 10 0 1-long cck-boundary
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/cck-1-1600 5 0 1-long 1600
 ```
 
 The last challenge byte encodes PHY in bits 0..2 and payload selection in
@@ -1402,8 +1402,8 @@ transport fragments or A-MPDUs. `COUNT` still counts complete MSDUs per
 direction, not fragments. For example, after flashing matching images:
 
 ```sh
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag2 100 2 ofdm6 frag2
-bash clean-rx/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag16 20 2 ofdm6 frag16
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag2 100 2 ofdm6 frag2
+bash clean-rx/tools/badge/mac_soak.sh INIT_SERIAL REPLY_SERIAL build/mac-frag16 20 2 ofdm6 frag16
 ```
 
 The controller now admits bounded legacy To-DS Data fragments through its
@@ -1891,7 +1891,7 @@ on the station badge, reproduce ten protected trials, two wrong-password
 controls and three open controls without changing the Mac's network:
 
 ```sh
-bash clean-rx/badge/mac_trials.sh AP_SERIAL CLEAN_STATION_SERIAL \
+bash clean-rx/tools/badge/mac_trials.sh AP_SERIAL CLEAN_STATION_SERIAL \
   build/clean-rx/badge/NEW_EVIDENCE_PREFIX
 ```
 

@@ -205,20 +205,28 @@ No hardware/RF acceptance was performed; the separate C05 gate remains.
 
 **Prerequisites:** C03, C05, C06.
 
-- [ ] Clearly distinguish host firmware from collectors, campaign runners,
+- [x] Clearly distinguish host firmware from collectors, campaign runners,
   evidence verifiers and independent peer fixtures.
-- [ ] Keep development tools outside controller source and out of ordinary
+- [x] Keep development tools outside controller source and out of ordinary
   firmware build prerequisites.
-- [ ] Centralize named controller profile definitions within `src/`; make
+- [x] Centralize named controller profile definitions within `src/`; make
   external runners select them instead of maintaining divergent flag lists.
-- [ ] Preserve existing campaign identities and invocation behavior, or
+- [x] Preserve existing campaign identities and invocation behavior, or
   document intentional migration steps and validate replacement commands.
-- [ ] Ensure builds and offline tests never flash devices or start RF
+- [x] Ensure builds and offline tests never flash devices or start RF
   experiments implicitly.
 
 **Acceptance:** each profile has one authoritative definition, tools remain
 usable against their intended firmware variants, and a controller build
 requires no collectors, USB libraries, peer SDKs or campaign infrastructure.
+
+Implementation and offline validation:
+[C07 tool and profile ownership](dev-doc/C07_TOOL_AND_PROFILE_OWNERSHIP.md).
+Named selections are owned by `src/profiles.mk`; development tools live
+under `tools/`. Existing campaign Make targets and flags are preserved,
+with explicit tool-path migration and firmware-only build targets.
+All 74 diagnostic selections and six runtime comparisons retain their
+controller/PSM baselines. No hardware or RF tests were performed.
 
 ### C08 - Enforce boundaries and complete documentation
 

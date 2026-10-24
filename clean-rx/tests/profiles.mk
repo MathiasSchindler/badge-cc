@@ -1,17 +1,12 @@
-OBSERVER_FLAGS := -DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1
-COPY_SCOPE_FLAGS := $(OBSERVER_FLAGS) -DREF_CLEAN_STIMULUS=1 -DREF_CLEAN_HANDOFF=1 \
-	-DCLEAN_RX_HT_ADVANCE=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_COPY_PROBE=1 \
-	-DCLEAN_RX_HT_COPY_DEFER_STREAM=1 -DCLEAN_RX_HT_COPY_STREAM_PHASE=2 \
-	-DCLEAN_RX_HT_COPY_STREAM_REARM=6 -DCLEAN_RX_HT_COPY_SCOPE=1
-EARLY_RX_FLAGS := $(OBSERVER_FLAGS) -DREF_CLEAN_STIMULUS=1 -DCLEAN_RX_HT_WINDOW=1 \
-	-DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_OBSERVER_FIFO=1 -DCLEAN_RX_HT_EARLY_FIFO=1 \
-	-DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_INJECT=0
-RECOVERY_FLAGS := $(EARLY_RX_FLAGS) -DCLEAN_RX_HT_ORDERED_FLUSH=1 -DCLEAN_RX_HT_PREFIX_RECOVERY=1
+OBSERVER_FLAGS = $(CLEAN_PROFILE_reference-early)
+COPY_SCOPE_FLAGS = $(CLEAN_PROFILE_copy-scope)
+EARLY_RX_FLAGS = $(CLEAN_PROFILE_early-rx)
+RECOVERY_FLAGS = $(CLEAN_PROFILE_early-prefix)
 
 .PHONY: test-copy-scope test-early-rx test-recovery
 test-copy-scope:
-	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/copy-scope PROFILE=diagnostic EXTRA_CFLAGS='$(COPY_SCOPE_FLAGS)' test copy-scope-test
+	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/copy-scope PROFILE=diagnostic SELECTION=copy-scope EXTRA_CFLAGS= test copy-scope-test
 test-early-rx:
-	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/early-rx PROFILE=diagnostic EXTRA_CFLAGS='$(EARLY_RX_FLAGS)' test early-rx-test
+	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/early-rx PROFILE=diagnostic SELECTION=early-rx EXTRA_CFLAGS= test early-rx-test
 test-recovery:
-	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/recovery PROFILE=diagnostic EXTRA_CFLAGS='$(RECOVERY_FLAGS)' test early-rx-test
+	$(MAKE) BUILD=$(abspath $(BUILD))/profiles/recovery PROFILE=diagnostic SELECTION=early-prefix EXTRA_CFLAGS= test early-rx-test

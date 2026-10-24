@@ -11,12 +11,12 @@ if [[ ( $# -ne 4 && $network -ne 1 && $qualification -ne 1 ) || ! $1 =~ ^[0-9A-F
       ! $2 =~ ^[0-9A-F]{16}$ || $1 == "$2" ||
       ( $network -eq 0 && ! $4 =~ ^[0-5]$ ) ||
       ( $network -eq 1 && ! $4 =~ ^[0-9]{2,4}$ ) ]]; then
-    echo "Usage: bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX CYCLES:0-5" >&2
-    echo "B2: bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX SECONDS:10-3900 --network" >&2
-    echo "B3: bash clean-rx/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 0 --qualification CHANNEL:1,6,11" >&2
+    echo "Usage: bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX CYCLES:0-5" >&2
+    echo "B2: bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX SECONDS:10-3900 --network" >&2
+    echo "B3: bash clean-rx/tools/badge/lifecycle_probe.sh STATION_SERIAL AP_SERIAL NEW_PREFIX 0 --qualification CHANNEL:1,6,11" >&2
     exit 2
 fi
-cd "$(dirname "$0")/../.." || exit 1
+cd "$(dirname "$0")/../../.." || exit 1
 station=$1 ap=$2 prefix=$3 cycles=$4
 if (( network )) && (( 10#$4 < 10 || 10#$4 > 3900 )); then
     echo "B2 duration must be 10..3900 seconds" >&2; exit 2
@@ -92,9 +92,9 @@ if wait "$ap_pid"; then ap_ok=1; fi
 ap_pid=
 if (( !station_ok || !ap_ok )); then echo "Station trial failed; retain both endpoint logs" >&2; exit 1; fi
 if (( network )); then
-    node clean-rx/badge/network_verify.cjs "$prefix" "$station_seconds" > "$prefix-pair.json"
+    node clean-rx/tools/badge/network_verify.cjs "$prefix" "$station_seconds" > "$prefix-pair.json"
 else
     verify_args=("$prefix" "$cycles")
     if (( qualification )); then verify_args+=("$channel"); fi
-    node clean-rx/badge/lifecycle_verify.cjs "${verify_args[@]}" > "$prefix-pair.json"
+    node clean-rx/tools/badge/lifecycle_verify.cjs "${verify_args[@]}" > "$prefix-pair.json"
 fi

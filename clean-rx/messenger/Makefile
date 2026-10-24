@@ -3,7 +3,9 @@ BUILD ?= $(ROOT)/build/clean-rx/messenger
 ROLE ?= 1
 BASELINE ?= 0
 CONTROLLER := $(abspath $(BUILD)/controller/cyw43_rx_fw.bin)
-FLAGS := -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_HT_RX=1
+include ../src/profiles.mk
+FLAGS := $(CLEAN_PROFILE_ht-data)
+COLLECTOR := ../tools/messenger/collector.c
 APP_FLAGS := -DWIFI_TRACE_SIZE=512u -DMSG_BASELINE=$(BASELINE)
 CC := clang
 CFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 \
@@ -26,17 +28,19 @@ OBJECTS := $(addprefix $(BUILD)/role$(ROLE)/,$(notdir $(SOURCES:.c=.o))) \
 	$(BUILD)/role$(ROLE)/picobin.o $(BUILD)/role$(ROLE)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
 
-.PHONY: all pair controller force test
+.PHONY: all firmware tools pair controller force test
 all: $(BUILD)/role$(ROLE)/messenger.uf2 $(BUILD)/collector
+firmware: $(BUILD)/role$(ROLE)/messenger.uf2
+tools: $(BUILD)/collector
 pair:
 	$(MAKE) ROLE=1 all
 	$(MAKE) ROLE=2 all
 controller:
-	$(MAKE) -C ../src CC=clang BUILD=$(abspath $(BUILD)/controller) PROFILE=runtime EXTRA_CFLAGS='$(FLAGS)'
+	$(MAKE) -C ../src CC=clang BUILD=$(abspath $(BUILD)/controller) PROFILE=runtime SELECTION=ht-data
 $(BUILD) $(BUILD)/role$(ROLE):
 	mkdir -p $@
 $(BUILD)/build_id.h: force controller | $(BUILD)
-	@id=$$({ shasum -a 256 $(SOURCES) $(HEADERS) collector.c Makefile $(CONTROLLER); \
+	@id=$$({ shasum -a 256 $(SOURCES) $(HEADERS) Makefile $(CONTROLLER); \
 		printf '%s\n' '$(APP_FLAGS)'; } | shasum -a 256 | cut -c1-8); \
 	printf '#define USB_REPORT_BUILD_ID 0x%su\n' "$$id" > $@.tmp; \
 	if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
@@ -57,9 +61,9 @@ $(ROOT)/build/host-tools/bin2uf2:
 	$(MAKE) -C $(ROOT) build/host-tools/bin2uf2
 $(BUILD)/role$(ROLE)/messenger.uf2: $(BUILD)/role$(ROLE)/messenger.bin $(ROOT)/build/host-tools/bin2uf2
 	$(ROOT)/build/host-tools/bin2uf2 $< $@ 0x10000000 0xe48bff59
-$(BUILD)/collector: collector.c link.c $(HEADERS) $(BUILD)/build_id.h
+$(BUILD)/collector: $(COLLECTOR) link.c $(HEADERS) $(BUILD)/build_id.h
 	cc -std=c11 -Wall -Wextra -Werror -O2 $(FLAGS) $(APP_FLAGS) -I$(BUILD) $$(pkg-config --cflags libusb-1.0) \
-		collector.c link.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c \
+		$(COLLECTOR) link.c ../src/mac.c ../src/block_ack.c $(ROOT)/src/shared/usb_report.c \
 		$(ROOT)/src/tools/diagnostics_logic.c $(ROOT)/src/radio/wifi_trace.c \
 		$$(pkg-config --libs libusb-1.0) -o $@
 test: $(BUILD)/link_test
