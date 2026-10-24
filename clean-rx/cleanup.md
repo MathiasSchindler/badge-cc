@@ -101,7 +101,9 @@ Ordinary firmware rejects diagnostic commands and cannot activate synthetic
 traffic or ACK suppression; passive evidence and recovery remain available.
 This deliberately changed runtime behavior. Implementation and offline tests
 are complete; [hardware acceptance](dev-doc/guides/HARDWARE_TRIALS.md#runtime-profile-acceptance)
-remains unperformed. See [the profile record](dev-doc/history/cleanup/C05_DIAGNOSTIC_PROFILES.md).
+remains incomplete. The [2026-10-24 regression](dev-doc/experiments/HARDWARE_REGRESSION_2026-10-24.md)
+adds bounded runtime RX/TX coverage, not full acceptance.
+See [the profile record](dev-doc/history/cleanup/C05_DIAGNOSTIC_PROFILES.md).
 
 ### C06 - Decompose controller orchestration and PSM composition
 
@@ -138,7 +140,8 @@ make -C clean-rx check BUILD=../build/clean-rx/acceptance-NEW
 
 **C01-C08 structural cleanup is complete.** Remaining
 [feature/reliability limits](dev-doc/issues/README.md) and the separate C05 hardware
-acceptance gate remain open. No new hardware/RF qualification was performed.
+acceptance gate remain open. C01-C08 offline acceptance itself performed no
+new hardware/RF qualification; later campaigns are recorded separately.
 
 ### C09 - Formalize and check the documentation boundary
 

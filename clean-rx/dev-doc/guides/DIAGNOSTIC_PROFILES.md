@@ -10,6 +10,9 @@ Diagnostics cover receive and transmit paths, including aggregate transmit
 stimuli and returned Block ACK frames. Qualification limits apply to each
 profile separately, not to transmission as a whole.
 
+For board-level coverage and failed diagnostic acceptance, see the
+[2026-10-24 badge/Pico regression](../experiments/HARDWARE_REGRESSION_2026-10-24.md).
+
 Select diagnostics explicitly and keep host/controller/collector images
 matched. Offline validation is described in [the development guide](DEVELOPMENT.md).
 Hardware work additionally requires [the trial protocol](HARDWARE_TRIALS.md).

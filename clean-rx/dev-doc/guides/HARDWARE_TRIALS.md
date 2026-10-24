@@ -45,8 +45,8 @@ Current unresolved qualifications are in [the issue register](../issues/README.m
 
 C05 changes ordinary ACK-path timing and command admission deliberately.
 The earlier C04 receive-only device check does not qualify it, and its
-one-time hardware authorization has ended. No C05 device flashing,
-execution or RF campaign is authorized or performed here.
+one-time hardware authorization has ended. This checklist grants no
+authorization; a completed campaign qualifies only its recorded scope.
 
 Before qualifying C05 on hardware, obtain new authorization and retain
 backup/restore safeguards. Test the new runtime profile for receive/F2
@@ -56,5 +56,4 @@ errors without traffic injection. Separately qualify diagnostic ACK-loss,
 HT/aggregate and SDIO campaigns only within their authorized scope.
 Record matched host/controller profile, flags, hashes and independent
 on-device evidence; native/byte-identity results do not substitute for it.
-
 

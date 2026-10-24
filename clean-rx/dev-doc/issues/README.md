@@ -66,13 +66,29 @@ retaining failed controls and independent physical evidence.
 
 ### Runtime profile hardware qualification
 
-**Status:** not run. C05 deliberately changed runtime command admission and
-the unsuppressed ACK path. Later byte-preserving changes do not qualify
-that behavior on silicon.
+**Status:** partially exercised; the full acceptance gate remains open.
+The [2026-10-24 regression](../experiments/HARDWARE_REGRESSION_2026-10-24.md)
+exercised runtime 6 Mbps OFDM RX/F2 and TX/echo on both badges and the Pico.
+C05 deliberately changed command admission and the unsuppressed ACK path;
+this bounded raw-traffic result does not qualify all of that behavior.
 
 **Next evidence:** obtain fresh authorization and execute the
 [runtime profile acceptance procedure](../guides/HARDWARE_TRIALS.md#runtime-profile-acceptance).
 The earlier one-device C04 receive-only test does not close this gate.
+
+### Aggregate diagnostic host deadline and incomplete reports
+
+**Status:** reproducible acceptance failure in the
+[2026-10-24 regression](../experiments/HARDWARE_REGRESSION_2026-10-24.md#experimental-aggregate-and-ba-failures).
+SHM/BA receivers exhaust the cumulative six-second loader budget before
+completing their final snapshots, including fresh channel-1 controls.
+Valid independently returned BA frames do not make the incomplete receiver
+reports pass. DMA also exposed a separate controller `0x8d` fault.
+
+**Next evidence:** correct and test the operation/snapshot deadline accounting
+without removing bounded recovery, then rerun matched positive and bad-FCS
+controls with valid frozen payload/lease evidence. Retain the DMA fault as
+a separate investigation. General HT/BA and physical timing gates stay open.
 
 ### Badge silicon identification
 
@@ -101,8 +117,9 @@ disabled/unselected model as an executed diagnostic pass.
 
 The one-time C04 hardware check used one badge in receive-only scope,
 restored its full flash backup and byte-verified the restoration; it did
-not qualify TX, other devices, or later profile changes. No new C05-C08
-flashing, device execution or RF qualification was performed.
+not qualify TX, other devices, or later profile changes. The later
+[2026-10-24 campaign](../experiments/HARDWARE_REGRESSION_2026-10-24.md)
+adds bounded RX/TX evidence and records failed diagnostic acceptance;
+it does not close all runtime, reliability or timing gates.
 Any new campaign follows [the hardware protocol](../guides/HARDWARE_TRIALS.md);
 no document reorganization supplies authorization or new RF evidence.
-

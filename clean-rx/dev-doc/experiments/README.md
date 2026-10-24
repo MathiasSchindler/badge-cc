@@ -6,6 +6,12 @@ They are historical evidence, not live TODO lists or current operating guides.
 Follow [the hardware protocol](../guides/HARDWARE_TRIALS.md) before any new run.
 Use [current issues](../issues/README.md) for what remains open.
 
+## Cross-board and capability regressions
+
+- [2026-10-24 badge/Pico RX/TX regression](HARDWARE_REGRESSION_2026-10-24.md):
+  raw cross-board exchanges, badge legacy/HT and station/security tests,
+  experimental aggregate/BA failures and complete flash restoration.
+
 ## Receive reliability and PHY controls
 
 - [AP authentication and receive-service controls](rx/AP_AUTHENTICATION.md):
