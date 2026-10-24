@@ -19,7 +19,7 @@ SOURCES := main.c link.c ../badge/loader.c ../src/mac.c ../src/block_ack.c \
 	$(ROOT)/src/platform/badger/display.c $(ROOT)/src/platform/badger/graphics.c \
 	$(ROOT)/src/radio/wifi_gspi.c $(ROOT)/src/radio/wifi_probe.c \
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
-HEADERS := $(wildcard *.h ../src/*.h ../badge/loader.h $(ROOT)/src/shared/*.h \
+HEADERS := $(wildcard *.h ../src/*.h ../src/psm/*.h ../badge/loader.h $(ROOT)/src/shared/*.h \
 	$(ROOT)/src/usb/*.h $(ROOT)/src/radio/*.h $(ROOT)/src/platform/badger/*.h \
 	$(ROOT)/src/arch/rp2350/*.h $(ROOT)/src/tools/diagnostics_logic.h)
 OBJECTS := $(addprefix $(BUILD)/role$(ROLE)/,$(notdir $(SOURCES:.c=.o))) \

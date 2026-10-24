@@ -107,6 +107,8 @@ function classify(file) {
     if (name === 'Makefile') return ['build-infrastructure'];
     if (file === 'clean-rx/tests/profiles.mk' || file === 'clean-rx/src/firmware.mk') return ['build-infrastructure'];
     if (file.startsWith('clean-rx/src/diagnostic/')) return ['firmware-side-diagnostic'];
+    if (file.startsWith('clean-rx/src/runtime/') || file.startsWith('clean-rx/src/psm/'))
+        return ['controller-runtime'];
     if (file.startsWith('clean-rx/tests/fixtures/')) return ['development-tool', 'shared-test-fixture'];
     if (file.startsWith('clean-rx/tests/')) return ['native-test'];
     if (name.endsWith('_test.c') || name.endsWith('.test.cjs')) return ['native-test'];

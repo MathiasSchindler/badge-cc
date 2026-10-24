@@ -41,7 +41,7 @@ REF_VOBJS := $(addprefix $(REF_BUILD)/vendor/,$(notdir $(REF_VENDOR:.c=.o))) \
 REF_OOBJS := $(addprefix $(REF_BUILD)/observer/,$(notdir $(REF_OBSERVER:.c=.o))) \
 	$(REF_BUILD)/observer/assets.o $(REF_BUILD)/picobin.o
 DIAGNOSTIC_FLAGS := -DCLEAN_RX_DIAGNOSTIC=1
-REF_HEADERS := $(wildcard $(REF_DIR)/*.h clean-rx/src/*.h clean-rx/src/diagnostic/*.h clean-rx/tests/fixtures/*.h clean-rx/badge/loader.h \
+REF_HEADERS := $(wildcard $(REF_DIR)/*.h clean-rx/src/*.h clean-rx/src/psm/*.h clean-rx/src/diagnostic/*.h clean-rx/tests/fixtures/*.h clean-rx/badge/loader.h \
 	$(SHARED_DIR)/*.h src/usb/*.h $(RADIO_DIR)/*.h $(PLATFORM_DIR)/*.h $(ARCH_DIR)/*.h)
 VPATH := $(sort $(dir $(REF_VENDOR) $(REF_OBSERVER)))
 

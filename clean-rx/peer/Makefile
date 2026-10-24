@@ -12,7 +12,7 @@ HT_PEER_SHARED := $(filter-out $(FIRMWARE_DIR)/usb_wifi_firmware.o \
 	$(HT_PEER_BUILD)/live_usb_control.o $(HT_PEER_BUILD)/live_usb_hw.o $(HT_PEER_BUILD)/wpa2_crypto.o \
 	$(HT_PEER_BUILD)/authenticator.o
 HT_PEER_INPUTS := $(HT_PEER_DIR)/main.c $(HT_PEER_DIR)/collector.c \
-	$(wildcard clean-rx/src/*.h clean-rx/host/*.h clean-rx/tests/fixtures/*.h) \
+	$(wildcard clean-rx/src/*.h clean-rx/src/psm/*.h clean-rx/host/*.h clean-rx/tests/fixtures/*.h) \
 	$(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/lifecycle.h \
 	$(HT_PEER_DIR)/lifecycle_usb.h $(HT_PEER_DIR)/Makefile \
 	$(HT_PEER_DIR)/network.c $(HT_PEER_DIR)/network.h $(HT_PEER_DIR)/network_json.h \
@@ -92,12 +92,12 @@ ht-peer-test: $(HT_PEER_BUILD)/protocol_test $(HT_PEER_BUILD)/network_test $(HT_
 	$(HT_PEER_BUILD)/authenticator_test
 	$(HT_PEER_BUILD)/cck_monitor_test
 
-$(HT_PEER_BUILD)/cck_monitor_test: $(HT_PEER_DIR)/cck_monitor_test.c $(HT_PEER_DIR)/cck_monitor.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/protocol.h $(wildcard clean-rx/src/*.h clean-rx/tests/fixtures/*.h) clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_control.c $(RADIO_DIR)/wifi_control.h | $(HT_PEER_BUILD)
+$(HT_PEER_BUILD)/cck_monitor_test: $(HT_PEER_DIR)/cck_monitor_test.c $(HT_PEER_DIR)/cck_monitor.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/protocol.h $(wildcard clean-rx/src/*.h clean-rx/src/psm/*.h clean-rx/tests/fixtures/*.h) clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c $(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_control.c $(RADIO_DIR)/wifi_control.h | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
 		$< clean-rx/src/mac.c clean-rx/src/block_ack.c $(SHARED_DIR)/usb_report.c \
 		$(TOOLS_DIR)/diagnostics_logic.c $(RADIO_DIR)/wifi_control.c -o $@
 
-$(HT_PEER_BUILD)/authenticator_test: $(HT_PEER_DIR)/authenticator_test.c $(HT_PEER_DIR)/authenticator.c $(HT_PEER_DIR)/authenticator.h $(wildcard clean-rx/badge/*.h clean-rx/src/*.h clean-rx/host/*.h) clean-rx/badge/wpa2.c clean-rx/host/wpa2_crypto.c clean-rx/src/mac.c clean-rx/src/block_ack.c | $(HT_PEER_BUILD)
+$(HT_PEER_BUILD)/authenticator_test: $(HT_PEER_DIR)/authenticator_test.c $(HT_PEER_DIR)/authenticator.c $(HT_PEER_DIR)/authenticator.h $(wildcard clean-rx/badge/*.h clean-rx/src/*.h clean-rx/src/psm/*.h clean-rx/host/*.h) clean-rx/badge/wpa2.c clean-rx/host/wpa2_crypto.c clean-rx/src/mac.c clean-rx/src/block_ack.c | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
 		$< $(HT_PEER_DIR)/authenticator.c clean-rx/badge/wpa2.c clean-rx/host/wpa2_crypto.c \
 		clean-rx/src/mac.c clean-rx/src/block_ack.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
@@ -110,7 +110,7 @@ $(HT_PEER_BUILD)/network_test: $(HT_PEER_DIR)/network_test.c $(HT_PEER_DIR)/netw
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
 		$< $(HT_PEER_DIR)/network.c $(TOOLS_DIR)/diagnostics_logic.c -o $@
 
-$(HT_PEER_BUILD)/protocol_test: $(HT_PEER_DIR)/protocol_test.c $(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/cck_monitor.h $(wildcard clean-rx/src/*.h clean-rx/host/*.h clean-rx/tests/fixtures/*.h) $(HT_PEER_DIR)/lifecycle_usb.h $(HT_PEER_DIR)/protected_ap.h clean-rx/host/wpa2_crypto.c $(HT_PEER_DIR)/Makefile src/usb/live_usb_control.c | $(HT_PEER_BUILD)
+$(HT_PEER_BUILD)/protocol_test: $(HT_PEER_DIR)/protocol_test.c $(HT_PEER_DIR)/protocol.h $(HT_PEER_DIR)/frame.h $(HT_PEER_DIR)/cck_monitor.h $(wildcard clean-rx/src/*.h clean-rx/src/psm/*.h clean-rx/host/*.h clean-rx/tests/fixtures/*.h) $(HT_PEER_DIR)/lifecycle_usb.h $(HT_PEER_DIR)/protected_ap.h clean-rx/host/wpa2_crypto.c $(HT_PEER_DIR)/Makefile src/usb/live_usb_control.c | $(HT_PEER_BUILD)
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -DLIVE_USB_FIRMWARE -DLIVE_USB_CLEAN \
 		$< clean-rx/host/wpa2_crypto.c src/usb/live_usb_control.c $(SHARED_DIR)/usb_report.c \
 		$(TOOLS_DIR)/diagnostics_logic.c $(WIFI_USB_HOST_SOURCES) -o $@

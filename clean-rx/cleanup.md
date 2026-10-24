@@ -178,21 +178,28 @@ unperformed gate requiring new authorization.
 
 **Prerequisites:** C04, C05.
 
-- [ ] Extract cohesive responsibilities from `main.c`: transport/DMA,
+- [x] Extract cohesive responsibilities from `main.c`: transport/DMA,
   station/MAC coordination, command dispatch and diagnostic publication.
-- [ ] Give mutable state explicit ownership and keep orchestration small;
+- [x] Give mutable state explicit ownership and keep orchestration small;
   avoid replacing one large file with hidden cross-module globals.
-- [ ] Separate ordinary PSM program composition from experimental fragments
+- [x] Separate ordinary PSM program composition from experimental fragments
   in `psm_ack.h` and `ht_observer.h`.
-- [ ] Preserve PSM label ordering, instruction addresses, hook targets and
+- [x] Preserve PSM label ordering, instruction addresses, hook targets and
   bounded control flow during organizational moves.
-- [ ] Keep assertions covering memory overlap, ABI geometry and emitted
+- [x] Keep assertions covering memory overlap, ABI geometry and emitted
   instruction constraints close to their owning contracts.
 
 **Acceptance:** organizational changes preserve binary/PSM baselines across
 the retained profile matrix. Any unavoidable differences receive explicit
 instruction/layout analysis and the required requalification rather than
 being treated as harmless file moves.
+
+Implementation and offline validation:
+[C06 controller composition](dev-doc/C06_CONTROLLER_COMPOSITION.md).
+All 74 retained diagnostic selections match C01 controller/PSM bytes;
+six ordinary runtime selections match C05 bytes and mutable-storage
+layouts. Implementation fragments retain one compilation unit deliberately.
+No hardware/RF acceptance was performed; the separate C05 gate remains.
 
 ### C07 - Separate development tooling and centralize profile ownership
 

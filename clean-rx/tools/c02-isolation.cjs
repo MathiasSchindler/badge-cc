@@ -78,9 +78,9 @@ function referenceProfileUnchanged(current, original) {
     return resolverMakefile(current).text === resolverMakefile(original).text;
 }
 
-function buildProfile(source, build, flags, isolated) {
+function buildProfile(source, build, flags, isolated, profile) {
     fs.mkdirSync(build);
-    const args = ['-C', source, 'CC=clang', ...(isolated ? ['PROFILE=diagnostic'] : []),
+    const args = ['-C', source, 'CC=clang', ...(profile ? [`PROFILE=${profile}`] : isolated ? ['PROFILE=diagnostic'] : []),
         `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`, 'all'];
     run('make', args, root, path.join(build, 'build.log'));
     const compilerFlags = fs.readFileSync(path.join(build, 'build_flags'), 'utf8').trim().split('\n')[1].trim().split(/\s+/);
@@ -236,7 +236,7 @@ function verify(outputArgument, recordArgument) {
     }
 }
 
-module.exports = { flagKey, resolverMakefile, referenceProfileUnchanged, inside };
+module.exports = { flagKey, resolverMakefile, referenceProfileUnchanged, inside, buildProfile };
 if (require.main === module) {
     try {
         if (process.argv.length < 3 || process.argv.length > 4) {

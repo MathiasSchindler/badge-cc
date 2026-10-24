@@ -21,7 +21,7 @@ SOURCES := main.c loader.c wpa2.c ../host/wpa2_crypto.c ../src/mac.c ../src/bloc
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o $(BUILD)/assets.o
 VPATH := $(sort $(dir $(SOURCES)))
-HEADERS := $(wildcard *.h ../src/*.h ../src/diagnostic/*.h ../host/*.h ../tests/fixtures/*.h $(ROOT)/src/tools/diagnostics_logic.h \
+HEADERS := $(wildcard *.h ../src/*.h ../src/psm/*.h ../src/diagnostic/*.h ../host/*.h ../tests/fixtures/*.h $(ROOT)/src/tools/diagnostics_logic.h \
 	../peer/frame.h ../peer/protocol.h ../peer/lifecycle.h ../peer/network.h ../peer/network_json.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio platform/badger arch/rp2350)))
 NATIVE_TESTS := $(addprefix $(BUILD)/,loader_test loader_strict_test wpa2_test secret_test ht20_test station_lifecycle_test)

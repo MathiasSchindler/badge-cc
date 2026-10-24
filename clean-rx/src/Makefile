@@ -16,7 +16,7 @@ LDFLAGS := -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings -T cyw4
 
 SRCS    := main.c pmu.c radio_phy.c psm_ucode.c mac.c block_ack.c
 OBJS    := $(BUILD)/startup.o $(addprefix $(BUILD)/,$(SRCS:.c=.o))
-HEADERS := $(wildcard *.h)
+HEADERS := $(wildcard *.h runtime/*.h runtime/*.inc psm/*.h)
 ifneq ($(PROFILE),runtime)
 HEADERS += $(wildcard diagnostic/*.h diagnostic/*.inc)
 endif
@@ -28,7 +28,7 @@ all: $(BUILD)/cyw43_rx_fw.bin $(BUILD)/profile.txt
 # Some supported Make versions compare timestamps only to whole seconds.
 FLAGS_CHANGED := $(shell printf '%s\n' '$(CC)' '$(CFLAGS)' '$(PROFILE)' | cmp -s - '$(BUILD)/build_flags' || printf changed)
 ifneq ($(FLAGS_CHANGED),)
-$(OBJS): force
+$(OBJS) $(BUILD)/cyw43_rx_fw.elf $(BUILD)/cyw43_rx_fw.bin $(BUILD)/profile.txt: force
 endif
 
 $(BUILD)/profile.txt: $(BUILD)/cyw43_rx_fw.bin $(BUILD)/build_flags

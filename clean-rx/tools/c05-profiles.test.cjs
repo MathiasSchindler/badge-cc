@@ -27,10 +27,9 @@ test('actual runtime dispatch guard reports diagnostic commands through firmware
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-c05-command-'));
     try {
         const main = fs.readFileSync(path.join(source, 'main.c'), 'utf8');
-        const start = main.indexOf('        uint32_t cmd = MBOX->host_cmd;');
-        const end = main.indexOf('#if CLEAN_RX_HT_OBSERVER_FIFO', start);
-        assert.ok(start > 0 && end > start);
-        const guard = main.slice(start, end);
+        assert.ok(main.includes('        uint32_t cmd = MBOX->host_cmd;\n#include "runtime/command_guard.inc"'));
+        const guard = '        uint32_t cmd = MBOX->host_cmd;\n' +
+            fs.readFileSync(path.join(source, 'runtime/command_guard.inc'), 'utf8');
         assert.ok(guard.includes('fail(0x85u, FW_MBOX_ADDR + 24u, cmd);'));
         fs.writeFileSync(path.join(directory, 'command.c'), `
 #include <assert.h>
@@ -133,9 +132,11 @@ test('named profiles are freestanding, identified, rebuild safely and reject inc
         }
         const isolated = path.join(directory, 'src');
         fs.mkdirSync(isolated);
-        for (const name of fs.readdirSync(source))
-            if (/\.(c|h|S|ld|mk)$/.test(name) || name === 'Makefile')
+        for (const name of fs.readdirSync(source, { recursive: true }))
+            if (!name.startsWith('diagnostic/') && (/\.(c|h|S|ld|mk|inc)$/.test(name) || name === 'Makefile')) {
+                fs.mkdirSync(path.dirname(path.join(isolated, name)), { recursive: true });
                 fs.copyFileSync(path.join(source, name), path.join(isolated, name));
+            }
         run('make', ['-C', isolated, 'CC=clang', `BUILD=${path.join(directory, 'isolated')}`, 'all']);
         assert.deepEqual(fs.readFileSync(path.join(directory, 'isolated/cyw43_rx_fw.bin')), runtime);
         assert.deepEqual(classify('clean-rx/src/diagnostic/sdio_run.inc'), ['firmware-side-diagnostic']);

@@ -6,7 +6,7 @@ include $(SRC)/firmware.mk
 NATIVE_FLAGS := -std=c11 -Wall -Wextra -Werror -O1 -g \
 	-fsanitize=address,undefined -I$(SRC) -Isupport
 NATIVE_FLAGS += $(PROFILE_FLAGS) $(EXTRA_CFLAGS)
-UNIT_HEADERS := $(wildcard $(SRC)/*.h $(SRC)/diagnostic/*.h support/*.h)
+UNIT_HEADERS := $(wildcard $(SRC)/*.h $(SRC)/psm/*.h $(SRC)/runtime/*.h $(SRC)/diagnostic/*.h support/*.h)
 INTEGRATION_HEADERS := $(UNIT_HEADERS) $(wildcard fixtures/*.h ../badge/*.h ../peer/*.h ../vendor-burst/*.h \
 	$(ROOT)/src/shared/*.h $(ROOT)/src/tools/*.h $(ROOT)/src/radio/*.h)
 DIAGNOSTICS := $(ROOT)/src/tools/diagnostics_logic.c
