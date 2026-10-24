@@ -106,15 +106,20 @@ dependency, not a claim of independence from the silicon.
 
 **Prerequisites:** C01, C02.
 
-- [ ] Move native test sources out of `src/` into a dedicated test directory.
-- [ ] Separate controller unit/model tests from badge/peer integration tests.
+Completed 2026-10-24. See the [test guide](tests/README.md) and
+[validation record](dev-doc/C03_TEST_SEPARATION.md). All seven native sources
+are relocated, named diagnostic profiles execute their required checks,
+and all 74 production-only selections retain their controller/PSM bytes.
+
+- [x] Move native test sources out of `src/` into a dedicated test directory.
+- [x] Separate controller unit/model tests from badge/peer integration tests.
   In particular, make dependencies on station RX and vendor-peer protocols
   explicit rather than hiding them in controller test recipes.
-- [ ] Give test-only helpers and PSM simulation a test-owned location.
-- [ ] Keep production builds independent of test files and test libraries.
-- [ ] Provide named test profiles for copy-scope, early RX and recovery.
+- [x] Give test-only helpers and PSM simulation a test-owned location.
+- [x] Keep production builds independent of test files and test libraries.
+- [x] Provide named test profiles for copy-scope, early RX and recovery.
   Report disabled coverage separately from tests that actually execute.
-- [ ] Update all callers, build prerequisites and directly related guides.
+- [x] Update all callers, build prerequisites and directly related guides.
 
 **Acceptance:** production builds require no test tree; all relocated tests
 retain their assertions and sanitizer coverage, and profile-specific tests

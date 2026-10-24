@@ -6,7 +6,7 @@
 #include "mac_soak.h"
 #include "sdio_ring.h"
 #include "tx_diag.h"
-#include "../badge/station_rx.h"
+#include "../../badge/station_rx.h"
 
 static void fcs(uint8_t *m, uint32_t n) {
     uint32_t crc = clean_mac_fcs(m, n - 4u);

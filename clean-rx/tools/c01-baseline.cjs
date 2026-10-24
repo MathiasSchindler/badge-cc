@@ -8,6 +8,15 @@ const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '../..');
 const controller = path.join(root, 'clean-rx/src');
+const nativeTests = path.join(root, 'clean-rx/tests');
+const testSources = {
+    psm_ucode_test: 'unit/psm_ucode_test.c',
+    mac_test: 'integration/mac_test.c',
+    block_ack_test: 'unit/block_ack_test.c',
+    rx_recovery_test: 'unit/rx_recovery_test.c',
+    copy_scope_test: 'integration/copy_scope_test.c',
+    early_rx_test: 'integration/early_rx_test.c',
+};
 const referenceOwner = 'clean-rx/vendor-burst/Makefile';
 const ht = ['CLEAN_RX_HT_RX=1', 'CLEAN_RX_HT_DATA=1'];
 const observer = ['CLEAN_RX_HT_RX=1', 'CLEAN_RX_HT_OBSERVER=1', 'CLEAN_RX_HT_EARLY_SAVE=1'];
@@ -88,6 +97,8 @@ function classify(file) {
     const name = path.basename(file);
     if (file.endsWith('.md')) return ['documentation'];
     if (name === 'Makefile') return ['build-infrastructure'];
+    if (file === 'clean-rx/tests/profiles.mk') return ['build-infrastructure'];
+    if (file.startsWith('clean-rx/tests/')) return ['native-test'];
     if (name.endsWith('_test.c') || name.endsWith('.test.cjs')) return ['native-test'];
     if (file.startsWith('clean-rx/tools/')) return ['development-tool'];
     if (file.startsWith('clean-rx/src/')) {
@@ -125,12 +136,12 @@ function referenceTargets(text) {
     }));
 }
 
-function dependencies(text) {
+function dependencies(text, cwd = controller) {
     const joined = text.replace(/\\\r?\n/g, ' ');
     const colon = joined.indexOf(':');
     if (colon < 0) throw new Error('Compiler dependency output has no target');
     return [...new Set(joined.slice(colon + 1).trim().split(/\s+/)
-        .map(file => path.relative(root, path.resolve(controller, file))))].sort();
+        .map(file => path.relative(root, path.resolve(cwd, file))))].sort();
 }
 
 function extractSymbol(elf, address, size) {
@@ -172,8 +183,13 @@ function captureProfile(profile, output) {
     const flags = profile.defines.map(value => `-D${value}`).join(' ');
     const tests = [...ordinaryTests, ...(profile.extraTests || [])];
     const args = ['-C', controller, 'CC=clang', `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
-        'all', ...tests.map(test => path.join(build, test))];
+        'all'];
     run('make', args, root, path.join(build, 'build.log'));
+    const testArgs = ['-C', nativeTests, `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`,
+        ...tests.map(test => path.join(build, test))];
+    run('make', testArgs, root, path.join(build, 'test-build.log'));
+    run('make', ['-C', nativeTests, `BUILD=${build}`, `EXTRA_CFLAGS=${flags}`, 'runtime-test'],
+        root, path.join(build, 'runtime-test.log'));
     const buildFlags = fs.readFileSync(path.join(build, 'build_flags'), 'utf8').trim().split('\n');
     const compilerFlags = buildFlags[1].trim().split(/\s+/);
     const sourcesMatch = /^SRCS\s*:=\s*(.+)$/m.exec(fs.readFileSync(path.join(controller, 'Makefile'), 'utf8'));
@@ -207,16 +223,17 @@ function captureProfile(profile, output) {
         if (!tests.includes(test)) return { test, status: 'not-selected', reason: 'Requires a dedicated diagnostic profile.' };
         const testOutput = run(path.join(build, test), [], root, path.join(build, `${test}.log`));
         const dep = run('cc', ['-std=c11', ...profile.defines.map(value => `-D${value}`),
-            '-MM', `${test}.c`], controller);
+            '-I../src', '-Isupport', '-MM', testSources[test]], nativeTests);
         fs.writeFileSync(path.join(build, `${test}.d`), dep);
         return { test, status: testStatus(testOutput), logSha256: sha256(testOutput),
-            dependencies: dependencies(dep),
+            source: `clean-rx/tests/${testSources[test]}`,
+            dependencies: dependencies(dep, nativeTests),
             ...(testStatus(testOutput) === 'disabled' ? { reason: 'Ordered-flush diagnostic was not selected.' } : {}) };
     });
     const files = ['cyw43_rx_fw.bin', 'cyw43_rx_fw.elf', 'cyw43_rx_fw.map', ...(psm ? ['psm.bin'] : []),
         ...inputs.map(input => input.object)];
     return {
-        ...profile, flags, command: ['make', ...args], compilerFlags, inputs,
+        ...profile, flags, command: ['make', ...args], testCommand: ['make', ...testArgs], compilerFlags, inputs,
         linkerScript: 'clean-rx/src/cyw43.ld',
         externalIncludes: [...new Set(inputs.flatMap(input => input.dependencies)
             .filter(file => !file.startsWith('clean-rx/src/')))].sort(),
@@ -247,7 +264,7 @@ function capture(outputArgument, recordArgument) {
     };
     const files = run('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', 'clean-rx'])
         .split('\0').filter(Boolean);
-    const inventory = [...new Set(files)].sort().map(file => ({
+    const inventory = [...new Set(files)].filter(file => fs.existsSync(path.join(root, file))).sort().map(file => ({
         file, roles: classify(file), sha256: sha256(fs.readFileSync(path.join(root, file))),
         ...(/\.(c|h|S)$/.test(file) ? {
             includes: [...fs.readFileSync(path.join(root, file), 'utf8')

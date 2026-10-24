@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "early_rx.h"
-#include "../vendor-burst/protocol.h"
+#include "../../vendor-burst/protocol.h"
 
 static void admit(uint32_t length) {
     uint16_t h[CLEAN_OBSERVER_EARLY_HEADER] = {0}, prefix[CLEAN_OBSERVER_RECORD_WORDS] = {0};

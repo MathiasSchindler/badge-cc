@@ -23,60 +23,11 @@ $(BUILD)/build_flags: force | $(BUILD)
 	@printf '%s\n' '$(CC)' '$(CFLAGS)' > $@.tmp; \
 	if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
-$(OBJS) $(BUILD)/psm_ucode_test $(BUILD)/mac_test $(BUILD)/copy_scope_test $(BUILD)/early_rx_test: $(BUILD)/build_flags
+$(OBJS): $(BUILD)/build_flags
 
-test: runtime-test $(BUILD)/psm_ucode_test $(BUILD)/mac_test $(BUILD)/block_ack_test $(BUILD)/rx_recovery_test
-	$(BUILD)/psm_ucode_test
-	$(BUILD)/mac_test
-	$(BUILD)/block_ack_test
-	$(BUILD)/rx_recovery_test
-
-$(BUILD)/rx_recovery_test: rx_recovery_test.c psm_ucode.c $(wildcard *.h) $(BUILD)/build_flags | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
-		rx_recovery_test.c psm_ucode.c -o $@
-
-$(BUILD)/block_ack_test: block_ack_test.c block_ack.c block_ack.h mac.c mac.h frame_limits.h types.h bytes.h $(BUILD)/build_flags | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
-		block_ack_test.c block_ack.c mac.c -o $@
-
-$(BUILD)/mac_test: mac_test.c mac.c $(wildcard *.h ../badge/*.h) ../../src/shared/stdint.h ../../src/shared/bytes.h \
-		../../src/tools/diagnostics_logic.c ../../src/tools/diagnostics_logic.h | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
-		mac_test.c mac.c ../../src/tools/diagnostics_logic.c -o $@
-
-$(BUILD)/psm_ucode_test: Makefile psm_ucode_test.c psm_ucode.c psm_ack.h ht_observer.h rx_recovery.h copy_scope.h unicast.h phy_rates.h frame_limits.h types.h \
-		../../src/tools/diagnostics_logic.c ../../src/tools/diagnostics_logic.h | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined psm_ucode_test.c psm_ucode.c \
-		../../src/tools/diagnostics_logic.c -o $@
-
-.PHONY: copy-scope-test
-copy-scope-test: $(BUILD)/copy_scope_test
-	$(BUILD)/copy_scope_test
-
-$(BUILD)/copy_scope_test: copy_scope_test.c psm_ucode.c $(wildcard *.h ../badge/*.h) ../vendor-burst/protocol.h \
-		../../src/tools/diagnostics_logic.c ../../src/tools/diagnostics_logic.h | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
-		copy_scope_test.c psm_ucode.c ../../src/tools/diagnostics_logic.c -o $@
-
-.PHONY: early-rx-test
-early-rx-test: $(BUILD)/early_rx_test
-	$(BUILD)/early_rx_test
-
-$(BUILD)/early_rx_test: early_rx_test.c $(wildcard *.h) ../vendor-burst/protocol.h \
-		mac.c block_ack.c ../../src/tools/diagnostics_logic.c | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g $(EXTRA_CFLAGS) -fsanitize=address,undefined \
-		early_rx_test.c mac.c block_ack.c ../../src/tools/diagnostics_logic.c -o $@
-
-.PHONY: runtime-test
-runtime-test: $(BUILD)/runtime_test $(BUILD)/runtime_types_first_test
-	$(BUILD)/runtime_test
-	$(BUILD)/runtime_types_first_test
-
-$(BUILD)/runtime_test: runtime_test.c types.h bytes.h Makefile | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined $< -o $@
-
-$(BUILD)/runtime_types_first_test: runtime_test.c types.h bytes.h Makefile | $(BUILD)
-	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -DCLEAN_TYPES_FIRST $< -o $@
+.PHONY: unit-test integration-test runtime-test copy-scope-test early-rx-test test-copy-scope test-early-rx test-recovery
+test unit-test integration-test runtime-test copy-scope-test early-rx-test test-copy-scope test-early-rx test-recovery:
+	$(MAKE) -C ../tests BUILD=$(abspath $(BUILD)) EXTRA_CFLAGS='$(EXTRA_CFLAGS)' $@
 
 $(BUILD):
 	mkdir -p $@

@@ -7,12 +7,15 @@
 #include <stdio.h>
 #include <string.h>
 #include "bytes.h"
+#include "crc32.h"
 
 _Static_assert(sizeof(uintptr_t) == sizeof(void *), "native pointer width");
 _Static_assert(sizeof(intptr_t) == sizeof(void *), "native signed pointer width");
 _Static_assert(sizeof(size_t) == sizeof(sizeof(0)), "native size width");
 
 int main(void) {
+    assert(test_crc32(0, 0u) == 0u);
+    assert(test_crc32((const uint8_t *)"123456789", 9u) == 0xcbf43926u);
     uint8_t source[264], destination[264], expected[264];
     for (uint32_t i = 0u; i < sizeof(source); ++i) source[i] = (uint8_t)(i * 37u);
     assert((uint8_t *)(uintptr_t)source == source);

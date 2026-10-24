@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "block_ack.h"
-#include "../../src/shared/bytes.h"
+#include "bytes.h"
 
 static const uint8_t own[6] = {2u,1u,2u,3u,4u,5u};
 static const uint8_t peer[6] = {2u,6u,7u,8u,9u,10u};
@@ -33,7 +33,7 @@ static void store16(uint8_t *p, uint32_t value) {
 }
 
 static void fcs(uint8_t *m, uint32_t n) {
-    badger_bytes_store_u32(m+n-4u,clean_mac_fcs(m,n-4u));
+    clean_bytes_store_u32(m+n-4u,clean_mac_fcs(m,n-4u));
 }
 
 static void header(uint8_t *m, uint32_t size, uint8_t fc) {

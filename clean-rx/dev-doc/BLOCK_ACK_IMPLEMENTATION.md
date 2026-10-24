@@ -141,7 +141,7 @@ acknowledge its unadmitted MPDU.
 
 ## Native validation
 
-[block_ack_test.c](../src/block_ack_test.c) covers:
+[block_ack_test.c](../tests/unit/block_ack_test.c) covers:
 
 - ADDBA preparation/activation, matching retransmissions, conflicts,
   malformed policy/fragment/FCS fields and all TIDs;

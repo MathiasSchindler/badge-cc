@@ -11,6 +11,9 @@ firmware.
 - [C02 controller source isolation](C02_ISOLATION.md): local types/byte
   helpers, standalone production builds and before/after controller/PSM
   comparison across retained reference selections.
+- [C03 native test separation](C03_TEST_SEPARATION.md): unit/model versus
+  badge/peer integration ownership, named diagnostic profiles, compatibility
+  entry points and production builds without a test tree.
 - [HT20 implementation and investigations](HT20_IMPLEMENTATION.md):
   D1/D2/D3 milestones, API development, receive failures, contention
   diagnostics, watchdog work, association/runtime peer profiles and

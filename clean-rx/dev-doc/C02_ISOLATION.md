@@ -103,7 +103,7 @@ is local; transfer the evidence directory separately when needed.
 - The seven-profile native capture passes its existing PSM/MAC/Block ACK,
   copy-scope and early-prefix checks. Recovery-disabled and not-selected
   cases retain the distinctions established in C01.
-- [runtime_test.c](../src/runtime_test.c) runs with both standard-header-first
+- [runtime_test.c](../tests/unit/runtime_test.c) runs with both standard-header-first
   and local-header-first inclusion, under address/undefined-behavior
   sanitizers. It checks native pointer/type compatibility, empty ranges,
   copy/zero/equality bounds and unaligned little-endian word values.

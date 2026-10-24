@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "../../src/tools/diagnostics_logic.h"
+#include "crc32.h"
 #include "frame_limits.h"
 #include "psm_ack.h"
 
@@ -2892,7 +2892,7 @@ int main(void) {
     static const uint8_t old_counter[8] = {0x80,0x17,0x00,0xff,0x63,0xf8,0x01,0x00};
     memcpy(original + 81u * 8u, old_counter, sizeof(old_counter));
     capture_layout(original);
-    assert(diag_crc32(original, sizeof(original)) == 0x227ce2bfu);
+    assert(test_crc32(original, sizeof(original)) == 0x227ce2bfu);
     streaming();
     stream_stall();
     receive_completion();

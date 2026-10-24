@@ -4,7 +4,7 @@
 #include <string.h>
 #include "frame_limits.h"
 #include "psm_ack.h"
-#include "../vendor-burst/protocol.h"
+#include "../../vendor-burst/protocol.h"
 
 _Static_assert(CLEAN_RX_HT_COPY_SCOPE, "Select a copy scope profile");
 extern const uint8_t psm_ucode_bytes[];

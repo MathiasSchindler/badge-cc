@@ -33,6 +33,12 @@ standalone builds and byte-for-byte comparison against the pre-cleanup
 controller profiles. On-chip ROM calibration tables remain a hardware
 dependency.
 
+Native controller/model and fixture-integration tests are documented in
+[the test guide](../tests/README.md). Run `make -C clean-rx/tests test` from
+the repository root; explicit diagnostic test profiles supply their own
+required flags. Legacy `make -C clean-rx/src test` forwards to the test
+build and is not a production dependency.
+
 For an application embedding the controller directly, place the binary in
 a read-only assembly section using `.incbin`, and expose start/end symbols
 to the host loader. The controller loads at SRAM address `0x00000000`.

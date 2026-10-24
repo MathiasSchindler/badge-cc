@@ -183,7 +183,7 @@ OFDM or short CCK. Open and WPA2-CCMP beacon fixtures include HT Capability,
 HT Operation and WMM parameters; subsequent association requests remain
 byte-for-byte legacy-only, with an explicit IE whitelist.
 
-[psm_ucode_test.c](../src/psm_ucode_test.c) verifies formats 2/3 do not
+[psm_ucode_test.c](../tests/unit/psm_ucode_test.c) verifies formats 2/3 do not
 transmit an ACK or CTS, including conflicting short-header and legacy OFDM
 status bits and a valid legacy SIGNAL value. Existing legacy ACK/CTS and
 PHY tests continue to run. These exercise current conservative boundaries,
