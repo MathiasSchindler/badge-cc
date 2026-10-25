@@ -11,8 +11,33 @@ static int greater(const uint8_t *a, const uint8_t *b, uint32_t n) {
     return 0;
 }
 
+static int ba_identity(const clean_wpa_t *s, const clean_ba_rx_t *ba);
+
+static int ba_reply_take(clean_wpa_t *s, uint8_t frame[512], uint32_t *length) {
+    if (!s->ba_reply_length) return 0;
+    *length=s->ba_reply_length;
+    badger_bytes_copy(frame,s->ba_reply,*length);
+    wpa_wipe(s->ba_reply,sizeof(s->ba_reply));
+    s->ba_reply_length=0u;
+    return 1;
+}
+
+static void ba_reset(clean_wpa_t *s) {
+    if (s->ba_servicing) {
+        s->ba_reset_pending=1u;
+        return;
+    }
+    if (s->ba) clean_ba_init(s->ba,s->mac,s->bssid);
+    if (s->ba_stream) {
+        wpa_wipe(s->ba_stream,sizeof(*s->ba_stream));
+        s->ba_stream->failed=1u;
+    }
+    s->ba_reset_pending=0u;
+}
+
 static int failure(clean_wpa_t *s, uint8_t error) {
     s->error=error;
+    ba_reset(s);
     wpa_wipe(s->pmk,32u); wpa_wipe(s->ptk,48u); wpa_wipe(s->gtk,16u);
     wpa_wipe(s->rx_mac.frame,sizeof(s->rx_mac.frame)); s->rx_mac.active=0u;
     for (uint32_t i=0u;i<16u;++i) {
@@ -27,6 +52,7 @@ static int failure(clean_wpa_t *s, uint8_t error) {
     s->old_valid=s->reply_old=0u;
     wpa_wipe(s->nonce_seed,sizeof(s->nonce_seed)); wpa_wipe(s->m3_gtk,sizeof(s->m3_gtk));
     wpa_wipe(s->probe_token,sizeof(s->probe_token)); s->rekey=0u;
+    wpa_wipe(s->ba_reply,sizeof(s->ba_reply)); s->ba_reply_length=0u;
     s->installed=0u;
     return -1;
 }
@@ -168,11 +194,24 @@ int clean_wpa_poll(clean_wpa_t *s, uint32_t now, uint8_t frame[512], uint32_t *l
     if (s->error) return -1;
     s->clock=now;
     group_expire(s,now);
+    clean_wpa_rx_expire(s,now);
     if (!s->timer_started) {
         s->timer_started=1u; s->started=s->retry_at=now;
     }
+    if (s->stage!=WPA_PROTECTED && now-s->started>=CLEAN_WPA_DEADLINE_US)
+        return failure(s,WPA_TIMEOUT);
+    if (s->ba && s->installed && !s->rekey && !ba_identity(s,s->ba))
+        return failure(s,WPA_FORMAT);
+    if (!frame) return 0;
+    if (ba_reply_take(s,frame,length)) return 1;
+    if (ba_identity(s,s->ba)) {
+        int result=clean_wpa_ba_poll(s,s->ba,now);
+        if (s->error) return -1;
+        if (result!=CLEAN_BA_ACCEPTED && result!=CLEAN_BA_BUSY)
+            return failure(s,WPA_FORMAT);
+        if (ba_reply_take(s,frame,length)) return 1;
+    }
     if (s->stage==WPA_PROTECTED) return 0;
-    if (now-s->started>=CLEAN_WPA_DEADLINE_US) return failure(s,WPA_TIMEOUT);
     if (s->stage==WPA_WAIT_M1 || now-s->retry_at<CLEAN_WPA_RETRY_US) return 0;
     if (s->retries>=CLEAN_WPA_MAX_RETRIES) return failure(s,WPA_TIMEOUT);
     ++s->retries; ++s->retransmissions; s->retry_at=now;
@@ -207,6 +246,7 @@ static int receive_key(clean_wpa_t *s, const uint8_t *m, uint32_t n,
             if (!greater(e+9u,s->replay,8u)) return failure(s,WPA_REPLAY);
             if (wpa_equal(e+17u,s->anonce,32u)) return failure(s,WPA_NONCE);
             if (fresh_nonce(s,e+17u)<0) return -1;
+            ba_reset(s);
             badger_bytes_copy(s->old_ptk,s->ptk,48u); s->rekey=1u;
             s->stage=WPA_WAIT_M1; s->started=s->retry_at=s->clock;
             s->timer_started=1u;
@@ -315,6 +355,7 @@ static int receive_key(clean_wpa_t *s, const uint8_t *m, uint32_t n,
     badger_bytes_copy(s->m3_gtk,candidate,16u); s->m3_gtk_id=gtk_id;
     wpa_wipe(candidate,sizeof(candidate));
     if (s->rekey) {
+        ba_reset(s);
         ++s->pairwise_rekeys;
         s->pairwise_needs_proof=1u;
         badger_bytes_copy(s->old_tx_pn,s->tx_pn,sizeof(s->tx_pn));
@@ -517,6 +558,24 @@ int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
                        uint8_t frame[512], uint32_t *length) {
     *length=0u;
     if (s->error) return -1;
+    if (s->ba && s->installed && !s->rekey && !ba_identity(s,s->ba))
+        return failure(s,WPA_FORMAT);
+    if (s->ba_reply_length) return CLEAN_WPA_RX_RETRY;
+    if (ba_identity(s,s->ba) && n>=24u && clean_mac_valid(m,n) &&
+        wpa_equal(m+4u,s->mac,6u) && wpa_equal(m+10u,s->bssid,6u)) {
+        int result=CLEAN_BA_IGNORED;
+        if (m[0]==0x84u)
+            result=clean_wpa_ba_bar(s,s->ba,m,n,s->clock);
+        else if (n>=46u && m[0]==0x88u && (m[1]&64u) &&
+                 s->ba->tid[m[24]&15u].active)
+            result=clean_wpa_ba_receive(s,s->ba,m,n,s->clock);
+        if (s->error) return -1;
+        if (result==CLEAN_BA_BUSY) return CLEAN_WPA_RX_RETRY;
+        if (result<0 && result!=CLEAN_BA_NO_AGREEMENT && result!=CLEAN_BA_OLD)
+            return failure(s,WPA_FORMAT);
+        if (result!=CLEAN_BA_IGNORED)
+            return ba_reply_take(s,frame,length);
+    }
     if (n>=2u && (m[1]&64u))
         return protected_receive(s,m,n,s->clock,0,frame,length)<0?-1:(*length?1:0);
     int result=receive_key(s,m,n,frame,length,0);
@@ -530,31 +589,81 @@ static int ba_protected_sink(void *context, const uint8_t *mpdu, uint32_t length
                               uint32_t now) {
     clean_wpa_t *s = context;
     if (!s->installed || s->error) return -1;
-    int result = protected_receive(s,mpdu,length,now,1,0,0);
+    if (s->ba_reply_length || s->ba_reset_pending) return 0;
+    s->clock=now;
+    int result = protected_receive(s,mpdu,length,now,1,s->ba_reply,&s->ba_reply_length);
     return result < 0 ? -1 : 1;
 }
 
 static int ba_identity(const clean_wpa_t *s, const clean_ba_rx_t *ba) {
-    return s->installed && !s->error && wpa_equal(s->mac,ba->own,6u) &&
+    return ba && s->ba==ba && s->installed && !s->error && !s->rekey &&
+           wpa_equal(s->mac,ba->own,6u) &&
            wpa_equal(s->bssid,ba->peer,6u);
+}
+
+int clean_wpa_ba_bind(clean_wpa_t *s, clean_ba_rx_t *ba, clean_ampdu_stream_t *stream) {
+    if (!ba || !s->installed || s->error || s->rekey) return CLEAN_BA_INVALID;
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
+    if (s->ba)
+        return s->ba==ba && s->ba_stream==stream ? CLEAN_BA_ACCEPTED : CLEAN_BA_CONFLICT;
+    s->ba=ba;
+    s->ba_stream=stream;
+    ba_reset(s);
+    return CLEAN_BA_ACCEPTED;
+}
+
+int clean_wpa_ba_reset(clean_wpa_t *s) {
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
+    if (!s->ba) return CLEAN_BA_INVALID;
+    ba_reset(s);
+    return CLEAN_BA_ACCEPTED;
+}
+
+int clean_wpa_ba_unbind(clean_wpa_t *s) {
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
+    ba_reset(s);
+    s->ba=0;
+    s->ba_stream=0;
+    return CLEAN_BA_ACCEPTED;
+}
+
+int clean_wpa_ampdu_begin(clean_wpa_t *s, uint32_t bytes) {
+    if (!ba_identity(s,s->ba) || !s->ba_stream) return CLEAN_BA_INVALID;
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
+    const clean_ampdu_stream_t *stream=s->ba_stream;
+    if (stream->expected && !stream->failed && clean_ampdu_end(stream)!=CLEAN_BA_ACCEPTED)
+        return CLEAN_BA_BUSY;
+    return clean_ampdu_begin(s->ba_stream,bytes);
+}
+
+static int ba_complete(clean_wpa_t *s, int result) {
+    s->ba_servicing=0u;
+    if (s->ba_reset_pending) ba_reset(s);
+    return result;
 }
 
 int clean_wpa_ba_receive(clean_wpa_t *s, clean_ba_rx_t *ba, const uint8_t *mpdu,
                          uint32_t length, uint32_t now) {
     if (!ba_identity(s,ba) || !mpdu || length < 46u || !(mpdu[1]&64u))
         return CLEAN_BA_INVALID;
-    return clean_ba_receive(ba,mpdu,length,now,ba_protected_sink,s);
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
+    s->ba_servicing=1u;
+    return ba_complete(s,clean_ba_receive(ba,mpdu,length,now,ba_protected_sink,s));
 }
 
 int clean_wpa_ba_poll(clean_wpa_t *s, clean_ba_rx_t *ba, uint32_t now) {
     if (!ba_identity(s,ba)) return CLEAN_BA_INVALID;
-    return clean_ba_poll(ba,now,ba_protected_sink,s);
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
+    s->ba_servicing=1u;
+    return ba_complete(s,clean_ba_poll(ba,now,ba_protected_sink,s));
 }
 
 int clean_wpa_ba_bar(clean_wpa_t *s, clean_ba_rx_t *ba, const uint8_t *mpdu,
                      uint32_t length, uint32_t now) {
     if (!ba_identity(s,ba)) return CLEAN_BA_INVALID;
-    return clean_ba_bar(ba,mpdu,length,now,ba_protected_sink,s);
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
+    s->ba_servicing=1u;
+    return ba_complete(s,clean_ba_bar(ba,mpdu,length,now,ba_protected_sink,s));
 }
 
 typedef struct {
@@ -565,7 +674,8 @@ typedef struct {
 static int ampdu_protected_sink(void *context, const uint8_t *mpdu,
                                 uint32_t length, uint32_t now) {
     wpa_ampdu_context_t *c = context;
-    int result = clean_wpa_ba_receive(c->wpa,c->ba,mpdu,length,now);
+    if (length < 46u || !(mpdu[1]&64u)) return -1;
+    int result = clean_ba_receive(c->ba,mpdu,length,now,ba_protected_sink,c->wpa);
     if (result == CLEAN_BA_BUSY) return 0;
     return result == CLEAN_BA_ACCEPTED || result == CLEAN_BA_DUPLICATE ||
            result == CLEAN_BA_OLD ? 1 : -1;
@@ -576,7 +686,10 @@ int clean_wpa_ampdu_feed(clean_wpa_t *s, clean_ba_rx_t *ba, clean_ampdu_stream_t
                          uint32_t now) {
     if (!used) return CLEAN_BA_INVALID;
     *used = 0u;
-    if (!ba_identity(s,ba)) return CLEAN_BA_INVALID;
+    if (!ba_identity(s,ba) || !stream || s->ba_stream!=stream) return CLEAN_BA_INVALID;
+    if (s->ba_servicing) return CLEAN_BA_BUSY;
     wpa_ampdu_context_t context = {.wpa=s,.ba=ba};
-    return clean_ampdu_feed(stream,bytes,length,used,ampdu_protected_sink,&context,now);
+    s->ba_servicing=1u;
+    return ba_complete(s,clean_ampdu_feed(stream,bytes,length,used,
+                                         ampdu_protected_sink,&context,now));
 }

@@ -8,6 +8,33 @@ Use [current issues](../issues/README.md) for what remains open.
 
 ## Cross-board and capability regressions
 
+- [Matched probe crossover and passive calibration](HT_PROBE_CROSSOVER_2026-10-25.md):
+  twelve retained attempts with fixed TX/Pico and target probe on/off,
+  probe-off identity-correlated body corruption, a separate ACK loss and
+  three byte-exact passive negatives; 36 raw replays and verified restoration.
+- [Bound pre-command SHM and dual-receiver rejection](HT_CANDIDATE_REJECTION_2026-10-25.md):
+  valid repaired-diagnostic reports, first normal control failure and two
+  bound rejections with no incorrect MAC bytes equal to their preimages;
+  uncalibrated probe, independent audit and verified restoration.
+- [Per-candidate D2 diagnostic](HT_CANDIDATE_TRACE_2026-10-25.md):
+  first attempt stopped on two unavailable diagnostic snapshots; missing
+  diagnostic-SHM initialization repaired and tested offline, failed evidence
+  sealed, originals restored and independently verified; no retry within that run.
+- [Initial SHM and dual-receiver D2 rejection](HT_REJECT_BASELINE_2026-10-25.md):
+  sixteen stopped-MAC baselines, a byte-exact negative control, then a normal
+  A-to-B miss with two bound rejections and shared incorrect bytes unlike
+  either initial buffer; independent audit and verified restoration.
+- [Calibrated spontaneous D2 rejection](HT_SPONTANEOUS_REJECTION_2026-10-25.md):
+  four passing target controls followed by a B-to-A miss, a bound active
+  rejection with 54/60 differing MAC bytes, passive-observer limitations,
+  TX timing comparison and verified restoration.
+- [Controlled D2 bad-FCS calibration](HT_REJECT_BAD_FCS_2026-10-25.md):
+  two passing directional controls, one byte-exact active rejection with the
+  deliberately changed FCS, passive observation limits and verified restoration.
+- [D2 rejected-copy investigation](HT_REJECT_COPY_2026-10-25.md):
+  four defective-prototype attempts with a reproduced B-to-A miss, followed by
+  four passing corrected-layout controls; derived ACK-state ownership repair,
+  zero-state-only hardware qualification and verified restoration.
 - [R08 retry and pause measurements](RETRY_AND_STALL_R08_2026-10-24.md):
   original retry reanalysis, 120 fresh raw exchanges, measured desktop/device
   timing, one passing network control, retained startup failure and restoration.

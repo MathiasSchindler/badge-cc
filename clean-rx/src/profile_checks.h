@@ -5,12 +5,35 @@
 #include "ht_contract.h"
 #include "ht_observer.h"
 
+_Static_assert(CLEAN_RX_HT_REJECT_TRACE == 0 || CLEAN_RX_HT_REJECT_TRACE == 1,
+               "Rejected HT copy trace must be zero or one");
+_Static_assert(!CLEAN_RX_HT_REJECT_TRACE ||
+               (CLEAN_RX_DIAGNOSTIC && CLEAN_RX_HT_RESPONSE &&
+                !CLEAN_RX_HT_OBSERVER && !CLEAN_RX_AMPDU_PROBE && !CLEAN_RX_AMPDU_INTERFACE),
+               "Rejected HT copy trace requires a nonaggregate diagnostic HT response build");
+_Static_assert(CLEAN_RX_HT_REJECT_BAD_FCS == 0 || CLEAN_RX_HT_REJECT_BAD_FCS == 1,
+               "Rejected HT bad-FCS control must be zero or one");
+_Static_assert(!CLEAN_RX_HT_REJECT_BAD_FCS ||
+               (CLEAN_RX_DIAGNOSTIC && CLEAN_RX_HT_REJECT_TRACE),
+               "Rejected HT bad-FCS control requires the diagnostic rejected-copy trace");
+_Static_assert(CLEAN_RX_HT_REJECT_BASELINE == 0 || CLEAN_RX_HT_REJECT_BASELINE == 1,
+               "Rejected HT baseline must be zero or one");
+_Static_assert(!CLEAN_RX_HT_REJECT_BASELINE ||
+               (CLEAN_RX_DIAGNOSTIC && CLEAN_RX_HT_REJECT_TRACE),
+               "Rejected HT baseline requires the diagnostic rejected-copy trace");
+_Static_assert(CLEAN_RX_HT_CANDIDATE_TRACE == 0 || CLEAN_RX_HT_CANDIDATE_TRACE == 1,
+               "HT candidate trace must be zero or one");
+_Static_assert(!CLEAN_RX_HT_CANDIDATE_TRACE ||
+               (CLEAN_RX_DIAGNOSTIC && CLEAN_RX_HT_REJECT_TRACE &&
+                !CLEAN_RX_HT_EARLY_FIFO && !CLEAN_RX_HT_COPY_SCOPE),
+               "HT candidate trace requires rejected-copy ownership without early FIFO or copy scope");
+
 #if !CLEAN_RX_DIAGNOSTIC && \
                 (CLEAN_RX_HT_PROBE || CLEAN_RX_HT_CLEAR_SIG_CRC || \
                  CLEAN_RX_HT_STIMULUS || CLEAN_RX_HT_HANDOFF_STIMULUS || \
                  CLEAN_RX_AMPDU_PROBE || CLEAN_RX_AMPDU_BAD_FCS || \
                  CLEAN_RX_AMPDU_INTERFACE || CLEAN_RX_AMPDU_HANDOFF || \
-                 CLEAN_RX_AMPDU_DMA || CLEAN_RX_AMPDU_SHM || CLEAN_RX_AMPDU_BA || \
+                 CLEAN_RX_AMPDU_DMA || CLEAN_RX_AMPDU_SHM || CLEAN_RX_AMPDU_BA || CLEAN_RX_AMPDU_REPEAT || \
                  CLEAN_RX_HT_ADVANCE || CLEAN_RX_HT_COPY_PROBE || \
                  CLEAN_RX_HT_NEXT_FIELD != 0x83u || CLEAN_RX_HT_NEXT_STREAM || \
                  CLEAN_RX_HT_SHM_ONLY || CLEAN_RX_HT_SHORT_STREAM || \

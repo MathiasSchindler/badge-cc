@@ -167,73 +167,10 @@ static int ampdu_dma_receive(uint32_t rx_start) {
 #endif
 
 #if CLEAN_RX_AMPDU_SHM
-static clean_ampdu_probe_trace_t AGGREGATE(ampdu_shm_snapshot);
-static uint16_t AGGREGATE(ampdu_shm_outcomes)[3];
-static uint8_t AGGREGATE(ampdu_shm_copied);
-static uint8_t AGGREGATE(ampdu_shm_next);
-
-
-static int ampdu_shm_receive(uint32_t mac_en, uint32_t rx_start) {
-    if (!AGGREGATE(ampdu_shm_copied)) {
-        if (shm_read16(0x601u) != CLEAN_AMPDU_SHM_HELD_STATE) return 1;
-        mmio_write32(D11_MACCONTROL, clean_mac_pause_psm(mac_en));
-        uint32_t control = mmio_read32(D11_MACCONTROL);
-        if ((control & 3u) != (clean_mac_pause_psm(mac_en) & 3u))
-            return fail(0x8du, D11_MACCONTROL, control);
-        uint16_t state = shm_read16(0x601u);
-        uint16_t count = shm_read16(CLEAN_AMPDU_PROBE_SHM);
-        if (state != CLEAN_AMPDU_SHM_HELD_STATE || !count || count > 3u ||
-            shm_read16(CLEAN_AMPDU_IF_SHM) != 3u ||
-            shm_read16(CLEAN_AMPDU_IF_SHM + 1u) != count)
-            return fail(0x8du, CLEAN_AMPDU_PROBE_SHM, count);
-        uint8_t *bytes = (uint8_t *)&AGGREGATE(ampdu_shm_snapshot) + 4u;
-        for (uint32_t i = 0u; i < CLEAN_AMPDU_PROBE_WORDS; ++i) {
-            uint16_t word = shm_read16(CLEAN_AMPDU_PROBE_SHM + i);
-            bytes[2u * i] = (uint8_t)word;
-            bytes[2u * i + 1u] = (uint8_t)(word >> 8u);
-        }
-        AGGREGATE(ampdu_shm_snapshot).magic = CLEAN_AMPDU_PROBE_MAGIC;
-        for (uint32_t i = 0u; i < count; ++i)
-            AGGREGATE(ampdu_shm_outcomes)[i] = shm_read16(CLEAN_AMPDU_IF_SHM + 11u + 8u * i);
-        uint32_t status = CLEAN_AMPDU_IF_SHM + CLEAN_AMPDU_SHM_STATUS_WORD;
-        uint32_t published = (uint32_t)shm_read16(status) |
-            ((uint32_t)shm_read16(status + 1u) << 16u);
-        shm_write16(status + 4u, state);
-        shm_write16(status + 5u, (uint16_t)(shm_read16(status + 5u) + 1u));
-        uint32_t held = mmio_read32(D11_BASE + 0x180u) - published;
-        shm_write16(status + 6u, (uint16_t)held);
-        shm_write16(status + 7u, (uint16_t)(held >> 16u));
-        AGGREGATE(ampdu_shm_copied) = 1u;
-        shm_write16(0x601u, 0u);
-        mmio_write32(D11_MACCONTROL, mac_en);
-    }
-    if (AGGREGATE(ampdu_shm_next) == AGGREGATE(ampdu_shm_snapshot).count) return 1;
-    uint32_t total = MULTI->captured_frames;
-    int credit = clean_sdio_credit_available(total, TRANSPORT(rx_published_frames), FW_MAX_FRAMES);
-    if (credit < 0) return fail(0x8cu, FW_MULTI_ADDR, total - TRANSPORT(rx_published_frames));
-    if (!credit) return 1;
-    volatile fw_frame_slot_t *slot = &MULTI->frames[total & (FW_MAX_FRAMES - 1u)];
-    int decoded = clean_ht_ampdu_shm_decode(&AGGREGATE(ampdu_shm_snapshot), AGGREGATE(ampdu_shm_next),
-                                           AGGREGATE(ampdu_shm_outcomes)[AGGREGATE(ampdu_shm_next)], slot->raw);
-    if (decoded < 0)
-        return fail(decoded == CLEAN_AMPDU_DMA_FCS_ERROR ? 0x8eu : 0x8du,
-                    CLEAN_AMPDU_PROBE_SHM, (uint32_t)AGGREGATE(ampdu_shm_next));
-    ++AGGREGATE(ampdu_shm_next);
-    if (decoded == CLEAN_AMPDU_DMA_BAD) return 1;
-    slot->frame_index = (uint16_t)(total + 1u);
-    slot->rxe_len = 86u;
-    slot->rxe_status1 = 0u;
-    uint32_t status = 264u + 2u * (AGGREGATE(ampdu_shm_next) - 1u);
-    slot->rxe_status2 = (uint16_t)(AGGREGATE(ampdu_shm_snapshot).raw[status] |
-        ((uint16_t)AGGREGATE(ampdu_shm_snapshot).raw[status + 1u] << 8u));
-    slot->phy_status0 = AGGREGATE(ampdu_shm_snapshot).phy;
-    slot->rx_tick_hi = (uint16_t)((ARM_CYCLE_COUNTER - rx_start) >> 16u);
-    slot->dma_rx_len = slot->dma_completed = 0u;
-    slot->f2_received = slot->f2_sdpcm_len = 0u;
+static void ampdu_shm_barrier(void) {
     __asm__ volatile("dsb" ::: "memory");
-    MULTI->captured_frames = total + 1u;
-    return 1;
 }
+#include "aggregate_rx.inc"
 #endif
 
 /* Template preparation is deliberately outside the contention interval. The

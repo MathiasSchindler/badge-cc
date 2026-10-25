@@ -4,6 +4,63 @@
 #include "ht_observe.h"
 
 int main(void) {
+    for (uint32_t mode = 0u; mode <= 31u; ++mode) {
+        uint8_t report[2092], before[2092], request[16] = {1u};
+        request[11] = 60u; request[14] = (uint8_t)mode;
+        memset(report, 0xa5, sizeof(report)); report[2000u] = (uint8_t)mode;
+        badger_bytes_store_u32(report + 1088u, 78u);
+        badger_bytes_store_u32(report + CLEAN_HT_TIMING_DETAIL + 8u, 1000u);
+        clean_ht_reject_baseline_t baseline = {
+            .magic = CLEAN_HT_REJECT_BASELINE_MAGIC, .generation = 1u,
+            .maccontrol_before = 0x84020400u, .maccontrol_after = 0x84020400u,
+            .begin_us = 100u, .end_us = 200u
+        };
+        memcpy(before, report, sizeof(report));
+        int allowed = mode == 25u || mode == 27u;
+        assert(clean_ht_reject_baseline_store(report, request, &baseline) == allowed);
+        if (allowed) {
+            assert(!memcmp(report + CLEAN_HT_REJECT_BASELINE_DETAIL, &baseline, sizeof(baseline)));
+            memcpy(before + CLEAN_HT_REJECT_BASELINE_DETAIL, &baseline, sizeof(baseline));
+        }
+        assert(!memcmp(report, before, sizeof(report)));
+        clean_ht_candidate_trace_t candidate = {.magic=CLEAN_HT_CANDIDATE_MAGIC};
+        memcpy(before,report,sizeof(report));
+        assert(clean_ht_candidate_store(report,request,&candidate)==allowed);
+        if (allowed) {
+            assert(!memcmp(report+CLEAN_HT_CANDIDATE_DETAIL,&candidate,sizeof(candidate)));
+            memcpy(before+CLEAN_HT_CANDIDATE_DETAIL,&candidate,sizeof(candidate));
+        }
+        assert(!memcmp(report,before,sizeof(report)));
+        if (!allowed) continue;
+        for (uint32_t fault=0u;fault<5u;++fault) {
+            clean_ht_candidate_trace_t bad=candidate;
+            uint8_t nonce[16];memcpy(nonce,request,sizeof(nonce));
+            if (fault==0u) bad.magic^=1u;
+            if (fault==1u) bad.committed=2u;
+            if (fault==2u) nonce[11]=28u;
+            if (fault==3u) nonce[14]=24u;
+            if (fault==4u) badger_bytes_store_u32(report+1088u,113u);
+            memcpy(before,report,sizeof(report));
+            assert(!clean_ht_candidate_store(report,nonce,&bad));
+            assert(!memcmp(report,before,sizeof(report)));
+        }
+        badger_bytes_store_u32(report+1088u,78u);
+        for (uint32_t fault = 0u; fault < 8u; ++fault) {
+            clean_ht_reject_baseline_t bad = baseline;
+            uint8_t nonce[16]; memcpy(nonce, request, sizeof(nonce));
+            if (fault == 0u) bad.magic ^= 1u;
+            if (fault == 1u) bad.generation ^= 1u;
+            if (fault == 2u) bad.maccontrol_before |= 1u;
+            if (fault == 3u) bad.maccontrol_after |= 2u;
+            if (fault == 4u) bad.end_us = 1001u;
+            if (fault == 5u) bad.reserved = 1u;
+            if (fault == 6u) nonce[11] = 28u;
+            if (fault == 7u) badger_bytes_store_u32(report + 1088u, 417u);
+            memcpy(before, report, sizeof(report));
+            assert(!clean_ht_reject_baseline_store(report, nonce, &bad));
+            assert(!memcmp(report, before, sizeof(report)));
+        }
+    }
     for (uint32_t mode=0u;mode<=31u;++mode) {
         uint8_t detail[2092],before[2092],entry[40];
         memset(detail,0xa5,sizeof(detail)); memset(entry,0x5a,sizeof(entry));

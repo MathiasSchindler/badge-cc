@@ -22,6 +22,12 @@
 #include "../../src/platform/badger/display.h"
 #include "../../src/platform/badger/graphics.h"
 
+_Static_assert(CLEAN_RX_HT_REJECT_BASELINE == 0 || CLEAN_RX_HT_REJECT_BASELINE == 1,
+               "Rejected HT baseline must be zero or one");
+#if CLEAN_RX_HT_REJECT_BASELINE && (!CLEAN_RX_DIAGNOSTIC || !CLEAN_RX_HT_REJECT_TRACE)
+#error "Rejected HT baseline requires the diagnostic rejected-copy trace"
+#endif
+
 _Static_assert(CLEAN_STATION_TRACE_DETAIL + sizeof(clean_mac_trace_status_t) <=
                CLEAN_SOAK_FAULT_DETAIL, "MAC trace must not overlap soak fault evidence");
 _Static_assert(CLEAN_WPA_REKEY_MODE>CLEAN_NETWORK_MODE &&
@@ -65,11 +71,20 @@ static clean_network_t network;
 static uint8_t network_frame[CLEAN_NETWORK_MTU + 32u], network_ethernet[CLEAN_NETWORK_MTU];
 static uint32_t soak_watchdog_at;
 static uint32_t probe_started;
+#if CLEAN_RX_HT_REJECT_BASELINE
+static clean_ht_reject_baseline_t ht_reject_baseline;
+#endif
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+static clean_ht_candidate_trace_t ht_candidate;
+#endif
 _Static_assert(CLEAN_HT_TIMING_DETAIL >= CLEAN_HT_FAILURE_DETAIL + sizeof(clean_ht_failure_t) &&
                CLEAN_HT_TIMING_DETAIL + 32u <= CLEAN_HT_WITNESS_ACK_DETAIL &&
                CLEAN_HT_WITNESS_ACK_DETAIL + 24u <= CLEAN_HT_OBSERVER_DETAIL &&
                CLEAN_HT_OBSERVER_DETAIL + 4u <= 1960u,
                "Nonaggregate HT timing must not overlap ACK/failure/packet evidence");
+_Static_assert(CLEAN_HT_REJECT_COPY_DETAIL == CLEAN_HT_PEER_DETAIL &&
+               sizeof(clean_ht_reject_copy_t) <= CLEAN_HT_PEER_BYTES,
+               "HT receive modes reuse station-only peer-policy report storage");
 static uint32_t clock_before[12], clock_after[12], sys_khz_q5;
 static int station_receive(clean_loader_t *l, const uint8_t mac[6], uint32_t *size);
 static int station_command(clean_loader_t *l, uint8_t *bytes, uint32_t size, uint32_t cmd);
@@ -650,18 +665,20 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
     int extended=detail[2000u]==CLEAN_WPA_REKEY_MODE;
     uint8_t *packet=rx_packet;
     uint8_t tx[512];
-    uint32_t pending = 0u;
+    uint32_t pending = 0u, retained = 0u;
     uint8_t pending_key = 0u;
     while (!l->error && !wpa.error) {
         if (extended && l->wire->now_us(l->wire->context)-started>=
             CLEAN_WPA_REKEY_SECONDS*1000000u) break;
         uint32_t retry_length;
-        int retry=clean_wpa_poll(&wpa,l->wire->now_us(l->wire->context),tx,&retry_length);
+        int retry=clean_wpa_poll(&wpa,l->wire->now_us(l->wire->context),
+                                 pending?0:tx,&retry_length);
         if (retry<0) break;
         if (retry) { pending=retry_length; pending_key=1u; }
-        uint32_t size;
-        if (!station_receive(l,mac,&size)) break;
-        if (size>=18u) {
+        if (!extended && wpa.stage==WPA_PROTECTED && !pending) break;
+        if (!pending && !retained && !station_receive(l,mac,&retained)) break;
+        uint32_t size=retained;
+        if (!pending && size>=18u) {
             const uint8_t *m=packet+18u;
             if (size<=(extended?CLEAN_WPA_REKEY_DETAIL-1104u:CLEAN_DETAIL_PACKET_BYTES) &&
                 size>=42u && !(m[1]&64u) &&
@@ -679,9 +696,11 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
             uint32_t length;
             int result=clean_wpa_receive(&wpa,m,size-18u,tx,&length);
             if (result<0) break;
+            if (result==CLEAN_WPA_RX_RETRY) continue;
+            retained=0u;
             if (result) { pending=length; pending_key=1u; }
             else if (!extended && wpa.stage==WPA_PROTECTED) break;
-        }
+        } else if (!pending) retained=0u;
         if (pending) {
             if (!station_command(l,tx,pending,5u|clean_tx_length_bits(pending)|
                 (1u<<18u)|(4u<<19u)|CLEAN_TX_ACK_REQUIRED)) break;
@@ -698,7 +717,8 @@ static void station_wpa(clean_loader_t *l, const uint8_t mac[6]) {
             }
         }
         uint32_t tick=l->wire->now_us(l->wire->context);
-        if (!pending && (wpa.stage>=WPA_M4_SENT || wpa.rekey) && tick-last_probe>=100000u) {
+        if (!pending && !retained && (wpa.stage>=WPA_M4_SENT || wpa.rekey) &&
+            tick-last_probe>=100000u) {
             uint32_t length=clean_wpa_probe(&wpa,tx);
             if (!length) break;
             pending=length;
@@ -1072,6 +1092,16 @@ static void run(const uint8_t nonce[16]) {
     soak_watchdog_at = l.wire->now_us(l.wire->context);
     if (badger_schedule_bootsel(CLEAN_BADGE_RECOVERY_MS) != 0) l.error = CLEAN_CANCELLED;
     badger_bytes_zero(detail, sizeof(detail));
+#if CLEAN_RX_HT_REJECT_BASELINE
+    badger_bytes_zero((uint8_t *)&ht_reject_baseline, sizeof(ht_reject_baseline));
+    int baseline_requested = (nonce[14] == 25u || nonce[14] == 27u) &&
+        clean_ht_data_length(nonce) == CLEAN_HT_ACK_MPDU;
+#endif
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+    badger_bytes_zero((uint8_t *)&ht_candidate, sizeof(ht_candidate));
+    int candidate_requested = (nonce[14] == 25u || nonce[14] == 27u) &&
+        clean_ht_data_length(nonce) == CLEAN_HT_ACK_MPDU;
+#endif
     clean_mac_rx_init(&station_rx);
     if (CLEAN_RX_WMM) clean_qos_rx_init(&station_qos);
     station_wmm_updates = station_wmm_offered = 0u;
@@ -1129,6 +1159,10 @@ static void run(const uint8_t nonce[16]) {
                    nonce[14] != 22u && nonce[14] != 23u &&
                    nonce[14] != 25u && nonce[14] != CLEAN_PEER_RX_MODE &&
                    (nonce[14] != CLEAN_HT_AMPDU_PROBE_RX_MODE || CLEAN_RX_AMPDU_BA)) &&
+#if CLEAN_RX_HT_REJECT_BASELINE
+        (!baseline_requested || clean_ht_reject_baseline_capture(&l, &ht_reject_baseline,
+            clean_request_generation(nonce), probe_started)) &&
+#endif
         clean_write(&l, 0x18002024u, 0xf0u) &&
         clean_write(&l, CLEAN_MBOX + 24u, 2u) && clean_wait_state(&l, 9u, 100000u)) {
         l.stage = 7u;
@@ -1420,9 +1454,20 @@ static void run(const uint8_t nonce[16]) {
         }
 #endif
     }
-    if (snapshot && (nonce[14] == 27u || nonce[14] == 28u))
+    if (snapshot && (nonce[14] == 27u || nonce[14] == 28u ||
+                    (CLEAN_RX_HT_REJECT_TRACE && nonce[14] == 25u)))
         snapshot = clean_block(&l, CLEAN_HT_FAILURE_ADDR, detail + CLEAN_HT_FAILURE_DETAIL,
                                sizeof(clean_ht_failure_t), 0u);
+#if CLEAN_RX_HT_REJECT_TRACE
+    if (snapshot && (nonce[14] == 25u || nonce[14] == 27u))
+        snapshot = clean_block(&l, CLEAN_HT_REJECT_COPY_ADDR, detail + CLEAN_HT_REJECT_COPY_DETAIL,
+                               sizeof(clean_ht_reject_copy_t), 0u);
+#endif
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+    if (snapshot && candidate_requested)
+        snapshot = clean_block(&l, CLEAN_HT_CANDIDATE_ADDR, (uint8_t *)&ht_candidate,
+                               sizeof(ht_candidate), 0u);
+#endif
     if (snapshot && nonce[14] >= 24u && nonce[14] <= 28u)
         snapshot = clean_block(&l, CLEAN_TX_START_HANDOFFS_ADDR,
                                detail + CLEAN_HT_TIMING_DETAIL + 24u, 8u, 0u);
@@ -1511,6 +1556,23 @@ static void run(const uint8_t nonce[16]) {
         badger_bytes_store_u32(detail + CLEAN_SOAK_PROGRESS_DETAIL +
             __builtin_offsetof(clean_soak_progress_t, snapshot_stop_error), snapshot_stop_error);
     }
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+    if (snapshot && candidate_requested && !clean_ht_candidate_store(detail, nonce, &ht_candidate)) {
+        l.address = CLEAN_HT_CANDIDATE_DETAIL;
+        l.actual = badger_bytes_load_u32(detail + 1088u);
+        l.error = CLEAN_READBACK;
+        snapshot = 0;
+    }
+#endif
+#if CLEAN_RX_HT_REJECT_BASELINE
+    if (snapshot && baseline_requested && ht_reject_baseline.magic &&
+        !clean_ht_reject_baseline_store(detail, nonce, &ht_reject_baseline)) {
+        l.address = CLEAN_HT_REJECT_BASELINE_DETAIL;
+        l.actual = badger_bytes_load_u32(detail + 1088u);
+        l.error = CLEAN_READBACK;
+        snapshot = 0;
+    }
+#endif
     if (l.error == CLEAN_OK && !snapshot) l.error = CLEAN_READBACK;
     if (l.error == CLEAN_OK && snapshot_stop_error != CLEAN_OK) l.error = snapshot_stop_error;
     clean_loader_finish_snapshot(&operation, &l, detail + CLEAN_SNAPSHOT_DETAIL);

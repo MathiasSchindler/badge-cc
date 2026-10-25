@@ -15,6 +15,8 @@
 #define CLEAN_AMPDU_SHM_HELD_STATE 16u
 #define CLEAN_AMPDU_SHM_STATUS_WORD 68u
 #define CLEAN_AMPDU_SHM_STATUS_WORDS 10u
+#define CLEAN_AMPDU_SHM_REPEAT_WORD 78u
+#define CLEAN_AMPDU_SHM_REPEAT_TAG 0x5250u
 /* Shared receipt-evidence ABI for both bounded aggregate delivery paths. */
 #define CLEAN_AMPDU_DMA_PENDING 0x300u
 #define CLEAN_AMPDU_DMA_SUBMITTED 0x301u
@@ -82,6 +84,10 @@ _Static_assert(CLEAN_AMPDU_SHM_STATUS_WORD >= 4u + 3u * 8u &&
                CLEAN_AMPDU_SHM_STATUS_WORD + CLEAN_AMPDU_SHM_STATUS_WORDS <=
                    CLEAN_AMPDU_HANDOFF_COMMIT,
                "SHM terminal ownership evidence must fit unused handoff-2 rows");
+_Static_assert(CLEAN_AMPDU_SHM_REPEAT_WORD >=
+                   CLEAN_AMPDU_SHM_STATUS_WORD + CLEAN_AMPDU_SHM_STATUS_WORDS &&
+               CLEAN_AMPDU_SHM_REPEAT_WORD < 80u,
+               "Repeated handoff marker must not overlap terminal or BA state");
 _Static_assert(CLEAN_AMPDU_DMA_PENDING >= CLEAN_AMPDU_IF_SHM + CLEAN_AMPDU_IF_WORDS &&
                CLEAN_AMPDU_DMA_SUBMITTED < 0x600u,
                "Aggregate DMA controls must not overlap evidence or station SHM");

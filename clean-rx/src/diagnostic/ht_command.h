@@ -10,6 +10,16 @@ static inline uint8_t clean_ht_amsdu_byte(uint32_t at, const uint8_t nonce[14]);
 static inline uint8_t clean_ht_ack_byte(uint32_t at, const uint8_t nonce[14]);
 static inline uint32_t clean_ht_data_length(const uint8_t nonce[14]);
 
+static inline uint32_t clean_ht_reject_bad_fcs_word(uint32_t word, uint32_t index,
+        uint32_t length, uint32_t ht_probe, const volatile uint8_t *packet) {
+    if (CLEAN_RX_HT_REJECT_BAD_FCS && ht_probe == 2u &&
+        length == CLEAN_PLCP_BYTES + CLEAN_HT_ACK_MPDU &&
+        packet[0] == CLEAN_HT_CLOCKED_VERSION &&
+        index == (length - 1u) / 4u)
+        word ^= 0x80u << (8u * ((length - 1u) & 3u));
+    return word;
+}
+
 static inline int clean_ht_ampdu_probe_mpdu(uint8_t m[80], const uint8_t nonce[14],
                                             uint32_t sequence) {
     if (nonce[13] >= 8u || sequence >= CLEAN_HT_AMPDU_PROBE_COUNT) return 0;

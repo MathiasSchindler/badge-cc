@@ -54,6 +54,81 @@ Next evidence must establish rejected-byte copy provenance and distinguish
 TX waveform failure from shared source-built RX behavior. Independent ACK
 acquisition remains uncalibrated; reliability and R07 acceptance remain open.
 
+The opt-in [rejected ACK60 copy-state trace](../guides/HOST_TOOLS.md#rejected-ack60-copy-state-trace)
+now freezes the first eligible record in either receive role and binds raw copy
+register operands to its cause, TSF and RXE count. Native tests cover passive
+capture, stable stale SHM, immutable first records and raw/JSON disagreement.
+The [eight-attempt investigation](../experiments/HT_REJECT_COPY_2026-10-25.md)
+reproduced the B-to-A miss but found that the new probe overlapped derived ACK
+state in both SHM and SRAM. Its copy-state evidence is **not qualified**.
+Both flashed prototypes and all failures are retained; all originals were
+restored. Four subsequent corrected-layout controls delivered with returned ACKs
+and passive Pico observations; all eight receiver traces stayed correctly zeroed.
+The subsequent [controlled bad-FCS calibration](../experiments/HT_REJECT_BAD_FCS_2026-10-25.md)
+retained a bound active rejection whose complete MAC bytes match the programmed
+fixture, including exactly the deliberately changed FCS bit. This exercises
+the active arm for one control, not general copy freshness or the radio root
+cause. The passive Pico retained no corresponding rejection.
+That complete matching 66-byte control is below the ordinary 128-byte streaming
+threshold: the threshold and stable register operands alone prove neither
+staleness nor freshness. The subsequent
+[normal-traffic campaign](../experiments/HT_SPONTANEOUS_REJECTION_2026-10-25.md)
+stopped on a fifth-attempt B-to-A miss with the calibrated, injection-disabled
+images. Its active rejection binds to the copy record, but 54/60 retained MAC
+bytes differ from the fixture and complete MAC identity fails; only a six-byte
+fresh challenge run matches. General freshness remains unproven. The Pico
+also missed an earlier frame that the target received and ACKed, so its
+silence cannot establish transmitter silence. Full originals were restored
+and independently verified. Next establish per-byte copy provenance and
+qualify independent observation; this trace alone cannot localize TX versus
+shared RX failure or close D2 work package 1.
+
+The subsequent [initial-SHM comparison](../experiments/HT_REJECT_BASELINE_2026-10-25.md)
+adds a default-off host-only stopped-MAC baseline; controller/PSM bytes are
+unchanged. After a byte-exact negative control, attempt eight reproduced a
+normal **A-to-B** miss with bound active and passive rejections. They share
+32 incorrect MAC bytes, including a 15-byte run, but differ at thirteen
+offsets. Every retained MAC byte differs from its own initial baseline in
+both receivers: untouched startup SHM does not explain this miss. Both
+requested fresh receiver addresses match, but complete MAC identity and
+general freshness still fail. This exercises the corrected passive arm,
+not byte-exact passive qualification. The campaign stopped and all originals
+were restored/verified. Next separate intervening-copy/common RX behavior
+from TX/RF with stronger per-candidate provenance and independent observation;
+do not apply an unproven startup-clearing fix.
+
+The new default-off [per-candidate pre-copy diagnostic](../experiments/HT_CANDIDATE_TRACE_2026-10-25.md)
+snapshots the previous receive bytes before prefix-copy setup and freezes them
+with the first rejection. Native PSM, report, startup and independent decoder
+tests pass. Its first authorized attempt stopped on unavailable receiver
+snapshots; missing initialization of the diagnostic's own SHM was repaired
+offline. This is not a receive-buffer clearing fix or RF-qualified probe.
+All originals were restored and independently verified; the failed attempt
+is sealed. A separately authorized
+[repaired-image campaign](../experiments/HT_CANDIDATE_REJECTION_2026-10-25.md)
+stopped on its first normal control failure with valid snapshots and two bound
+rejections. None of the active/passive incorrect MAC bytes equalled its own
+pre-command snapshot. Both retained the requested FCS but neither complete
+identity/body CRC validates. This narrows unchanged-preimage explanations,
+not general copy or RF provenance. No positive/negative RF calibration
+passed; probe timing perturbation remains possible. All originals were again
+restored, fully verified and left in BOOTSEL. D2 package 1 remains open.
+
+The subsequent [matched crossover](../experiments/HT_PROBE_CROSSOVER_2026-10-25.md)
+keeps TX and Pico probe-off and changes only the active receiver's candidate
+probe. Both states delivered complete bodies in 3/4 normal attempts. A
+probe-off identity-correlated rejection has 15 incorrect MAC bytes; another
+probe-off trial delivered the full body and started an ACK that the transmitter
+did not acquire. Thus the new probe is not necessary for either failure stage,
+but the small test does not establish that it is harmless. Three deliberate
+bad-FCS fixtures were retained byte-exactly by the passive Pico, including two
+simultaneous active/passive matches. Probe-on receiver B has a byte-exact
+negative control; receiver A's counterpart remains missing. This is limited
+physical-device calibration, not independent receiver-code or loss-free
+observation qualification. All twelve attempts/36 reports are sealed and all
+originals restored/full-verified in BOOTSEL. TX/RF versus shared RX/copy and
+the independently unwitnessed ACK path remain unresolved.
+
 ### HT aggregate and Block ACK
 
 **Status:** not integrated/qualified for general station operation.
@@ -61,6 +136,20 @@ Negotiated HT advertisement remains disabled. Raw HT v1, the direct messenger
 and finite retained-SHM/DMA/F2 fixtures are narrower interfaces.
 General live A-MPDU reception, agreement/key/reorder integration and
 independently qualified SIFS-timed Immediate BA remain open.
+
+The [secure BA software lifecycle](../guides/HOST_TOOLS.md#d2-secure-block-ack-software-lifecycle)
+now binds reorder/stream storage to WPA key transitions, aborts and timeouts,
+with deferred callback cleanup and pressure-safe repeated software PPDUs.
+This does not add a station dispatcher or a controller BA-install/revoke
+backend, and does not qualify general aggregate reception.
+The default-off [repeated retained-SHM prototype](../guides/HOST_TOOLS.md#repeated-retained-shm-handoff-offline-prototype)
+now rearms terminal leases after bounded SRAM admission, with native
+controller/PSM pressure and wrap coverage. Its exported native execution
+transcripts now pass an independent multi-PPDU model oracle, including
+complete fixture bytes/FCS, lease transitions and tampered-transcript controls.
+It retains the fixed fixture contract; live multi-PPDU collection, repeated
+RF delivery and general RXE completion remain unqualified. Finite-fixture
+acceptance explicitly rejects its marker.
 
 **Next evidence:** follow the [D2 work packages](../../../todo.md#remaining-work-packages)
 and [D3 acceptance](../../../todo.md#d3-ht-mac-and-performance).

@@ -59,6 +59,8 @@ function verify(config,tx,rx,rawTx,rawRx) {
     assert.equal(rx.capture_available,true); assert.equal(rx.lease_available,true);
     assert.equal(rawRx.readUInt32LE(768),0x32504441,'missing capture');
     assert.equal(rawRx.readUInt32LE(1104),0x32464941,'missing lease');
+    assert.equal(rawRx.readUInt16LE(1264),0,
+        'repeated/unknown handoff requires a multi-PPDU oracle, not finite-fixture acceptance');
     assert.equal(rx.interface?.valid,true);
     assert.equal(rawRx.readUInt16LE(1108),3);
     assert.ok(rawRx.readUInt16LE(1110)>=1 && rawRx.readUInt16LE(1110)<=3);
@@ -187,7 +189,7 @@ function selfTest(collector) {
         for (const field of ['delivered_subframe_bitmap','delivered_subframes','delivered_duplicates',
             'capture_available','lease_available','delivery_payloads_valid','observed_fixture_bitmap'])
             assert.throws(()=>verify(config,tx,{...rx,[field]:null},txRaw,rxRaw));
-        for (const offset of [4,8,36,64,708,712,716,768,796,1104,1248,1250,1252,1254,
+        for (const offset of [4,8,36,64,708,712,716,768,796,1104,1248,1250,1252,1254,1264,1265,
             2048,2052,2056,2068,2072,2088]) {
             rxRaw[offset]^=1; assert.throws(()=>verify(config,tx,rx,txRaw,rxRaw)); rxRaw[offset]^=1;
         }
@@ -202,6 +204,13 @@ function selfTest(collector) {
             assert.equal(zeroReceipt.status,0,zeroReceipt.stderr);
             const zeroRecord=JSON.parse(zeroReceipt.stdout);
             assert.equal(zeroRecord.reported_delivered_subframe_bitmap,null);
+            const repeated=Buffer.from(rxRaw);
+            repeated.writeUInt16LE(0x5250,1264);
+            fs.writeFileSync(file,repeated);
+            const repeatReport=spawnSync(collector,['--inspect-ampdu',file,config.challenge],{encoding:'utf8'});
+            assert.equal(repeatReport.status,1,repeatReport.stderr);
+            assert.equal(JSON.parse(repeatReport.stdout).finite_fixture_qualified,false);
+            assert.match(repeatReport.stderr,/multi-PPDU/);
             if (zeroRecord.dma_experiment_enabled) {
                 const words=[0x10002,0x10000030,0x40,0,0x314d4441,3968,0x35000,0,
                     0x10003,0x560002,0xa411922,0x8000002];
@@ -258,7 +267,7 @@ function selfTest(collector) {
     }
     console.log('Aggregate evidence: complete/zero controls, stale/missing/partial reports, false counters, invalid lease and collector nulls pass');
 }
-module.exports={verify};
+module.exports={verify,crc,mpdu};
 if (require.main===module) {
     if (process.argv[2]==='--self-test') selfTest(process.argv[3]);
     else {

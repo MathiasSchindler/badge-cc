@@ -8,6 +8,42 @@ static int fail(clean_loader_t *l, uint32_t error) {
     return 0;
 }
 
+int clean_ht_reject_baseline_capture(clean_loader_t *l, clean_ht_reject_baseline_t *record,
+                                    uint32_t generation, uint32_t probe_started) {
+    badger_bytes_zero((uint8_t *)record, sizeof(*record));
+    record->begin_us = l->wire->now_us(l->wire->context) - probe_started;
+    const uint32_t addresses[] = {CLEAN_MBOX + 4u, CLEAN_MBOX + 24u,
+                                  CLEAN_MBOX + 32u, 0x18001120u};
+    const uint32_t expected[] = {8u, 1u, generation, 0u};
+    for (uint32_t pass = 0u; pass < 2u; ++pass) {
+        for (uint32_t i = 0u; i < 4u; ++i) {
+            uint32_t value;
+            if (!clean_read(l, addresses[i], &value)) return 0;
+            if ((i == 3u ? value & 3u : value) != expected[i]) {
+                l->address = addresses[i]; l->actual = value;
+                return fail(l, CLEAN_CONTROLLER);
+            }
+            if (i == 3u) {
+                if (pass) record->maccontrol_after = value;
+                else record->maccontrol_before = value;
+            }
+        }
+        if (!pass) {
+            for (uint32_t i = 0u; i < 33u; ++i) {
+                uint32_t word = CLEAN_SHM_FRAME + 1u + i, value;
+                if (!clean_write(l, 0x18001160u, 0x00010000u | (word >> 1u)) ||
+                    !clean_read(l, 0x18001160u, &value) ||
+                    !clean_read(l, 0x18001164u, &value)) return 0;
+                record->raw[i] = (uint16_t)(value >> (16u * (word & 1u)));
+            }
+        }
+    }
+    record->end_us = l->wire->now_us(l->wire->context) - probe_started;
+    record->generation = generation;
+    record->magic = CLEAN_HT_REJECT_BASELINE_MAGIC;
+    return 1;
+}
+
 int clean_service(clean_loader_t *l) {
     if (l->error != CLEAN_OK) return 0;
     uint32_t now = l->wire->now_us(l->wire->context);

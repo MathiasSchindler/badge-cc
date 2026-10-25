@@ -30,6 +30,16 @@
 #define CLEAN_HT_OBSERVER_MAGIC 0x31534f48u
 #define CLEAN_HT_F2_DETAIL 1860u
 #define CLEAN_HT_F2_MAGIC 0x31463248u
+#define CLEAN_HT_REJECT_BASELINE_DETAIL 1520u
+#define CLEAN_HT_REJECT_BASELINE_MAGIC 0x31425248u
+typedef struct {
+    uint32_t magic, generation, maccontrol_before, maccontrol_after, begin_us, end_us;
+    uint16_t raw[33], reserved;
+} clean_ht_reject_baseline_t;
+_Static_assert(sizeof(clean_ht_reject_baseline_t) == 92u &&
+               CLEAN_HT_REJECT_BASELINE_DETAIL >= 1104u + 18u + 60u &&
+               CLEAN_HT_REJECT_BASELINE_DETAIL + sizeof(clean_ht_reject_baseline_t) <= 1632u,
+               "ACK60 baseline must fit unused packet-report tail without touching counters");
 #define CLEAN_SNAPSHOT_AGGREGATE (CLEAN_SNAPSHOT_FROZEN | CLEAN_SNAPSHOT_MAILBOX | \
                                   CLEAN_SNAPSHOT_MULTI | CLEAN_SNAPSHOT_HT | CLEAN_SNAPSHOT_AMPDU)
 
@@ -109,6 +119,9 @@ void clean_loader_finish_snapshot(clean_loader_t *operation, clean_loader_t *sna
 int clean_snapshot_block(clean_loader_t *loader, uint32_t address, uint8_t *bytes,
                           uint32_t length, uint32_t *sections, uint32_t section);
 int clean_check_layout(clean_loader_t *loader);
+int clean_ht_reject_baseline_capture(clean_loader_t *loader,
+                                    clean_ht_reject_baseline_t *record,
+                                    uint32_t generation, uint32_t probe_started);
 int clean_receive(clean_loader_t *loader, uint8_t packet[CLEAN_RX_PACKET_BYTES], uint32_t *length);
 
 #endif

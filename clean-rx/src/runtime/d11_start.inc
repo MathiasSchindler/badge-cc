@@ -53,6 +53,11 @@ static int load_and_start_psm(uint32_t generation, uint32_t channel) {
         shm_write16(CLEAN_AMPDU_IF_SHM + i, 0u);
     ((volatile clean_ampdu_interface_t *)CLEAN_AMPDU_IF_ADDR)->magic = 0u;
 #endif
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+    for (uint32_t i = 0u; i < CLEAN_HT_CANDIDATE_WORDS; ++i)
+        shm_write16(CLEAN_HT_CANDIDATE_SHM + i, 0u);
+    ((volatile clean_ht_candidate_trace_t *)CLEAN_HT_CANDIDATE_ADDR)->magic = 0u;
+#endif
 #if CLEAN_RX_AMPDU_DMA
     shm_write16(CLEAN_AMPDU_DMA_PENDING, 0u);
     shm_write16(CLEAN_AMPDU_DMA_SUBMITTED, 0u);

@@ -86,7 +86,10 @@ static void capture_layout(uint8_t original[2360]) {
     restore(original,162u,WORD(0x77fu,0x1780u,0x1780u,AMPDU_IF_BODY),
             WORD(0x3f0u,0x1fffu,0x1800u,0x1780u));
 #endif
-#if CLEAN_RX_REJECT_PROBE
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+    restore(original, 130u, WORD(0x77fu,0x1780u,0x1780u,HT_CANDIDATE_ENTER),
+            WORD(0x307u,0x1800u,0x1078u,0x1078u));
+#elif CLEAN_RX_REJECT_PROBE
     restore(original, 130u, WORD(0x77fu,0x1780u,0x1780u,RX_REJECT_CLEAR_0),
             WORD(0x307u,0x1800u,0x1078u,0x1078u));
 #endif
@@ -738,7 +741,7 @@ static uint32_t psm_run(uint16_t regs[0x1800], int events, uint32_t pc) {
         if (pc == AMPDU_SHM_WAIT && regs[0x601u]) return pc;
 #endif
         if (pc == 198u || pc == 266u || pc == 124u || pc == 130u ||
-            (CLEAN_RX_REJECT_PROBE && pc == 131u) ||
+            ((CLEAN_RX_REJECT_PROBE || CLEAN_RX_HT_CANDIDATE_TRACE) && pc == 131u) ||
             (CLEAN_RX_AMPDU_DMA && (pc == 253u || pc == 220u)) ||
             pc == 118u || pc == 129u || pc == 163u ||
             pc == 148u || pc == 154u || pc == 262u || pc == 263u) return pc;
@@ -1145,7 +1148,9 @@ static void receive_trace(void) {
     r[CLEAN_SHM_FRAME + 1u] = 0x840eu;
     assert(psm_run(r, 0, RX_TRACE_ENTER) == 148u);
     assert(r[0x7acu] == 0x840eu && r[CLEAN_RX_TRACE_SHM] == 0x040au);
-    assert(r[0x1780u] == 123u && r[0x1781u] == 456u && r[0x1782u] == 789u);
+    assert(r[0x1780u] == 123u && r[0x1781u] == 456u);
+    /* Passive eligibility stages SIG comparisons in r2 even for unrelated frames. */
+    if (!CLEAN_RX_HT_REJECT_TRACE) assert(r[0x1782u] == 789u);
 }
 
 static void ht_receive_trace(void) {
@@ -1224,7 +1229,7 @@ static void ht_failure_capture(void) {
                 r[0x1119u] = 65535u; r[0x111au] = 123u;
                 uint32_t entry = cause == 2u ? HT_FAIL_FCS : HT_FAIL_ABORT;
                 assert(psm_run(r, 0, entry) == (cause == 2u ? 263u : 266u));
-                int saved = policy == 3u && length <= 66u;
+                int saved = (CLEAN_RX_HT_REJECT_TRACE || policy == 3u) && length <= 66u;
                 assert(r[CLEAN_HT_FAILURE_SHM] == saved);
                 if (!saved) continue;
                 const uint16_t meta[] = {(uint16_t)cause,65535u,123u,(uint16_t)length,
@@ -1288,6 +1293,90 @@ static void ht_failure_capture(void) {
         assert(r[CLEAN_HT_EARLY_SHM + 9u] == (phy >= 2u ? 2u : 0u));
     }
     puts("HT failure capture: policy/SIG/length gates, independent repeated copies, terminal PHY 0..3 and abort return paths pass; NOT RF");
+}
+
+static void ht_rejected_copy_state(void) {
+#if CLEAN_RX_HT_REJECT_TRACE
+    assert(HT_COPY_COMMIT > HT_FAIL_COMMIT && HT_COPY_COMMIT > HT_COPY_AFTER_NEXT);
+    uint8_t publication[CLEAN_HT_REJECT_COPY_ADDR+sizeof(clean_ht_reject_copy_t)-CLEAN_TX_COMPLETION_ADDR];
+    memset(publication,0xa5,sizeof(publication));
+    clean_ht_reject_copy_t record={.magic=CLEAN_HT_REJECT_COPY_MAGIC,.count=1u,
+        .cause=2u,.length=66u,.stream_threshold=CLEAN_RX_STREAM_PREFIX_BYTES};
+    uint32_t offset=CLEAN_HT_REJECT_COPY_ADDR-CLEAN_TX_COMPLETION_ADDR;
+    memcpy(publication+offset,&record,sizeof(record));
+    for(uint32_t i=0u;i<CLEAN_PHY_EDGE_ADDR+sizeof(clean_phy_edge_t)-CLEAN_TX_COMPLETION_ADDR;++i)
+        assert(publication[i]==0xa5u);
+    memset(publication,0x5a,CLEAN_PHY_EDGE_ADDR+sizeof(clean_phy_edge_t)-CLEAN_TX_COMPLETION_ADDR);
+    assert(!memcmp(publication+offset,&record,sizeof(record)));
+    uint16_t r[0x1800];
+    const uint16_t registers[] = {0x1004u,0x1001u,0x1002u,0x102au,0x102bu};
+    for (uint32_t streamed=0u;streamed<2u;++streamed) {
+        memset(r,0,sizeof(r));
+        for(uint32_t i=CLEAN_ACK_TEST_SHM;i<=CLEAN_TX_SELECT_READBACK;++i)r[i]=0x5a5au;
+        const uint16_t values[] = {(uint16_t)(streamed?2u:0u),CLEAN_SHM_FRAME,4095u,0u,0x8000u};
+        for (uint32_t i=0u;i<5u;++i) r[registers[i]]=values[i];
+        const uint16_t sig[] = {0x3c07u,0x0700u,0x03fcu};
+        for (uint32_t i=0u;i<3u;++i)
+            r[CLEAN_HT_EARLY_SHM+2u+i]=r[CLEAN_SHM_FRAME+1u+i]=sig[i];
+        r[0x100cu]=66u;r[0x1119u]=65535u;r[0x111au]=12u;
+        for (uint32_t i=3u;i<33u;++i) r[CLEAN_SHM_FRAME+1u+i]=(uint16_t)(0xa000u+i);
+        assert(psm_run(r,0,HT_FAIL_FCS)==263u);
+        assert(r[CLEAN_QOS_RESPONSE_POLICY]==0u && r[CLEAN_HT_FAILURE_SHM]==1u);
+        for(uint32_t i=CLEAN_ACK_TEST_SHM;i<=CLEAN_TX_SELECT_READBACK;++i)assert(r[i]==0x5a5au);
+        const uint16_t *copy=r+CLEAN_HT_REJECT_COPY_SHM;
+        assert(copy[0]==1u && copy[1]==2u && copy[2]==65535u && copy[3]==12u &&
+               copy[4]==66u && copy[5]==CLEAN_RX_STREAM_PREFIX_BYTES);
+        for (uint32_t i=0u;i<5u;++i)
+            assert(copy[6u+i]==values[i] && copy[11u+i]==values[i] &&
+                   r[registers[i]]==values[i]);
+        uint16_t saved[CLEAN_HT_FAILURE_WORDS],provenance[CLEAN_HT_REJECT_COPY_WORDS];
+        memcpy(saved,r+CLEAN_HT_FAILURE_SHM,sizeof(saved));
+        memcpy(provenance,copy,sizeof(provenance));
+        r[0x1004u]^=2u;r[CLEAN_SHM_FRAME+10u]^=1u;
+        assert(psm_run(r,0,HT_FAIL_ABORT)==266u);
+        assert(!memcmp(saved,r+CLEAN_HT_FAILURE_SHM,sizeof(saved)));
+        assert(!memcmp(provenance,copy,sizeof(provenance)));
+    }
+    puts("Rejected HT copy trace: passive policy, first-rejection ownership, stale SHM and unchanged copy registers pass; NOT copy-completion or RF proof");
+#endif
+}
+
+static void ht_candidate_provenance(void) {
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+    assert(instruction(130u) == WORD(0x77fu,0x1780u,0x1780u,HT_CANDIDATE_ENTER));
+    uint16_t r[0x1800]={0}, before[33], frozen[CLEAN_HT_CANDIDATE_WORDS];
+    for (uint32_t i=0u;i<7u;++i) r[0x1780u+i]=(uint16_t)(0x1234u+i);
+    const uint16_t copy_regs[]={0x1004u,0x1001u,0x1002u,0x102au,0x102bu};
+    for (uint32_t i=0u;i<5u;++i) r[copy_regs[i]]=(uint16_t)(0x2000u+i);
+    for (uint32_t round=0u;round<2u;++round) {
+        for (uint32_t i=0u;i<33u;++i)
+            before[i]=r[CLEAN_SHM_FRAME+1u+i]=(uint16_t)(0xa000u+100u*round+i);
+        r[0x1119u]=65530u;r[0x111au]=12u;r[0x1078u]=0xffffu;
+        assert(psm_run(r,0,HT_CANDIDATE_ENTER)==131u);
+        assert(r[0x1078u]==0xff7fu && r[CLEAN_HT_CANDIDATE_SHM]==round+1u);
+        assert(!memcmp(before,r+CLEAN_HT_CANDIDATE_SHM+12u,sizeof(before)));
+        assert(!memcmp(before,r+CLEAN_SHM_FRAME+1u,sizeof(before)));
+        for (uint32_t i=0u;i<7u;++i) assert(r[0x1780u+i]==0x1234u+i);
+        for (uint32_t i=0u;i<5u;++i)
+            assert(r[copy_regs[i]]==0x2000u+i && r[CLEAN_HT_CANDIDATE_SHM+7u+i]==0x2000u+i);
+    }
+    const uint16_t sig[]={0x3c07u,0x0700u,0x03fcu};
+    for (uint32_t i=0u;i<3u;++i)
+        r[CLEAN_HT_EARLY_SHM+2u+i]=r[CLEAN_SHM_FRAME+1u+i]=sig[i];
+    r[0x100cu]=66u;r[0x1119u]=4u;r[0x111au]=13u;
+    assert(psm_run(r,0,HT_FAIL_FCS)==263u);
+    assert(r[CLEAN_HT_CANDIDATE_SHM+45u]==2u && r[CLEAN_HT_CANDIDATE_SHM+46u]==4u &&
+           r[CLEAN_HT_CANDIDATE_SHM+47u]==13u && r[CLEAN_HT_CANDIDATE_SHM+48u]==66u &&
+           r[CLEAN_HT_CANDIDATE_SHM+49u]==1u);
+    assert(!memcmp(before,r+CLEAN_HT_CANDIDATE_SHM+12u,sizeof(before)));
+    memcpy(frozen,r+CLEAN_HT_CANDIDATE_SHM,sizeof(frozen));
+    r[CLEAN_SHM_FRAME+10u]^=1u;r[0x1078u]=0xffffu;
+    assert(psm_run(r,0,HT_CANDIDATE_ENTER)==131u && r[0x1078u]==0xff7fu);
+    assert(!memcmp(frozen,r+CLEAN_HT_CANDIDATE_SHM,sizeof(frozen)));
+    memset(r,0,sizeof(r));r[CLEAN_HT_CANDIDATE_SHM]=65535u;
+    assert(psm_run(r,0,HT_CANDIDATE_ENTER)==131u && !r[CLEAN_HT_CANDIDATE_SHM]);
+    puts("HT candidate: pre-command bytes, register preservation, candidate replacement, rejection binding, immutable freeze and sequence/TSF wrap; NOT RF");
+#endif
 }
 
 static void contention(void) {
@@ -2327,13 +2416,17 @@ static void aggregate_terminal_handoff(void) {
                 assert(((uint32_t)r[status+8u] |
                         ((uint32_t)r[status+9u]<<16u)) -
                        ((uint32_t)r[status] | ((uint32_t)r[status+1u]<<16u))==16u);
-                assert(r[CLEAN_AMPDU_PROBE_SHM]==count);
+                assert(r[CLEAN_AMPDU_PROBE_SHM]==(CLEAN_RX_AMPDU_REPEAT ? 0u : count));
+                if (CLEAN_RX_AMPDU_REPEAT)
+                    assert(!r[CLEAN_AMPDU_IF_SHM] && !r[CLEAN_AMPDU_IF_SHM+1u]);
                 assert(!r[CLEAN_ACK_SENT] && !r[CLEAN_CTS_SENT]);
             }
     uint16_t r[0x1800]={0};
     r[status+2u]=65535u; r[status+3u]=65535u;
     r[0x1782u]=1u;
+    r[0x1783u]=0x1234u;
     assert(psm_run(r,0,AMPDU_SHM_COMMIT)==AMPDU_SHM_WAIT);
+    assert(r[0x1783u]==0x1234u);
     assert(!r[status+2u] && r[status+3u]==65535u);
     r[0x601u]=0u;
     assert(psm_run(r,0,AMPDU_SHM_WAIT)==266u && !r[status+3u]);
@@ -2939,6 +3032,8 @@ int main(void) {
     receive_trace();
     ht_receive_trace();
     ht_failure_capture();
+    ht_rejected_copy_state();
+    ht_candidate_provenance();
     authentication_failure_capture();
     idle_watchdog();
     acknowledgements();

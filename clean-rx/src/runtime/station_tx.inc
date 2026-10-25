@@ -222,6 +222,10 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         uint32_t w = (uint32_t)b[0] | ((uint32_t)b[1] << 8u) |
                      ((uint32_t)b[2] << 16u) | ((uint32_t)b[3] << 24u);
         w = clean_ht_probe_template_word(w, i, ht_probe == 1u, CLEAN_RX_HT_CLEAR_SIG_CRC);
+#if CLEAN_RX_HT_REJECT_BAD_FCS
+        w = clean_ht_reject_bad_fcs_word(w, i, total_len, ht_probe,
+                                        (const volatile uint8_t *)FW_TX_BUF_ADDR);
+#endif
         mmio_write32(D11_TPL_WR_DATA, w);
     }
     mmio_write32(D11_TPL_WR_PTR, 0u);
@@ -230,6 +234,10 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
         uint32_t expected = (uint32_t)b[0] | ((uint32_t)b[1] << 8u) |
                             ((uint32_t)b[2] << 16u) | ((uint32_t)b[3] << 24u);
         expected = clean_ht_probe_template_word(expected, i, ht_probe == 1u, CLEAN_RX_HT_CLEAR_SIG_CRC);
+#if CLEAN_RX_HT_REJECT_BAD_FCS
+        expected = clean_ht_reject_bad_fcs_word(expected, i, total_len, ht_probe,
+                                               (const volatile uint8_t *)FW_TX_BUF_ADDR);
+#endif
         uint32_t actual = mmio_read32(D11_TPL_WR_DATA);
         if (actual != expected) return fail(0x8du, i * 4u, actual);
     }
@@ -540,4 +548,3 @@ static int d11_transmit_template_frame(uint32_t total_len, uint32_t is_ofdm, uin
     }
     return tx_conditions == 7u || fail(0x82u, 0x1800150eu, MBOX->vco_status);
 }
-

@@ -40,12 +40,18 @@ _Static_assert(!CLEAN_RX_HT_HANDOFF_GUARD || CLEAN_RX_HT_RX,
 #ifndef CLEAN_RX_AMPDU_SHM
 #define CLEAN_RX_AMPDU_SHM 0
 #endif
+#ifndef CLEAN_RX_AMPDU_REPEAT
+#define CLEAN_RX_AMPDU_REPEAT 0
+#endif
 #ifndef CLEAN_RX_AMPDU_BA
 #define CLEAN_RX_AMPDU_BA 0
 #endif
 _Static_assert(CLEAN_RX_AMPDU_BA == 0 ||
                (CLEAN_RX_AMPDU_BA == 1 && CLEAN_RX_AMPDU_SHM),
                "Diagnostic Block ACK requires retained SHM delivery");
+_Static_assert(CLEAN_RX_AMPDU_REPEAT == 0 ||
+               (CLEAN_RX_AMPDU_REPEAT == 1 && CLEAN_RX_AMPDU_SHM && !CLEAN_RX_AMPDU_BA),
+               "Repeated aggregate handoff requires retained SHM without diagnostic BA");
 #define CLEAN_RX_AMPDU_DELIVERY (CLEAN_RX_AMPDU_DMA || CLEAN_RX_AMPDU_SHM)
 #if CLEAN_RX_HT_RX
 #define CLEAN_MPDU_BYTES 3896u

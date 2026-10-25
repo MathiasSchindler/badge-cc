@@ -31,6 +31,9 @@ static uint32_t command_delay, command_reads;
 static int command_simulated, command_replaced;
 static uint32_t service_calls;
 static uint32_t bus_error_call, transfer_us, cancel_call;
+static int baseline_mock, baseline_fault;
+static uint32_t baseline_selector, baseline_reads;
+static uint16_t baseline_shm[4096];
 
 static uint32_t now(void *context) {
     (void)context;
@@ -111,6 +114,29 @@ static wifi_bus_result_t mock_transfer(const wifi_wire_t *wire, const uint8_t *t
     }
     uint32_t absolute = base | (addr & 0x7fffu);
     assert(addr & 0x8000u);
+    if (baseline_mock && (absolute == 0x18001120u || absolute == 0x18001160u ||
+                         absolute == 0x18001164u)) {
+        assert(count == 4u);
+        if (cmd >> 31u) {
+            assert(absolute == 0x18001160u && tx_length == 8u);
+            baseline_selector = badger_bytes_load_u32(tx + 4u);
+            assert((baseline_selector & 0xffff0000u) == 0x10000u);
+        } else {
+            memset(rx, 0, rx_length);
+            uint32_t value = baseline_selector;
+            if (absolute == 0x18001120u)
+                value = 0x84020400u | (baseline_fault == 1 ||
+                    (baseline_fault == 2 && baseline_reads == 33u) ? 3u : 0u);
+            if (absolute == 0x18001164u) {
+                uint32_t at = 2u * (baseline_selector & 0xffffu);
+                assert(at >= CLEAN_SHM_FRAME && at + 1u <= CLEAN_SHM_FRAME + 33u);
+                value = baseline_shm[at] | ((uint32_t)baseline_shm[at + 1u] << 16u);
+                ++baseline_reads;
+            }
+            badger_bytes_store_u32(rx + WIFI_GSPI_BACKPLANE_PAD, value);
+        }
+        return WIFI_BUS_OK;
+    }
     if (command_simulated && !(cmd >> 31u) && absolute == CLEAN_MBOX + 24u) {
         assert(count == 4u && rx_length == 4u + WIFI_GSPI_BACKPLANE_PAD);
         memset(rx, 0, rx_length);
@@ -1281,6 +1307,41 @@ static void snapshot_validity(const wifi_wire_t *wire) {
     puts("Snapshot validity: exact read sections, partial-read clearing, frozen state, nonce and controller generation gates pass");
 }
 
+static void rejected_baseline_tests(const wifi_wire_t *wire) {
+    clean_loader_t l;
+    clean_ht_reject_baseline_t record;
+    baseline_mock = 1;
+    for (uint32_t i = 0u; i < 4096u; ++i) baseline_shm[i] = (uint16_t)(i ^ 0xa56bu);
+    uint16_t original[4096];
+    memcpy(original, baseline_shm, sizeof(original));
+    for (uint32_t fault = 0u; fault < 8u; ++fault) {
+        state = fault == 3u ? 9u : 8u;
+        badger_bytes_store_u32(ram + CLEAN_MBOX + 24u, fault == 4u ? 2u : 1u);
+        badger_bytes_store_u32(ram + CLEAN_MBOX + 32u, fault == 5u ? 8u : 7u);
+        baseline_fault = (int)fault; baseline_reads = 0u;
+        clean_loader_init(&l, wire, service, NULL);
+        if (fault == 6u) bus_error_call = calls + 20u;
+        if (fault == 7u) cancel_call = calls + 20u;
+        int ok = clean_ht_reject_baseline_capture(&l, &record, 7u, ticks);
+        if (!fault) {
+            assert(ok && l.error == CLEAN_OK && baseline_reads == 33u);
+            assert(record.magic == CLEAN_HT_REJECT_BASELINE_MAGIC && record.generation == 7u);
+            assert(record.maccontrol_before == 0x84020400u &&
+                   record.maccontrol_after == 0x84020400u);
+            assert(record.begin_us <= record.end_us && !record.reserved);
+            assert(!memcmp(record.raw, baseline_shm + CLEAN_SHM_FRAME + 1u, sizeof(record.raw)));
+        } else {
+            assert(!ok && !record.magic);
+            assert(l.error == (fault == 6u ? CLEAN_BUS : fault == 7u ?
+                               CLEAN_CANCELLED : CLEAN_CONTROLLER));
+        }
+        assert(!memcmp(original, baseline_shm, sizeof(original)));
+        baseline_fault = 0; bus_error_call = cancel_call = 0u; cancel = 0;
+    }
+    baseline_mock = 0; state = 0u;
+    puts("Stopped SHM baseline: exact 33 words, no buffer writes, state/generation/MAC gates, late activation, bus errors and cancellation pass");
+}
+
 int main(void) {
     cck_rates();
     ht_probe_tests();
@@ -1288,6 +1349,7 @@ int main(void) {
     station_tests();
     wifi_wire_t wire = {.now_us = now, .transfer = mock_transfer,
         .write = write_signal, .data_output = output, .read_data = read_signal};
+    rejected_baseline_tests(&wire);
     command_completion(&wire);
     aggregate_deadlines(&wire);
     fault_snapshots(&wire);

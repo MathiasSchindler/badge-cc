@@ -47,6 +47,36 @@ test('no witness is inconclusive; submission never proves transmission', () => {
     assert.equal(result.tx_over_air_confirmed, false);
     assert.equal(result.accepted, false);
 });
+test('required rejected-copy diagnostics fail closed rather than disappearing from a valid snapshot', () => {
+    const e = example();
+    e.config.require_reject_copy = true;
+    assert.throws(e.run, /required rejected-copy trace is missing/);
+    e.config.require_reject_copy = 'true';
+    assert.throws(e.run);
+    delete e.config.require_reject_copy;
+    e.rx.json.ht_reject_copy = {available: true};
+    assert.throws(e.run);
+});
+test('required stopped-SHM baseline fails closed when missing or incorrectly configured', () => {
+    const e = example();
+    e.config.require_reject_baseline = true;
+    assert.throws(e.run, /required rejected-frame baseline is missing/);
+    e.config.require_reject_baseline = 'true';
+    assert.throws(e.run);
+    delete e.config.require_reject_baseline;
+    e.rx.json.ht_reject_baseline = {available: true};
+    assert.throws(e.run);
+});
+test('required candidate trace fails closed when missing or incorrectly configured', () => {
+    const e = example();
+    e.config.require_candidate_trace = true;
+    assert.throws(e.run, /required per-candidate trace is missing/);
+    e.config.require_candidate_trace = 'true';
+    assert.throws(e.run);
+    delete e.config.require_candidate_trace;
+    e.rx.json.ht_candidate = {available: true};
+    assert.throws(e.run);
+});
 test('positive independent complete witness separates target receiver miss', () => {
     const e = example(), t = e.wr.subarray(64);
     t.writeUInt32LE(1, 56); e.wj.frames = 1;
@@ -383,6 +413,122 @@ test('correlated F2 evidence agrees with native C for every fixture/rate and rej
             fs.rmdirSync(directory);
         }
     });
+test('stopped-SHM baseline binds generation, preserves byte differences and never proves freshness',
+    {skip: !process.env.CLEAN_RX_HT_COLLECTOR}, () => {
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-ht-baseline-'));
+        const file = path.join(directory, 'report.bin');
+        function collect(raw, config) {
+            fs.writeFileSync(file, raw);
+            const c = spawnSync(process.env.CLEAN_RX_HT_COLLECTOR,
+                ['--inspect-ht', file, config.challenge], {encoding: 'utf8'});
+            assert.ok([0, 1].includes(c.status), c.stderr);
+            return JSON.parse(c.stdout);
+        }
+        try {
+            for (const observer of [false, true]) {
+                const e = sourceExample('ack', 60, 7);
+                e.config.require_reject_baseline = true;
+                e.raw[2000] = e.raw[2086] = observer ? 25 : 27;
+                for (const at of [680, 1996, 524]) e.raw.writeUInt32LE(0, at);
+                e.raw.writeUInt32LE(0x32464848, 1640);
+                e.raw.writeUInt16LE(1, 1644); e.raw.writeUInt16LE(2, 1646);
+                e.raw.writeUInt16LE(66, 1652);
+                e.raw.writeUInt32LE(0x31504348, 1040);
+                for (const [at, value] of [[1044,1],[1046,2],[1052,66],[1054,128]])
+                    e.raw.writeUInt16LE(value, at);
+                const captured = Buffer.concat([e.raw.subarray(538, 544), e.m]);
+                captured[32] ^= 1;
+                captured.copy(e.raw, 1660); captured.copy(e.raw, 1726);
+                for (const [at, value] of [[1520,0x31425248],[1524,e.raw.readUInt32LE(64)],
+                    [1528,0x84020400],[1532,0x84020400],[1536,100],[1540,200],
+                    [1800,0x31545448],[1804,e.raw.readUInt32LE(64)],[1808,1000]])
+                    e.raw.writeUInt32LE(value, at);
+                for (const unchanged of [true, false]) {
+                    Buffer.from(captured.map(v => unchanged ? v : v ^ 255)).copy(e.raw, 1544);
+                    const j = collect(e.raw, e.config), d = diagnose(e.raw, j, e.config, observer);
+                    const comparison = d.baseline.rejection_comparison;
+                    assert.equal(comparison.unchanged_offsets.length, unchanged ? 66 : 0);
+                    assert.equal(comparison.changed_offsets.length, unchanged ? 0 : 66);
+                    assert.deepEqual(comparison.unchanged_incorrect_mac_offsets, unchanged ? [26] : []);
+                    assert.equal(d.baseline.shm_copy_freshness_proven, false);
+                    assert.equal(comparison.shm_copy_freshness_proven, false);
+                    for (const at of [1520,1524,1528,1532,1536,1540,1544,1610,1800,1804]) {
+                        const bad = Buffer.from(e.raw); bad[at] ^= 1;
+                        assert.throws(() => diagnose(bad, j, e.config, observer));
+                    }
+                    for (const [at, value] of [[1524,8],[1528,0x84020401],
+                        [1532,0x84020402],[1536,201],[1540,1001],[1088,417]]) {
+                        const bad = Buffer.from(e.raw); bad.writeUInt32LE(value, at);
+                        assert.throws(() => diagnose(bad, collect(bad, e.config), e.config, observer));
+                    }
+                }
+            }
+        } finally {
+            if (fs.existsSync(file)) fs.unlinkSync(file);
+            fs.rmdirSync(directory);
+        }
+    });
+test('per-candidate pre-copy bytes bind the first rejection without promoting copy freshness',
+    {skip: !process.env.CLEAN_RX_HT_COLLECTOR}, () => {
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-ht-candidate-'));
+        const file = path.join(directory, 'report.bin');
+        const collect = (raw, config) => {
+            fs.writeFileSync(file, raw);
+            const c = spawnSync(process.env.CLEAN_RX_HT_COLLECTOR,
+                ['--inspect-ht', file, config.challenge], {encoding: 'utf8'});
+            assert.ok([0, 1].includes(c.status), c.stderr);
+            return JSON.parse(c.stdout);
+        };
+        try {
+            for (const observer of [false, true]) {
+                const e = sourceExample('ack', 60, 7);
+                e.config.require_candidate_trace = e.config.require_reject_copy = true;
+                e.raw[2000] = e.raw[2086] = observer ? 25 : 27;
+                for (const at of [680, 1996, 524]) e.raw.writeUInt32LE(0, at);
+                for (const [at, value] of [[1040,0x31504348],[1640,0x32464848],
+                    [1048,5],[1648,5],[1216,0x31435048],[1222,0xfffffff0],[1312,5]])
+                    e.raw.writeUInt32LE(value, at);
+                for (const [at, value] of [[1044,1],[1046,2],[1052,66],[1054,128],
+                    [1644,1],[1646,2],[1652,66],[1220,0],[1310,2],[1316,66],[1318,1]])
+                    e.raw.writeUInt16LE(value, at);
+                const captured = Buffer.concat([e.raw.subarray(538, 544), e.m]);
+                captured[32] ^= 1;
+                captured.copy(e.raw, 1660); captured.copy(e.raw, 1726);
+                for (const unchanged of [true, false]) {
+                    Buffer.from(captured.map(v => unchanged ? v : v ^ 255)).copy(e.raw, 1244);
+                    const json = collect(e.raw, e.config);
+                    const d = diagnose(e.raw, json, e.config, observer).candidate_trace;
+                    assert.equal(d.record_correlated, true);
+                    assert.equal(d.sequence, 0, 'counter wrap is a valid candidate');
+                    assert.equal(d.rejection_comparison.unchanged_offsets.length, unchanged ? 66 : 0);
+                    assert.deepEqual(d.rejection_comparison.unchanged_incorrect_mac_offsets,
+                        unchanged ? [26] : []);
+                    assert.equal(d.shm_copy_freshness_proven, false);
+                    for (const at of [1216,1220,1222,1226,1228,1230,1232,1234,1244,
+                        1310,1312,1316,1318]) {
+                        const bad = Buffer.from(e.raw); bad[at] ^= 1;
+                        assert.throws(() => diagnose(bad, json, e.config, observer));
+                    }
+                    for (const [at, value] of [[1310,3],[1316,65],[1318,2],[1088,113]]) {
+                        const bad = Buffer.from(e.raw); bad.writeUInt16LE(value, at);
+                        assert.throws(() => diagnose(bad, collect(bad, e.config), e.config, observer));
+                    }
+                    const late = Buffer.from(e.raw); late.writeUInt32LE(6, 1222);
+                    assert.throws(() => diagnose(late, collect(late, e.config), e.config, observer));
+                }
+                e.raw.writeUInt16LE(0, 1318);
+                assert.throws(() => diagnose(e.raw, collect(e.raw, e.config), e.config, observer));
+                for (const at of [1044,1046,1052,1048,1644,1310,1312,1316])
+                    e.raw.writeUInt16LE(0, at);
+                const pending = diagnose(e.raw, collect(e.raw, e.config), e.config, observer).candidate_trace;
+                assert.equal(pending.record_correlated, false);
+                assert.equal(pending.rejection_comparison, undefined);
+            }
+        } finally {
+            if (fs.existsSync(file)) fs.unlinkSync(file);
+            fs.rmdirSync(directory);
+        }
+    });
 test('native-correlated RXE rejection distinguishes stable bad-FCS bytes from changing capture reads',
     {skip: !process.env.CLEAN_RX_HT_COLLECTOR}, () => {
         const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-ht-reject-'));
@@ -409,6 +555,81 @@ test('native-correlated RXE rejection distinguishes stable bad-FCS bytes from ch
                 assert.equal(d.rejection.fcs_valid, false);
                 assert.equal(d.rejection.repeat_matches, !changed);
                 assert.equal(d.rejection.shm_copy_freshness_proven, false);
+            }
+        } finally {
+            if (fs.existsSync(file)) fs.unlinkSync(file);
+            fs.rmdirSync(directory);
+        }
+    });
+test('first-rejection copy operands bind active/passive evidence without proving SHM freshness',
+    {skip: !process.env.CLEAN_RX_HT_COLLECTOR}, () => {
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-ht-copy-'));
+        const file = path.join(directory, 'report.bin');
+        function collect(raw, config) {
+            fs.writeFileSync(file, raw);
+            const c = spawnSync(process.env.CLEAN_RX_HT_COLLECTOR,
+                ['--inspect-ht', file, config.challenge], {encoding: 'utf8'});
+            assert.ok([0, 1].includes(c.status), c.stderr);
+            return JSON.parse(c.stdout);
+        }
+        try {
+            for (const observer of [false, true]) {
+                const e = sourceExample('ack', 60, 7);
+                e.config.require_reject_copy = true;
+                e.raw[2000] = e.raw[2086] = observer ? 25 : 27;
+                for (const at of [680, 1996, 524]) e.raw.writeUInt32LE(0, at);
+                e.raw.writeUInt32LE(0x32464848, 1640);
+                for (const [at, value] of [[1644,1],[1646,2],[1648,65535],[1650,12],
+                    [1652,66],[1792,66]]) e.raw.writeUInt16LE(value, at);
+                const stale = Buffer.concat([e.raw.subarray(538, 544), e.m]);
+                stale[32] ^= 1;
+                stale.copy(e.raw, 1660); stale.copy(e.raw, 1726);
+                e.raw.writeUInt32LE(0x31504348, 1040);
+                e.raw.subarray(1644, 1654).copy(e.raw, 1044);
+                e.raw.writeUInt16LE(128, 1054);
+                const values = [0, 0, 4095, 0, 0x8000];
+                for (let i=0;i<5;++i) {
+                    e.raw.writeUInt16LE(values[i],1056+2*i);
+                    e.raw.writeUInt16LE(values[i],1066+2*i);
+                }
+                const json = collect(e.raw, e.config);
+                const check = (raw=e.raw, j=json) => diagnose(raw,j,e.config,observer);
+                const d = check();
+                assert.equal(d.stage,'rxe_rejection_with_correlated_shm');
+                assert.equal(d.rejection.identity_correlated,true);
+                assert.equal(d.rejection.fcs_valid,false);
+                assert.equal(d.copy_trace.status,'bound_to_rejection');
+                assert.equal(d.copy_trace.below_stream_threshold,true);
+                assert.equal(d.copy_trace.copy_registers_stable,true);
+                assert.equal(d.copy_trace.shm_copy_freshness_proven,false);
+                assert.deepEqual(d.copy_trace.before,values);
+                for (const key of ['count','cause','time_us','length','stream_threshold',
+                    'before','after','shm_copy_freshness_proven']) {
+                    const changed = structuredClone(json);
+                    changed.ht_reject_copy[key] = key === 'before' || key === 'after' ?
+                        [0,0,0,0,0] : 123;
+                    assert.throws(()=>check(e.raw,changed),key);
+                }
+                for (const at of [1044,1046,1048,1050,1052,1054,1056,1064,1066,1074]) {
+                    const changed = Buffer.from(e.raw); changed[at] ^= 1;
+                    assert.throws(()=>check(changed),`raw offset ${at}`);
+                }
+                e.raw.writeUInt16LE(2,1066);
+                let changed = check(e.raw,collect(e.raw,e.config));
+                assert.equal(changed.copy_trace.copy_registers_stable,false);
+                assert.equal(changed.copy_trace.shm_copy_freshness_proven,false);
+                e.raw.writeUInt16LE(13,1050);
+                changed = check(e.raw,collect(e.raw,e.config));
+                assert.equal(changed.copy_trace.status,'record_mismatch');
+                assert.equal(changed.copy_trace.below_stream_threshold,null);
+                e.raw.writeUInt16LE(0,1044);
+                changed = check(e.raw,collect(e.raw,e.config));
+                assert.equal(changed.copy_trace.status,'uncommitted');
+                assert.equal(changed.copy_trace.record_correlated,false);
+                e.raw.writeUInt16LE(2,1044);
+                assert.throws(()=>check(e.raw,collect(e.raw,e.config)),/multiple records/);
+                e.raw.writeUInt32LE(0,1040);
+                assert.throws(()=>check(e.raw,collect(e.raw,e.config)),/trace is missing/);
             }
         } finally {
             if (fs.existsSync(file)) fs.unlinkSync(file);

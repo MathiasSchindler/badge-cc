@@ -499,6 +499,16 @@ evidence_ready:
         uint32_t required = CLEAN_SNAPSHOT_AGGREGATE |
             (CLEAN_RX_AMPDU_INTERFACE ? CLEAN_SNAPSHOT_INTERFACE : 0u);
         int evidence_valid = clean_snapshot_available(detail, nonce, required);
+        uint32_t repeat_offset = CLEAN_AMPDU_IF_DETAIL + 4u + 2u*CLEAN_AMPDU_SHM_REPEAT_WORD;
+        uint16_t repeat = (uint16_t)(detail[repeat_offset] |
+            ((uint16_t)detail[repeat_offset+1u] << 8u));
+        if (CLEAN_RX_AMPDU_REPEAT || repeat == CLEAN_AMPDU_SHM_REPEAT_TAG) {
+            printf("{\"mode\":\"ampdu-repeat\",\"repeat_handoff_enabled\":true,"
+                   "\"handoff_marker\":%u,\"finite_fixture_qualified\":false,"
+                   "\"ht_qualified\":false}\n",repeat);
+            fputs("Repeated handoff requires multi-PPDU collection; finite-fixture acceptance is disabled\n",stderr);
+            return 0;
+        }
         int completed = evidence_valid && !usb_report_u32(detail+8u) &&
             usb_report_u32(detail+36u)==10u;
         int submitted = completed && usb_report_u32(detail+1092u)==1u &&
@@ -930,6 +940,41 @@ evidence_ready:
         for (uint32_t i = 0u; i < 14u; ++i) printf("%02x", nonce[i]);
         printf("\"");
         if (data_mode) {
+            clean_ht_candidate_trace_t candidate;
+            memcpy(&candidate, detail + CLEAN_HT_CANDIDATE_DETAIL, sizeof(candidate));
+            int candidate_available = (tx == 25u || tx == 27u) && expected_length == 60u &&
+                candidate.magic == CLEAN_HT_CANDIDATE_MAGIC;
+            printf(",\"ht_candidate\":{\"available\":%s", candidate_available ? "true" : "false");
+            if (candidate_available) {
+                printf(",\"sequence\":%u,\"start_us\":%u,\"length\":%u,\"status1\":%u,"
+                       "\"status2\":%u,\"phy\":%u,\"copy\":[",
+                       candidate.sequence, (uint32_t)candidate.start_lo | ((uint32_t)candidate.start_hi << 16u),
+                       candidate.length, candidate.status1, candidate.status2, candidate.phy);
+                for (uint32_t i = 0u; i < 5u; ++i) printf("%s%u", i ? "," : "", candidate.copy[i]);
+                printf("],\"raw\":\"");
+                const uint8_t *bytes = (const uint8_t *)candidate.raw;
+                for (uint32_t i = 0u; i < sizeof(candidate.raw); ++i) printf("%02x", bytes[i]);
+                printf("\",\"cause\":%u,\"reject_us\":%u,\"reject_length\":%u,"
+                       "\"committed\":%u,\"shm_copy_freshness_proven\":false",
+                       candidate.cause, (uint32_t)candidate.reject_lo | ((uint32_t)candidate.reject_hi << 16u),
+                       candidate.reject_length, candidate.committed);
+            }
+            printf("}");
+            clean_ht_reject_baseline_t baseline;
+            memcpy(&baseline, detail + CLEAN_HT_REJECT_BASELINE_DETAIL, sizeof(baseline));
+            int baseline_available = (tx == 25u || tx == 27u) && expected_length == 60u &&
+                baseline.magic == CLEAN_HT_REJECT_BASELINE_MAGIC;
+            printf(",\"ht_reject_baseline\":{\"available\":%s", baseline_available ? "true" : "false");
+            if (baseline_available) {
+                printf(",\"generation\":%u,\"maccontrol_before\":%u,\"maccontrol_after\":%u,"
+                       "\"begin_us\":%u,\"end_us\":%u,\"raw\":\"",
+                       baseline.generation, baseline.maccontrol_before, baseline.maccontrol_after,
+                       baseline.begin_us, baseline.end_us);
+                const uint8_t *bytes = (const uint8_t *)baseline.raw;
+                for (uint32_t i = 0u; i < sizeof(baseline.raw); ++i) printf("%02x", bytes[i]);
+                printf("\",\"shm_copy_freshness_proven\":false");
+            }
+            printf("}");
             const uint8_t *timing=detail+CLEAN_HT_TIMING_DETAIL;
             int timing_valid=usb_report_u32(timing)==CLEAN_HT_TIMING_MAGIC &&
                 usb_report_u32(timing+4u)==clean_request_generation(nonce);
@@ -1017,7 +1062,24 @@ evidence_ready:
             for (uint32_t i = 0u; i < 6u; ++i) printf("%02x", plcp[i]);
             printf("\"");
         }
-        if (ack_mode) {
+        clean_ht_reject_copy_t copy;
+        memcpy(&copy, detail + CLEAN_HT_REJECT_COPY_DETAIL, sizeof(copy));
+        int copy_available = (tx == 25u || tx == 27u) &&
+                             copy.magic == CLEAN_HT_REJECT_COPY_MAGIC;
+        printf(",\"ht_reject_copy\":{\"available\":%s", copy_available ? "true" : "false");
+        if (copy_available) {
+            printf(",\"count\":%u,\"cause\":%u,\"time_us\":%u,\"length\":%u,"
+                   "\"stream_threshold\":%u,\"before\":[",
+                   copy.count, copy.cause,
+                   (uint32_t)copy.time_lo | ((uint32_t)copy.time_hi << 16u),
+                   copy.length, copy.stream_threshold);
+            for (uint32_t i=0u;i<5u;++i) printf("%s%u",i?",":"",copy.before[i]);
+            printf("],\"after\":[");
+            for (uint32_t i=0u;i<5u;++i) printf("%s%u",i?",":"",copy.after[i]);
+            printf("],\"shm_copy_freshness_proven\":false");
+        }
+        printf("}");
+        if (ack_mode || copy_available) {
             clean_ht_failure_t failure;
             memcpy(&failure, detail + CLEAN_HT_FAILURE_DETAIL, sizeof(failure));
             const uint8_t *raw = (const uint8_t *)failure.raw;
@@ -1025,9 +1087,11 @@ evidence_ready:
             int valid = failure.magic == CLEAN_HT_FAILURE_MAGIC &&
                         failure.count && failure.length <= 66u;
             int complete = valid && failure.length == 66u;
-            int candidate = complete && raw[0] == nonce[13] &&
+            uint8_t ack_expected[CLEAN_HT_DATA_STORAGE];
+            int ack_expected_valid = clean_ht_ack_frame(ack_expected, nonce);
+            int candidate = complete && ack_expected_valid && raw[0] == nonce[13] &&
                 clean_ht20_rx_sig_valid(raw, CLEAN_HT_ACK_MPDU) &&
-                !memcmp(raw + 10u, expected + 18u, 12u);
+                !memcmp(raw + 10u, ack_expected + 18u, 12u);
             printf(",\"failure_record_valid\":%s,\"failure_count\":%u,\"failure_cause\":%u,"
                    "\"failure_length\":%u,\"failure_phy\":%u,\"failure_status1\":%u,"
                    "\"failure_status2\":%u,\"failure_candidate_match\":%s,"
@@ -1044,10 +1108,10 @@ evidence_ready:
                        "true" : "false",
                    failure.final_length, failure.final_status1, failure.final_status2,
                    failure.final_phy, (uint32_t)failure.time_lo | ((uint32_t)failure.time_hi << 16u));
-            if (complete) {
+            if (complete && ack_expected_valid) {
                 uint32_t bit_errors = 0u;
                 for (uint32_t i = 0u; i < CLEAN_HT_ACK_MPDU; ++i) {
-                    uint8_t different = raw[6u+i] ^ expected[14u+i];
+                    uint8_t different = raw[6u+i] ^ ack_expected[14u+i];
                     for (; different; different &= (uint8_t)(different - 1u)) ++bit_errors;
                 }
                 printf(",\"failure_fixture_bit_errors\":%u", bit_errors);

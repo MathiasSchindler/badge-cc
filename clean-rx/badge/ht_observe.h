@@ -3,6 +3,7 @@
 
 #include "loader.h"
 #include "frames.h"
+#include "../tests/fixtures/ht20.h"
 
 typedef struct {
     uint32_t magic, count, packet_bytes, elapsed_us, calculated_fcs, received_fcs;
@@ -12,6 +13,33 @@ typedef struct {
 _Static_assert(CLEAN_HT_OBSERVER_DETAIL + 4u <= CLEAN_HT_F2_DETAIL &&
                CLEAN_HT_F2_DETAIL + sizeof(clean_ht_f2_observation_t) <= 1960u,
                "Correlated F2 evidence must fit the HT-owned report gap");
+
+static inline int clean_ht_reject_baseline_store(uint8_t detail[2092],
+        const uint8_t nonce[16], const clean_ht_reject_baseline_t *record) {
+    if ((nonce[14] != 25u && nonce[14] != 27u) || detail[2000u] != nonce[14] ||
+        clean_ht_data_length(nonce) != CLEAN_HT_ACK_MPDU ||
+        record->magic != CLEAN_HT_REJECT_BASELINE_MAGIC ||
+        record->generation != clean_request_generation(nonce) ||
+        (record->maccontrol_before & 3u) || (record->maccontrol_after & 3u) ||
+        record->reserved || record->begin_us > record->end_us ||
+        record->end_us > badger_bytes_load_u32(detail + CLEAN_HT_TIMING_DETAIL + 8u) ||
+        badger_bytes_load_u32(detail + 1088u) > CLEAN_HT_REJECT_BASELINE_DETAIL - 1104u)
+        return 0;
+    badger_bytes_copy(detail + CLEAN_HT_REJECT_BASELINE_DETAIL,
+                     (const uint8_t *)record, sizeof(*record));
+    return 1;
+}
+
+static inline int clean_ht_candidate_store(uint8_t detail[2092],
+        const uint8_t nonce[16], const clean_ht_candidate_trace_t *record) {
+    if ((nonce[14] != 25u && nonce[14] != 27u) || detail[2000u] != nonce[14] ||
+        clean_ht_data_length(nonce) != CLEAN_HT_ACK_MPDU ||
+        record->magic != CLEAN_HT_CANDIDATE_MAGIC || record->committed > 1u ||
+        badger_bytes_load_u32(detail + 1088u) > CLEAN_HT_CANDIDATE_DETAIL - 1104u)
+        return 0;
+    badger_bytes_copy(detail + CLEAN_HT_CANDIDATE_DETAIL, (const uint8_t *)record, sizeof(*record));
+    return 1;
+}
 
 static inline void clean_ht_observe_f2(uint8_t detail[2092], const uint8_t *packet,
         uint32_t size, const uint8_t nonce[14], uint32_t elapsed_us) {

@@ -108,6 +108,12 @@ the 8,191-byte aggregate limit does not increase that individual bound.
 
 ## API and lifecycle requirements
 
+**2026-10-25 API update:** unbound WPA adapters are no longer accepted.
+See the [current binding/reset contract](../guides/HOST_TOOLS.md#d2-secure-block-ack-software-lifecycle)
+for PTK/abort invalidation, deferred callback wiping and safe successive
+software PPDUs. The implementation below remains a software foundation,
+not a live controller response backend.
+
 Initialize BA state with the actual local MAC and associated AP. Route
 validated action frames through `clean_ba_action`; do not call
 `clean_ba_activate` in production until controller/PSM state and resources
@@ -187,5 +193,4 @@ Logs are retained under `build/clean-rx/badge/ba-{default,gated}-{controller,bad
 These are software tests, not independent OTA evidence. No badge flash was
 written for the software-only stage. The subsequent radio campaign and
 full-flash preservation are recorded in the linked investigation.
-
 

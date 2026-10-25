@@ -65,6 +65,54 @@ _Static_assert(sizeof(clean_edca_status_t) == 16u &&
 #define CLEAN_HT_FAILURE_ADDR 0x20400u
 #define CLEAN_HT_FAILURE_MAGIC 0x32464848u
 #define CLEAN_HT_FAILURE_DETAIL 1640u
+#ifndef CLEAN_RX_HT_REJECT_TRACE
+#define CLEAN_RX_HT_REJECT_TRACE 0
+#endif
+#ifndef CLEAN_RX_HT_REJECT_BAD_FCS
+#define CLEAN_RX_HT_REJECT_BAD_FCS 0
+#endif
+#ifndef CLEAN_RX_HT_REJECT_BASELINE
+#define CLEAN_RX_HT_REJECT_BASELINE 0
+#endif
+#ifndef CLEAN_RX_HT_CANDIDATE_TRACE
+#define CLEAN_RX_HT_CANDIDATE_TRACE 0
+#endif
+#define CLEAN_HT_CANDIDATE_SHM 0x400u
+#define CLEAN_HT_CANDIDATE_ADDR 0x20800u
+#define CLEAN_HT_CANDIDATE_DETAIL 1216u
+#define CLEAN_HT_CANDIDATE_MAGIC 0x31435048u
+#define CLEAN_HT_CANDIDATE_WORDS 50u
+typedef struct {
+    uint32_t magic;
+    uint16_t sequence, start_lo, start_hi, length, status1, status2, phy;
+    uint16_t copy[5], raw[33];
+    uint16_t cause, reject_lo, reject_hi, reject_length, committed;
+} clean_ht_candidate_trace_t;
+_Static_assert(sizeof(clean_ht_candidate_trace_t) == 4u + 2u*CLEAN_HT_CANDIDATE_WORDS &&
+               CLEAN_HT_CANDIDATE_SHM > CLEAN_AMPDU_DMA_SUBMITTED &&
+               CLEAN_HT_CANDIDATE_SHM + CLEAN_HT_CANDIDATE_WORDS <= 0x600u &&
+               CLEAN_HT_CANDIDATE_ADDR == CLEAN_AMPDU_IF_ADDR &&
+               sizeof(clean_ht_candidate_trace_t) <= 4u + 2u*CLEAN_AMPDU_IF_WORDS &&
+               CLEAN_HT_CANDIDATE_DETAIL >= 1104u + 18u + CLEAN_HT_ACK_MPDU &&
+               CLEAN_HT_CANDIDATE_DETAIL + sizeof(clean_ht_candidate_trace_t) <= 1520u,
+               "Per-candidate evidence must fit diagnostic-only aggregate and ACK60 report gaps");
+#define CLEAN_HT_REJECT_COPY_SHM 0x790u
+#define CLEAN_HT_REJECT_COPY_ADDR 0x20600u
+#define CLEAN_HT_REJECT_COPY_DETAIL 1040u
+#define CLEAN_HT_REJECT_COPY_MAGIC 0x31504348u
+#define CLEAN_HT_REJECT_COPY_WORDS 16u
+typedef struct {
+    uint32_t magic;
+    uint16_t count, cause, time_lo, time_hi, length, stream_threshold;
+    uint16_t before[5], after[5];
+} clean_ht_reject_copy_t;
+_Static_assert(sizeof(clean_ht_reject_copy_t) == 4u + 2u*CLEAN_HT_REJECT_COPY_WORDS &&
+               CLEAN_HT_REJECT_COPY_SHM + CLEAN_HT_REJECT_COPY_WORDS <= 0x7a0u &&
+               CLEAN_HT_REJECT_COPY_ADDR >= CLEAN_PHY_EDGE_ADDR + sizeof(clean_phy_edge_t) &&
+               CLEAN_HT_REJECT_COPY_ADDR == CLEAN_AMPDU_PROBE_ADDR &&
+               sizeof(clean_ht_reject_copy_t) <= 4u + 2u*CLEAN_AMPDU_PROBE_WORDS &&
+               CLEAN_HT_REJECT_COPY_DETAIL + sizeof(clean_ht_reject_copy_t) <= 1088u,
+               "Rejected HT copy trace must fit reserved SHM, SRAM and HT report space");
 
 #define CLEAN_AUTH_FAILURE_SHM 0x750u
 #define CLEAN_AUTH_FAILURE_WORDS 28u
@@ -105,6 +153,9 @@ _Static_assert(sizeof(clean_auth_failure_t) == 4u + 2u * CLEAN_AUTH_FAILURE_WORD
                CLEAN_AUTH_FAILURE_ADDR + sizeof(clean_auth_failure_t) <= 0x20d80u &&
                CLEAN_AUTH_FAILURE_DETAIL + sizeof(clean_auth_failure_t) <= 796u,
                "Rejected authentication evidence must not overlap other records");
+_Static_assert(CLEAN_HT_REJECT_COPY_SHM >= CLEAN_AUTH_FAILURE_SHM + CLEAN_AUTH_FAILURE_WORDS &&
+               CLEAN_HT_REJECT_COPY_ADDR >= CLEAN_AUTH_FAILURE_ADDR + sizeof(clean_auth_failure_t),
+               "Rejected HT copy trace must follow authentication evidence");
 
 typedef struct {
     uint32_t magic;
@@ -180,6 +231,9 @@ _Static_assert(CLEAN_TX_COMPLETION_ADDR >= CLEAN_AUTH_FAILURE_ADDR + sizeof(clea
                CLEAN_TX_COMPLETION_DETAIL >= 296u + 180u &&
                CLEAN_TX_COMPLETION_DETAIL + sizeof(clean_tx_completion_status_t) <= 520u,
                "Owned TX completion evidence must not overlap existing reports");
+_Static_assert(CLEAN_HT_REJECT_COPY_ADDR >= CLEAN_TX_COMPLETION_HANDOFFS_ADDR + 4u &&
+               CLEAN_HT_REJECT_COPY_SHM >= CLEAN_TX_SELECT_READBACK + 1u,
+               "Rejected HT copy evidence must not overlap TX completion, handoff or select state");
 _Static_assert(CLEAN_TX_CLEANUP_REQUEST >= CLEAN_RX_TRACE_SHM + CLEAN_RX_TRACE_WORDS &&
                CLEAN_TX_PRE_RESPONSE + 1u <= CLEAN_HT_EARLY_SHM,
                "TX cleanup state must not overlap receive evidence");
@@ -291,6 +345,9 @@ _Static_assert(sizeof(clean_ack_arith_t) == 12u &&
                CLEAN_ACK_ARITH_ADDR + sizeof(clean_ack_arith_t) <= 0x20d00u &&
                CLEAN_ACK_ARITH_DETAIL + sizeof(clean_ack_arith_t) <= 1000u,
                "ACK arithmetic operands must not overlap transmit status or EDCA");
+_Static_assert(CLEAN_HT_REJECT_COPY_SHM >= CLEAN_ACK_ARITH_SHM + 3u &&
+               CLEAN_HT_REJECT_COPY_ADDR >= CLEAN_ACK_ARITH_ADDR + sizeof(clean_ack_arith_t),
+               "Rejected HT copy evidence must not overlap ACK suppression, deadline or arithmetic state");
 
 #define CLEAN_DCF_FIRED 2u
 #define CLEAN_DCF_DEFERRED 3u

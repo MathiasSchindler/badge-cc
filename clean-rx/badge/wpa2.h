@@ -19,6 +19,7 @@ enum { WPA_OK, WPA_FORMAT, WPA_REPLAY, WPA_NONCE, WPA_MIC, WPA_UNWRAP,
 #define CLEAN_WPA_REKEY_DETAIL 1520u
 #define CLEAN_WPA_REKEY_MAGIC 0x324b4552u
 enum { WPA_REPLY_M2, WPA_REPLY_M4, WPA_REPLY_GROUP };
+enum { CLEAN_WPA_RX_RETRY = 2 };
 typedef struct {
     uint8_t key[16], pn[17][6], valid, needs_proof;
     uint32_t retired_at;
@@ -48,23 +49,45 @@ typedef struct {
     clean_qos_rx_t rx_qos;
     uint8_t rx_mpdu[CLEAN_MPDU_BYTES], fragment_pn[6];
     uint8_t qos_fragment_pn[16][6];
+    clean_ba_rx_t *ba;
+    clean_ampdu_stream_t *ba_stream;
+    uint8_t ba_servicing, ba_reset_pending;
+    uint8_t ba_reply[512];
+    uint32_t ba_reply_length;
 } clean_wpa_t;
 
 void clean_wpa_init(clean_wpa_t *s, const uint8_t secret[64], const uint8_t mac[6],
                      const uint8_t ap[6], const uint8_t *rsn, uint8_t rn);
-/* Call before RX and TX service, including while a controller TX is pending. */
+/* Call before RX and TX service, including while a controller TX is pending.
+ * A null response services timers without releasing ciphertext or consuming
+ * replies; use it while the previous controller submission is outstanding. */
 int clean_wpa_poll(clean_wpa_t *s, uint32_t now, uint8_t response[512], uint32_t *length);
 int clean_wpa_abort(clean_wpa_t *s, uint8_t error);
 /* Count completed controller submissions, not peer authorization or on-air ACKs. */
 void clean_wpa_tx_complete(clean_wpa_t *s);
-/* 1 response produced, 0 unrelated frame, -1 explicit protocol failure. */
+/* 1 response produced, 0 consumed/unrelated frame, -1 explicit failure.
+ * CLEAN_WPA_RX_RETRY leaves input caller-owned: poll, then retry the same bytes.
+ * Bound active agreements route ciphertext through reorder before MIC/PN checks.
+ * This does not negotiate or activate agreements or schedule physical BA. */
 int clean_wpa_receive(clean_wpa_t *s, const uint8_t *m, uint32_t n,
                        uint8_t response[512], uint32_t *length);
 uint32_t clean_wpa_probe(clean_wpa_t *s, uint8_t frame[512]);
 int clean_wpa_protected(clean_wpa_t *s, const uint8_t *m, uint32_t n, uint32_t now);
 void clean_wpa_rx_expire(clean_wpa_t *s, uint32_t now);
-/* Agreement/controller ownership remains with the caller. Ciphertext is
- * buffered first; per-TID MIC/PN processing runs only on ordered release. */
+/* Bind only after key installation, before preparing any agreement. Storage
+ * is exclusive and must outlive the binding; do not copy a bound WPA state. Abort before
+ * reinitializing it. Binding does not install a controller response or activate
+ * an agreement; the caller still owns those hardware operations. */
+int clean_wpa_ba_bind(clean_wpa_t *s, clean_ba_rx_t *ba, clean_ampdu_stream_t *stream);
+int clean_wpa_ba_unbind(clean_wpa_t *s);
+/* Explicit reset discards ciphertext, agreements and any partial PPDU.
+ * The caller must also revoke the corresponding controller response state. */
+int clean_wpa_ba_reset(clean_wpa_t *s);
+int clean_wpa_ampdu_begin(clean_wpa_t *s, uint32_t bytes);
+/* Ciphertext is buffered first; per-TID MIC/PN processing runs only on ordered
+ * release. PTK transitions and failures invalidate all bound receive state.
+ * Ordered EAPOL replies are bounded and drained through clean_wpa_poll; the
+ * delivery sink stalls before authentication while a reply awaits service. */
 int clean_wpa_ba_receive(clean_wpa_t *s, clean_ba_rx_t *ba, const uint8_t *mpdu,
                          uint32_t length, uint32_t now);
 int clean_wpa_ba_poll(clean_wpa_t *s, clean_ba_rx_t *ba, uint32_t now);

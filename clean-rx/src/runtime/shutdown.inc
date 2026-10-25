@@ -78,6 +78,18 @@
             words[i] = shm_read16(CLEAN_HT_FAILURE_SHM + i);
         failure->magic = CLEAN_HT_FAILURE_MAGIC;
     }
+#if CLEAN_RX_HT_REJECT_TRACE
+    volatile uint16_t *copy_words = (volatile uint16_t *)(CLEAN_HT_REJECT_COPY_ADDR + 4u);
+    for (uint32_t i = 0u; i < CLEAN_HT_REJECT_COPY_WORDS; ++i)
+        copy_words[i] = shm_read16(CLEAN_HT_REJECT_COPY_SHM + i);
+    ((volatile clean_ht_reject_copy_t *)CLEAN_HT_REJECT_COPY_ADDR)->magic = CLEAN_HT_REJECT_COPY_MAGIC;
+#endif
+#if CLEAN_RX_HT_CANDIDATE_TRACE
+    volatile uint16_t *candidate_words = (volatile uint16_t *)(CLEAN_HT_CANDIDATE_ADDR + 4u);
+    for (uint32_t i = 0u; i < CLEAN_HT_CANDIDATE_WORDS; ++i)
+        candidate_words[i] = shm_read16(CLEAN_HT_CANDIDATE_SHM + i);
+    ((volatile clean_ht_candidate_trace_t *)CLEAN_HT_CANDIDATE_ADDR)->magic = CLEAN_HT_CANDIDATE_MAGIC;
+#endif
     sample_rxe8(MBOX->rxe_post);
     for (uint32_t i = 0u; i < 16u; ++i)
         MBOX->psm_mailbox[i] = shm_read16(0x600u + i);

@@ -13,7 +13,7 @@ DIAGNOSTICS := $(ROOT)/src/tools/diagnostics_logic.c
 UNIT_TESTS := runtime_test runtime_types_first_test firmware_command_test psm_ucode_test block_ack_test rx_recovery_test
 
 .DEFAULT_GOAL := test
-.PHONY: test unit-test integration-test runtime-test copy-scope-test early-rx-test force
+.PHONY: test unit-test integration-test runtime-test copy-scope-test early-rx-test aggregate-rx-test aggregate-rx-oracle-test force
 test: unit-test integration-test
 unit-test: $(addprefix $(BUILD)/,$(UNIT_TESTS))
 	$(BUILD)/runtime_test
@@ -31,6 +31,11 @@ copy-scope-test: $(BUILD)/copy_scope_test
 	$(BUILD)/copy_scope_test
 early-rx-test: $(BUILD)/early_rx_test
 	$(BUILD)/early_rx_test
+aggregate-rx-test: $(BUILD)/aggregate_rx_test
+	$(BUILD)/aggregate_rx_test
+aggregate-rx-oracle-test: $(BUILD)/aggregate_rx_test
+	$(BUILD)/aggregate_rx_test --record-repeat $(BUILD)/aggregate-repeat.ndjson
+	node ../tools/ampdu_repeat_verify.cjs --self-test $(BUILD)/aggregate-repeat.ndjson
 
 $(BUILD):
 	mkdir -p $@
@@ -65,5 +70,7 @@ $(BUILD)/copy_scope_test: integration/copy_scope_test.c $(SRC)/psm_ucode.c $(DIA
 	$(HOST_CC) $(NATIVE_FLAGS) $< $(SRC)/psm_ucode.c $(DIAGNOSTICS) -o $@
 $(BUILD)/early_rx_test: integration/early_rx_test.c $(SRC)/mac.c $(SRC)/block_ack.c $(DIAGNOSTICS) $(INTEGRATION_HEADERS) | $(BUILD)
 	$(HOST_CC) $(NATIVE_FLAGS) $< $(SRC)/mac.c $(SRC)/block_ack.c $(DIAGNOSTICS) -o $@
+$(BUILD)/aggregate_rx_test: integration/aggregate_rx_test.c unit/psm_ucode_test.c $(SRC)/runtime/aggregate_rx.inc $(SRC)/psm_ucode.c $(SRC)/mac.c $(INTEGRATION_HEADERS) $(BUILD)/test_flags | $(BUILD)
+	$(HOST_CC) $(NATIVE_FLAGS) $< $(SRC)/psm_ucode.c $(SRC)/mac.c -o $@
 
 include profiles.mk

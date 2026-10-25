@@ -137,6 +137,16 @@ _Static_assert(CLEAN_RX_STREAM_PREFIX_BYTES > 26u,
     X(HT_FAIL_CLOCK_##n, 0x3f0u, 0x1119u, 0x1800u, 0x1781u) \
     X(HT_FAIL_REPEAT_##n, 0x3f0u, 0x1782u, 0x1800u, CLEAN_HT_FAILURE_SHM + 41u + n)
 
+#if CLEAN_RX_HT_REJECT_TRACE
+#include "diagnostic/psm_ht_reject.h"
+#else
+#define HT_FAILURE_ENTER(X) \
+    X(HT_FAIL_ENTER,0xd1u,CLEAN_QOS_RESPONSE_POLICY,0x1803u,HT_FAIL_RETURN)
+#define HT_REJECT_BEFORE(X)
+#define HT_REJECT_AFTER(X)
+#define HT_CANDIDATE_PROGRAM(X)
+#endif
+
 #define AUTH_FAILURE_WORD(X, n) \
     X(AUTH_BAD_RAW_##n, 0x3f0u, CLEAN_SHM_FRAME + 1u + n, 0x1800u, CLEAN_AUTH_FAILURE_SHM + 8u + n)
 

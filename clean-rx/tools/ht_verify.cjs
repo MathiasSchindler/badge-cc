@@ -128,6 +128,11 @@ function endpoint(raw, json, config, role, m) {
         (u16(530) & 3) === 2 && raw[538] === config.mcs &&
         sigValid(raw.subarray(538, 544), m.length) && capture.equals(m);
     assert.equal(json.fresh_ht_trace, role === 'rx' && completed && trace);
+    if (role === 'rx') {
+        rejectedCopy(raw, json, config);
+        rejectedBaseline(raw, json, config);
+        rejectedCandidate(raw, json, config);
+    }
     const corrupt = correlated && (u16(528) !== m.length + 6 ||
         !capture.equals(m.subarray(0, 96)) || (u16(530) & 3) !== 2 ||
         raw[538] !== config.mcs || !sigValid(raw.subarray(538, 544), m.length));
@@ -291,6 +296,101 @@ function inspect(prefix) {
         config.control === 'omit-rx' ? null : raw('rx'),
         hasWitness ? read('witness') : null, hasWitness ? raw('witness') : null);
 }
+function rejectedBaseline(raw, json, config) {
+    const u = at => raw.readUInt32LE(at);
+    const available = [25, 27].includes(raw[2000]) && config.mpdu_bytes === 60 &&
+        u(1520) === 0x31425248;
+    if (config.require_reject_baseline !== undefined)
+        assert.equal(typeof config.require_reject_baseline, 'boolean');
+    if (config.require_reject_baseline)
+        assert.ok(available, 'required rejected-frame baseline is missing');
+    if (!available) {
+        if (json.ht_reject_baseline) assert.equal(json.ht_reject_baseline.available, false);
+        return {available: false};
+    }
+    const baseline = {available: true, generation: u(1524),
+        maccontrol_before: u(1528), maccontrol_after: u(1532),
+        begin_us: u(1536), end_us: u(1540), raw: raw.subarray(1544, 1610).toString('hex'),
+        shm_copy_freshness_proven: false};
+    for (const [key, value] of Object.entries(baseline))
+        assert.deepEqual(json.ht_reject_baseline?.[key], value, `raw/JSON baseline ${key} differs`);
+    assert.equal(baseline.generation, u(64), 'baseline generation differs');
+    assert.equal(baseline.maccontrol_before & 3, 0, 'baseline MAC/PSM was active before read');
+    assert.equal(baseline.maccontrol_after & 3, 0, 'baseline MAC/PSM was active after read');
+    assert.equal(u(1800), 0x31545448, 'baseline requires valid receive timing');
+    assert.equal(u(1804), baseline.generation, 'baseline receive timing generation differs');
+    assert.equal(json.ht_timing?.valid, true);
+    assert.equal(json.ht_timing.listen_begin_us, u(1808));
+    assert.ok(baseline.begin_us <= baseline.end_us && baseline.end_us <= u(1808),
+        'baseline must precede the receive window');
+    assert.equal(raw.readUInt16LE(1610), 0, 'baseline reserved word differs');
+    assert.ok(u(1088) <= 1520 - 1104, 'baseline overlaps retained packet');
+    return baseline;
+}
+function rejectedCopy(raw, json, config) {
+    const s = at => raw.readUInt16LE(at), u = at => raw.readUInt32LE(at);
+    const available = [25, 27].includes(raw[2000]) && u(1040) === 0x31504348;
+    if (config.require_reject_copy !== undefined)
+        assert.equal(typeof config.require_reject_copy, 'boolean');
+    if (config.require_reject_copy) assert.ok(available, 'required rejected-copy trace is missing');
+    if (!available) {
+        if (json.ht_reject_copy) assert.equal(json.ht_reject_copy.available, false);
+        return {available: false};
+    }
+    const copy = {available: true, count: s(1044), cause: s(1046),
+        time_us: u(1048), length: s(1052), stream_threshold: s(1054),
+        before: Array.from({length: 5}, (_, i) => s(1056 + 2*i)),
+        after: Array.from({length: 5}, (_, i) => s(1066 + 2*i)),
+        shm_copy_freshness_proven: false};
+    for (const [key, value] of Object.entries(copy))
+        assert.deepEqual(json.ht_reject_copy?.[key], value, `raw/JSON rejected-copy ${key} differs`);
+    assert.ok(copy.count <= 1, 'first-rejection trace cannot contain multiple records');
+    const committed = copy.count === 1;
+    if (committed) {
+        assert.ok([2, 3].includes(copy.cause));
+        assert.ok(copy.length <= 66);
+        assert.ok([64, 128, 384].includes(copy.stream_threshold));
+    }
+    const correlated = committed && u(1640) === 0x32464848 && s(1644) === copy.count &&
+        s(1646) === copy.cause && u(1648) === copy.time_us && s(1652) === copy.length;
+    return {...copy, committed, record_correlated: correlated,
+        status: !committed ? 'uncommitted' : correlated ? 'bound_to_rejection' : 'record_mismatch',
+        below_stream_threshold: correlated ? copy.length < copy.stream_threshold : null,
+        copy_registers_stable: correlated ? copy.before.every((v, i) => v === copy.after[i]) : null};
+}
+function rejectedCandidate(raw, json, config) {
+    const s = at => raw.readUInt16LE(at), u = at => raw.readUInt32LE(at);
+    const available = [25, 27].includes(raw[2000]) && config.mpdu_bytes === 60 &&
+        u(1216) === 0x31435048;
+    if (config.require_candidate_trace !== undefined)
+        assert.equal(typeof config.require_candidate_trace, 'boolean');
+    if (config.require_candidate_trace) assert.ok(available, 'required per-candidate trace is missing');
+    if (!available) {
+        if (json.ht_candidate) assert.equal(json.ht_candidate.available, false);
+        return {available: false};
+    }
+    const candidate = {available: true, sequence: s(1220), start_us: u(1222),
+        length: s(1226), status1: s(1228), status2: s(1230), phy: s(1232),
+        copy: Array.from({length: 5}, (_, i) => s(1234 + 2*i)),
+        raw: raw.subarray(1244, 1310).toString('hex'), cause: s(1310),
+        reject_us: u(1312), reject_length: s(1316), committed: s(1318),
+        shm_copy_freshness_proven: false};
+    for (const [key, value] of Object.entries(candidate))
+        assert.deepEqual(json.ht_candidate?.[key], value, `raw/JSON candidate ${key} differs`);
+    assert.ok(u(1088) <= 1216 - 1104, 'candidate trace overlaps retained packet');
+    assert.ok(candidate.committed <= 1, 'invalid candidate commit');
+    const copy = rejectedCopy(raw, json, config);
+    assert.equal(candidate.committed, copy.committed ? 1 : 0, 'candidate/rejection commit differs');
+    if (candidate.committed) {
+        assert.equal(copy.record_correlated, true, 'candidate lacks bound rejection');
+        assert.equal(candidate.cause, copy.cause);
+        assert.equal(candidate.reject_us, copy.time_us);
+        assert.equal(candidate.reject_length, copy.length);
+        assert.ok(((candidate.reject_us - candidate.start_us) >>> 0) < 0x80000000,
+            'candidate snapshot follows rejection');
+    }
+    return {...candidate, record_correlated: !!candidate.committed};
+}
 function diagnose(raw, json, config, observer = false) {
     const m = fixture(config), passive = observer ? {...config, fixture: 'data'} : config;
     const role = raw[2000] === 24 || raw[2000] === 28 ? 'tx' : 'rx';
@@ -342,13 +442,24 @@ function diagnose(raw, json, config, observer = false) {
     if (early.available) Object.assign(early, {candidates: s(644), outcome: s(662),
         final_count: s(656), matches_requested_sig: s(644) > 0 && sig[0] === config.mcs &&
             sigValid(sig, config.mpdu_bytes), identity_correlated: false});
+    const copy = role === 'rx' ? rejectedCopy(raw, json, config) : {available: false};
+    const baseline = role === 'rx' ? rejectedBaseline(raw, json, config) : {available: false};
+    const candidateTrace = role === 'rx' ? rejectedCandidate(raw, json, config) : {available: false};
     let rejection = {available: false};
-    if (!observer && config.fixture === 'ack') {
+    if ((!observer && config.fixture === 'ack') ||
+        (copy.available && config.fixture === 'ack')) {
         const valid = u(1640) === 0x32464848, count = s(1644), length = s(1652);
         assert.equal(json.failure_record_valid, valid);
         assert.equal(json.failure_count, count);
         assert.equal(json.failure_length, length);
         assert.equal(json.failure_cause, s(1646));
+        if (copy.available) {
+            assert.equal(json.failure_time_us, u(1648));
+            for (const [key, at] of [['failure_status1',1654],['failure_status2',1656],
+                ['failure_phy',1658],['failure_final_length',1792],
+                ['failure_final_status1',1794],['failure_final_status2',1796],
+                ['failure_final_phy',1798]]) assert.equal(json[key],s(at));
+        }
         if (valid && count) {
             assert.ok(length <= 66);
             const captured = raw.subarray(1660, 1660 + length);
@@ -368,6 +479,19 @@ function diagnose(raw, json, config, observer = false) {
                 fcs_valid: fcsValid, repeat_matches: captured.equals(repeated),
                 matches_expected_bytes: complete && body.equals(m),
                 shm_copy_freshness_proven: false};
+            for (const prior of [baseline, candidateTrace].filter(record =>
+                record.available && (record !== candidateTrace || record.record_correlated))) {
+                const initial = Buffer.from(prior.raw, 'hex'), unchanged = [], changed = [],
+                    unchangedIncorrectMac = [];
+                for (let i = 0; i < captured.length; ++i) {
+                    (captured[i] === initial[i] ? unchanged : changed).push(i);
+                    if (i >= 6 && captured[i] === initial[i] && captured[i] !== m[i - 6])
+                        unchangedIncorrectMac.push(i - 6);
+                }
+                prior.rejection_comparison = {length, unchanged_offsets: unchanged,
+                    changed_offsets: changed, unchanged_incorrect_mac_offsets: unchangedIncorrectMac,
+                    shm_copy_freshness_proven: false};
+            }
         }
     }
     let stage = 'no_correlated_capture';
@@ -379,7 +503,10 @@ function diagnose(raw, json, config, observer = false) {
     else if (early.matches_requested_sig) stage = 'uncorrelated_ht_phy_candidate';
     if (role === 'tx') stage = e.returned_ack ? 'returned_ack_verified' :
         e.submitted ? 'tx_submitted_only' : 'tx_not_submitted';
-    return {available: true, stage, f2, early, rejection};
+    return {available: true, stage, f2, early, rejection,
+        ...(copy.available ? {copy_trace: copy} : {}),
+        ...(baseline.available ? {baseline} : {}),
+        ...(candidateTrace.available ? {candidate_trace: candidateTrace} : {})};
 }
 module.exports = {crc, fixture, ackFrame, endpoint, witness, sourceWitness, verify, inspect, diagnose};
 if (require.main === module) {

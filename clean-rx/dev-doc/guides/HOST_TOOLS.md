@@ -144,6 +144,174 @@ SNonce through the dedicated secret-control path, bound to the BSSID,
 channel and request. This is separate from the controller's raw
 hardware-key command.
 
+## D2 secure Block ACK software lifecycle
+
+The [WPA adapters](../../badge/wpa2.h) now require explicit, exclusive binding
+of caller-owned BA storage and optional delimiter-stream storage through
+`clean_wpa_ba_bind`, after key installation and **before** preparing agreements.
+Binding initializes receive storage; it neither activates an agreement nor
+installs a controller response. Repeating the identical binding preserves
+admitted ciphertext; replacing either storage pointer returns a conflict.
+Storage must remain valid until `clean_wpa_ba_unbind`; do not copy a bound WPA
+state. Abort before reinitializing WPA state for another association.
+
+Use `clean_wpa_ampdu_begin` for successive software PPDUs. A partial delimiter,
+partial MPDU or complete MPDU awaiting pool credit returns `CLEAN_BA_BUSY`
+instead of being overwritten by the next begin. Retry the unconsumed input
+after backpressure, including a zero-byte tail when all input was consumed.
+A completed or failed stream can begin again without resetting agreements,
+receipt bitmaps or PN state. An explicit `clean_wpa_ba_reset` instead wipes
+agreements, queued ciphertext and partial stream storage.
+
+Starting a pairwise rekey invalidates the binding's receive contents and
+suspends BA admission until the new PTK is installed. Installation resets
+receive storage again; a new agreement is required. Duplicate M3 messages
+and GTK-only changes preserve existing unicast BA state. WPA abort, timeout
+and MIC failure also wipe the bound storage. Failures inside a reorder sink
+defer that wipe until the outer receive, poll, BAR or stream call returns,
+so the queue is never reset underneath its callback.
+
+The canonical `clean_wpa_receive` entry point now routes protected unicast
+QoS frames for explicitly bound, active agreements through ciphertext reorder,
+including normal-ACK-policy frames within those agreements. Compressed BARs
+use the same ordered release path. `clean_wpa_poll` services gaps and agreement
+timeouts even without another received frame. No ADDBA request is accepted or
+activated by this dispatcher.
+
+Ordered EAPOL processing retains at most one response. While that response is
+queued, the delivery sink stalls **before** authenticating another MPDU or
+advancing its PN. This also prevents a deferred PTK reset from releasing more
+old-agreement ciphertext. Polling drains the response; pending replies are WPA
+output and survive a BA-only reset/unbind, but abort, timeout and authentication
+failure wipe them. Direct BA and delimiter-stream adapters share this behavior.
+
+`CLEAN_WPA_RX_RETRY` means the input is still caller-owned, not that a response
+was produced. The badge station loop retains that packet and retries after
+polling instead of consuming another F2 packet. While a controller submission
+is outstanding, it passes a null output to `clean_wpa_poll`: timers still run,
+but ordered delivery and output consumption pause so the submitted frame and
+its key-response bookkeeping cannot be overwritten. Fragment expiry and its
+pending PN cleanup also run during this paused polling.
+
+**Boundary:** canonical software ingress and the badge caller are wired, but
+the live station still does not bind or activate BA storage: a production
+agreement cannot be installed safely yet. Its owner must revoke/read back controller
+response state on these transitions before permitting further reception.
+There is still no production BA-install/revoke command or general aggregate
+receive path. Do not activate a production agreement or advertise HT from
+these software results. The fixed fixture command is not that backend.
+Default-runtime and extended-WMM WPA sanitizer tests, shared authenticator
+regressions, and linked badge/Pico builds pass. No devices were flashed for
+this change; the station loop's revised TX/RX scheduling is not RF-qualified.
+
+Focused offline tests, with no device discovery or radio operations:
+
+```sh
+make -C clean-rx/badge SELECTION=wmm-edca ../../build/clean-rx/badge/wpa2_test
+build/clean-rx/badge/wpa2_test
+```
+
+Coverage includes canonical receive through station preprocessing, normal/BA ACK
+policies, BAR/gap/timeout service, one-reply pressure across canonical/direct/stream
+ingress, ordered GTK replies and PTK invalidation, paused-TX deadline handling,
+binding-identity rejection, the exact 16-slot pool limit, no receipt bit on rejected
+admission, zero-byte retry, three successive variable-length software PPDUs,
+PTK/GTK/retransmission boundaries, timeout, reassociation and deferred
+MIC-failure wiping through all four adapter entry points. These are not RF,
+transport-continuation, SIFS or negotiated-interoperability qualification.
+
+## Repeated retained-SHM handoff (offline prototype)
+
+`CLEAN_RX_AMPDU_REPEAT=1` is default-off and diagnostic-only. It requires
+`CLEAN_RX_AMPDU_SHM=1` and excludes the diagnostic BA responder. The
+[controller handoff](../../src/runtime/aggregate_rx.inc) now keeps the PSM's
+terminal lease until every saved good MPDU has acquired a bounded SRAM slot.
+The controller checks publication/release counters before claiming and
+releasing each lease. The PSM then resets its capture/prefix counters for
+another PPDU, without clearing the monotonic lease evidence.
+
+When SRAM is full, good frames remain in the immutable snapshot and the PSM
+stays held. Bad outcomes need no SRAM credit and cannot overwrite occupied
+slots. Malformed outcomes, count mismatches, stale/skipped leases and failed
+MAC pauses produce explicit firmware errors. Publication and release support
+16-bit counter wrap; the existing SRAM ring retains its 32-bit counter rules.
+The default one-shot path remains available.
+
+This still accepts the **existing, at-most-three, 80-byte fixture bodies and
+252-byte HT-SIG contract**. It does not generalize RXE completion, variable
+lengths, arbitrary N-body aggregates or live station agreements. Holding a
+producer is software backpressure, not an RF flow-control guarantee.
+
+Offline test command, without device discovery or radio operations:
+
+```sh
+make -C clean-rx/tests PROFILE=diagnostic \
+  BUILD=../../build/d2-repeat-local/tests \
+  EXTRA_CFLAGS='-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_AMPDU_PROBE=1 -DCLEAN_RX_AMPDU_INTERFACE=3 -DCLEAN_RX_AMPDU_HANDOFF=2 -DCLEAN_RX_AMPDU_SHM=1 -DCLEAN_RX_AMPDU_REPEAT=1' \
+  aggregate-rx-test
+```
+
+The [integration test](../../tests/integration/aggregate_rx_test.c) executes
+the actual controller fragment against the existing PSM instruction model,
+with modeled MMIO/SHM and independently checked complete delivered bytes/FCS.
+It covers 100 successive leases, partial terminal batches, mixed/all-bad
+outcomes, exact ring exhaustion, delayed credit, malformed claim/release,
+pause failures and 16-/32-bit wrap under ASan/UBSan. Repeated and one-shot
+PSM tests, matched firmware builds and the finite oracle also pass. The
+default runtime controller remains byte-identical to the preceding build.
+
+The producer records marker `0x5250` at interface SHM word `+78`, saved-report
+offset `1264`; the marker survives rearm and does not overlap terminal or BA
+records. The native collector and finite-fixture verifier explicitly reject
+this mode rather than promoting a single retained snapshot into a repeated
+reception claim. Live multi-PPDU collection and a freshly authorized, bounded
+hardware campaign are still required. No hardware was flashed for this
+implementation; HT association remains disabled.
+
+### Independent repeated-execution oracle
+
+The native harness can now export a bounded, persistent execution transcript
+from the actual controller fragment and PSM interpreter, rather than just
+asserting success internally. Run the same diagnostic flags above with
+`aggregate-rx-oracle-test` instead of `aggregate-rx-test`. The target writes
+`aggregate-repeat.ndjson` in the selected build directory and runs
+[the independent JavaScript oracle](../../tools/ampdu_repeat_verify.cjs),
+including negative controls. No device discovery or radio operations occur.
+
+The version-1 `clean-rx-repeat-model` format is newline-delimited JSON:
+
+- The header fixes the eight-slot SRAM capacity and
+  `source: "controller-psm-model"`.
+- `begin`/`end` delimit the repeated, pressure and counter-wrap scenarios.
+- `publish` retains all 288 SHM capture bytes, observed outcomes and lease
+  counters. The oracle independently constructs each scheduled fixture's
+  complete body, FCS and aggregate HT-SIG; it does not trust the C fixture's
+  expected-byte array or a reported good-frame count.
+- `poll` records actual post-call ownership, the retained bytes and any new
+  complete SRAM frame. `consume` records the actual frame and returned credit.
+  The oracle checks every transition, frame order and held-buffer immutability.
+- A mandatory final `complete` record prevents interrupted executions from
+  passing. Files above 4 MiB or 2,048 events are rejected.
+
+The deterministic scenarios cover 114 modeled PPDUs, 115 delivered bodies,
+ten full-ring stalls, three bad outcomes drained with no credit, and both
+16-bit lease and 32-bit ring-counter wrap. Mutation tests reject missing,
+duplicated or reordered events, stale identities/bytes, altered bytes with a
+recomputed FCS, bad-frame delivery, incorrect counters and damaged captures.
+
+Inspect an existing transcript without rerunning the model:
+
+```sh
+node clean-rx/tools/ampdu_repeat_verify.cjs \
+  build/d2-repeat-local/tests/aggregate-repeat.ndjson
+```
+
+**Boundary:** this is an offline fixed-fixture model oracle, not a live USB
+collector, transport/RF witness or fresh-campaign binding. All output explicitly
+leaves live-collection, variable-length, RF, SIFS and HT qualification false.
+The existing finite-fixture collector still rejects repeated-mode reports.
+No controller/PSM/badge executable behavior changes in this oracle increment.
+
 ## Paired WPA2 trials
 
 For a paired WPA2 fixture, install the unmodified vendor `usb-wifi-link`
@@ -487,6 +655,196 @@ an independently witnessed ACK not returned to TX, and unavailable evidence.
 Without a positive receiver/witness observation, missing TX versus missing RX
 remains explicitly unresolved. An absent passive witness never proves no RF.
 Intentional omitted-TX/omitted-RX controls must be declared in configuration.
+
+### Rejected ACK60 copy-state trace
+
+`CLEAN_RX_HT_REJECT_TRACE=1` is an opt-in diagnostic for D2 reception work,
+with one controlled active-rejection calibration, not general copy-freshness
+or passive-rejection qualification. It requires `PROFILE=diagnostic` and
+`SELECTION=ht-response`; runtime, compile-time HT-observer and aggregate builds
+reject it. Match the flag on the controller and badge/Pico host image.
+Receive-only mode 25 still uses this ordinary `ht-response` build, not the
+compile-time observer selection. Mode 27 remains the active ACK60 receive role.
+
+The [initial RF prototypes](../experiments/HT_REJECT_COPY_2026-10-25.md)
+overlapped derived ACK allocations and are not qualified copy-state evidence.
+Four corrected-layout hardware controls passed and retained eight entirely
+zeroed receiver records. A later
+[bad-FCS control](../experiments/HT_REJECT_BAD_FCS_2026-10-25.md) exercised the
+active rejection arm with a complete programmed-byte match, but not the
+passive arm. A later
+[spontaneous miss](../experiments/HT_SPONTANEOUS_REJECTION_2026-10-25.md)
+retained a bound active record with 54/60 differing MAC bytes and no complete
+fixture identity. Its partial fresh-payload match does not qualify general
+copy freshness. Use fresh matched images, not either retained prototype.
+
+Read the frozen rejection's own SIG/metadata separately from the rolling
+last-candidate trace, which may have been overwritten by later activity.
+`no_correlated_capture` does not exclude an eligible rejection lacking complete
+MAC identity. Also, `tx_diagnostic.mac_rx_turnaround_us` includes the reliable
+command's ACK wait before its final timestamp; it is not an isolated hardware
+RX-ready latency measurement.
+
+For an explicitly authorized negative control, add
+`CLEAN_RX_HT_REJECT_BAD_FCS=1` **only to the transmitting badge/controller
+build**. It requires the rejected-copy trace and changes only clocked ACK60 TX:
+after normal command/MAC validation, the template write and its verified
+readback XOR bit 7 of the last FCS byte (PLCP-inclusive byte 65). The input
+packet, HT-SIG, MAC body and other TX modes remain unchanged. Receiving badges
+and the passive Pico use the ordinary trace build. Native tests verify the
+exact one-bit change and default-off identity. Template readback proves
+programming, not the on-air FCS: a delivered valid frame means the intended
+negative control was not achieved, not that a bad-FCS frame was accepted.
+
+For an explicitly authorized initial-buffer comparison, add
+`CLEAN_RX_HT_REJECT_BASELINE=1` to the **badge/Pico host build**, retaining its
+matched trace-enabled controller. The option defaults off and requires the
+diagnostic rejected-copy trace. It adds no controller or PSM instructions.
+Only ACK60 receive modes 25/27 capture it; other modes and lengths do not.
+
+Before enabling RX, the host verifies controller state 8, host command 1,
+the request generation and stopped MAC/PSM bits. It reads SHM words
+`0x801..0x821` through the object selector/data port, then repeats those
+guards before committing the record. It never writes the receive buffer,
+poisons SHM, changes thresholds or forces a copy. The extra pre-RX SDIO reads
+do change startup timing.
+
+The 92-byte record at report offset 1520 holds magic `0x31425248`, generation,
+before/after MACCONTROL, probe-relative begin/end times, 66 baseline bytes and
+a zero reserved word. It reuses only unused ACK60 packet-report tail space.
+Publication fails explicitly if retained packet bytes would overlap it;
+packet, rejection, ACK and counter evidence are not overwritten.
+The native collector exposes `ht_reject_baseline`. Set
+`require_reject_baseline:true` in an offline verifier configuration to require
+it on each receive report. The independent decoder checks raw/JSON equality,
+generation, stopped bits, reserved storage, packet bounds and timing before
+the receive window.
+
+When a rejection exists, the diagnosis compares its bytes with that initial
+baseline, including unchanged MAC offsets that differ from the normal
+fixture. Deliberate bad-FCS controls need a separate programmed-byte comparison.
+Equal initial/rejected bytes are observations, not a general stale-byte proof;
+different bytes exclude unchanged startup content, not stale content from
+intervening candidates. `shm_copy_freshness_proven` remains false.
+The [eight-attempt hardware comparison](../experiments/HT_REJECT_BASELINE_2026-10-25.md)
+retained sixteen baselines, a byte-exact active negative control and a normal
+A-to-B miss with bound active/passive rejections whose MAC bytes differ from
+their respective initial buffers. It does not qualify general freshness or
+an independent receiver implementation.
+
+#### Per-candidate pre-copy trace
+
+`CLEAN_RX_HT_CANDIDATE_TRACE=1` additionally requires the rejected-copy trace
+and defaults off. Match it on controller and badge/Pico builds. It excludes
+the early FIFO and copy-scope profiles as well as the existing aggregate/
+compile-time-observer exclusions. Unlike the host-only baseline, it changes
+the receive PSM program and timing; it is **not RF-qualified**.
+
+Before starting the PSM, the controller clears only the 50 diagnostic SHM
+words `0x400..0x431` and invalidates publication magic. It does not clear
+receive SHM. Before each candidate's prefix-copy setup, the PSM snapshots
+66 existing receive bytes, sequence, adjacent TSF halves, raw RXE fields and
+five copy operands. The first eligible rejection freezes the preimage and
+binds cause, TSF and length. No copy command/threshold or general register
+is changed. Sequence zero is valid after wrap.
+
+The stopped controller record is 104 bytes at SRAM `0x20800`; the host
+publishes it at report offset 1216 only for ACK60 modes 25/27 with commit
+0/1 and retained packet size at most 112 bytes. It aliases inactive aggregate
+storage and unused packet-report tail space, never packet/rejection/ACK
+evidence. The collector exposes `ht_candidate` by saved magic, including
+offline replay without the compile flag.
+
+Set `require_candidate_trace:true` to require it on each valid receive
+report. The independent verifier checks every raw/JSON field, packet bounds,
+commit/rejection-copy agreement, cause/TSF/length binding and modular
+start-to-rejection order. Diagnosis emits `candidate_trace` and compares a
+committed preimage with the rejected bytes using the same byte-comparison
+logic as the startup baseline. Uncommitted records cannot supply a rejection
+comparison. Equality/difference does not establish stale-byte or RF provenance;
+`shm_copy_freshness_proven` stays false.
+
+The [first hardware attempt](../experiments/HT_CANDIDATE_TRACE_2026-10-25.md)
+stopped on failed diagnostic publication in both receivers. Missing diagnostic
+SHM initialization was then repaired and tested offline. In a separately
+authorized [repaired-image follow-up](../experiments/HT_CANDIDATE_REJECTION_2026-10-25.md),
+the first normal control failed with valid reports and two bound rejections.
+No incorrect MAC byte equalled its own pre-command snapshot byte. The
+probe has not passed positive/negative RF calibration; probe perturbation,
+general copy freshness and TX/RF versus shared RX remain open.
+Old images are not qualified or reusable control images.
+
+The later [matched probe comparison](../experiments/HT_PROBE_CROSSOVER_2026-10-25.md)
+holds normal TX and the passive Pico probe-off and changes only the target
+receiver. It supplies passing normal probe-on controls in both directions,
+one byte-exact probe-on active negative on receiver B, and three byte-exact
+passive negatives. Receiver A's probe-on negative was not retained. Probe-off
+body corruption and a separate delivered-body/returned-ACK failure also
+recurred. This narrows calibration gaps without establishing a harmless probe,
+general freshness or a product reliability/timing qualification.
+
+Example offline builds (with the documented LLVM toolchain on `PATH`):
+
+```sh
+make -C clean-rx/src CC=clang PROFILE=diagnostic SELECTION=ht-response \
+  EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 \
+  BUILD=../../build/clean-rx/reject-copy all
+make -C clean-rx/badge PROFILE=diagnostic SELECTION=ht-response \
+  EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 \
+  CONTROLLER_BIN="$(pwd)/build/clean-rx/reject-copy/cyw43_rx_fw.bin" \
+  BUILD=../../build/clean-rx/reject-copy-badge firmware \
+  ../../build/clean-rx/reject-copy-badge/collector
+```
+
+For Pico 2 W, add `BADGE_PICO=1` and use a separate host build directory.
+These commands build images only; no new hardware campaign is authorized.
+
+The probe bypasses only the old active-response-policy requirement for the
+existing rejected-ACK60 hook. Matching current/early SIG and declared 60-byte
+length gates remain. It freezes the **first** eligible bad-FCS/abort record,
+including the two existing SHM reads, without enabling responses, forcing a
+copy, writing copy/control registers or changing retries/deadlines. Additional
+diagnostic instructions do perturb the rejection path's timing.
+
+Before/after raw operands are ordered `0x1004`, `0x1001`, `0x1002`, `0x102a`,
+`0x102b` (control, base, limit, end and next-length samples). Their hardware
+semantics/completion behavior are not independently established. A 66-byte
+RXE rejection is below the compiled ordinary 128-byte streaming threshold;
+it also bypasses the final GoodFCS copy. Stable SHM reads therefore cannot
+establish that the bytes belong to a complete current frame.
+
+The 2,092-byte report size and existing rejection offsets remain unchanged.
+Receive modes 25/27 alone reuse station-only peer-policy report storage:
+
+| Offset | Copy-state field |
+| --- | --- |
+| 1040 | Magic `0x31504348` |
+| 1044 | Six 16-bit words: commit count, cause, TSF low/high, RXE length, stream threshold |
+| 1056 | Five before operands |
+| 1066 | Five after operands |
+
+Controller storage is SHM words `0x790..0x79f`, after ACK arithmetic/select
+state, and SRAM `0x20600..0x20623`, after PHY-edge evidence. The SRAM slot is
+intentionally shared with the excluded aggregate probe, not with ordinary
+TX completion, ACK suppression/deadline or arithmetic records.
+The controller publishes the SRAM magic last; the host includes both records
+in the frozen snapshot and propagates read failures as unavailable evidence.
+A current matched collector decodes optional `ht_reject_copy` by its marker,
+not its own probe flag, and decodes passive rejection bytes against a separate
+ACK60 template rather than the normal Data60 fixture.
+
+`node clean-rx/tools/ht_verify.cjs --diagnose EVIDENCE_PREFIX` independently
+checks every exposed operand against the raw report. Set
+`"require_reject_copy": true` in the campaign configuration to require the
+marker on intended target/passive receive roles; older archives without this
+requirement remain readable. Diagnosis exposes `copy_trace.status` as
+`uncommitted`, `record_mismatch` or `bound_to_rejection`, checking count,
+cause, TSF and RXE length against the frozen rejection. Uncommitted includes
+both no eligible rejection and interrupted capture; neither is a zero-loss
+observation. Threshold/stability interpretations are withheld on mismatches.
+`shm_copy_freshness_proven` stays **false** even for bound, stable records.
+This trace cannot establish RF corruption or distinguish transmitter waveform
+failure from a shared source-built receiver failure.
 
 Native tests exercise complete ACK bytes, truncation and stale identity.
 Badge tests run the dependency-free Node oracle against the actual C decoder

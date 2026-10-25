@@ -954,6 +954,43 @@ static void ack_packet_tests(void) {
     puts("HT normal-ACK fixture: all MCS/TIDs, complete fixed profile, fresh identity and default/station gates pass; NOT RF");
 }
 
+static void reject_bad_fcs_tests(void) {
+    uint8_t header[8] = {0};
+    for (uint32_t version = 0u; version < 7u; ++version)
+        for (uint32_t probe = 0u; probe < 4u; ++probe)
+            for (uint32_t length = 0u; length < 80u; ++length)
+                for (uint32_t index = 0u; index < 20u; ++index) {
+                    header[0] = (uint8_t)version;
+                    uint32_t expected = 0xdeadbeefu;
+                    if (CLEAN_RX_HT_REJECT_BAD_FCS && version == CLEAN_HT_CLOCKED_VERSION &&
+                        probe == 2u && length == 66u && index == 16u)
+                        expected ^= 0x8000u;
+                    assert(clean_ht_reject_bad_fcs_word(0xdeadbeefu, index, length,
+                                                       probe, header) == expected);
+                }
+    assert(clean_ht_reject_bad_fcs_word(123u, 0u, 66u, 0u, NULL) == 123u);
+    if (!CLEAN_RX_HT_RESPONSE) return;
+    uint8_t nonce[14] = {1u,2u,3u,4u,5u,6u,0u,8u,9u,10u,11u,60u,0u,0u};
+    uint8_t packet[CLEAN_HT_DATA_STORAGE], template[68];
+    const uint32_t cmd = CLEAN_HT_DATA_CMD | clean_tx_length_bits(66u) | (1u << 19u);
+    for (uint32_t mcs = 0u; mcs < 8u; ++mcs) {
+        nonce[13] = (uint8_t)mcs;
+        assert(clean_ht_clocked_frame(packet, nonce));
+        assert(clean_ht_clocked_command_valid(cmd, 1u, 3u, packet));
+        for (uint32_t i = 0u; i < sizeof(template)/4u; ++i) {
+            uint32_t word = badger_bytes_load_u32(packet + CLEAN_HT_DATA_HEADER + 4u*i);
+            word = clean_ht_reject_bad_fcs_word(word, i, 66u, 2u, packet);
+            badger_bytes_store_u32(template + 4u*i, word);
+        }
+        for (uint32_t i = 0u; i < sizeof(template); ++i)
+            assert(template[i] == (uint8_t)(packet[CLEAN_HT_DATA_HEADER+i] ^
+                   (CLEAN_RX_HT_REJECT_BAD_FCS && i == 65u ? 0x80u : 0u)));
+        assert(clean_mac_valid(template+6u, 60u) == !CLEAN_RX_HT_REJECT_BAD_FCS);
+        assert(clean_ht_clocked_command_valid(cmd, 1u, 3u, packet));
+    }
+    puts("Rejected HT bad-FCS control: exactly one template FCS bit changes; validated input, PLCP, payload and other TX modes stay intact; NOT RF");
+}
+
 static void ack_evidence_tests(void) {
     for (uint32_t basic = 0u; basic < 4096u; ++basic)
         assert(clean_ht_clocked_policy_valid(3u, (uint16_t)basic, 1u, 3u) == (basic == 0x150u));
@@ -1105,6 +1142,7 @@ int main(void) {
     aggregate_probe_tests();
     packet_tests();
     ack_packet_tests();
+    reject_bad_fcs_tests();
     ack_evidence_tests();
     peer_tests();
     amsdu_tests();

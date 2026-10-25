@@ -23,6 +23,30 @@ function run(command, args, cwd) {
     return result.text;
 }
 
+test('rejected-copy publication rejects TX completion and derived ACK-state overlaps', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-copy-layout-'));
+    try {
+        const header = fs.readFileSync(path.join(source, 'unicast_contract.h'), 'utf8');
+        fs.writeFileSync(path.join(directory, 'layout.c'), '#include "overlap.h"\n');
+        for (const [name, original, overlapping] of [
+            ['CLEAN_HT_REJECT_COPY_ADDR', '0x20600u', '0x20500u'],
+            ['CLEAN_HT_REJECT_COPY_ADDR', '0x20600u', '0x20520u'],
+            ['CLEAN_HT_REJECT_COPY_SHM', '0x790u', '0x770u'],
+            ['CLEAN_HT_REJECT_COPY_SHM', '0x790u', '0x780u'],
+        ]) {
+            const changed = header.replace(`#define ${name} ${original}`, `#define ${name} ${overlapping}`);
+            assert.notEqual(changed, header);
+            fs.writeFileSync(path.join(directory, 'overlap.h'), changed);
+            const result = execute('cc', ['-std=c11', '-I', source, '-fsyntax-only',
+                path.join(directory, 'layout.c')]);
+            assert.notEqual(result.status, 0, `Accepted overlapping ${name} ${overlapping}`);
+            assert.match(result.text, /Rejected HT copy (?:trace|evidence)/);
+        }
+    } finally {
+        fs.rmSync(directory, { recursive: true });
+    }
+});
+
 test('actual runtime dispatch guard reports diagnostic commands through firmware error 0x85', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-c05-command-'));
     try {
@@ -81,6 +105,56 @@ int main(void) {
     }
 });
 
+test('actual stopped candidate initialization clears every SHM word before PSM startup', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-candidate-init-'));
+    try {
+        const startup = fs.readFileSync(path.join(source, 'runtime/d11_start.inc'), 'utf8');
+        const block = startup.match(/#if CLEAN_RX_HT_CANDIDATE_TRACE\n[\s\S]*?\n#endif/);
+        assert.ok(block);
+        assert.ok(startup.indexOf(block[0]) < startup.indexOf('static const uint8_t start_bits'));
+        const file = path.join(directory, 'init.c');
+        fs.writeFileSync(file, `
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+#include "unicast_contract.h"
+static uint16_t shm[0x1000];
+static clean_ht_candidate_trace_t published;
+#undef CLEAN_HT_CANDIDATE_ADDR
+#define CLEAN_HT_CANDIDATE_ADDR ((uintptr_t)&published)
+static __attribute__((unused)) void shm_write16(uint32_t word, uint16_t value) {
+    assert(word < 0x1000u); shm[word] = value;
+}
+static void initialize(void) {
+${block[0]}
+}
+int main(void) {
+    for (unsigned pass=0;pass<2;++pass) {
+        memset(shm,0xa5,sizeof(shm));
+        memset(&published,0xa5,sizeof(published));
+        initialize();
+        for (unsigned i=0;i<0x1000u;++i)
+            assert(shm[i] == (CLEAN_RX_HT_CANDIDATE_TRACE &&
+                i>=CLEAN_HT_CANDIDATE_SHM && i<CLEAN_HT_CANDIDATE_SHM+CLEAN_HT_CANDIDATE_WORDS
+                ? 0u : 0xa5a5u));
+        assert(published.magic == (CLEAN_RX_HT_CANDIDATE_TRACE ? 0u : 0xa5a5a5a5u));
+        const unsigned char *bytes=(const unsigned char *)&published;
+        for (unsigned i=4u;i<sizeof(published);++i) assert(bytes[i]==0xa5u);
+    }
+}
+`);
+        for (const enabled of [0, 1]) {
+            const executable = path.join(directory, `init-${enabled}`);
+            run('cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-O1',
+                '-fsanitize=address,undefined', `-DCLEAN_RX_HT_CANDIDATE_TRACE=${enabled}`,
+                '-I', source, file, '-o', executable]);
+            run(executable, []);
+        }
+    } finally {
+        fs.rmSync(directory, { recursive: true });
+    }
+});
+
 test('named profiles are freestanding, identified, rebuild safely and reject incompatible options', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-rx-c05-build-'));
     try {
@@ -122,6 +196,26 @@ test('named profiles are freestanding, identified, rebuild safely and reject inc
             ['EXTRA_CFLAGS=-DCLEAN_SDIO_SELF_TEST_WINDOW=1u'],
             ['EXTRA_CFLAGS=-DCLEAN_RX_HT_PROBE=1'],
             ['EXTRA_CFLAGS=-DCLEAN_RX_HT_CLEAR_SIG_CRC=1'],
+            ['PROFILE=diagnostic', 'EXTRA_CFLAGS=-DCLEAN_RX_AMPDU_REPEAT=1'],
+            ['PROFILE=diagnostic', 'EXTRA_CFLAGS=-DCLEAN_RX_AMPDU_REPEAT=2'],
+            ['PROFILE=diagnostic', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_AMPDU_PROBE=1 -DCLEAN_RX_AMPDU_INTERFACE=3 -DCLEAN_RX_AMPDU_HANDOFF=2 -DCLEAN_RX_AMPDU_SHM=1 -DCLEAN_RX_AMPDU_REPEAT=1 -DCLEAN_RX_AMPDU_BA=1'],
+            ['PROFILE=runtime', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_DATA=1 -DCLEAN_RX_AMPDU_PROBE=1 -DCLEAN_RX_AMPDU_INTERFACE=3 -DCLEAN_RX_AMPDU_HANDOFF=2 -DCLEAN_RX_AMPDU_SHM=1 -DCLEAN_RX_AMPDU_REPEAT=1'],
+            ['PROFILE=runtime', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1'],
+            ['PROFILE=diagnostic', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=2'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 -DCLEAN_RX_HT_OBSERVER=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 -DCLEAN_RX_AMPDU_PROBE=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 -DCLEAN_RX_AMPDU_INTERFACE=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_BAD_FCS=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 -DCLEAN_RX_HT_REJECT_BAD_FCS=2'],
+            ['PROFILE=runtime', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_BAD_FCS=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_BASELINE=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 -DCLEAN_RX_HT_REJECT_BASELINE=2'],
+            ['PROFILE=runtime', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_BASELINE=1'],
+            ['PROFILE=runtime', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_CANDIDATE_TRACE=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_CANDIDATE_TRACE=1'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 -DCLEAN_RX_HT_CANDIDATE_TRACE=2'],
+            ['PROFILE=diagnostic', 'SELECTION=ht-response', 'EXTRA_CFLAGS=-DCLEAN_RX_HT_REJECT_TRACE=1 -DCLEAN_RX_HT_CANDIDATE_TRACE=1 -DCLEAN_RX_HT_COPY_SCOPE=1'],
             ['EXTRA_CFLAGS=-DCLEAN_RX_HT_RX=1 -DCLEAN_RX_HT_OBSERVER=1 -DCLEAN_RX_HT_EARLY_SAVE=1 -DCLEAN_RX_HT_WINDOW=1 -DCLEAN_RX_HT_REARM_WAIT=1 -DCLEAN_RX_HT_REARM_RECOVER=1 -DCLEAN_RX_HT_REARM_INJECT=1'],
             ['PROFILE=sdio-test', 'EXTRA_CFLAGS=-DCLEAN_SDIO_SELF_TEST=0'],
         ];
@@ -129,7 +223,18 @@ test('named profiles are freestanding, identified, rebuild safely and reject inc
             const result = execute('make', ['-C', source, 'CC=clang', `BUILD=${build}`, ...flags, 'all']);
             assert.notEqual(result.status, 0, `Accepted incompatible options: ${flags}\n${result.text}`);
             assert.match(result.text, /error:|error "|\*\*\*/i);
+            if (flags.some(flag => flag.includes('CLEAN_RX_HT_CANDIDATE_TRACE=')))
+                assert.match(result.text, /HT candidate trace/);
+            else if (flags.some(flag => flag.includes('CLEAN_RX_HT_REJECT_BASELINE=')))
+                assert.match(result.text, /Rejected HT baseline/);
+            else if (flags.some(flag => flag.includes('CLEAN_RX_HT_REJECT_BAD_FCS=')))
+                assert.match(result.text, /Rejected HT bad-FCS control/);
+            else if (flags.some(flag => flag.includes('CLEAN_RX_HT_REJECT_TRACE=')))
+                assert.match(result.text, /Rejected HT copy trace/);
         }
+        const transmit = fs.readFileSync(path.join(source, 'runtime/station_tx.inc'), 'utf8');
+        assert.match(transmit, /w = clean_ht_reject_bad_fcs_word\(w,/);
+        assert.match(transmit, /expected = clean_ht_reject_bad_fcs_word\(expected,/);
         const isolated = path.join(directory, 'src');
         fs.mkdirSync(isolated);
         for (const name of fs.readdirSync(source, { recursive: true }))
