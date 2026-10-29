@@ -46,6 +46,9 @@ static uint16_t read16(const uint8_t *bytes) {
 }
 
 static void stall(live_usb_control_t *control) {
+#ifdef LIVE_USB_KEYPAD_TRACE
+    control->keypad_out = control->keypad_pending = 0u;
+#endif
 #ifdef LIVE_USB_CLEAN
     for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
     control->clean_secret_ready=control->clean_secret_out=0u;
@@ -98,6 +101,10 @@ static void string_descriptor(live_usb_control_t *control, const char *text,
 }
 
 void live_usb_control_reset(live_usb_control_t *control) {
+#ifdef LIVE_USB_KEYPAD_TRACE
+    control->keypad_out = control->keypad_pending = control->keypad_ready = 0u;
+    control->keypad_status_valid = 0u;
+#endif
 #ifdef LIVE_USB_CLEAN
     for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
     control->clean_secret_ready=control->clean_secret_out=0u;
@@ -149,6 +156,9 @@ void live_usb_control_init(live_usb_control_t *control, uint32_t build_id,
 }
 
 void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8]) {
+#ifdef LIVE_USB_KEYPAD_TRACE
+    control->keypad_out = control->keypad_pending = 0u;
+#endif
 #ifdef LIVE_USB_CLEAN
     if (control->clean_secret_out) {
         for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
@@ -183,7 +193,11 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
             send(control, languages, sizeof(languages), length);
         } else if (descriptor == 3u && (index == 0x0409u || index == 0u) && number >= 1u && number <= 3u) {
             string_descriptor(control, number == 1u ? "Universe badge lab" :
+#ifdef LIVE_USB_KEYPAD_TRACE
+                               number == 2u ? "U26 Keypad Trace" : control->serial, length);
+#else
                                number == 2u ? "U26 Live Reports" : control->serial, length);
+#endif
         } else stall(control);
     } else if (type == 0u && request == 5u && value < 128u &&
                index == 0u && length == 0u && control->configured == 0u) {
@@ -241,6 +255,21 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
         send(control, control->compiler_records + value * 64u, 64u, length);
 #endif
     } else if (control->configured && value == 0u && index == 0u) {
+#ifdef LIVE_USB_KEYPAD_TRACE
+        if (type == 0x40u && request == KEYPAD_TRACE_SUBMIT && length == 64u &&
+            !control->keypad_ready) {
+            control->keypad_out = 1u;
+            control->length = 64u;
+            control->action = USB_ACTION_OUT;
+            control->phase = USB_PHASE_DATA_OUT;
+            return;
+        }
+        if (type == 0xc0u && request == KEYPAD_TRACE_STATUS && length == 64u &&
+            control->keypad_status_valid) {
+            send(control, control->keypad_status, 64u, length);
+            return;
+        }
+#endif
 #ifdef LIVE_USB_CLEAN
         if (type==0x40u && request==LIVE_USB_CLEAN_SECRET && length==64u && !control->probe_inflight) {
             for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
@@ -357,6 +386,12 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
         control->phase = USB_PHASE_IDLE;
     } else if (control->phase == USB_PHASE_STATUS_IN && in && length == 0u) {
         control->phase = USB_PHASE_IDLE;
+#ifdef LIVE_USB_KEYPAD_TRACE
+        if (control->keypad_pending) {
+            control->keypad_pending = 0u;
+            control->keypad_ready = 1u;
+        }
+#endif
 #ifdef LIVE_USB_CLEAN
         if (control->clean_secret_out==2u) {
             control->clean_secret_out=0u;
@@ -369,6 +404,10 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
             control->action = USB_ACTION_ADDRESS;
         }
         if (control->configuration_pending) {
+#ifdef LIVE_USB_KEYPAD_TRACE
+            control->keypad_out = control->keypad_pending = control->keypad_ready = 0u;
+            control->keypad_status_valid = 0u;
+#endif
 #ifdef LIVE_USB_CLEAN
             for (uint32_t i=0u;i<64u;++i) ((volatile uint8_t *)control->clean_secret)[i]=0u;
             control->clean_secret_ready=control->clean_secret_out=0u;
@@ -414,6 +453,20 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
         }
     } else if (control->phase == USB_PHASE_DATA_OUT && !in &&
                length == USB_REPORT_WIRE_SIZE && data != 0) {
+#ifdef LIVE_USB_KEYPAD_TRACE
+        if (control->keypad_out) {
+            control->keypad_out = 0u;
+            if (!keypad_trace_wire_valid(data) ||
+                (data[6] == KEYPAD_TRACE_RECORD && data[7] != 1u)) {
+                stall(control);
+                return;
+            }
+            badger_bytes_copy(control->keypad_record, data, 64u);
+            control->keypad_pending = 1u;
+            status_in(control);
+            return;
+        }
+#endif
 #ifdef LIVE_USB_CLEAN
         if (control->clean_secret_out==1u) {
             control->clean_secret_out=2u;

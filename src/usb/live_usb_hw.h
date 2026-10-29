@@ -10,6 +10,8 @@ typedef struct {
     uint32_t hardware_errors;
 } live_usb_stats_t;
 
+/* Establish USB clocks/reset without enabling either USB role or VBUS. */
+int32_t live_usb_hw_clock_init(void);
 int32_t live_usb_hw_init(void);
 int32_t live_usb_hw_poll(live_usb_control_t *control);
 void live_usb_hw_disconnect(void);

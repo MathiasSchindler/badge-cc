@@ -33,8 +33,7 @@ static int pause_us(uint32_t us) {
     return 0;
 }
 
-int32_t live_usb_hw_init(void) {
-    stats.resets = stats.setups = stats.completions = stats.hardware_errors = 0u;
+int32_t live_usb_hw_clock_init(void) {
     /* Do not reset a PLL currently clocking the executing core. */
     uint32_t sys = REG(0x4001003cu);
     if ((sys & 1u) && ((sys >> 5u) & 7u) == 1u) return -2001;
@@ -57,6 +56,13 @@ int32_t live_usb_hw_init(void) {
     REG(0x40010060u) = 1u << 11u;
     REG(0x40023000u) = 1u << 28u;
     if (!wait_mask(&REG(0x40020008u), 1u << 28u, 1u << 28u)) return -2005;
+    return 0;
+}
+
+int32_t live_usb_hw_init(void) {
+    stats.resets = stats.setups = stats.completions = stats.hardware_errors = 0u;
+    int32_t error = live_usb_hw_clock_init();
+    if (error != 0) return error;
     for (uint32_t offset = 0u; offset < 4096u; offset += 4u) DPRAM(offset) = 0u;
     USB(0x74u) = 0x09u;
     USB(0x78u) = 0x0cu;

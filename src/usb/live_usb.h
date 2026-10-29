@@ -29,6 +29,9 @@
 #define LIVE_USB_UDP_PAGE 0x5fu
 #define LIVE_USB_UDP_FREEZE 0x60u
 #define LIVE_USB_PACKET 64u
+#ifdef LIVE_USB_KEYPAD_TRACE
+#include "../../logi-keypad/firmware/trace.h"
+#endif
 #ifdef LIVE_USB_NAMETAG_M2
 #include "../shared/nametag_measure.h"
 #define LIVE_USB_M2_SUBMIT 0x63u
@@ -92,6 +95,10 @@ typedef struct {
     uint32_t udp_generation;
     uint8_t udp_report[64];
     uint8_t udp_detail[512];
+#ifdef LIVE_USB_KEYPAD_TRACE
+    uint8_t keypad_out, keypad_pending, keypad_ready, keypad_status_valid;
+    uint8_t keypad_record[64], keypad_status[64];
+#endif
 #ifdef LIVE_USB_CLEAN
     uint8_t clean_secret[64], clean_secret_ready, clean_secret_out;
 #endif
