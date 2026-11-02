@@ -199,3 +199,73 @@ the final BW500-specific driver refinement; final-build BW500 reception
 was separately verified after flashing that refinement.
 Intermittent HTTP stalls/retries occurred as with the earlier monitor:
 the result does not establish lossless networking or radio capture.
+
+### Charger-powered relocation, 2026-10-23, about 18:33 CEST
+
+The movable Pico was relocated to another position and powered by a USB
+charger. Only `7C4918BAB9492C77` remained connected to laptop USB. Both
+Wi-Fi dashboards were reachable and both radios remained at baseline;
+no settings were changed or manual tests queued during this check.
+
+The remote's uptime was about 69 seconds, revision 1 and an empty test
+history, consistent with a fresh autonomous boot. Its current-boot raw
+packet history contained a health report received from the local Pico.
+The local receiver also contained a new remote startup report:
+
+| Direction | Validated observation | RSSI | SNR |
+| --- | --- | --- | --- |
+| Movable to local | Remote health sequence 1, remote uptime 60,000 ms | -58 dBm | 12.5 dB |
+| Local to movable | Local health sequence 5 received during the remote's current boot | -56 dBm | 12.5 dB |
+
+Sender chip IDs and application CRC32 were checked at each receiving
+node, with no reported radio CRC errors. Wi-Fi/DHCP, radio initialization
+and transmit/restore status were healthy on both. This demonstrates
+bidirectional health-packet delivery at this placement using nominal
+0 dBm, SF7/BW125; it is not a distance or sustained-loss measurement.
+
+### Placement profile comparison, 2026-10-23, after 19:13 CEST
+
+Both devices stayed at their existing locations, with the movable node on
+its USB charger. Frequency was held at **869.850 MHz**, power at nominal
+**0 dBm**, CR at **4/5**, and preamble at **8**. Every successful test frame
+was checked for sender identity, request token, ordinal and application
+CRC32 at the receiving node; TxDone alone was not counted as delivery.
+
+| Profile | 36-byte airtime | Local to movable | Movable to local | Observed RSSI across both directions | Observed SNR |
+| --- | --- | --- | --- | --- | --- |
+| SF7 / BW250 | 38.528 ms | 2/2 | 2/2 | -58 to -57 dBm | 13 to 13.5 dB |
+| SF9 / BW125, sequential repeat | 267.264 ms | 2/2 | 2/2 | -63 to -58 dBm | 10.75 to 11.25 dB |
+| SF10 / BW125, sequential repeat | 493.568 ms | 2/2 | 2/2 | -63 to -61 dBm | 8.5 to 8.75 dB |
+
+No duplicates or radio CRC errors were reported in these successful runs.
+SF7/BW250 used half the baseline airtime; SF10/BW125 used about 12.8 times
+the airtime of SF7/BW250. Different profile RSSI/SNR values should not be
+interpreted as calibrated range measurements or directly comparable link
+margin estimates.
+
+**Test-method caveat:** initially, both nodes' batches were queued together.
+SF7/BW250 passed, but SF9 and SF10 each produced TxDone without any received
+test frames in either direction. The earlier successful SF7 packets were
+only about one short packet's airtime apart in reconstructed node timing,
+making overlapping longer transmissions a plausible explanation.
+The failed simultaneous trials are not evidence that SF9/SF10 lack range.
+
+SF9 and SF10 were therefore repeated with **one sender at a time**.
+Automatic configuration-change health reports were allowed to complete
+first; the receiver's automatic-health attempt count remained unchanged
+through each controlled batch. Both repeats then passed 2/2 each way.
+This supports a half-duplex collision/interference explanation, without
+claiming a measured on-air collision trace.
+
+**Recommendation at this placement:** SF7/BW250 is a useful faster candidate;
+SF10/BW125 remains a tested, slower option when more sensitivity is needed.
+Only four received packets per successful profile were sampled, so this
+does not establish a sustained delivery rate, worst-case interference
+performance or maximum range. SF12 was not tested because SF10 worked.
+
+Both devices were restored to their starting **SF7/BW125 baseline** at
+869.850 MHz with empty manual queues. Final Wi-Fi/DHCP/radio health and
+transmit/restore error checks passed. No firmware was changed or flashed.
+Machine-readable observations were saved locally in the ignored
+`build/placement-profile-comparison.json` and
+`build/placement-profile-sequential.json` reports.

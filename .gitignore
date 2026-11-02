@@ -3,6 +3,7 @@ build/
 ssid-data/
 experimental/
 pimoroni/
+danger-zone/
 vendor/*
 !vendor/cascadia-code/
 .venv/
