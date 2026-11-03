@@ -108,90 +108,15 @@ static int load_capture(const char *path, capture_t *capture) {
     return ok;
 }
 
-static int property_number(io_service_t device, CFStringRef key, int expected) {
-    CFTypeRef property = IORegistryEntryCreateCFProperty(device, key, kCFAllocatorDefault, 0);
-    int value = 0;
-    int match = property && CFGetTypeID(property) == CFNumberGetTypeID() &&
-        CFNumberGetValue(property, kCFNumberIntType, &value) && value == expected;
-    if (property) CFRelease(property);
-    return match;
-}
-
-static int property_serial(io_service_t device, const char *serial) {
-    CFTypeRef property = IORegistryEntryCreateCFProperty(device, CFSTR("USB Serial Number"),
-                                                        kCFAllocatorDefault, 0);
-    char value[128];
-    int match = property && CFGetTypeID(property) == CFStringGetTypeID() &&
-        CFStringGetCString(property, value, sizeof(value), kCFStringEncodingUTF8) &&
-        !strcmp(value, serial);
-    if (property) CFRelease(property);
-    return match;
-}
+#include "../src/host/tools/usb_macos.h"
 
 static IOUSBDeviceInterface500 **open_badge(const char *serial) {
-    io_iterator_t iterator = IO_OBJECT_NULL;
-    kern_return_t result = IOServiceGetMatchingServices(kIOMainPortDefault,
-                                                        IOServiceMatching("IOUSBHostDevice"), &iterator);
-    if (result != KERN_SUCCESS) {
-        fprintf(stderr, "USB enumeration failed: 0x%08x.\n", (unsigned)result);
-        return NULL;
-    }
-    io_service_t selected = IO_OBJECT_NULL, device;
-    unsigned matches = 0u;
-    while ((device = IOIteratorNext(iterator))) {
-        if (property_number(device, CFSTR("idVendor"), 0xcafe) &&
-            property_number(device, CFSTR("idProduct"), 0x4026) &&
-            property_serial(device, serial)) {
-            ++matches;
-            if (!selected) { selected = device; IOObjectRetain(selected); }
-        }
-        IOObjectRelease(device);
-    }
-    IOObjectRelease(iterator);
-    if (matches != 1u) {
-        fprintf(stderr, "Expected one running trace badge with serial %s; found %u.\n",
-                serial, matches);
-        if (selected) IOObjectRelease(selected);
-        return NULL;
-    }
-    IOCFPlugInInterface **plugin = NULL;
-    SInt32 score;
-    result = IOCreatePlugInInterfaceForService(selected, kIOUSBDeviceUserClientTypeID,
-                                              kIOCFPlugInInterfaceID, &plugin, &score);
-    IOObjectRelease(selected);
-    if (result != KERN_SUCCESS || !plugin) {
-        fprintf(stderr, "USB plugin creation failed: 0x%08x.\n", (unsigned)result);
-        return NULL;
-    }
-    IOUSBDeviceInterface500 **usb = NULL;
-    HRESULT query = (*plugin)->QueryInterface(plugin, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID500),
-                                              (LPVOID *)&usb);
-    (*plugin)->Release(plugin);
-    if (query != S_OK || !usb) {
-        fprintf(stderr, "USB interface query failed: 0x%08x.\n", (unsigned)query);
-        return NULL;
-    }
-    IOReturn opened = (*usb)->USBDeviceOpen(usb);
-    if (opened != kIOReturnSuccess) {
-        fprintf(stderr, "USB open failed (not seizing): 0x%08x.\n", (unsigned)opened);
-        (*usb)->Release(usb);
-        return NULL;
-    }
-    return usb;
+    return usb_macos_open(0xcafe, 0x4026, serial);
 }
 
 static int transfer(IOUSBDeviceInterface500 **usb, uint8_t input, uint8_t request,
                      uint8_t wire[64]) {
-    IOUSBDevRequestTO packet = {.bmRequestType = input ? 0xc0 : 0x40,
-        .bRequest = request, .wLength = 64, .pData = wire,
-        .noDataTimeout = 1000, .completionTimeout = 1000};
-    IOReturn result = (*usb)->DeviceRequestTO(usb, &packet);
-    if (result != kIOReturnSuccess || packet.wLenDone != 64u) {
-        fprintf(stderr, "USB request 0x%02x failed: 0x%08x, %u/64 bytes.\n",
-                request, (unsigned)result, (unsigned)packet.wLenDone);
-        return 0;
-    }
-    return 1;
+    return usb_macos_transfer(usb, input, request, wire, 64u);
 }
 
 static int read_status(IOUSBDeviceInterface500 **usb, uint8_t status[64]) {
@@ -274,12 +199,7 @@ int main(int argc, char **argv) {
         if (ok && replay) ok = submit(usb, wire, &expected);
     }
     if (usb) {
-        IOReturn closed = (*usb)->USBDeviceClose(usb);
-        if (closed != kIOReturnSuccess) {
-            fprintf(stderr, "USB close failed: 0x%08x.\n", (unsigned)closed);
-            ok = 0;
-        }
-        (*usb)->Release(usb);
+        if (!usb_macos_close(usb)) ok = 0;
     }
     if (ok) printf("%s %u raw reports: %u decoded, %u unknown/command, %u retained, %u overwritten.\n",
                    replay ? "Badge confirmed" : "Validated", expected.total,

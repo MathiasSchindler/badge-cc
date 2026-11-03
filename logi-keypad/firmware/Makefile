@@ -13,6 +13,7 @@ SOURCES := main.c trace.c $(USB) $(SHARED) $(ROOT)/src/usb/live_usb_hw.c \
 	$(ROOT)/src/arch/rp2350/nametag_clock.c $(ROOT)/src/platform/badger/display.c \
 	$(ROOT)/src/platform/badger/graphics.c $(ROOT)/src/platform/badger/diagnostic_hw.c
 HEADERS := $(wildcard *.h ../keypad-input.h $(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb radio arch/rp2350 platform/badger tools)))
+HEADERS += $(ROOT)/src/host/tools/usb_macos.h
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o
 VPATH := $(sort $(dir $(SOURCES)))
 HOST_FLAGS := -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
