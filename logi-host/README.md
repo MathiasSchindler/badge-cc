@@ -20,7 +20,11 @@ completed over interrupt OUT/IN, and incoming reports are captured and decoded
 using the existing keypad helpers. Physical key presses still need user
 qualification. All nine numbered JPEGs have been acknowledged by the keypad
 over the PIO host, including a 30-second keepalive hold; visual confirmation
-of this PIO-driven test remains open. There is no hub support or
+subsequently established **4..9 visible but 1..3 missing** on that build.
+A startup-settling guard is now installed and protocol-tested; the user
+subsequently confirmed **all nine images visible** with that guard.
+The exact internal startup-rendering mechanism remains unproven.
+There is no hub support or
 navigation-diversion setup. The Mac diagnostic connection uses the
 separate native USB controller; it does not host the peripheral on behalf
 of the Waveshare board.
@@ -445,6 +449,10 @@ existing Mac tool's geometry, fragment flags, padding and report assembly.
 
 The host discovers keepalive feature `0x0008` (index `04` on this device),
 sets its timeout to 3000 ms, and refreshes it about once per second.
+After the first successful keepalive, it allows one second for asynchronous
+startup rendering to settle before uploading any image. This is a bounded
+guard under investigation, not a decoded device-ready indication. USB polling,
+SOFs, native diagnostics and recovery continue during this nonblocking pause.
 Each 4095-byte LCD output report uses HID **SET_REPORT** over EP0:
 `21/09`, value `0214`, interface zero, length `0fff`. On this keypad, the
 data stage is 63 full 64-byte packets plus a final 63-byte packet, beginning
@@ -773,10 +781,45 @@ firmware was flashed/readback-verified on the same board and passed a
   deferred commit/abort/reset and isolation; monitor tests reject incomplete
   images, wrong mode/stage and cleanup failures. Mac keypad, badge-native host,
   trace/replay and shared native USB regressions pass.
-- The final target is **101,348 bytes text, zero initialized data and 168,124
+- That target was **101,348 bytes text, zero initialized data and 168,124
   bytes BSS**, with no undefined symbols or target library dependencies.
 
-These are real protocol acknowledgments, not a camera/visual inspection.
-The user's earlier visual confirmation applies to the **Mac-driven** test;
-PIO-driven appearance/alignment and physical button input still require
-observation. No resistor, wiring or power-source changes were made.
+These are real protocol acknowledgments, not proof of persistent pixels.
+The user's earlier complete visual confirmation applies to the **Mac-driven**
+test. No resistor, wiring or power-source changes were made.
+
+### Missing upper row investigation, 2026-11-04
+
+The user's PIO-test photograph shows correctly aligned digits **4..9** but
+three dark upper keys. Thus the original PIO build is visually qualified for
+**six images, not nine**, despite all 27 successful fragment replies.
+
+One suspected cause is a race with asynchronous startup rendering: images
+1..3 were accepted roughly 80..210 ms into the original session, while
+unsolicited startup-associated reports continued at about 300 ms. Their
+precise semantics are unknown; they are not treated as a readiness signal.
+This timing is evidence for an experiment, not proof of the cause.
+
+The candidate adds a single one-second settling pause after the initial
+keepalive ACK, using the existing cooperative pause mechanism. A regression
+model independently clears rendered pixels 300 ms after configuration,
+without retracting successful report ACKs. Its all-nine-visible assertion
+fails without the guard and passes with it; this models the suspected
+hazard rather than claiming the device's exact internal behavior.
+
+The candidate was built, sanitized, flashed and readback-verified:
+
+- First LCD fragment reply at **1.045 s**, all nine images/27 fragments
+  acknowledged by **1.572 s**, followed by the full **30-second hold**.
+- **64 reports, 6,286 IN polls, 6,284 NAKs**, zero duplicates, timeouts,
+  wire errors, primary errors or cleanup errors.
+- Target: **101,360 bytes text**, zero initialized data, **168,124 bytes BSS**;
+  no undefined symbols or new dependencies. Full host tests pass.
+- Acknowledged BOOTSEL recovery succeeded with the candidate installed.
+
+**Visual verification passed, 2026-11-04:** the user subsequently confirmed,
+"Alle Bilder werden nun angezeigt." All nine images, including the formerly
+missing upper row, are now visually qualified with the one-second guard.
+This confirms the observed fix, not the device's exact internal startup
+mechanism. Physical button input and the pre-existing ACK timing limitation
+remain open.

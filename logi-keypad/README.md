@@ -13,8 +13,12 @@ now shares the verified descriptor/input helpers and supports bounded
 full-speed HID input capture without using the Mac as the peripheral host.
 Its explicit [numbered LCD test](../logi-host/README.md#numbered-lcd-test) now
 uploads prepared JPEGs via HID SET_REPORT: all nine images/27 fragments and
-a 30-second keepalive hold passed. PIO-driven appearance still needs visual
-confirmation; navigation diversion on that host remains future work.
+a 30-second keepalive hold passed at the protocol level. The user's photo
+shows **4..9 visible but 1..3 missing** on the initial PIO build. A
+[startup-settling guard](../logi-host/README.md#missing-upper-row-investigation-2026-11-04)
+is installed and tested; the user subsequently confirmed **all nine images
+visible** on 2026-11-04.
+Navigation diversion on that host remains future work.
 
 ## What this device does
 

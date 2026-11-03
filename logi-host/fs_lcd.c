@@ -78,6 +78,11 @@ static int32_t accept_reply(fs_lcd_t *l, const fs_packet_t *p, uint32_t now) {
         if (!p->data[4] || p->data[4] == 0xffu) return FS_HID_REPLY;
         l->feature = p->data[4];
     } else if (l->stage == FS_LCD_KEEPALIVE) {
+        if (!l->last_keepalive) {
+            /* A keepalive ACK can precede the device's asynchronous startup repaint. */
+            l->pause_started = now;
+            l->pause_us = 1000000u;
+        }
         l->last_keepalive = now;
     } else if (l->stage == FS_LCD_UPLOAD) {
         if (p->data[0] != 0x13u || p->length != 32u) return FS_LCD_REPLY;

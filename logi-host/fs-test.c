@@ -146,8 +146,9 @@ typedef struct {
     uint8_t lcd_images, busy_once, reject_image, drop_image_reply, output_nak, output_naked, early_reply;
     uint8_t control_fault, control_setup_nak, control_status_nak;
     uint8_t output_report[4095];
-    uint16_t output_count;
-    uint32_t image_offset, keepalives, fragments, last_keepalive;
+    uint16_t output_count, visible_images;
+    uint8_t startup_cleared;
+    uint32_t image_offset, keepalives, fragments, last_keepalive, configured_at;
 } device_t;
 
 static int32_t lcd_transfer(device_t *d, const fs_tx_t *tx, const uint8_t token[68],
@@ -231,7 +232,10 @@ static int32_t lcd_transfer(device_t *d, const fs_tx_t *tx, const uint8_t token[
             ++d->fragments;
             d->image_offset += count;
             ++d->image_part;
-            if (last) { ++d->lcd_images; d->image_offset = 0u; d->image_part = 1u; }
+            if (last) {
+                d->visible_images |= 1u << d->lcd_images;
+                ++d->lcd_images; d->image_offset = 0u; d->image_part = 1u;
+            }
         }
         d->reply_length = d->drop_image_reply || d->early_reply ? 0u : 32u;
     }
@@ -321,11 +325,20 @@ static int32_t keypad_exchange(device_t *d, const fs_tx_t *tx, unsigned bits,
         assert(d->control_state == 3u && token[1] == FS_IN);
         if (d->cleanup_stall && !d->request[2]) { p->pid = FS_STALL_PID; return 0; }
         p->pid = FS_DATA1; d->configured = d->request[2]; d->control_state = 0u;
+        if (d->configured) d->configured_at = d->now;
     }
     return 0;
 }
 
-static uint32_t mock_now(void *context) { device_t *d = context; return d->now += 10u; }
+static uint32_t mock_now(void *context) {
+    device_t *d = context;
+    d->now += 10u;
+    if (d->lcd_mode && d->configured && !d->startup_cleared && d->now - d->configured_at >= 300000u) {
+        d->startup_cleared = 1u;
+        d->visible_images = 0u;
+    }
+    return d->now;
+}
 static int32_t mock_reset(void *context) {
     device_t *d = context; ++d->resets; d->now += 20000u; return d->reset_error;
 }
@@ -508,6 +521,7 @@ static void lcd_tests(void) {
         }
         if (mode < 2u || mode >= 7u) {
             assert(!error && l.images == 9u && d.lcd_images == 9u && d.output_naked);
+            assert(d.startup_cleared && d.visible_images == 0x1ffu);
             assert(l.fragments == d.fragments && l.fragments >= 27u && d.keepalives >= 3u);
             assert(d.now - began < 30000000u);
             uint8_t status[64] = {0}; fs_lcd_status(&l, status);
