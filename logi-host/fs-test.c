@@ -148,6 +148,9 @@ typedef struct {
     uint8_t output_report[4095];
     uint16_t output_count, visible_images;
     uint8_t startup_cleared;
+    uint8_t update_key, update_inverted;
+    uint16_t rendered_inverted;
+    uint32_t updates;
     uint32_t image_offset, keepalives, fragments, last_keepalive, configured_at;
 } device_t;
 
@@ -206,17 +209,19 @@ static int32_t lcd_transfer(device_t *d, const fs_tx_t *tx, const uint8_t token[
             ++d->keepalives; d->last_keepalive = d->now;
         }
     } else {
-        assert(report[0] == 0x14u && size == 4095u % d->mps && d->lcd_images < 9u && d->keepalives);
+        assert(report[0] == 0x14u && size == 4095u % d->mps && d->keepalives);
         assert(d->now - d->last_keepalive < 3000000u);
-        const fs_lcd_image_t *image = &fs_lcd_images[d->lcd_images];
+        unsigned key = d->lcd_images < 9u ? d->lcd_images : d->update_key;
+        const fs_lcd_image_t *image = d->lcd_images < 9u || !d->update_inverted ?
+                                      &fs_lcd_images[key] : &fs_lcd_inverted_images[key];
         unsigned header = d->image_part == 1u ? 20u : 5u;
         unsigned count = image->length - d->image_offset;
         if (count > 4095u - header) count = 4095u - header;
         int last = d->image_offset + count == image->length;
         assert(report[4] == (d->image_part | 0x20u | (header == 20u ? 0x80u : 0u) | (last ? 0x40u : 0u)));
         if (header == 20u) {
-            assert((report[9] << 8u | report[10]) == 23u + d->lcd_images % 3u * 158u);
-            assert((report[11] << 8u | report[12]) == 6u + d->lcd_images / 3u * 158u);
+            assert((report[9] << 8u | report[10]) == 23u + key % 3u * 158u);
+            assert((report[11] << 8u | report[12]) == 6u + key / 3u * 158u);
             assert(report[13] == 0u && report[14] == 118u && report[15] == 0u && report[16] == 118u);
             assert(((uint32_t)report[18] << 8u | report[19]) == image->length);
         }
@@ -233,8 +238,14 @@ static int32_t lcd_transfer(device_t *d, const fs_tx_t *tx, const uint8_t token[
             d->image_offset += count;
             ++d->image_part;
             if (last) {
-                d->visible_images |= 1u << d->lcd_images;
-                ++d->lcd_images; d->image_offset = 0u; d->image_part = 1u;
+                d->visible_images |= 1u << key;
+                if (d->lcd_images < 9u) ++d->lcd_images;
+                else {
+                    if (d->update_inverted) d->rendered_inverted |= 1u << key;
+                    else d->rendered_inverted &= (uint16_t)~(1u << key);
+                    ++d->updates;
+                }
+                d->image_offset = 0u; d->image_part = 1u;
             }
         }
         d->reply_length = d->drop_image_reply || d->early_reply ? 0u : 32u;
@@ -493,6 +504,87 @@ static void keypad_tests(void) {
     puts("read-only HID++ query, raw events, malformed descriptors/replies and deconfiguration PASS");
 }
 
+static void lcd_key(fs_lcd_t *l, uint8_t key) {
+    fs_packet_t p = {.pid = FS_DATA1, .length = 32u,
+                     .data = {0x13,0xff,2,0,42,1}};
+    p.data[6] = key;
+    assert(!fs_lcd_input(l, &p));
+}
+
+static void lcd_tick(device_t *d, fs_keypad_t *k, fs_lcd_t *l) {
+    d->now += 1000u;
+    assert(!fs_lcd_step(l, k));
+    fs_packet_t p;
+    int32_t result = fs_keypad_step(k, &p);
+    assert(result >= 0);
+    if (result) assert(!fs_lcd_input(l, &p));
+}
+
+static void lcd_until_updates(device_t *d, fs_keypad_t *k, fs_lcd_t *l, uint32_t updates) {
+    for (unsigned loops = 0u; loops < 20000u; ++loops) {
+        lcd_tick(d, k, l);
+        if (l->images == 9u && !l->rendering && !l->waiting && !k->output_length &&
+            d->updates == updates) return;
+    }
+    assert(0);
+}
+
+static void lcd_toggle_tests(void) {
+    device_t d = {.mps = 64u, .keypad = 1u, .lcd_mode = 1u,
+                  .out_pid = FS_DATA0, .in_pid = FS_DATA0, .image_part = 1u,
+                  .update_key = 0u, .update_inverted = 1u};
+    fs_bus_t bus = {.context = &d, .now = mock_now, .reset = mock_reset, .exchange = mock_exchange};
+    fs_keypad_t k; fs_result_t r; fs_lcd_t l, static_lcd;
+    assert(!fs_keypad_start(&bus, &r, &k));
+    k.host.budget = 62000000u;
+    fs_lcd_begin(&static_lcd, FS_LCD_STATIC);
+    lcd_key(&static_lcd, 1u);
+    assert(!static_lcd.desired);
+    fs_lcd_begin(&l, FS_LCD_TOGGLE);
+    lcd_key(&l, 1u);
+    lcd_until_updates(&d, &k, &l, 1u);
+    assert(l.desired == 1u && l.displayed == 1u && d.rendered_inverted == 1u);
+    lcd_key(&l, 1u);
+    lcd_key(&l, 10u);
+    for (unsigned i = 0u; i < 50u; ++i) lcd_tick(&d, &k, &l);
+    assert(d.updates == 1u && l.desired == 1u);
+    lcd_key(&l, 0u);
+    assert(l.desired == 1u);
+    lcd_key(&l, 1u);
+    d.update_inverted = 0u;
+    unsigned loops = 0u;
+    while (!l.rendering || !l.offset) {
+        assert(++loops < 2000u);
+        lcd_tick(&d, &k, &l);
+    }
+    assert(!l.inverted);
+    lcd_key(&l, 0u); lcd_key(&l, 1u);
+    lcd_until_updates(&d, &k, &l, 2u);
+    assert(l.desired == 1u && !l.displayed && !d.rendered_inverted);
+    d.update_inverted = 1u;
+    lcd_until_updates(&d, &k, &l, 3u);
+    assert(l.displayed == 1u && d.rendered_inverted == 1u);
+
+    lcd_key(&l, 0u); lcd_key(&l, 9u);
+    d.update_key = 8u; d.update_inverted = 1u;
+    d.busy_once = d.output_nak = 1u; d.output_naked = 0u;
+    lcd_until_updates(&d, &k, &l, 4u);
+    assert(l.displayed == 0x101u && d.rendered_inverted == 0x101u && d.output_naked);
+    lcd_key(&l, 0u); lcd_key(&l, 5u); lcd_key(&l, 0u); lcd_key(&l, 5u);
+    for (unsigned i = 0u; i < 50u; ++i) lcd_tick(&d, &k, &l);
+    assert(d.updates == 4u && l.desired == 0x101u);
+    lcd_key(&l, 0u); lcd_key(&l, 1u);
+    l.stopping = 1u;
+    lcd_key(&l, 0u); lcd_key(&l, 4u);
+    d.update_key = 0u; d.update_inverted = 0u;
+    lcd_until_updates(&d, &k, &l, 5u);
+    assert(l.desired == 0x100u && l.displayed == 0x100u && d.rendered_inverted == 0x100u);
+    assert(l.images == 9u && l.fragments > 27u && d.keepalives > 2u);
+    assert(!fs_keypad_stop(&k) && !d.configured);
+    puts("LCD toggle: press edges, release/held/invalid/static filtering, startup input, per-key JPEG redraw,");
+    puts("in-flight snapshot, queued-toggle coalescing, busy/NAK retry, keepalive and stop/drain PASS");
+}
+
 static void lcd_tests(void) {
     for (unsigned mode = 0u; mode < 10u; ++mode) {
         device_t d = {.mps = mode < 7u ? 64u : (uint8_t)(8u << (mode - 7u)),
@@ -506,7 +598,7 @@ static void lcd_tests(void) {
         fs_keypad_t k; fs_result_t r; fs_lcd_t l; fs_packet_t p;
         assert(!fs_keypad_start(&bus, &r, &k));
         k.host.budget = 62000000u;
-        fs_lcd_begin(&l);
+        fs_lcd_begin(&l, FS_LCD_STATIC);
         uint32_t began = d.now;
         int32_t error = 0;
         for (unsigned loops = 0u; loops < 40000u; ++loops) {
@@ -542,6 +634,7 @@ int main(void) {
     host_tests();
     keypad_tests();
     lcd_tests();
+    lcd_toggle_tests();
     puts("Full-speed: independent wire vectors, all payload sizes/stuffing, bad CRC/PID/line,");
     puts("reset, SOF, EP0 8/16/32/64, address/status/toggle, duplicate/NAK/STALL/deadline PASS");
     return 0;

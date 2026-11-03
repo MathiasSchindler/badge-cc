@@ -56,11 +56,9 @@ static int lcd_pixels(unsigned key, uint8_t *pixels) {
     return 1;
 }
 
-static CFDataRef lcd_jpeg(unsigned key) {
-    uint8_t pixels[LCD_PIXELS_SIZE];
-    if (!lcd_pixels(key, pixels)) return NULL;
+static CFDataRef lcd_encode_jpeg(unsigned key, const uint8_t pixels[LCD_PIXELS_SIZE]) {
     CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
-    CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, pixels, sizeof(pixels), NULL);
+    CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, pixels, LCD_PIXELS_SIZE, NULL);
     CGImageRef image = colors && provider ?
         CGImageCreate(LCD_KEY_SIZE, LCD_KEY_SIZE, 8, 32, LCD_KEY_SIZE * 4, colors,
                       kCGImageAlphaNoneSkipLast, provider, NULL, false,
@@ -92,6 +90,12 @@ static CFDataRef lcd_jpeg(unsigned key) {
         return NULL;
     }
     return data;
+}
+
+static inline CFDataRef lcd_jpeg(unsigned key) {
+    uint8_t pixels[LCD_PIXELS_SIZE];
+    if (!lcd_pixels(key, pixels)) return NULL;
+    return lcd_encode_jpeg(key, pixels);
 }
 
 static inline size_t lcd_packet(uint8_t out[LCD_PACKET_SIZE], unsigned key,

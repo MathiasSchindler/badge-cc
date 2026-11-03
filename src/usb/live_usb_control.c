@@ -203,7 +203,7 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
         request != LIVE_USB_LOGI_FS_TRACE &&
         request != LIVE_USB_LOGI_KEYPAD && request != LIVE_USB_LOGI_KEYPAD_STATUS &&
         request != LIVE_USB_LOGI_KEYPAD_EVENT &&
-        request != LIVE_USB_LOGI_LCD_TEST &&
+        request != LIVE_USB_LOGI_LCD_TEST && request != LIVE_USB_LOGI_LCD_TOGGLE &&
         request != LIVE_USB_INFO && request != LIVE_USB_BOOTSEL) {
         stall(control);
         return;
@@ -288,12 +288,14 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
 #endif
 #ifdef LIVE_USB_LOGI_HOST
     } else if (control->configured && type == 0x40u &&
-               (request == LIVE_USB_LOGI_KEYPAD || request == LIVE_USB_LOGI_LCD_TEST) &&
+               (request == LIVE_USB_LOGI_KEYPAD || request == LIVE_USB_LOGI_LCD_TEST ||
+                request == LIVE_USB_LOGI_LCD_TOGGLE) &&
                index == 0u && value >= 1u && value <= 30u && length == 0u &&
                !control->logi_fs_ready && !control->logi_keypad_active) {
         control->logi_fs_pending = 1u;
         control->logi_keypad_pending = (uint8_t)value;
-        control->logi_lcd_pending = request == LIVE_USB_LOGI_LCD_TEST;
+        control->logi_lcd_pending = request == LIVE_USB_LOGI_LCD_TOGGLE ? 2u :
+                                    request == LIVE_USB_LOGI_LCD_TEST ? 1u : 0u;
         status_in(control);
     } else if (control->configured && type == 0xc0u && request == LIVE_USB_LOGI_KEYPAD_EVENT &&
                index == 0u && value < LIVE_USB_LOGI_KEYPAD_SLOTS && length == 64u &&

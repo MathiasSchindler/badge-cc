@@ -6,7 +6,8 @@ keypad, with events relayed to the badge over a separate connection.
 
 **Current milestone: experimental full-speed PIO transport, device/configuration/
 HID descriptors, SET_CONFIGURATION and bounded keypad input sessions,
-plus numbered LCD test images, with passive diagnostics by default.**
+plus numbered LCD test images and an interactive per-key inversion demo,
+with passive diagnostics by default.**
 The 144 MHz clock, active empty-port reset/send/timeout and passive recovery
 are physically verified. The directly connected keypad now completes both
 device-descriptor reads, their status stages and SET_ADDRESS at full speed:
@@ -17,8 +18,9 @@ starts about **8.0..9.0 bit times** after SE0-to-J, with sampling uncertainty
 of +/-0.5 bit; USB permits at most 7.5. This remains an experimental transport,
 not a compliant or complete USB host. A read-only HID++ feature query has
 completed over interrupt OUT/IN, and incoming reports are captured and decoded
-using the existing keypad helpers. Physical key presses still need user
-qualification. All nine numbered JPEGs have been acknowledged by the keypad
+using the existing keypad helpers. Button-driven normal/inverted image changes
+are now physically and visually confirmed. All nine numbered JPEGs have been
+acknowledged by the keypad
 over the PIO host, including a 30-second keepalive hold; visual confirmation
 subsequently established **4..9 visible but 1..3 missing** on that build.
 A startup-settling guard is now installed and protocol-tested; the user
@@ -485,6 +487,74 @@ of previous icons or brightness; default animations may return afterward.
 Navigation diversion is not changed. The arbitrary-image API and permanent
 display ownership are outside this bounded test.
 
+## Interactive LCD toggle demo
+
+```sh
+# Restart the installed firmware if it is in BOOTSEL:
+build/picotool-usb/picotool reboot --ser B72817DA2FE6A757
+
+# After the initial nine images, accept button input for 30 seconds:
+build/logi-host/logi-host-monitor --serial B72817DA2FE6A757 --lcd-toggle 30
+```
+
+This explicit mode replaces the icons without backing them up, just like
+`--lcd-test`. Wait for `LCD images accepted: 9/9`, then press LCD keys 1..9:
+
+- A new press toggles **only that key** between its normal image and an
+  RGB-inverted variant. Releasing it does not change the image.
+- Repeated reports for the same held key do not toggle repeatedly. A release
+  rearms the next press. Single-key use is the initial qualification target;
+  simultaneous/overlapping keys are not yet physically qualified.
+- Input during initial setup is retained; the initial grid is drawn first.
+  Subsequent transfers redraw only keys whose requested state differs from
+  the last acknowledged state, in round-robin order.
+- A JPEG already being sent retains its key and variant until completion,
+  even if another press arrives. Rapid changes are coalesced to the latest
+  requested state rather than mutating an in-flight report or interleaving
+  two images. Busy retries restart the same snapshot.
+- Keepalives, HID input, native diagnostics and recovery continue while
+  redrawing. The one-second startup guard is retained.
+
+The **1..30-second input window starts after the initial grid**. At its end,
+new presses stop changing requested state; pending changes drain before
+deconfiguration, with at most one extra second. A drain timeout is an explicit
+failure. The existing overall upload/session deadlines still apply. Neither
+`--lcd-test` nor default read-only capture acquires this behavior implicitly.
+Navigation diversion and page-button actions are unchanged.
+
+The target embeds **18 JPEGs: nine normal and nine inverted**, prepared with
+the shared Mac renderer/encoder at build time. Decoded images are checked for
+118x118 dimensions and mean RGB error below 12 levels relative to their
+expected pixels. No target JPEG encoder, heap or new dependency is added.
+This establishes a button-to-state-to-redraw path; menus, counters, clocks and
+other dynamic content are future extensions, not implemented modes.
+
+### Interactive validation, 2026-11-04
+
+- Sanitized tests reconstruct actual normal/inverted JPEG payloads for the
+  requested key and exercise press edges, releases, repeated held reports,
+  invalid inputs, static-mode isolation, input during startup, mid-transfer
+  state changes, rapid-toggle coalescing, busy/NAK retries and stop/drain.
+- Native EP0 tests cover both display commands, including bounds, wrong
+  direction/index/length, deferred commit/abort/reset and concurrent rejection.
+  Monitor tests accept mode 2 and reject incomplete/wrong-mode/failed results.
+  Shared Mac keypad, badge-native host, trace/replay and USB regressions pass.
+- The flashed/readback-verified firmware completed a **30-second interactive
+  session**: 9/9 initial images, 27 fragments, 64 input reports, 6,285 IN polls,
+  6,283 NAKs and zero duplicates, timeouts, wire errors or cleanup errors.
+  A static display test, read-only capture and descriptor probe also passed;
+  acknowledged exact-chip BOOTSEL recovery succeeded.
+- No physical key presses were observed in that initial run. A subsequent
+  user-assisted **30-second test** captured **23 presses and 23 releases**,
+  with **23 acknowledged redraws**: 96 total fragments including the initial
+  grid, 180 input reports, zero duplicates, timeouts, wire errors or cleanup
+  errors. The user confirmed: **"bei jedem Druck wechselte das Bild korrekt."**
+  This qualifies the real button-to-display toggle path visually as well as
+  at the protocol level. Simultaneous/overlapping keys remain unqualified.
+- Target: **181,800 bytes text, zero initialized data, 168,136 bytes BSS**, no
+  undefined symbols. ACK timing remains experimentally 8.5..9.0 bit times,
+  not compliance-qualified.
+
 ### Keypad diagnostic records
 
 All requests require native USB configuration and index zero:
@@ -497,6 +567,8 @@ All requests require native USB configuration and index zero:
   consuming it. Sequence `n` occupies slot `(n - 1) % 32`.
 - `40/79`, value **1..30 hold seconds**, length zero: explicitly arm the LCD
   test after its status ACK, with the same abort/concurrency guards as `40/76`.
+- `40/7a`, value **1..30 input seconds**, length zero: arm the interactive
+  toggle demo with the same deferred commit/abort/concurrency guards.
 
 Status fields (little-endian):
 
@@ -510,10 +582,10 @@ Status fields (little-endian):
 | 42, 43 | Interface number, discovered feature index |
 | 44 | Signed cleanup error |
 | 48..49 | Declared configuration demand, mA |
-| 50, 51 | Accepted LCD images, accepted LCD fragments |
+| 50, 51 | Initial LCD images accepted (0..9), accepted LCD fragments (saturates at 255) |
 | 52 | Decoded LCD-key state count, including releases |
 | 56, 57 | Query reply confirmed, device still configured |
-| 58, 59 | LCD mode enabled, LCD stage |
+| 58, 59 | LCD mode (0 disabled, 1 static, 2 toggle), LCD stage |
 | 60 | CRC32 over bytes 0..59 |
 
 States: 0 idle, 1 enumerating, 2 polling, 3 complete, 4 failed.
@@ -821,5 +893,5 @@ The candidate was built, sanitized, flashed and readback-verified:
 "Alle Bilder werden nun angezeigt." All nine images, including the formerly
 missing upper row, are now visually qualified with the one-second guard.
 This confirms the observed fix, not the device's exact internal startup
-mechanism. Physical button input and the pre-existing ACK timing limitation
-remain open.
+mechanism. Simultaneous/overlapping key input and the pre-existing ACK timing
+limitation remain open.

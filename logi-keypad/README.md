@@ -18,6 +18,11 @@ shows **4..9 visible but 1..3 missing** on the initial PIO build. A
 [startup-settling guard](../logi-host/README.md#missing-upper-row-investigation-2026-11-04)
 is installed and tested; the user subsequently confirmed **all nine images
 visible** on 2026-11-04.
+The [interactive PIO demo](../logi-host/README.md#interactive-lcd-toggle-demo)
+adds a per-key normal/inverted toggle on each press, without a target JPEG
+encoder. A user-assisted run captured **23 presses, 23 releases and 23
+acknowledged redraws**, without transport errors; the user confirmed that
+every press changed the image correctly. Simultaneous keys remain unqualified.
 Navigation diversion on that host remains future work.
 
 ## What this device does

@@ -55,11 +55,12 @@ static void print_status(const uint8_t bytes[64]) {
 }
 
 static void usage(FILE *out, const char *program) {
-    fprintf(out, "Usage: %s --serial SERIAL [--watch SECONDS | --bootsel | --probe-full-speed | --fs-status | --keypad-watch SECONDS | --lcd-test SECONDS]\n"
+    fprintf(out, "Usage: %s --serial SERIAL [--watch SECONDS | --bootsel | --probe-full-speed | --fs-status | --keypad-watch SECONDS | --lcd-test SECONDS | --lcd-toggle SECONDS]\n"
             "Read passive USB-A line diagnostics (default: one snapshot).\n"
             "--probe-full-speed explicitly DRIVES GPIO12/13: reset, address, device descriptor.\n"
             "--keypad-watch captures HID input for 1..30 seconds and queries a feature read-only.\n"
             "--lcd-test SECONDS replaces all nine icons with numbered test images; holds for 1..30 seconds.\n"
+            "--lcd-toggle SECONDS toggles each key's normal/inverted image on press for 1..30 seconds.\n"
             "Experimental full-speed direct-device only; no low-speed or hubs.\n"
             "--bootsel checks the matching firmware before requesting recovery.\n", program);
 }
@@ -145,7 +146,7 @@ static int validate_keypad_record(const uint8_t bytes[64], uint32_t magic) {
         badger_bytes_load_u32(bytes + 60u) == diag_crc32(bytes, 60u);
 }
 
-static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd_test) {
+static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd_mode) {
     uint8_t bytes[64];
     if (!usb_macos_transfer(usb, 1u, LIVE_USB_LOGI_KEYPAD_STATUS, bytes, 64u)) return 0;
     if (!validate_keypad_record(bytes, FS_KEYPAD_MAGIC) || bytes[14] == 2u) {
@@ -153,8 +154,11 @@ static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd
     }
     uint16_t generation = (uint16_t)(keypad_u16(bytes + 12u) + 1u);
     if (!generation) generation = 1u;
-    if (lcd_test) puts("LCD test replaces existing icons (no image backup); uploading numbered keys 1..9.");
-    if (!usb_macos_transfer_value(usb, 0u, lcd_test ? LIVE_USB_LOGI_LCD_TEST : LIVE_USB_LOGI_KEYPAD,
+    if (lcd_mode) puts("LCD mode replaces existing icons (no image backup); uploading numbered keys 1..9.");
+    if (lcd_mode == FS_LCD_TOGGLE) puts("Press a key to toggle its image; release does not toggle. Wait for 9/9 images.");
+    uint8_t request = lcd_mode == FS_LCD_TOGGLE ? LIVE_USB_LOGI_LCD_TOGGLE :
+                      lcd_mode ? LIVE_USB_LOGI_LCD_TEST : LIVE_USB_LOGI_KEYPAD;
+    if (!usb_macos_transfer_value(usb, 0u, request,
                                   (uint16_t)seconds, NULL, 0u)) return 0;
     puts("Keypad session armed: configuration, verified HID and input capture.");
     struct timespec start, tick;
@@ -164,10 +168,10 @@ static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd
     for (unsigned loops = 0u; loops < 7000u; ++loops) {
         if (!usb_macos_transfer(usb, 1u, LIVE_USB_LOGI_KEYPAD_STATUS, bytes, 64u)) return 0;
         if (!validate_keypad_record(bytes, FS_KEYPAD_MAGIC) || keypad_u16(bytes + 12u) != generation ||
-            bytes[14] > 4u || bytes[58] != (unsigned)lcd_test || bytes[50] > 9u) {
+            bytes[14] > 4u || bytes[58] != (unsigned)lcd_mode || bytes[50] > 9u) {
             fputs("Keypad status protocol/build/CRC/generation mismatch.\n", stderr); return 0;
         }
-        if (lcd_test && bytes[50] != images) {
+        if (lcd_mode && bytes[50] != images) {
             images = bytes[50];
             printf("  LCD images accepted: %u/9 (%u acknowledged fragments).\n", images, bytes[51]);
         }
@@ -206,19 +210,19 @@ static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd
                    bytes[36], bytes[37], bytes[38], bytes[39], bytes[40], bytes[41], bytes[42]);
             printf("  Declared configuration demand: %u mA (not measured; power path unqualified).\n",
                    keypad_u16(bytes + 48u));
-            if (lcd_test) printf("  LCD images=%u/9 fragments=%u state=%u; hold complete=%u.\n",
+            if (lcd_mode) printf("  LCD images=%u/9 fragments=%u state=%u; hold complete=%u.\n",
                                  bytes[50], bytes[51], bytes[59], bytes[59] == FS_LCD_DONE);
             if (!badger_bytes_load_u32(bytes + 52u))
                 puts("  No physical LCD key states observed; button operation is not yet verified.");
             int phy_ok = read_fs(usb, 0u, 0);
             return bytes[14] == 3u && !error && !badger_bytes_load_u32(bytes + 44u) &&
                 bytes[56] && !bytes[57] &&
-                (!lcd_test || (bytes[58] == 1u && bytes[50] == 9u && bytes[59] == FS_LCD_DONE)) &&
+                (!lcd_mode || (bytes[58] == (unsigned)lcd_mode && bytes[50] == 9u && bytes[59] == FS_LCD_DONE)) &&
                 phy_ok;
         }
         if (clock_gettime(CLOCK_MONOTONIC, &tick)) { perror("keypad clock"); return 0; }
         if ((double)(tick.tv_sec - start.tv_sec) +
-            (double)(tick.tv_nsec - start.tv_nsec) / 1000000000.0 >= seconds + (lcd_test ? 34.0 : 3.0)) break;
+            (double)(tick.tv_nsec - start.tv_nsec) / 1000000000.0 >= seconds + (lcd_mode ? 34.0 : 3.0)) break;
         struct timespec delay = {.tv_nsec = 10000000};
         while (nanosleep(&delay, &delay))
             if (errno != EINTR) { perror("keypad wait"); return 0; }
@@ -231,16 +235,18 @@ int main(int argc, char **argv) {
     const char *serial = NULL;
     unsigned seconds = 0u;
     unsigned keypad_seconds = 0u;
-    int lcd_test = 0;
+    int lcd_mode = 0;
     int bootsel = 0, mode = 0, probe = 0, fs_status = 0;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--serial") && !serial && i + 1 < argc) serial = argv[++i];
         else if (!strcmp(argv[i], "--watch") && !mode && i + 1 < argc) {
             if (!parse_seconds(argv[++i], &seconds)) { usage(stderr, argv[0]); return 2; }
             mode = 1;
-        } else if ((!strcmp(argv[i], "--keypad-watch") || !strcmp(argv[i], "--lcd-test")) &&
+        } else if ((!strcmp(argv[i], "--keypad-watch") || !strcmp(argv[i], "--lcd-test") ||
+                    !strcmp(argv[i], "--lcd-toggle")) &&
                    !mode && i + 1 < argc) {
-            lcd_test = !strcmp(argv[i], "--lcd-test");
+            lcd_mode = !strcmp(argv[i], "--lcd-toggle") ? FS_LCD_TOGGLE :
+                       !strcmp(argv[i], "--lcd-test") ? FS_LCD_STATIC : 0;
             if (!parse_seconds(argv[++i], &keypad_seconds) || keypad_seconds > 30u) {
                 usage(stderr, argv[0]); return 2;
             }
@@ -276,7 +282,7 @@ int main(int argc, char **argv) {
             fputs("Firmware reports a PIO or USB error.\n", stderr);
             ok = 0; break;
         }
-        if (keypad_seconds) { ok = keypad_watch(usb, keypad_seconds, lcd_test); break; }
+        if (keypad_seconds) {         ok = keypad_watch(usb, keypad_seconds, lcd_mode); break; }
         if (bootsel) {
             ok = usb_macos_transfer(usb, 0u, LIVE_USB_BOOTSEL, NULL, 0u);
             if (ok) puts("BOOTSEL request acknowledged.");

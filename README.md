@@ -18,7 +18,7 @@ Optional SDK-based applications explore Bluetooth and Wi-Fi.
 | [docs/](docs/) | Hardware specifications, application guides, protocols and physical test results. |
 | [tests/](tests/) | Additional host-side firmware tests. |
 | [logi-keypad/](logi-keypad/) | Logitech MX Keypad tools, no-libc badge trace viewer, and experimental native USB-host firmware with power/CC prerequisites. |
-| [logi-host/](logi-host/) | Independent Waveshare RP2350-USB-A firmware: passive diagnostics, experimental full-speed PIO host, HID input capture and numbered LCD test images. |
+| [logi-host/](logi-host/) | Independent Waveshare RP2350-USB-A firmware: passive diagnostics, experimental full-speed PIO host, HID input capture, numbered LCD images and an interactive per-key inversion demo. |
 | [pico2w/](pico2w/) | Standalone, no-SDK/no-libc Pico 2 W runtime and headless USB-report target, with its own build, tests and documentation. |
 | [clean-rx/](clean-rx/badge/README.md) | Alternative source-built CYW43439 firmware supporting reception and transmission, with an opt-in, no-libc badge host. |
 

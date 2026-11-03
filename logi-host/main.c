@@ -124,7 +124,7 @@ void bare_main(void) {
                 if (!++keypad_generation) ++keypad_generation;
                 control.logi_keypad_active = 1u;
                 badger_bytes_zero((uint8_t *)&lcd, sizeof(lcd));
-                if (control.logi_lcd_requested) fs_lcd_begin(&lcd);
+                if (control.logi_lcd_requested) fs_lcd_begin(&lcd, control.logi_lcd_requested);
                 if (fs_clock_error) {
                     keypad.error = fs_clock_error;
                     keypad.stage = 4u;
@@ -148,17 +148,22 @@ void bare_main(void) {
         }
         uint32_t tick = now(0);
         if (control.logi_keypad_active) {
+            if (lcd.stage && lcd.images == 9u &&
+                tick - lcd.hold_started >= (uint32_t)control.logi_keypad_seconds * 1000000u)
+                lcd.stopping = 1u;
             if (!control.configured) {
                 keypad.error = FS_CANCELLED;
                 finish_keypad(&io);
             } else if (!lcd.stage &&
                        tick - keypad_started >= (uint32_t)control.logi_keypad_seconds * 1000000u) {
                 finish_keypad(&io);
-            } else if (lcd.stage && lcd.images == 9u && !lcd.waiting && !keypad.output_length &&
-                       tick - lcd.hold_started >= (uint32_t)control.logi_keypad_seconds * 1000000u) {
+            } else if (lcd.stage && lcd.stopping && !lcd.waiting && !keypad.output_length &&
+                       !lcd.rendering && lcd.desired == lcd.displayed) {
                 lcd.stage = FS_LCD_DONE;
                 finish_keypad(&io);
             } else if (lcd.stage && ((!lcd.hold_started && tick - keypad_started >= 30000000u) ||
+                       (lcd.stopping && tick - lcd.hold_started >=
+                        (1u + control.logi_keypad_seconds) * 1000000u) ||
                        tick - keypad_started >= (31u + control.logi_keypad_seconds) * 1000000u)) {
                 keypad.error = FS_DEADLINE;
                 finish_keypad(&io);
