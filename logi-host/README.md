@@ -7,10 +7,14 @@ keypad, with events relayed to the badge over a separate connection.
 **Current milestone: experimental full-speed PIO transport and a bounded
 USB device-descriptor probe, with passive diagnostics by default.**
 The 144 MHz clock, active empty-port reset/send/timeout and passive recovery
-are physically verified. A directly connected keypad also returned the first
-eight device-descriptor bytes at full speed, but its OUT status stage keeps
-returning NAK: **complete enumeration is not yet working**.
-There is no HID driver, hub support,
+are physically verified. The directly connected keypad now completes both
+device-descriptor reads, their status stages and SET_ADDRESS at full speed:
+**four consecutive final-build probes succeeded**, identifying `046d:c354`.
+The former persistent OUT-status NAKs were caused by late host ACKs.
+ACK turnaround is improved but still not qualified: the first captured ACK
+starts about **8.0..8.5 bit times** after SE0-to-J, with sampling uncertainty
+of +/-0.5 bit; USB permits at most 7.5. This remains an experimental transport,
+not a compliant or complete USB host. There is no HID driver, hub support,
 keypad input or LCD output yet. The Mac diagnostic connection uses the
 separate native USB controller; it does not host the peripheral on behalf
 of the Waveshare board.
@@ -78,8 +82,10 @@ Outputs:
 The firmware uses `-ffreestanding -nostdinc -fno-builtin -nostdlib`,
 project-owned integer headers, a 2 MiB flash linker map and no unresolved
 library symbols. The UF2 family is `0xe48bff59`. The initial diagnostic
-image contained 6,512 bytes of flash payload in 26 UF2 blocks; the active
-driver build is approximately 16 KiB. Critical receive/validation/ACK code
+image contained 6,512 bytes of flash payload in 26 UF2 blocks; the qualified
+descriptor-probe build contains 16,456 bytes in 65 UF2 blocks and 161,672
+bytes of BSS, including a 128 KiB differential-decoding table.
+Critical receive/validation/ACK code
 is copied to SRAM at boot rather than depending on flash-cache latency.
 
 Sanitized tests exercise the PIO instructions against a modeled FIFO,
@@ -95,12 +101,15 @@ invalid CRC/PID/line states, all EP0 packet sizes, duplicates, NAK limits,
 STALL and deadline failures. A cycle-level interpreter executes the actual
 32 PIO instruction words with varied input phase and one-clock jitter,
 including partial FIFO trailers, EOP validation and the ACK entry/gap.
-MMIO transport tests verify that bad CRC, EOP and FIFO errors suppress ACK.
+MMIO transport tests verify that bad SYNC, PID, CRC, EOP and FIFO errors
+in any of the three active state machines suppress ACK.
 They cover immediate decoding of full FIFO words before EOP as well as
 buffered reception after EOP, for every payload size from zero to 64 bytes.
 Reset tests cover delayed input settling after release and a line that
 never returns to idle.
-Monitor tests reject stale probe generations. **These models are not proof
+Monitor tests reject stale probe generations and check response-gap extraction
+across trace-word boundaries, missing edges and invalid line states.
+**These models are not proof
 of electrical USB compliance or real peripheral ACK turnaround timing.**
 
 ## Native USB diagnostics
@@ -195,7 +204,7 @@ Configured vendor-IN request `c0/72`, value/index zero, length exactly 64:
 Errors: `-4401` PIO reset timeout, `-4402` receive timeout,
 `-4403` PIO FIFO/debug error, `-4404` exhausted counters.
 Sampling stops on a PIO error; native USB still exposes the failure.
-Only passive status, full-speed probe/result, build info (`53`) and BOOTSEL
+Only passive status, full-speed probe/result/trace, build info (`53`) and BOOTSEL
 (`52`) vendor requests are accepted. Radio, replay and other badge commands
 are blocked.
 
@@ -204,7 +213,9 @@ are blocked.
 - [fs_wire.c](fs_wire.c): token/data/handshake/SOF construction, CRC5/CRC16,
   NRZI, bit-stuffing, differential-state validation and streaming decode.
 - [fs_pio.c](fs_pio.c): independent PLL_SYS setup at 144 MHz, GPIO12/13,
-  PIO0 SM0 transmitter and SM1 receiver. Native USB keeps its own 48 MHz PLL.
+  PIO0 SM0 transmitter, SM1 receiver and SM2 preloaded ACK transmitter.
+  Input-only PIO1 SM0 independently records the first DATA EOP/ACK.
+  Native USB keeps its own 48 MHz PLL.
 - [fs_host.c](fs_host.c): bounded EP0 probe and diagnostic result.
 
 **No active USB-A signals are sent automatically at boot.** The default
@@ -256,15 +267,17 @@ configured or continuously polled.
 TX uses twelve 144 MHz system clocks per bit. SETUP/OUT token plus DATA
 are pre-encoded into one PIO stream, including the interpacket gap.
 RX samples both lines at the same bit cadence, validates two SE0 bit
-samples followed by J, and streams eight sampled bits per FIFO word.
-The CPU performs table-based NRZI/unstuffing and streaming CRC in SRAM.
-Before EOP, full FIFO words are decoded immediately rather than holding one
-word back. GPIO line checks use one SIO snapshot, and an already completed
-PIO EOP check does not incur an extra timer read before ACK.
-ACK is preloaded but enabled only after validation; PIO enforces the
-minimum gap before the ACK entry. Actual maximum ACK turnaround and
-sustained receive FIFO service must still be measured with real devices.
-No automatic ACK is sent for corrupt packets.
+samples followed by J and rejects SE1 at release. Full eight-sample words
+are decoded immediately. A single tagged EOP trailer combines the remaining
+samples with the sample count, avoiding the old one-word lookahead that
+delayed processing of the final CRC byte.
+The CPU performs table-based differential/NRZI/unstuffing and streaming CRC
+in SRAM. A separately preloaded SM2 starts ACK through one enable write,
+only after SYNC, PID, CRC, stuffing, length, FIFO and EOP checks.
+PIO enforces the minimum gap; the measured maximum response time is still
+too long (see physical qualification). No automatic ACK is sent for corrupt
+packets. The hot receive objects and LTO link use `-O2`; other target objects
+retain `-Oz`. Sustained traffic and worst-case ACK timing remain unqualified.
 
 Each PHY exchange has a 150 us timeout. The probe has a 300 ms deadline;
 NAKs have at most 128 attempts/100 ms per transaction, and repeated
@@ -298,6 +311,34 @@ Errors: `-4501` timeout, `-4502` buffer limit, `-4503` encoding/EOP,
 `-4504` CRC, `-4505` PID, `-4506` length, `-4507` STALL,
 `-4508` toggle, `-4509` descriptor, `-4510` line/reset level,
 `-4511` clock, `-4512` FIFO, `-4513` deadline/retry limit.
+
+### Physical post-EOP trace
+
+Configured vendor-IN `c0/75`, value/index zero, length exactly 64:
+
+| Offset | Little-endian field |
+| --- | --- |
+| 0, 4 | Magic `FST1`, matching build ID |
+| 8, 9 | Captured word count (0..8), first successfully received DATA PID |
+| 10..11 | Generation matching the full-speed result |
+| 12..15 | Reserved, zero |
+| 16..47 | Up to eight chronological sample words, oldest two-bit sample in bits 1:0 |
+| 48..59 | Reserved, zero |
+| 60 | CRC32 over bytes 0..59 |
+
+PIO1 observes the pins without changing their mux or output direction.
+It detects receive SE0 and captures 128 samples at 24 MHz (half a full-speed
+bit per sample), then stalls harmlessly in its joined RX FIFO.
+The monitor reads this record alongside the result, checks build/CRC/generation
+and prints `0` (SE0), `J`, `K`, or `X` (SE1). It measures the first SE0/J/K
+response transition, reports +/-0.5-bit sampling uncertainty and warns when
+that interval does not establish the 7.5-bit host limit. Missing transitions
+are reported explicitly, not treated as a zero-delay response.
+
+This captures only the first successful DATA transaction's EOP/ACK, not
+every ACK or a continuous USB trace. A successful descriptor probe does not
+mean timing compliance; its exit status describes the probe, while timing
+qualification is reported separately.
 
 ## Flash, preservation and recovery
 
@@ -387,10 +428,10 @@ The earlier attached-state observation also had D- low; that does not
 establish a working, powered full-speed peripheral or successful USB
 enumeration.
 
-No peripheral identity, speed or mouse report was established by the
-Waveshare diagnostic.
-No component has been removed and the diagnostic still never drives
-USB-A. The board was left in BOOTSEL, with the diagnostic installed.
+At this passive-only milestone no peripheral identity, speed or mouse
+report had been established by the Waveshare diagnostic. No component
+had been removed and that diagnostic never drove USB-A.
+The board was left in BOOTSEL, with the diagnostic installed.
 
 ### Mouse identification through the Mac hub, 2026-11-03
 
@@ -416,8 +457,8 @@ Waveshare must not be interpreted as proof of full-speed operation.
 
 The working replacement cable enumerates the Logitech MX Keypad,
 `046d:c354`, serial `346F35813233`, at **480 Mbit/s** on the Mac.
-Its previously read other-speed descriptors advertise full-speed behavior,
-but actual 12 Mbit/s operation has not been verified.
+Its previously read other-speed descriptors advertised full-speed behavior;
+subsequent direct Waveshare tests below confirmed actual 12 Mbit/s operation.
 
 ### Active-driver empty-port qualification
 
@@ -437,35 +478,58 @@ The keypad remained visible on the Mac during this empty-port test:
 - Passive capture resumed afterward with advancing counters and no
   passive PIO/native USB errors. Software BOOTSEL recovery succeeded.
 
-The test does **not** establish valid USB waveforms or successful reception,
-CRC checking or ACK timing on real peripheral traffic. No actual peripheral
-descriptor has been read by this driver yet.
+That empty-port test did **not** establish valid USB waveforms or successful
+reception, CRC checking or ACK timing on real peripheral traffic. The later
+direct-peripheral tests below provide that separate evidence.
 
 ### Direct keypad qualification, 2026-11-03
 
 The user connected the keypad directly to Waveshare USB-A with the working
-cable, keeping USB-C attached to the Mac. The installed firmware was first
-tested, then diagnostic/receive-path updates were built, sanitized and
-flashed with readback verification:
+cable, keeping USB-C attached to the Mac. Initial testing established:
 
 - Reset readback was consistently `d1`: J, driven SE0, released J.
 - The keypad ACKed SETUP and returned a valid DATA1 packet containing
   `12 01 00 02 00 00 00 40`: device descriptor, USB 2.0, EP0 maximum 64 bytes.
 - Probes stopped at `stage=3 phase=3 last_pid=5a error=-4513`:
   the initial read's OUT status transaction repeatedly returned NAK.
-  The final build reproduced this on two consecutive probes, each with
+  The earlier build reproduced this on two consecutive probes, each with
   `tx=305 rx=131 timeouts=0 NAKs=129 wire_errors=0`.
-- Immediate FIFO decoding and a shorter pre-ACK path did not resolve the
-  status-stage failure. ACK turnaround or waveform correctness must not be
-  inferred from the valid received packet; the cause remains unproven.
-- Passive sampling resumed without reported PIO/native USB errors; over
-  two seconds its sample count advanced from 122,960 to 139,200.
-- Acknowledged software BOOTSEL recovery was verified against chip ID
-  `B72817DA2FE6A757`; the updated firmware remains installed.
 
-This establishes actual full-speed packet reception from the connected
-keypad, not a complete descriptor transfer, its VID/PID on the Waveshare,
-or working HID input. No resistor was removed. Next: measure/qualify the
-ACK and OUT-status exchange before address assignment, configuration, HID
-polling, keypad protocol or a badge relay. For the identified low-speed
-mouse, the separate R13 issue still applies.
+The subsequent independent PIO capture showed a correctly encoded ACK
+starting approximately 17 bit times after the received packet's SE0-to-J.
+USB 2.0 sections 7.1.18.1 and 7.1.19.1 specify a host response maximum
+of 7.5 bit times and a device timeout between 16 and 18 bit times.
+Thus the device could discard the late ACK and continue NAKing OUT status.
+Moving ACK preparation out of the receive path, fixing the FIFO trailer,
+and reducing receive/validation overhead eliminated the persistent NAKs.
+The USB 2.0 base specification is available in the
+[official USB-IF archive](https://www.usb.org/sites/default/files/usb_20_20250603.zip).
+
+The final firmware was built, sanitized, flashed and readback-verified.
+**Four consecutive probes** each produced:
+
+```text
+stage=6 phase=3 last_pid=d2 error=0
+tx=32 rx=11 timeouts=0 NAKs=3 wire_errors=0 reset_lines=d1
+12 01 00 02 00 00 00 40 6d 04 54 c3 00 02 01 02 03 01
+VID:PID=046d:c354, EP0 maximum packet=64
+```
+
+Both GET_DESCRIPTOR status stages and SET_ADDRESS now succeed. Three
+transient NAKs remain, but are handled by bounded retries; they no longer
+prevent completion. The first DATA ACK measured 8.5 bit times in three
+probes and 8.0 in the fourth, each with +/-0.5-bit sampling uncertainty.
+This is below the device's timeout, but **does not meet/establish the
+7.5-bit host response requirement**. No USB compliance claim is made.
+
+Passive sampling resumed after all probes: over two seconds the sample
+count advanced from 3,760 to 20,000 without PIO/native USB errors.
+Acknowledged software BOOTSEL recovery was verified against the exact
+chip ID `B72817DA2FE6A757`; the updated firmware remains installed.
+No resistor was removed.
+
+Next: bring ACK timing below the host limit with margin and qualify longer
+traffic, then add configuration descriptors, SET_CONFIGURATION, HID polling,
+keypad protocol and eventually a badge relay. These descriptor-only successes
+do not establish working keypad buttons or LCD output. For the identified
+low-speed mouse, the separate R13 issue still applies.

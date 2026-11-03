@@ -6,14 +6,35 @@
 static uint8_t mocked_report[64];
 static IOReturn mock_request(void *self, IOUSBDevRequestTO *request) {
     (void)self;
-    assert(request->bmRequestType == 0xc0u && request->bRequest == LIVE_USB_LOGI_FS_STATUS);
+    assert(request->bmRequestType == 0xc0u);
     assert(request->wLength == 64u);
-    memcpy(request->pData, mocked_report, 64u);
+    if (request->bRequest == LIVE_USB_LOGI_FS_TRACE) {
+        fs_result_t r = {.generation = (uint16_t)(mocked_report[54] | mocked_report[55] << 8u)};
+        fs_trace_report(&r, USB_REPORT_BUILD_ID, request->pData);
+    } else {
+        assert(request->bRequest == LIVE_USB_LOGI_FS_STATUS);
+        memcpy(request->pData, mocked_report, 64u);
+    }
     request->wLenDone = 64u;
     return kIOReturnSuccess;
 }
 
 int main(void) {
+    uint8_t trace[64] = {0};
+    assert(trace_response_gap(trace) == -1);
+    trace[8] = 2u;
+    /* Four SE0 samples, a 17-sample idle gap crossing a word boundary, then K. */
+    for (unsigned i = 4u; i < 32u; ++i)
+        trace[16u + i / 4u] |= (i < 21u ? 1u : 2u) << (2u * (i % 4u));
+    assert(trace_response_gap(trace) == 17);
+    trace[21] |= 3u << 2u;
+    assert(trace_response_gap(trace) == -1);
+    memset(trace + 16u, 0x55, 32u);
+    assert(trace_response_gap(trace) == -1);
+    trace[16] = 0u;
+    assert(trace_response_gap(trace) == -1);
+    trace[8] = 9u;
+    assert(trace_response_gap(trace) == -1);
     unsigned seconds = 123u;
     const char *invalid[] = {"", "0", "-1", "+1", " 1", "1x", "3601", "999999999999999999999999"};
     for (unsigned i = 0u; i < sizeof(invalid) / sizeof(*invalid); ++i) {

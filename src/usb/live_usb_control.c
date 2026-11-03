@@ -194,6 +194,7 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
 #ifdef LIVE_USB_LOGI_HOST
     if ((type & 0x60u) == 0x40u && request != LIVE_USB_LOGI_STATUS &&
         request != LIVE_USB_LOGI_PROBE && request != LIVE_USB_LOGI_FS_STATUS &&
+        request != LIVE_USB_LOGI_FS_TRACE &&
         request != LIVE_USB_INFO && request != LIVE_USB_BOOTSEL) {
         stall(control);
         return;
@@ -287,6 +288,11 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
         if (type == 0xc0u && request == LIVE_USB_LOGI_FS_STATUS && length == 64u &&
             control->logi_fs_valid) {
             send(control, control->logi_fs_status, 64u, length);
+            return;
+        }
+        if (type == 0xc0u && request == LIVE_USB_LOGI_FS_TRACE && length == 64u &&
+            control->logi_fs_valid) {
+            send(control, control->logi_fs_trace, 64u, length);
             return;
         }
         if (type == 0xc0u && request == LIVE_USB_LOGI_STATUS && length == 64u &&

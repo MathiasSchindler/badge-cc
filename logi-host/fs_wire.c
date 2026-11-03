@@ -1,8 +1,9 @@
 #include "fs.h"
 #include "../src/shared/bytes.h"
 
-static uint32_t decode[14][511];
+static uint32_t decode[14][512];
 static uint16_t crc_table[256];
+static uint16_t differential[65536];
 
 static uint16_t crc_byte(uint16_t crc, uint8_t byte) {
     return (uint16_t)((crc >> 8u) ^ crc_table[(crc ^ byte) & 255u]);
@@ -25,6 +26,16 @@ uint16_t fs_crc16(const uint8_t *bytes, uint16_t length) {
 }
 
 void fs_wire_init(void) {
+    for (uint32_t samples = 0u; samples < 65536u; ++samples) {
+        uint32_t dp = 0x100u;
+        if (((samples ^ (samples >> 1u)) & 0x5555u) == 0x5555u) {
+            dp = samples & 0x5555u;
+            dp = (dp | dp >> 1u) & 0x3333u;
+            dp = (dp | dp >> 2u) & 0x0f0fu;
+            dp = (dp | dp >> 4u) & 0xffu;
+        }
+        differential[samples] = (uint16_t)dp;
+    }
     for (uint32_t i = 0u; i < 256u; ++i) {
         uint16_t crc = (uint16_t)i;
         for (uint8_t j = 0u; j < 8u; ++j) crc = (uint16_t)((crc >> 1u) ^ ((crc & 1u) ? 0xa001u : 0u));
@@ -113,34 +124,49 @@ int32_t fs_handshake(fs_tx_t *tx, uint8_t pid) {
 }
 
 void fs_rx_init(fs_rx_t *rx) {
-    badger_bytes_zero((uint8_t *)rx, sizeof(*rx));
+    rx->length = rx->pending = rx->bits = rx->data_pid = 0u;
+    rx->error = 0;
     rx->crc = 0xffffu;
     rx->state = 1u;
+}
+
+static inline int32_t receive_byte(fs_rx_t *rx, uint8_t byte) {
+    uint32_t length = rx->length;
+    if (length == FS_PACKET_BYTES) return rx->error = FS_OVERFLOW;
+    if (length >= 2u) rx->crc = crc_byte((uint16_t)rx->crc, byte);
+    else if (!length) {
+        if (byte != 0x80u) return rx->error = FS_ENCODING;
+    } else if (byte == FS_DATA0 || byte == FS_DATA1) rx->data_pid = byte;
+    rx->bytes[length] = byte;
+    rx->length = length + 1u;
+    return 0;
 }
 
 int32_t fs_rx_feed(fs_rx_t *rx, uint16_t samples, uint8_t count) {
     if (rx->error) return rx->error;
     if (!count || count > 8u) return rx->error = FS_LENGTH;
     uint16_t mask = (uint16_t)(0xffffu >> (16u - 2u * count));
-    samples &= mask;
-    if (((samples ^ (samples >> 1u)) & 0x5555u & mask) != (0x5555u & mask))
+    uint32_t dp = differential[(samples & mask) | (0x5555u & (uint16_t)~mask)];
+    if (dp & 0x100u)
         return rx->error = FS_LINE;
-    uint32_t dp = samples & 0x5555u;
-    dp = (dp | dp >> 1u) & 0x3333u;
-    dp = (dp | dp >> 2u) & 0x0f0fu;
-    dp = (dp | dp >> 4u) & 0xffu;
-    uint32_t decoded = decode[rx->state][(1u << count) - 1u + dp];
+    uint32_t decoded = decode[rx->state][(1u << count) - 1u + (dp & ((1u << count) - 1u))];
     if (decoded & 0x10000u) return rx->error = FS_ENCODING;
-    rx->state = (uint8_t)(decoded >> 12u) & 15u;
-    rx->pending |= (decoded & 255u) << rx->bits;
-    rx->bits += (uint8_t)(decoded >> 8u) & 15u;
-    if (rx->bits >= 8u) {
-        if (rx->length == FS_PACKET_BYTES) return rx->error = FS_OVERFLOW;
-        uint8_t byte = (uint8_t)rx->pending;
-        rx->bytes[rx->length++] = byte;
-        if (rx->length > 2u) rx->crc = crc_byte(rx->crc, byte);
-        rx->pending >>= 8u;
-        rx->bits -= 8u;
+    if ((decoded & 0xf00u) == 0x800u && !rx->bits) {
+        rx->state = (decoded >> 12u) & 15u;
+        int32_t error = receive_byte(rx, (uint8_t)decoded);
+        if (error) return error;
+    } else {
+        uint32_t pending = rx->pending | (decoded & 255u) << rx->bits;
+        uint32_t bits = rx->bits + ((decoded >> 8u) & 15u);
+        if (bits >= 8u) {
+            int32_t error = receive_byte(rx, (uint8_t)pending);
+            if (error) return error;
+            pending >>= 8u;
+            bits -= 8u;
+        }
+        rx->state = (decoded >> 12u) & 15u;
+        rx->pending = pending;
+        rx->bits = bits;
     }
     return 0;
 }

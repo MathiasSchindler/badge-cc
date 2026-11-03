@@ -186,3 +186,16 @@ void fs_report(const fs_result_t *r, uint32_t build, uint8_t line, uint8_t bytes
     bytes[59] = r->phase;
     badger_bytes_store_u32(bytes + 60u, diag_crc32(bytes, 60u));
 }
+
+void fs_trace_report(const fs_result_t *r, uint32_t build, uint8_t bytes[64]) {
+    badger_bytes_zero(bytes, 64u);
+    badger_bytes_store_u32(bytes, FS_TRACE_MAGIC);
+    badger_bytes_store_u32(bytes + 4u, build);
+    bytes[8] = r->trace_count;
+    bytes[9] = r->trace_pid;
+    bytes[10] = (uint8_t)r->generation;
+    bytes[11] = (uint8_t)(r->generation >> 8u);
+    for (uint8_t i = 0u; i < r->trace_count && i < 8u; ++i)
+        badger_bytes_store_u32(bytes + 16u + 4u * i, r->trace_words[i]);
+    badger_bytes_store_u32(bytes + 60u, diag_crc32(bytes, 60u));
+}

@@ -32,13 +32,13 @@ $(BUILD)/build_id.h: force $(SOURCES) $(HEADERS) Makefile memmap.ld | $(BUILD)
 $(BUILD)/%.o: %.c $(HEADERS) $(BUILD)/build_id.h
 	$(CC) $(FLAGS) -c $< -o $@
 
-$(BUILD)/fs_wire.o $(BUILD)/fs_pio.o: FLAGS += -O3 -flto
+$(BUILD)/fs_wire.o $(BUILD)/fs_pio.o: FLAGS += -O2 -flto
 
 $(BUILD)/picobin.o: $(ROOT)/src/arch/rp2350/picobin.S | $(BUILD)
 	$(CC) $(FLAGS) -c $< -o $@
 
 $(BUILD)/logi-host.elf: $(OBJECTS) memmap.ld
-	$(CC) $(FLAGS) -O3 -flto -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
+	$(CC) $(FLAGS) -O2 -flto -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
 		-Tmemmap.ld $(OBJECTS) -Wl,-Map=$(BUILD)/logi-host.map -o $@
 	@test -z "$$(llvm-nm -u $@)"
 	llvm-size $@

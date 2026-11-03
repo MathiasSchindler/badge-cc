@@ -58,6 +58,7 @@ static void tx_model(const fs_tx_t *tx, uint8_t ack) {
             unsigned flag = op & 7u;
             m.irq |= 1u << flag; m.irq_clock[flag] = m.clock;
         }
+        if (ack && m.pc == 30u) next = 4u;
         m.clock += 1u + ((op >> 8u) & 31u);
         m.pc = next;
     }
@@ -68,7 +69,7 @@ static void tx_model(const fs_tx_t *tx, uint8_t ack) {
     }
     assert(m.release_clock - m.output_clock[m.emitted - 1u] == 12u);
     assert(m.irq_clock[4] < m.irq_clock[0]);
-    if (ack) assert(m.output_clock[0] == 2u);
+    if (ack) assert(m.output_clock[0] == 1u);
 }
 
 static uint8_t input(const fs_tx_t *tx, uint32_t clock, uint32_t start, int jitter, uint8_t short_eop) {
@@ -81,7 +82,8 @@ static uint8_t input(const fs_tx_t *tx, uint32_t clock, uint32_t start, int jitt
         if (clock < boundary) break;
         ++index;
     }
-    if (short_eop && index >= tx->count - 2u) return 1u;
+    if (short_eop == 1u && index >= tx->count - 2u) return 1u;
+    if (short_eop == 2u && index >= tx->count - 1u) return 3u;
     if (clock >= start + tx->count * 12u) return 1u;
     return sample(tx, index);
 }
@@ -89,7 +91,7 @@ static uint8_t input(const fs_tx_t *tx, uint32_t clock, uint32_t start, int jitt
 static void rx_model(const fs_tx_t *tx, unsigned phase, int jitter, uint8_t short_eop) {
     machine_t m = {.pc = 10u, .y = 1023u, .irq = 16u};
     unsigned start = 40u + phase;
-    for (unsigned steps = 0u; steps < 20000u && m.pc != 29u && !(m.irq & 8u); ++steps) {
+    for (unsigned steps = 0u; steps < 20000u && m.pc != 27u && !(m.irq & 8u); ++steps) {
         uint16_t op = fs_pio_program[m.pc];
         uint8_t next = (uint8_t)(m.pc + 1u), kind = op >> 13u;
         uint8_t pins = input(tx, m.clock, start, jitter, short_eop);
@@ -108,16 +110,19 @@ static void rx_model(const fs_tx_t *tx, unsigned phase, int jitter, uint8_t shor
             else assert(dest == 2u);
         } else if (kind == 3u) { assert((op & 255u) == 0x22u); m.x = m.osr & 3u; m.osr >>= 2u; }
         else if (kind == 2u) {
-            assert((op & 255u) == 0x22u);
-            m.isr = (m.isr >> 2u) | m.x << 30u;
-            m.shift += 2u;
-            if (m.shift == 16u) {
+            unsigned bits = op & 31u, source = (op >> 5u) & 7u;
+            assert((bits == 2u && source == 1u) || (bits == 16u && source == 2u));
+            uint32_t value = source == 1u ? m.x : m.y;
+            m.isr = (m.isr >> bits) | value << (32u - bits);
+            m.shift += bits;
+            if (m.shift >= 16u) {
                 m.fifo[m.emitted++] = m.isr;
                 m.isr = 0u; m.shift = 0u;
             }
         } else if (kind == 0u) {
             unsigned condition = (op >> 5u) & 7u;
-            if (!condition || (condition == 1u && !m.x) || (condition == 4u && m.y--))
+            if (!condition || (condition == 1u && !m.x) || (condition == 4u && m.y--) ||
+                (condition == 6u && (pins & 2u)))
                 next = op & 31u;
         } else if (kind == 4u) {
             assert((op & 255u) == 0x20u);
@@ -132,15 +137,15 @@ static void rx_model(const fs_tx_t *tx, unsigned phase, int jitter, uint8_t shor
         m.pc = next;
     }
     if (short_eop) { assert(m.irq & 8u); return; }
-    assert(m.pc == 29u && m.irq & 2u && m.irq & 4u);
-    unsigned count = 1023u - m.fifo[m.emitted - 1u];
+    assert(m.pc == 27u && m.irq & 4u);
+    unsigned count = 1023u - (m.fifo[m.emitted - 1u] >> 16u);
     assert(count == tx->count - 3u);
-    assert(m.emitted == count / 8u + 2u);
+    assert(m.emitted == count / 8u + 1u);
     fs_rx_t rx; fs_rx_init(&rx);
     for (unsigned i = 0u; i < count / 8u; ++i)
         assert(!fs_rx_feed(&rx, (uint16_t)(m.fifo[i] >> 16u), 8u));
     if (count % 8u)
-        assert(!fs_rx_feed(&rx, (uint16_t)(m.fifo[m.emitted - 2u] >> (32u - 2u * (count % 8u))),
+        assert(!fs_rx_feed(&rx, (uint16_t)m.fifo[m.emitted - 1u] >> (16u - 2u * (count % 8u)),
                            (uint8_t)(count % 8u)));
     fs_packet_t packet;
     assert(!fs_rx_finish(&rx, &packet));
@@ -151,7 +156,51 @@ static uint32_t timer, pins, writes, drives, released, pads, ctrl, clock_fail;
 static uint32_t last_dirs, clock_multiplier, clock_post;
 static uint32_t time_step = 100u, release_delay, awaiting_release, release_stuck;
 static uint32_t transport, flags, fifo[100], available, consumed, ack_count, bad_eop, fifo_fault;
-static uint32_t eop_early;
+static uint32_t eop_early, ack_preloaded;
+
+static void trace_model(void) {
+    fs_tx_t ack = {0};
+    assert(!fs_handshake(&ack, FS_ACK));
+    for (unsigned phase = 0u; phase < 12u; ++phase) {
+        machine_t m = {0};
+        unsigned start = 40u + phase;
+        uint8_t captured[128];
+        unsigned count = 0u;
+        uint32_t previous_sample = 0u;
+        while (count < 128u && m.clock < 3000u) {
+            uint8_t pins = 1u;
+            if (m.clock >= start + 2u) {
+                unsigned bit = (m.clock - start - 2u) / 12u;
+                pins = bit < 2u ? 0u : bit < 6u ? 1u :
+                       bit < 6u + ack.count ? sample(&ack, bit - 6u) : 1u;
+            }
+            uint16_t op = fs_trace_program[m.pc];
+            uint8_t next = (uint8_t)(m.pc + 1u);
+            switch (op >> 13u) {
+                case 5u: m.osr = pins; break;
+                case 3u: m.x = m.osr & 3u; break;
+                case 0u:
+                    if (!(op & 0xe0u) || !m.x) next = op & 31u;
+                    break;
+                case 2u:
+                    if (count) assert(m.clock - previous_sample == 6u);
+                    previous_sample = m.clock;
+                    captured[count++] = pins;
+                    break;
+                case 6u: break;
+                default: assert(0);
+            }
+            m.clock += 1u + ((op >> 8u) & 31u);
+            m.pc = next;
+        }
+        assert(count == 128u);
+        unsigned idle = captured[3] == 1u ? 3u : 4u;
+        for (unsigned i = 0u; i < idle; ++i) assert(!captured[i]);
+        for (unsigned i = idle; i < idle + 8u; ++i) assert(captured[i] == 1u);
+        for (unsigned i = 0u; i < ack.count * 2u; ++i)
+            assert(captured[idle + 8u + i] == sample(&ack, i / 2u));
+    }
+}
 uint32_t fs_test_read(uint32_t address) {
     if (address == 0x400b000cu) return timer += time_step;
     if (address == 0xd0000004u) {
@@ -161,7 +210,7 @@ uint32_t fs_test_read(uint32_t address) {
     }
     if (address == 0x4001003cu) return ctrl;
     if (address == 0x40010044u) return ctrl & 1u ? 2u : 1u;
-    if (address == 0x40020008u) return 1u << 14u;
+    if (address == 0x40020008u) return (1u << 14u) | (1u << 12u);
     if (address == 0x40050000u) return clock_fail ? 0u : 1u << 31u;
     if (transport && address == LOGI_PIO + 4u) return consumed < available ? 0u : 1u << 9u;
     if (transport && address == LOGI_PIO + 0x30u) return flags;
@@ -169,7 +218,7 @@ uint32_t fs_test_read(uint32_t address) {
     if (transport && address == LOGI_PIO + 0x24u) {
         assert(consumed < available);
         uint32_t value = fifo[consumed++];
-        if (eop_early || consumed >= available - 1u) flags |= 2u;
+        if (eop_early || consumed == available) flags |= 2u;
         if (consumed == available) flags |= 2u | (bad_eop ? 8u : 4u);
         return value;
     }
@@ -185,8 +234,12 @@ void fs_test_write(uint32_t address, uint32_t value) {
     if (address == 0x40050008u) clock_multiplier = value;
     if (address == 0x4005000cu) clock_post = value;
     if (transport && address == LOGI_PIO + 0x30u) flags &= ~value;
-    if (transport && address == LOGI_PIO && value == 3u) flags |= 17u;
-    if (transport && address == LOGI_PIO && value == 1u) { ++ack_count; flags |= 17u; }
+    if (transport && address == LOGI_PIO + 0x18u) ++ack_preloaded;
+    if (transport && address == LOGI_PIO && value == 3u) {
+        assert(ack_preloaded == 4u);
+        flags |= 17u;
+    }
+    if (transport && address == LOGI_PIO && value == 4u) { ++ack_count; flags |= 17u; }
     if (address == LOGI_PIO + 0xd8u && (value == 0xe083u || value == 0xe080u)) {
         if (last_dirs && !(value & 3u)) awaiting_release = 1u;
         if (value & 3u) awaiting_release = 0u;
@@ -199,15 +252,14 @@ void fs_test_write(uint32_t address, uint32_t value) {
 }
 
 static void response_fifo(const fs_tx_t *response) {
-    available = consumed = flags = ack_count = bad_eop = fifo_fault = 0u;
+    available = consumed = flags = ack_count = bad_eop = fifo_fault = ack_preloaded = 0u;
     unsigned n = 0u;
     uint32_t word = 0u, bits = response->count - 3u;
     for (unsigned i = 0u; i < bits; ++i) {
         word = word >> 2u | (uint32_t)sample(response, i) << 30u;
         if (++n == 8u) { fifo[available++] = word; word = n = 0u; }
     }
-    fifo[available++] = word;
-    fifo[available++] = 1023u - bits;
+    fifo[available++] = ((1023u - bits) << 16u) | (word >> 16u);
 }
 
 static void transport_tests(void) {
@@ -236,12 +288,22 @@ static void transport_tests(void) {
     eop_early = 0u;
     response_fifo(&response); bad_eop = 1u;
     assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_ENCODING && !ack_count && !last_dirs);
-    response_fifo(&response); fifo_fault = 2u;
-    assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_FIFO && !ack_count);
+    for (unsigned fault = 1u; fault <= 4u; fault <<= 1u) {
+        response_fifo(&response); fifo_fault = fault;
+        assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_FIFO && !ack_count && !last_dirs);
+    }
     response.words[1] ^= 3u << 8u;
     response_fifo(&response);
     assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_CRC && !ack_count);
     response.words[1] ^= 3u << 8u;
+    response.words[0] ^= 3u << 16u;
+    response_fifo(&response);
+    assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_PID && !ack_count);
+    response.words[0] ^= 3u << 16u;
+    response.words[0] ^= 3u;
+    response_fifo(&response);
+    assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_ENCODING && !ack_count);
+    response.words[0] ^= 3u;
     response.words[0] |= 3u;
     response_fifo(&response);
     assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_LINE && !ack_count);
@@ -251,7 +313,7 @@ static void transport_tests(void) {
     assert(!fs_pio_exchange(0, &tx, 1u, &packet) && packet.pid == FS_NAK && !ack_count);
     response_fifo(&response); bad_eop = 1u;
     assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_ENCODING && !ack_count);
-    available = consumed = ack_count = 0u;
+    available = consumed = ack_count = ack_preloaded = 0u;
     assert(fs_pio_exchange(0, &tx, 1u, &packet) == FS_TIMEOUT && !ack_count && !last_dirs);
     transport = 0u;
 }
@@ -288,10 +350,12 @@ int main(void) {
             rx_model(&tx, phase, -1, 0u);
         }
         rx_model(&tx, 0u, 0, 1u);
+        rx_model(&tx, 0u, 0, 2u);
     }
     fs_tx_t ack = {0};
     assert(!fs_handshake(&ack, FS_ACK));
     tx_model(&ack, 1u);
+    trace_model();
     transport_tests();
     puts("PIO: actual 32-instruction TX/RX model, 12 clocks/bit, all payload sizes,");
     puts("phase/jitter, partial FIFO trailers, 2-bit EOP, ACK entry/gap, gated reset/release PASS");

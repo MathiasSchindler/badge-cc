@@ -79,6 +79,7 @@ void bare_main(void) {
                 const fs_bus_t bus = {.context = &fs_result, .now = fs_pio_now,
                                       .reset = fs_pio_reset, .exchange = fs_pio_exchange};
                 (void)fs_probe(&bus, &fs_result);
+                fs_pio_trace_finish(&fs_result);
                 fs_result.clock_ready = 1u;
                 fs_pio_stop();
                 int32_t restored = logi_board_init(&board, &io);
@@ -90,6 +91,7 @@ void bare_main(void) {
             if (!++fs_generation) ++fs_generation;
             fs_result.generation = fs_generation;
             fs_report(&fs_result, USB_REPORT_BUILD_ID, 0u, control.logi_fs_status);
+            fs_trace_report(&fs_result, USB_REPORT_BUILD_ID, control.logi_fs_trace);
             control.logi_fs_valid = 1u;
             control.logi_status_valid = 0u;
         }
@@ -104,6 +106,7 @@ void bare_main(void) {
                               milliseconds, live_usb_hw_stats()->hardware_errors);
             control.logi_status_valid = 1u;
             fs_report(&fs_result, USB_REPORT_BUILD_ID, control.logi_status[52], control.logi_fs_status);
+            fs_trace_report(&fs_result, USB_REPORT_BUILD_ID, control.logi_fs_trace);
             control.logi_fs_valid = 1u;
             published = tick;
         }

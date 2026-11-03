@@ -7,6 +7,7 @@
 #define FS_RX_BITS 640u
 #define FS_PACKET_BYTES 68u
 #define FS_REPORT_MAGIC 0x31505346u
+#define FS_TRACE_MAGIC 0x31545346u
 #define FS_SYS_HZ 144000000u
 #if defined(__arm__) && !defined(LOGI_FS_TEST)
 #define FS_CRITICAL __attribute__((section(".time_critical.fs")))
@@ -30,9 +31,13 @@ enum { FS_OUT = 0xe1, FS_IN = 0x69, FS_SOF = 0xa5, FS_SETUP = 0x2d,
 typedef struct { uint32_t words[FS_TX_WORDS]; uint16_t count; uint8_t packets; } fs_tx_t;
 static inline void fs_tx_init(fs_tx_t *tx) { tx->count = 0u; tx->packets = 0u; }
 typedef struct {
-    uint8_t bytes[FS_PACKET_BYTES], length;
-    uint16_t crc, pending;
-    uint8_t bits, state;
+    uint8_t bytes[FS_PACKET_BYTES];
+    uint32_t pending, length, data_pid;
+    /* RP2350 is little-endian: one load checks the final CRC and pending-bit count. */
+    union {
+        struct { uint16_t crc; uint8_t bits, state; };
+        uint32_t tail;
+    };
     int32_t error;
 } fs_rx_t;
 typedef struct {
@@ -49,6 +54,8 @@ typedef struct {
     uint32_t tx, rx, timeouts, naks, wire_errors;
     uint16_t generation;
     uint8_t stage, descriptor_length, mps, descriptor[18], last_pid, clock_ready, reset_levels, phase;
+    uint32_t trace_words[8];
+    uint8_t trace_count, trace_pid;
 } fs_result_t;
 
 uint8_t fs_crc5(uint16_t bits);
@@ -64,13 +71,16 @@ FS_CRITICAL int32_t fs_rx_validate(const fs_rx_t *rx, fs_packet_t *packet);
 int32_t fs_rx_finish(fs_rx_t *rx, fs_packet_t *packet);
 int32_t fs_probe(const fs_bus_t *bus, fs_result_t *result);
 void fs_report(const fs_result_t *result, uint32_t build, uint8_t line, uint8_t bytes[64]);
+void fs_trace_report(const fs_result_t *result, uint32_t build, uint8_t bytes[64]);
 
-/* SM0 TX, SM1 RX. Twelve system clocks per full-speed bit at 144 MHz. */
+/* PIO0 SM0 TX, SM1 RX, SM2 preloaded ACK. PIO1 SM0 input-only trace. */
 extern const uint16_t fs_pio_program[32];
+extern const uint16_t fs_trace_program[6];
 int32_t fs_pio_clock(void);
 int32_t fs_pio_reset(void *context);
 FS_CRITICAL int32_t fs_pio_exchange(void *context, const fs_tx_t *tx, uint8_t receive, fs_packet_t *packet);
 void fs_pio_stop(void);
+void fs_pio_trace_finish(fs_result_t *result);
 uint32_t fs_pio_now(void *context);
 
 #endif

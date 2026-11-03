@@ -163,6 +163,10 @@ static void test_usb(void) {
     setup(0xc0u, LIVE_USB_LOGI_FS_STATUS, 0u, 64u);
     assert(usb.action == USB_ACTION_IN && usb.length == 64u);
     setup(0xc0u, LIVE_USB_LOGI_FS_STATUS, 0u, 63u); assert(usb.action == USB_ACTION_STALL);
+    usb.logi_fs_trace[9] = 0x4bu;
+    setup(0xc0u, LIVE_USB_LOGI_FS_TRACE, 0u, 64u);
+    assert(usb.action == USB_ACTION_IN && usb.length == 64u && usb.data[9] == 0x4bu);
+    setup(0xc0u, LIVE_USB_LOGI_FS_TRACE, 0u, 63u); assert(usb.action == USB_ACTION_STALL);
     setup(0x40u, LIVE_USB_BOOTSEL, 0u, 0u);
     assert(!usb.reboot_requested);
     setup(0xc0u, LIVE_USB_INFO, 0u, 12u); assert(!usb.reboot_requested);

@@ -72,6 +72,21 @@ static int validate_fs(const uint8_t bytes[64]) {
         (bytes[34] == 0u || bytes[34] == 8u || bytes[34] == 18u) && bytes[58] <= 1u;
 }
 
+static unsigned trace_sample(const uint8_t trace[64], unsigned i) {
+    uint32_t word = badger_bytes_load_u32(trace + 16u + (i / 16u) * 4u);
+    return (word >> (2u * (i % 16u))) & 3u;
+}
+
+static int trace_response_gap(const uint8_t trace[64]) {
+    unsigned n = (unsigned)trace[8] * 16u, i = 0u;
+    if (!n || n > 128u || trace_sample(trace, 0u) != 0u) return -1;
+    while (i < n && trace_sample(trace, i) == 0u) ++i;
+    unsigned start = i;
+    while (i < n && trace_sample(trace, i) == 1u) ++i;
+    if (i == start || i == n || trace_sample(trace, i) != 2u) return -1;
+    return (int)(i - start);
+}
+
 static int read_fs(IOUSBDeviceInterface500 **usb, uint16_t expected, int check_generation) {
     uint8_t bytes[64];
     if (!usb_macos_transfer(usb, 1u, LIVE_USB_LOGI_FS_STATUS, bytes, 64u)) return 0;
@@ -91,6 +106,28 @@ static int read_fs(IOUSBDeviceInterface500 **usb, uint16_t expected, int check_g
         putchar('\n');
         if (bytes[34] == 18u)
             printf("  VID:PID=%04x:%04x\n", bytes[44] | bytes[45] << 8u, bytes[46] | bytes[47] << 8u);
+    }
+    uint8_t trace[64];
+    if (!usb_macos_transfer(usb, 1u, LIVE_USB_LOGI_FS_TRACE, trace, 64u)) return 0;
+    if (badger_bytes_load_u32(trace) != FS_TRACE_MAGIC ||
+        badger_bytes_load_u32(trace + 4u) != USB_REPORT_BUILD_ID ||
+        badger_bytes_load_u32(trace + 60u) != diag_crc32(trace, 60u) || trace[8] > 8u ||
+        trace[10] != bytes[54] || trace[11] != bytes[55]) {
+        fputs("Full-speed trace protocol/build/CRC/generation mismatch.\n", stderr);
+        return 0;
+    }
+    printf("  physical post-EOP trace (24 MHz, first DATA PID=%02x): ", trace[9]);
+    for (unsigned i = 0u; i < (unsigned)trace[8] * 16u; ++i)
+        putchar("0JKX"[trace_sample(trace, i)]);
+    putchar('\n');
+    int gap = trace_response_gap(trace);
+    if (gap < 0) {
+        puts("  Response timing unavailable: capture lacks an SE0/J/K transition.");
+    } else {
+        printf("  First response edge: %.1f bit times after SE0-to-J "
+               "(sampling uncertainty +/-0.5; USB host maximum 7.5).\n", gap / 2.0);
+        if (gap + 1 > 15)
+            fputs("  WARNING: captured response does not establish the USB host timing limit.\n", stderr);
     }
     if (error || bytes[33] != 6u || bytes[34] != 18u) {
         fputs("No successful full-speed device-descriptor probe recorded; see firmware stage/error.\n", stderr);
