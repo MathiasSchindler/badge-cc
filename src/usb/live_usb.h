@@ -12,6 +12,10 @@
 #define LIVE_USB_LOGI_PROBE 0x73u
 #define LIVE_USB_LOGI_FS_STATUS 0x74u
 #define LIVE_USB_LOGI_FS_TRACE 0x75u
+#define LIVE_USB_LOGI_KEYPAD 0x76u
+#define LIVE_USB_LOGI_KEYPAD_STATUS 0x77u
+#define LIVE_USB_LOGI_KEYPAD_EVENT 0x78u
+#define LIVE_USB_LOGI_KEYPAD_SLOTS 32u
 #else
 #define LIVE_USB_PID 0x4026u
 #endif
@@ -107,6 +111,8 @@ typedef struct {
     uint8_t logi_status[64], logi_status_valid;
     uint8_t logi_fs_status[64], logi_fs_valid, logi_fs_pending, logi_fs_ready;
     uint8_t logi_fs_trace[64];
+    uint8_t logi_keypad_status[64], logi_keypad_events[LIVE_USB_LOGI_KEYPAD_SLOTS][64];
+    uint8_t logi_keypad_pending, logi_keypad_seconds, logi_keypad_active, logi_keypad_valid;
 #endif
 #ifdef LIVE_USB_KEYPAD_TRACE
     uint8_t keypad_out, keypad_pending, keypad_ready, keypad_status_valid;

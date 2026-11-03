@@ -2,12 +2,17 @@
 #define LOGI_HOST_FS_H
 
 #include "board.h"
+#include "../logi-keypad/keypad-descriptors.h"
+#include "../logi-keypad/keypad-input.h"
 
 #define FS_TX_WORDS 64u
 #define FS_RX_BITS 640u
 #define FS_PACKET_BYTES 68u
 #define FS_REPORT_MAGIC 0x31505346u
 #define FS_TRACE_MAGIC 0x31545346u
+#define FS_KEYPAD_MAGIC 0x31504b46u
+#define FS_KEYPAD_EVENT_MAGIC 0x31454b46u
+#define FS_KEYPAD_EVENTS 32u
 #define FS_SYS_HZ 144000000u
 #if defined(__arm__) && !defined(LOGI_FS_TEST)
 #define FS_CRITICAL __attribute__((section(".time_critical.fs")))
@@ -22,7 +27,7 @@ enum {
     FS_CRC = -4504, FS_PID = -4505, FS_LENGTH = -4506,
     FS_STALL = -4507, FS_TOGGLE = -4508, FS_DESCRIPTOR = -4509,
     FS_LINE = -4510, FS_CLOCK = -4511, FS_FIFO = -4512,
-    FS_DEADLINE = -4513
+    FS_DEADLINE = -4513, FS_HID_REPLY = -4514, FS_CANCELLED = -4515
 };
 enum { FS_OUT = 0xe1, FS_IN = 0x69, FS_SOF = 0xa5, FS_SETUP = 0x2d,
        FS_DATA0 = 0xc3, FS_DATA1 = 0x4b, FS_ACK = 0xd2,
@@ -57,6 +62,19 @@ typedef struct {
     uint32_t trace_words[8];
     uint8_t trace_count, trace_pid;
 } fs_result_t;
+typedef struct {
+    const fs_bus_t *bus;
+    fs_result_t *result;
+    uint32_t started, last_sof, budget;
+    uint16_t frame;
+} fs_host_t;
+typedef struct {
+    fs_host_t host;
+    keypad_endpoints_t endpoints;
+    uint32_t last_input, last_output, query_started, polls, reports, duplicates, buttons, report_crc, naks;
+    int32_t error, cleanup_error;
+    uint8_t stage, phase, configured, input_pid, query_sent, query_done, feature, repeated;
+} fs_keypad_t;
 
 uint8_t fs_crc5(uint16_t bits);
 uint16_t fs_crc16(const uint8_t *bytes, uint16_t length);
@@ -70,6 +88,12 @@ FS_CRITICAL FS_INLINE_RX int32_t fs_rx_feed(fs_rx_t *rx, uint16_t samples, uint8
 FS_CRITICAL int32_t fs_rx_validate(const fs_rx_t *rx, fs_packet_t *packet);
 int32_t fs_rx_finish(fs_rx_t *rx, fs_packet_t *packet);
 int32_t fs_probe(const fs_bus_t *bus, fs_result_t *result);
+int32_t fs_keypad_start(const fs_bus_t *bus, fs_result_t *result, fs_keypad_t *keypad);
+int32_t fs_keypad_step(fs_keypad_t *keypad, fs_packet_t *packet);
+int32_t fs_keypad_stop(fs_keypad_t *keypad);
+void fs_keypad_status(const fs_keypad_t *keypad, uint32_t build, uint16_t generation, uint8_t bytes[64]);
+void fs_keypad_event(const fs_keypad_t *keypad, const fs_packet_t *packet, uint32_t build,
+                    uint16_t generation, uint8_t bytes[64]);
 void fs_report(const fs_result_t *result, uint32_t build, uint8_t line, uint8_t bytes[64]);
 void fs_trace_report(const fs_result_t *result, uint32_t build, uint8_t bytes[64]);
 

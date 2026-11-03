@@ -80,10 +80,11 @@ static inline IOUSBDeviceInterface500 **usb_macos_open(int vendor, int product, 
     return usb;
 }
 
-static inline int usb_macos_transfer(IOUSBDeviceInterface500 **usb, uint8_t input,
-                                     uint8_t request, uint8_t *wire, uint16_t length) {
+static inline int usb_macos_transfer_value(IOUSBDeviceInterface500 **usb, uint8_t input,
+                                           uint8_t request, uint16_t value,
+                                           uint8_t *wire, uint16_t length) {
     IOUSBDevRequestTO packet = {.bmRequestType = input ? 0xc0 : 0x40,
-        .bRequest = request, .wLength = length, .pData = wire,
+        .bRequest = request, .wValue = value, .wLength = length, .pData = wire,
         .noDataTimeout = 1000, .completionTimeout = 1000};
     IOReturn result = (*usb)->DeviceRequestTO(usb, &packet);
     if (result != kIOReturnSuccess || packet.wLenDone != length) {
@@ -92,6 +93,11 @@ static inline int usb_macos_transfer(IOUSBDeviceInterface500 **usb, uint8_t inpu
         return 0;
     }
     return 1;
+}
+
+static inline int usb_macos_transfer(IOUSBDeviceInterface500 **usb, uint8_t input,
+                                     uint8_t request, uint8_t *wire, uint16_t length) {
+    return usb_macos_transfer_value(usb, input, request, 0u, wire, length);
 }
 
 static inline int usb_macos_close(IOUSBDeviceInterface500 **usb) {

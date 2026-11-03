@@ -115,12 +115,102 @@ static void wire_tests(void) {
 static const uint8_t descriptor[18] = {
     18,1,0,2,0,0,0,8,0x6d,4,0x54,0xc3,0,1,1,2,3,1
 };
+static const uint8_t configuration[] = {
+    9,2,41,0,1,1,4,0x80,180, 9,4,0,0,2,3,0,0,0,
+    9,0x21,0x11,1,0,1,0x22,140,0,
+    7,5,0x81,3,32,0,5, 7,5,1,3,64,0,5
+};
+static const uint8_t hid[] = {
+    0x06,0x43,0xff,0x0a,0x02,0x1a,0xa1,0x01,0x85,0x11,0x95,0x13,0x75,0x08,
+    0x15,0x00,0x26,0xff,0x00,0x09,0x02,0x81,0x00,0x09,0x02,0x91,0x00,0xc0,
+    0x06,0x43,0xff,0x0a,0x08,0x1a,0xa1,0x01,0x85,0x13,0x96,0x1f,0x00,0x75,
+    0x08,0x15,0x00,0x26,0xff,0x00,0x09,0x08,0x82,0x02,0x01,0x09,0x08,0x92,
+    0x02,0x01,0xc0,0x06,0x43,0xff,0x0a,0x10,0x1a,0xa1,0x01,0x85,0x14,0x96,
+    0xfe,0x0f,0x75,0x08,0x15,0x00,0x26,0xff,0x00,0x09,0x10,0x92,0x02,0x01,
+    0xc0,0x05,0x01,0x09,0x80,0xa1,0x01,0x85,0x04,0x95,0x01,0x75,0x02,0x15,
+    0x01,0x25,0x03,0x09,0x82,0x09,0x81,0x09,0x83,0x81,0x00,0x75,0x06,0x81,
+    0x03,0xc0,0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,0x05,0x95,0x01,0x75,0x01,
+    0x15,0x00,0x25,0x01,0x0a,0x24,0x02,0x81,0x02,0x95,0x07,0x81,0x03,0xc0
+};
 typedef struct {
     uint32_t now, sof, resets, exchanges, naks;
     uint8_t step, read_offset, address, mps;
     uint8_t stall, timeout, forever_nak, corrupt, duplicate, duplicated, bad_toggle, short_packet, status_nak;
     int32_t reset_error;
+    uint8_t keypad, configured, control_state, request[8], inputs, output_naks;
+    uint8_t bad_config, bad_hid, no_query, query_ready, hid_error, cleanup_stall;
+    uint16_t control_offset;
+    uint32_t last_input, last_output;
 } device_t;
+
+static int32_t keypad_exchange(device_t *d, const fs_tx_t *tx, unsigned bits,
+                               const uint8_t token[68], unsigned offset, fs_packet_t *p) {
+    assert((bits & 127u) == 1u);
+    uint8_t raw[68];
+    p->length = 0u;
+    if (bits >> 7u) {
+        assert((bits >> 7u) == 1u && d->configured);
+        if (token[1] == FS_OUT) {
+            assert(d->now - d->last_output >= 5000u); d->last_output = d->now;
+            assert(unpack(tx, &offset, raw) == 24u && raw[1] == FS_DATA0);
+            assert(!memcmp(raw + 2u, (uint8_t[]){0x11,0xff,0,1,0x1b,4}, 6u));
+            if (d->output_naks) { --d->output_naks; p->pid = FS_NAK; }
+            else { d->query_ready = 1u; p->pid = FS_ACK; }
+        } else {
+            assert(token[1] == FS_IN && d->now - d->last_input >= 5000u);
+            d->last_input = d->now;
+            if (!d->query_ready || d->no_query || d->inputs >= 4u) { p->pid = FS_NAK; return 0; }
+            memset(p->data, 0, 32u);
+            if (!d->inputs) {
+                memcpy(p->data, (uint8_t[]){0x11,0xff,0,1,0x0b}, 5u);
+                if (d->hid_error) memcpy(p->data + 2u, (uint8_t[]){0xff,0,1,7}, 4u);
+                p->length = 20u; p->pid = FS_DATA0;
+            } else {
+                memcpy(p->data, (uint8_t[]){0x13,0xff,2,0,42,1,9}, 7u);
+                p->length = 32u; p->pid = d->inputs < 3u ? FS_DATA1 : FS_DATA0;
+                if (d->inputs == 3u) p->data[6] = 0u;
+            }
+            ++d->inputs;
+        }
+        return 0;
+    }
+    if (token[1] == FS_SETUP) {
+        assert(unpack(tx, &offset, raw) == 12u && raw[1] == FS_DATA0);
+        memcpy(d->request, raw + 2u, 8u);
+        d->control_offset = 0u;
+        if (d->request[1] == 9u) {
+            assert(!d->request[0] && d->request[2] <= 1u && !d->request[6] && !d->request[7]);
+            d->control_state = 3u;
+        } else {
+            assert(d->request[1] == 6u && (d->request[3] == 2u || d->request[3] == 0x22u));
+            assert(d->request[0] == (d->request[3] == 2u ? 0x80u : 0x81u));
+            d->control_state = 1u;
+        }
+        p->pid = FS_ACK;
+    } else if (d->control_state == 1u) {
+        assert(token[1] == FS_IN);
+        uint16_t length = keypad_u16(d->request + 6u);
+        const uint8_t *source = d->request[3] == 2u ? configuration : hid;
+        assert(length <= (d->request[3] == 2u ? sizeof(configuration) : sizeof(hid)));
+        p->length = (uint8_t)(length - d->control_offset);
+        if (p->length > d->mps) p->length = d->mps;
+        p->pid = d->control_offset / d->mps & 1u ? FS_DATA0 : FS_DATA1;
+        memcpy(p->data, source + d->control_offset, p->length);
+        if (d->bad_config && d->request[3] == 2u && d->control_offset + p->length == 41u)
+            p->data[p->length - 1u] = 0u;
+        if (d->bad_hid && d->request[3] == 0x22u) p->data[0] ^= 1u;
+        d->control_offset += p->length;
+        if (d->control_offset == length) d->control_state = 2u;
+    } else if (d->control_state == 2u) {
+        assert(token[1] == FS_OUT && unpack(tx, &offset, raw) == 4u && raw[1] == FS_DATA1);
+        p->pid = FS_ACK; d->control_state = 0u;
+    } else {
+        assert(d->control_state == 3u && token[1] == FS_IN);
+        if (d->cleanup_stall && !d->request[2]) { p->pid = FS_STALL_PID; return 0; }
+        p->pid = FS_DATA1; d->configured = d->request[2]; d->control_state = 0u;
+    }
+    return 0;
+}
 
 static uint32_t mock_now(void *context) { device_t *d = context; return d->now += 10u; }
 static int32_t mock_reset(void *context) {
@@ -133,8 +223,10 @@ static int32_t mock_exchange(void *context, const fs_tx_t *tx, uint8_t reply, fs
     unsigned bits = token[2] | (token[3] & 7u) << 8u;
     assert((token[3] >> 3u) == fs_crc5((uint16_t)bits));
     if (token[1] == FS_SOF) { assert(!reply); ++d->sof; return 0; }
-    assert(reply && !(bits >> 7u));
+    assert(reply);
     ++d->exchanges;
+    if (d->keypad && d->step == 8u) return keypad_exchange(d, tx, bits, token, offset, packet);
+    assert(!(bits >> 7u));
     if (d->timeout) return FS_TIMEOUT;
     if (d->forever_nak || d->naks || (d->status_nak && d->step == 2u)) {
         if (d->naks) --d->naks;
@@ -221,9 +313,64 @@ static void host_tests(void) {
     assert(probe(&d, &r) == FS_LINE && r.stage == 1u && !d.exchanges);
 }
 
+static void keypad_tests(void) {
+    for (unsigned mps = 8u; mps <= 64u; mps *= 2u) {
+        device_t d = {.mps = (uint8_t)mps, .keypad = 1u, .output_naks = 2u};
+        fs_bus_t bus = {.context = &d, .now = mock_now, .reset = mock_reset, .exchange = mock_exchange};
+        fs_keypad_t k; fs_result_t r; fs_packet_t p;
+        assert(!fs_keypad_start(&bus, &r, &k));
+        assert(k.stage == 2u && k.configured && k.endpoints.max_power_ma == 360u &&
+               k.report_crc == diag_crc32(hid, sizeof(hid)));
+        unsigned events = 0u;
+        for (unsigned i = 0u; i < 20000u && k.reports < 3u; ++i) {
+            int32_t result = fs_keypad_step(&k, &p);
+            assert(result >= 0);
+            if (result) {
+                uint8_t event[64];
+                fs_keypad_event(&k, &p, 123u, 7u, event);
+                assert(event[14] == p.length && keypad_u16(event + 12u) == 7u);
+                assert(!memcmp(event + 16u, p.data, p.length));
+                assert(badger_bytes_load_u32(event + 8u) == ++events);
+                assert(badger_bytes_load_u32(event + 60u) == diag_crc32(event, 60u));
+            }
+        }
+        assert(events == 3u && k.buttons == 2u && k.duplicates == 1u && k.query_done && k.feature == 0x0bu);
+        assert(!fs_keypad_stop(&k) && !d.configured && k.stage == 3u);
+        uint8_t status[64]; fs_keypad_status(&k, 123u, 7u, status);
+        assert(status[56] && !status[57] && status[36] == 0x81u && status[38] == 5u && status[40] == 64u);
+    }
+    for (unsigned mode = 0u; mode < 4u; ++mode) {
+        device_t d = {.mps = 64u, .keypad = 1u};
+        d.bad_config = mode == 0u; d.bad_hid = mode == 1u; d.no_query = mode == 2u; d.hid_error = mode == 3u;
+        fs_bus_t bus = {.context = &d, .now = mock_now, .reset = mock_reset, .exchange = mock_exchange};
+        fs_keypad_t k; fs_result_t r; fs_packet_t p;
+        int32_t error = fs_keypad_start(&bus, &r, &k);
+        if (mode < 2u) assert(error == FS_DESCRIPTOR);
+        else {
+            assert(!error);
+            for (unsigned i = 0u; i < 100000u && !k.error; ++i) {
+                error = fs_keypad_step(&k, &p);
+                if (error < 0) k.error = error;
+            }
+            assert(k.error == (mode == 2u ? FS_DEADLINE : FS_HID_REPLY));
+            if (mode == 3u) assert(k.reports == 1u && error == 1);
+        }
+        assert(fs_keypad_stop(&k) < 0 && !d.configured && k.stage == 4u);
+    }
+    device_t d = {.mps = 64u, .keypad = 1u, .cleanup_stall = 1u};
+    fs_bus_t bus = {.context = &d, .now = mock_now, .reset = mock_reset, .exchange = mock_exchange};
+    fs_keypad_t k; fs_result_t r;
+    assert(!fs_keypad_start(&bus, &r, &k));
+    k.query_done = 1u;
+    assert(fs_keypad_stop(&k) == FS_STALL && k.cleanup_error == FS_STALL && k.configured);
+    puts("Keypad: multi-packet config/HID, all EP0 sizes, interrupt intervals/toggles/duplicates,");
+    puts("read-only HID++ query, raw events, malformed descriptors/replies and deconfiguration PASS");
+}
+
 int main(void) {
     wire_tests();
     host_tests();
+    keypad_tests();
     puts("Full-speed: independent wire vectors, all payload sizes/stuffing, bad CRC/PID/line,");
     puts("reset, SOF, EP0 8/16/32/64, address/status/toggle, duplicate/NAK/STALL/deadline PASS");
     return 0;

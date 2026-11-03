@@ -54,10 +54,11 @@ static void print_status(const uint8_t bytes[64]) {
 }
 
 static void usage(FILE *out, const char *program) {
-    fprintf(out, "Usage: %s --serial SERIAL [--watch SECONDS | --bootsel | --probe-full-speed | --fs-status]\n"
+    fprintf(out, "Usage: %s --serial SERIAL [--watch SECONDS | --bootsel | --probe-full-speed | --fs-status | --keypad-watch SECONDS]\n"
             "Read passive USB-A line diagnostics (default: one snapshot).\n"
             "--probe-full-speed explicitly DRIVES GPIO12/13: reset, address, device descriptor.\n"
-            "Experimental full-speed direct-device only; no low-speed, hubs or HID polling yet.\n"
+            "--keypad-watch captures HID input for 1..30 seconds and queries a feature read-only.\n"
+            "Experimental full-speed direct-device only; no low-speed, hubs or LCD uploads yet.\n"
             "--bootsel checks the matching firmware before requesting recovery.\n", program);
 }
 
@@ -136,14 +137,96 @@ static int read_fs(IOUSBDeviceInterface500 **usb, uint16_t expected, int check_g
     return 1;
 }
 
+static int validate_keypad_record(const uint8_t bytes[64], uint32_t magic) {
+    return badger_bytes_load_u32(bytes) == magic &&
+        badger_bytes_load_u32(bytes + 4u) == USB_REPORT_BUILD_ID &&
+        badger_bytes_load_u32(bytes + 60u) == diag_crc32(bytes, 60u);
+}
+
+static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds) {
+    uint8_t bytes[64];
+    if (!usb_macos_transfer(usb, 1u, LIVE_USB_LOGI_KEYPAD_STATUS, bytes, 64u)) return 0;
+    if (!validate_keypad_record(bytes, FS_KEYPAD_MAGIC) || bytes[14] == 2u) {
+        fputs("Keypad status mismatch or a session is already running.\n", stderr); return 0;
+    }
+    uint16_t generation = (uint16_t)(keypad_u16(bytes + 12u) + 1u);
+    if (!generation) generation = 1u;
+    if (!usb_macos_transfer_value(usb, 0u, LIVE_USB_LOGI_KEYPAD, (uint16_t)seconds, NULL, 0u)) return 0;
+    puts("Keypad session armed: configuration, verified HID, read-only feature query; press LCD keys.");
+    struct timespec start, tick;
+    if (clock_gettime(CLOCK_MONOTONIC, &start)) { perror("keypad clock"); return 0; }
+    uint32_t consumed = 0u;
+    for (unsigned loops = 0u; loops < 4000u; ++loops) {
+        if (!usb_macos_transfer(usb, 1u, LIVE_USB_LOGI_KEYPAD_STATUS, bytes, 64u)) return 0;
+        if (!validate_keypad_record(bytes, FS_KEYPAD_MAGIC) || keypad_u16(bytes + 12u) != generation ||
+            bytes[14] > 4u) {
+            fputs("Keypad status protocol/build/CRC/generation mismatch.\n", stderr); return 0;
+        }
+        uint32_t count = badger_bytes_load_u32(bytes + 16u);
+        if (count < consumed || count - consumed > FS_KEYPAD_EVENTS) {
+            fputs("Keypad capture overrun or invalid report sequence; reports were lost.\n", stderr); return 0;
+        }
+        while (consumed < count) {
+            uint8_t event[64];
+            if (!usb_macos_transfer_value(usb, 1u, LIVE_USB_LOGI_KEYPAD_EVENT,
+                (uint16_t)(consumed % FS_KEYPAD_EVENTS), event, 64u)) return 0;
+            if (!validate_keypad_record(event, FS_KEYPAD_EVENT_MAGIC) ||
+                keypad_u16(event + 12u) != generation ||
+                badger_bytes_load_u32(event + 8u) != consumed + 1u || !event[14] || event[14] > 32u) {
+                fputs("Keypad event mismatch/overwrite; refusing stale or corrupt input.\n", stderr); return 0;
+            }
+            printf("  input #%u at %u us:", ++consumed, badger_bytes_load_u32(event + 48u));
+            for (unsigned i = 0u; i < event[14]; ++i) printf(" %02x", event[16u + i]);
+            int key = decode_button(event[16], event + 16u, event[14]);
+            int navigation = decode_navigation(event[15], event[16], event + 16u, event[14]);
+            if (key == 0) printf("  LCD key release");
+            else if (key > 0) printf("  LCD key=%d row=%d column=%d", key, (key - 1) / 3 + 1, (key - 1) % 3 + 1);
+            else if (navigation >= 0) printf("  navigation state=%d", navigation);
+            else printf("  command reply or unknown report");
+            putchar('\n');
+        }
+        if (bytes[14] == 3u || bytes[14] == 4u) {
+            int32_t error = (int32_t)badger_bytes_load_u32(bytes + 8u);
+            printf("Keypad session: state=%u phase=%u error=%d cleanup_error=%d reports=%u LCD_states=%u "
+                   "polls=%u NAKs=%u duplicates=%u HID_CRC=%08x feature=%02x query_reply=%u\n",
+                   bytes[14], bytes[15], error, (int32_t)badger_bytes_load_u32(bytes + 44u),
+                   count, badger_bytes_load_u32(bytes + 52u), badger_bytes_load_u32(bytes + 20u),
+                   badger_bytes_load_u32(bytes + 24u), badger_bytes_load_u32(bytes + 28u),
+                   badger_bytes_load_u32(bytes + 32u), bytes[43], bytes[56]);
+            printf("  IN=%02x/%u bytes/%u ms OUT=%02x/%u bytes/%u ms interface=%u\n",
+                   bytes[36], bytes[37], bytes[38], bytes[39], bytes[40], bytes[41], bytes[42]);
+            printf("  Declared configuration demand: %u mA (not measured; power path unqualified).\n",
+                   keypad_u16(bytes + 48u));
+            if (!badger_bytes_load_u32(bytes + 52u))
+                puts("  No physical LCD key states observed; button operation is not yet verified.");
+            return bytes[14] == 3u && !error && !badger_bytes_load_u32(bytes + 44u) &&
+                bytes[56] && !bytes[57] && read_fs(usb, 0u, 0);
+        }
+        if (clock_gettime(CLOCK_MONOTONIC, &tick)) { perror("keypad clock"); return 0; }
+        if ((double)(tick.tv_sec - start.tv_sec) +
+            (double)(tick.tv_nsec - start.tv_nsec) / 1000000000.0 >= seconds + 3.0) break;
+        struct timespec delay = {.tv_nsec = 10000000};
+        while (nanosleep(&delay, &delay))
+            if (errno != EINTR) { perror("keypad wait"); return 0; }
+    }
+    fputs("Keypad session did not finish within its bounded deadline.\n", stderr);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *serial = NULL;
     unsigned seconds = 0u;
+    unsigned keypad_seconds = 0u;
     int bootsel = 0, mode = 0, probe = 0, fs_status = 0;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--serial") && !serial && i + 1 < argc) serial = argv[++i];
         else if (!strcmp(argv[i], "--watch") && !mode && i + 1 < argc) {
             if (!parse_seconds(argv[++i], &seconds)) { usage(stderr, argv[0]); return 2; }
+            mode = 1;
+        } else if (!strcmp(argv[i], "--keypad-watch") && !mode && i + 1 < argc) {
+            if (!parse_seconds(argv[++i], &keypad_seconds) || keypad_seconds > 30u) {
+                usage(stderr, argv[0]); return 2;
+            }
             mode = 1;
         } else if (!strcmp(argv[i], "--bootsel") && !mode) { bootsel = mode = 1; }
         else if (!strcmp(argv[i], "--probe-full-speed") && !mode) { probe = mode = 1; }
@@ -176,6 +259,7 @@ int main(int argc, char **argv) {
             fputs("Firmware reports a PIO or USB error.\n", stderr);
             ok = 0; break;
         }
+        if (keypad_seconds) { ok = keypad_watch(usb, keypad_seconds); break; }
         if (bootsel) {
             ok = usb_macos_transfer(usb, 0u, LIVE_USB_BOOTSEL, NULL, 0u);
             if (ok) puts("BOOTSEL request acknowledged.");

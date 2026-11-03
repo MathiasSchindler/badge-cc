@@ -48,6 +48,7 @@ static uint16_t read16(const uint8_t *bytes) {
 static void stall(live_usb_control_t *control) {
 #ifdef LIVE_USB_LOGI_HOST
     control->logi_fs_pending = 0u;
+    control->logi_keypad_pending = 0u;
 #endif
 #ifdef LIVE_USB_KEYPAD_TRACE
     control->keypad_out = control->keypad_pending = 0u;
@@ -107,6 +108,7 @@ void live_usb_control_reset(live_usb_control_t *control) {
 #ifdef LIVE_USB_LOGI_HOST
     control->logi_status_valid = 0u;
     control->logi_fs_valid = control->logi_fs_pending = control->logi_fs_ready = 0u;
+    control->logi_keypad_valid = control->logi_keypad_pending = control->logi_keypad_seconds = 0u;
 #endif
 #ifdef LIVE_USB_KEYPAD_TRACE
     control->keypad_out = control->keypad_pending = control->keypad_ready = 0u;
@@ -165,6 +167,7 @@ void live_usb_control_init(live_usb_control_t *control, uint32_t build_id,
 void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8]) {
 #ifdef LIVE_USB_LOGI_HOST
     control->logi_fs_pending = 0u;
+    control->logi_keypad_pending = 0u;
 #endif
 #ifdef LIVE_USB_KEYPAD_TRACE
     control->keypad_out = control->keypad_pending = 0u;
@@ -195,6 +198,8 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
     if ((type & 0x60u) == 0x40u && request != LIVE_USB_LOGI_STATUS &&
         request != LIVE_USB_LOGI_PROBE && request != LIVE_USB_LOGI_FS_STATUS &&
         request != LIVE_USB_LOGI_FS_TRACE &&
+        request != LIVE_USB_LOGI_KEYPAD && request != LIVE_USB_LOGI_KEYPAD_STATUS &&
+        request != LIVE_USB_LOGI_KEYPAD_EVENT &&
         request != LIVE_USB_INFO && request != LIVE_USB_BOOTSEL) {
         stall(control);
         return;
@@ -277,10 +282,22 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
                control->compiler_valid) {
         send(control, control->compiler_records + value * 64u, 64u, length);
 #endif
+#ifdef LIVE_USB_LOGI_HOST
+    } else if (control->configured && type == 0x40u && request == LIVE_USB_LOGI_KEYPAD &&
+               index == 0u && value >= 1u && value <= 30u && length == 0u &&
+               !control->logi_fs_ready && !control->logi_keypad_active) {
+        control->logi_fs_pending = 1u;
+        control->logi_keypad_pending = (uint8_t)value;
+        status_in(control);
+    } else if (control->configured && type == 0xc0u && request == LIVE_USB_LOGI_KEYPAD_EVENT &&
+               index == 0u && value < LIVE_USB_LOGI_KEYPAD_SLOTS && length == 64u &&
+               control->logi_keypad_valid) {
+        send(control, control->logi_keypad_events[value], 64u, length);
+#endif
     } else if (control->configured && value == 0u && index == 0u) {
 #ifdef LIVE_USB_LOGI_HOST
         if (type == 0x40u && request == LIVE_USB_LOGI_PROBE && length == 0u &&
-            !control->logi_fs_ready) {
+            !control->logi_fs_ready && !control->logi_keypad_active) {
             control->logi_fs_pending = 1u;
             status_in(control);
             return;
@@ -293,6 +310,11 @@ void live_usb_control_setup(live_usb_control_t *control, const uint8_t setup[8])
         if (type == 0xc0u && request == LIVE_USB_LOGI_FS_TRACE && length == 64u &&
             control->logi_fs_valid) {
             send(control, control->logi_fs_trace, 64u, length);
+            return;
+        }
+        if (type == 0xc0u && request == LIVE_USB_LOGI_KEYPAD_STATUS && length == 64u &&
+            control->logi_keypad_valid) {
+            send(control, control->logi_keypad_status, 64u, length);
             return;
         }
         if (type == 0xc0u && request == LIVE_USB_LOGI_STATUS && length == 64u &&
@@ -437,6 +459,8 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
             control->logi_fs_pending = 0u;
             control->logi_fs_valid = 0u;
             control->logi_fs_ready = 1u;
+            control->logi_keypad_seconds = control->logi_keypad_pending;
+            control->logi_keypad_pending = 0u;
         }
 #endif
 #ifdef LIVE_USB_KEYPAD_TRACE
@@ -459,6 +483,7 @@ void live_usb_control_complete(live_usb_control_t *control, uint8_t in,
         if (control->configuration_pending) {
 #ifdef LIVE_USB_LOGI_HOST
             control->logi_fs_pending = control->logi_fs_ready = control->logi_fs_valid = 0u;
+            control->logi_keypad_pending = control->logi_keypad_seconds = control->logi_keypad_valid = 0u;
 #endif
 #ifdef LIVE_USB_KEYPAD_TRACE
             control->keypad_out = control->keypad_pending = control->keypad_ready = 0u;

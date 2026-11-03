@@ -4,18 +4,22 @@ This directory is for the **Waveshare RP2350-USB-A**, not the Universe badge.
 The eventual goal is an owned PIO USB host for a mouse, then the Logitech
 keypad, with events relayed to the badge over a separate connection.
 
-**Current milestone: experimental full-speed PIO transport and a bounded
-USB device-descriptor probe, with passive diagnostics by default.**
+**Current milestone: experimental full-speed PIO transport, device/configuration/
+HID descriptors, SET_CONFIGURATION and bounded keypad input sessions,
+with passive diagnostics by default.**
 The 144 MHz clock, active empty-port reset/send/timeout and passive recovery
 are physically verified. The directly connected keypad now completes both
 device-descriptor reads, their status stages and SET_ADDRESS at full speed:
 **four consecutive final-build probes succeeded**, identifying `046d:c354`.
 The former persistent OUT-status NAKs were caused by late host ACKs.
 ACK turnaround is improved but still not qualified: the first captured ACK
-starts about **8.0..8.5 bit times** after SE0-to-J, with sampling uncertainty
+starts about **8.0..9.0 bit times** after SE0-to-J, with sampling uncertainty
 of +/-0.5 bit; USB permits at most 7.5. This remains an experimental transport,
-not a compliant or complete USB host. There is no HID driver, hub support,
-keypad input or LCD output yet. The Mac diagnostic connection uses the
+not a compliant or complete USB host. A read-only HID++ feature query has
+completed over interrupt OUT/IN, and incoming reports are captured and decoded
+using the existing keypad helpers. Physical key presses still need user
+qualification. There is no hub support, navigation-diversion setup or LCD
+output yet. The Mac diagnostic connection uses the
 separate native USB controller; it does not host the peripheral on behalf
 of the Waveshare board.
 
@@ -82,9 +86,10 @@ Outputs:
 The firmware uses `-ffreestanding -nostdinc -fno-builtin -nostdlib`,
 project-owned integer headers, a 2 MiB flash linker map and no unresolved
 library symbols. The UF2 family is `0xe48bff59`. The initial diagnostic
-image contained 6,512 bytes of flash payload in 26 UF2 blocks; the qualified
-descriptor-probe build contains 16,456 bytes in 65 UF2 blocks and 161,672
-bytes of BSS, including a 128 KiB differential-decoding table.
+image contained 6,512 bytes of flash payload in 26 UF2 blocks. The later
+descriptor-only milestone contained 16,456 bytes in 65 UF2 blocks; the HID
+build contains 19,444 bytes in 76 UF2 blocks, with 163,880 bytes of BSS including the 128 KiB
+differential-decoding table and a 32-record capture ring.
 Critical receive/validation/ACK code
 is copied to SRAM at boot rather than depending on flash-cache latency.
 
@@ -109,6 +114,13 @@ Reset tests cover delayed input settling after release and a line that
 never returns to idle.
 Monitor tests reject stale probe generations and check response-gap extraction
 across trace-word boundaries, missing edges and invalid line states.
+HID tests cover multi-packet configuration/report-descriptor reads at every
+EP0 packet size, the actual full-speed endpoint intervals, NAK retries,
+DATA toggles/duplicate suppression, read-only HID++ replies and errors,
+malformed descriptors, and successful/failed deconfiguration. Monitor tests
+reject stale/corrupt/overwritten ring records and missing query confirmation.
+Native EP0 tests cover deferred session arming/abort, bounds and exclusion
+of concurrent active probes.
 **These models are not proof
 of electrical USB compliance or real peripheral ACK turnaround timing.**
 
@@ -204,7 +216,8 @@ Configured vendor-IN request `c0/72`, value/index zero, length exactly 64:
 Errors: `-4401` PIO reset timeout, `-4402` receive timeout,
 `-4403` PIO FIFO/debug error, `-4404` exhausted counters.
 Sampling stops on a PIO error; native USB still exposes the failure.
-Only passive status, full-speed probe/result/trace, build info (`53`) and BOOTSEL
+Only passive status, full-speed probe/result/trace, keypad session/status/events,
+build info (`53`) and BOOTSEL
 (`52`) vendor requests are accepted. Radio, replay and other badge commands
 are blocked.
 
@@ -263,6 +276,10 @@ This is partial enumeration, not SET_CONFIGURATION or a working HID device.
 Passive counters restart after an active probe. Another probe begins with
 a bus reset; after a successful one-shot probe the device is not kept
 configured or continuously polled.
+
+The separate `--keypad-watch` mode below extends this sequence through
+configuration and HID polling; the descriptor-only command retains its
+original behavior.
 
 TX uses twelve 144 MHz system clocks per bit. SETUP/OUT token plus DATA
 are pre-encoded into one PIO stream, including the interpacket gap.
@@ -339,6 +356,105 @@ This captures only the first successful DATA transaction's EOP/ACK, not
 every ACK or a continuous USB trace. A successful descriptor probe does not
 mean timing compliance; its exit status describes the probe, while timing
 qualification is reported separately.
+
+## Bounded keypad HID sessions
+
+The strict full-speed configuration parser and exact 140-byte HID descriptor
+check are shared with the existing badge-native host through
+[keypad-descriptors.h](../logi-keypad/keypad-descriptors.h), rather than copied
+into a second driver. Input interpretation reuses
+[keypad-input.h](../logi-keypad/keypad-input.h).
+The badge-native USB transport itself is not used on the Waveshare.
+
+```sh
+# Restart the installed Waveshare firmware if it is in BOOTSEL:
+build/picotool-usb/picotool reboot --ser B72817DA2FE6A757
+
+# Explicitly authorize reset/configuration and capture for 1..30 seconds:
+build/logi-host/logi-host-monitor --serial B72817DA2FE6A757 --keypad-watch 30
+```
+
+Only the verified `046d:c354` device with one supported HID interface is
+configured. The driver reads the configuration header and full descriptor,
+uses their actual endpoint addresses/sizes/intervals, sends SET_CONFIGURATION,
+and reads/checks all 140 HID bytes across multiple EP0 packets.
+The physical full-speed descriptors specify **IN `81`, 32 bytes, 5 ms** and
+**OUT `01`, 64 bytes, 5 ms**, not the Mac's high-speed 1-ms/microframe or
+1024-byte endpoint assumptions. Declared power is 360 mA, not measured current;
+the board's unqualified VBUS path and R13 limitations remain unchanged.
+
+During the session, the cooperative main loop services native Mac USB,
+watchdog renewal and recovery between bounded PIO exchanges. SOFs continue;
+interrupt endpoint intervals are measured from the preceding transaction's
+completion, so OUT retries and IN polls never run sooner than advertised.
+Idle IN NAKs are normal and counted, not treated as missing key events or
+retried in a tight loop. DATA toggles are maintained; valid duplicates are
+ACKed but not published twice. Repeated duplicates and all other transfer
+errors stop the session explicitly.
+
+One 20-byte HID++ request, `11 ff 00 01 1b 04 ...`, discovers feature
+`0x1b04` without enabling diversion or changing settings. Its correlated
+reply must arrive within one second. On the attached keypad it returns
+feature index `0x0b`. Unknown reports remain visible verbatim.
+LCD-key states report key 1..9, one-based row/column, or release; zero observed
+button reports is explicitly **not** a successful physical-button test.
+
+Every nonempty input report, including command replies, enters a 32-record
+ring with generation, sequence, timestamp and CRC. The Mac drains it about
+every 10 ms and fails explicitly on overrun, stale generation or corruption.
+Stopping/crashing the monitor does not create an unbounded host: the firmware
+still ends the requested session within 30 seconds. On completion/error it
+attempts SET_CONFIGURATION(0), preserves any primary and cleanup error,
+disables the PIO PHY and restores passive sampling. After stopping the capture
+client, another monitor invocation can request BOOTSEL; early recovery cancels
+the session.
+Passive counters are frozen while PIO0 is hosting and restart afterward.
+
+No navigation reporting settings are changed, no display keepalive is sent,
+and no image is uploaded. The existing
+[LCD framing documentation](../logi-keypad/README.md#lcd-transport) remains the
+next-layer reference: its 4095-byte reports must be split into full-speed
+64-byte OUT packets with correct toggles/intervals, not sent as 4095-byte USB
+packets. Prepared JPEG data or project-owned encoding is still required on
+the freestanding target.
+
+### Keypad diagnostic records
+
+All requests require native USB configuration and index zero:
+
+- `40/76`, value **1..30 seconds**, length zero: arm a session only after its
+  status ACK. Aborted requests cannot drive USB-A; concurrent probes/sessions
+  are rejected.
+- `c0/77`, value zero, length exactly 64: session status.
+- `c0/78`, value **0..31**, length exactly 64: read that ring slot without
+  consuming it. Sequence `n` occupies slot `(n - 1) % 32`.
+
+Status fields (little-endian):
+
+| Offset | Field |
+| --- | --- |
+| 0, 4, 8 | Magic `FKP1`, build ID, signed primary error |
+| 12..13, 14, 15 | Generation, state, last phase |
+| 16, 20, 24, 28 | Report count, IN polls, all NAKs including enumeration, duplicates |
+| 32 | HID descriptor CRC32 |
+| 36..38, 39..41 | IN address/size/interval, OUT address/size/interval |
+| 42, 43 | Interface number, discovered feature index |
+| 44 | Signed cleanup error |
+| 48..49 | Declared configuration demand, mA |
+| 52 | Decoded LCD-key state count, including releases |
+| 56, 57 | Query reply confirmed, device still configured |
+| 60 | CRC32 over bytes 0..59 |
+
+States: 0 idle, 1 enumerating, 2 polling, 3 complete, 4 failed.
+Phases: 1 device descriptor, 2 configuration header, 3 full configuration,
+4 SET_CONFIGURATION, 5 HID descriptor, 6 feature query, 7 input polling.
+Additional errors: `-4514` invalid/error HID++ reply, `-4515` cancelled by
+native USB deconfiguration/reset or recovery.
+
+Event fields: magic `FKE1` at 0, build at 4, one-based sequence at 8,
+generation at 12..13, raw length at 14, feature at 15, raw bytes at 16..47,
+microseconds since polling began at 48, CRC32 at 60. Unused bytes are zero.
+This is diagnostic capture, not Mac HID keyboard emulation.
 
 ## Flash, preservation and recovery
 
@@ -528,8 +644,37 @@ Acknowledged software BOOTSEL recovery was verified against the exact
 chip ID `B72817DA2FE6A757`; the updated firmware remains installed.
 No resistor was removed.
 
-Next: bring ACK timing below the host limit with margin and qualify longer
-traffic, then add configuration descriptors, SET_CONFIGURATION, HID polling,
-keypad protocol and eventually a badge relay. These descriptor-only successes
-do not establish working keypad buttons or LCD output. For the identified
+At that milestone the next steps were configuration and HID polling; the
+bounded HID session above now implements those layers. The descriptor-only
+successes did not establish working keypad buttons or LCD output. For the identified
 low-speed mouse, the separate R13 issue still applies.
+
+### Configured HID qualification
+
+The final HID firmware was flashed with readback verification on the same
+board and tested with successive **2-second, 30-second and 2-second** sessions:
+
+- Every session read the full-speed configuration and all 140 HID bytes,
+  yielding descriptor CRC32 `1bfc4b8e`, then successfully configured the device.
+- All three completed the read-only HID++ feature query with reply
+  `11 ff 00 01 0b 00 06 ...`. Each also captured two unsolicited
+  `13 ff 02 10 ...` startup reports, preserved as unknown rather than buttons.
+- The 30-second session performed **5,975 interrupt IN polls**, with 5,980
+  total NAKs including enumeration, **zero duplicates, timeouts or wire
+  errors**. Native Mac USB remained responsive throughout.
+- Each session successfully sent SET_CONFIGURATION(0) and returned to passive
+  mode. An additional descriptor-only probe still passed after all sessions.
+- The first DATA ACK measured 8.0, 9.0 and 8.0 bit times respectively, each
+  with +/-0.5-bit sampling uncertainty: the timing limitation remains.
+- Passive samples then advanced from 3,840 to 20,480 over two seconds with
+  no PIO/native USB errors. Exact-chip BOOTSEL recovery succeeded.
+- A separate 30-second capture was interrupted by stopping its Mac client;
+  while the device session was still active, a new monitor successfully
+  requested acknowledged BOOTSEL recovery. The board remains in BOOTSEL with
+  this firmware installed.
+
+No human button presses were supplied: `LCD_states=0` is an explicit remaining
+physical test, not evidence that the switches fail. Next, run the bounded
+capture while pressing keys 1..9 and check presses/releases against the known
+row-major mapping. Navigation diversion and LCD report uploads remain separate
+future work; ACK timing still needs correction before claiming a compliant host.

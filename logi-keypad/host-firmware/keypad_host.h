@@ -3,12 +3,7 @@
 
 #include "usb_host.h"
 #include "../keypad-input.h"
-
-typedef struct {
-    uint8_t configuration, interface, input, output, input_size, output_size;
-    uint8_t input_interval, output_interval;
-    uint16_t report_size;
-} keypad_endpoints_t;
+#include "../keypad-descriptors.h"
 
 typedef struct {
     usb_host_t *usb;

@@ -8,6 +8,10 @@ The [badge trace firmware](#badge-usb-trace-viewer) provides device-mode replay;
 the [experimental native-host firmware](#experimental-native-host-firmware)
 reads a directly attached, externally powered keypad without the Mac.
 No build or test command flashes the badge.
+The separate [Waveshare PIO host](../logi-host/README.md#bounded-keypad-hid-sessions)
+now shares the verified descriptor/input helpers and supports bounded
+full-speed HID input capture without using the Mac as the peripheral host.
+Display uploads and navigation diversion on that PIO host remain future work.
 
 ## What this device does
 
@@ -323,7 +327,7 @@ All 140 report-descriptor bytes:
   11 command replies. Both navigation controls were restored to their original
   `diverted=0` state with successful readback.
 - Visual LCD appearance/alignment, cold-start initialization, held and simultaneous presses,
-  full-speed enumeration and badge host operation remain **unverified**.
+  full-speed enumeration using the badge's native controller and badge host operation remain **unverified**.
 
 ### Why the navigation buttons were silent
 

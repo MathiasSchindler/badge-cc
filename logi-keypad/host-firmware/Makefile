@@ -10,7 +10,7 @@ SOURCES := main.c $(LOGIC) $(ROOT)/src/usb/live_usb_hw.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/arch/rp2350/nametag_clock.c $(ROOT)/src/platform/badger/display.c \
 	$(ROOT)/src/platform/badger/graphics.c $(ROOT)/src/platform/badger/diagnostic_hw.c
-HEADERS := $(wildcard *.h ../keypad-input.h ../firmware/trace.h \
+HEADERS := $(wildcard *.h ../keypad-input.h ../keypad-descriptors.h ../firmware/trace.h \
 	$(addsuffix /*.h,$(addprefix $(ROOT)/src/,shared usb arch/rp2350 platform/badger tools)))
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o
 VPATH := $(sort $(dir $(SOURCES)))

@@ -167,6 +167,26 @@ static void test_usb(void) {
     setup(0xc0u, LIVE_USB_LOGI_FS_TRACE, 0u, 64u);
     assert(usb.action == USB_ACTION_IN && usb.length == 64u && usb.data[9] == 0x4bu);
     setup(0xc0u, LIVE_USB_LOGI_FS_TRACE, 0u, 63u); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_KEYPAD, 0u, 0u); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_KEYPAD, 31u, 0u); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_KEYPAD, 2u, 0u);
+    assert(usb.logi_fs_pending && usb.logi_keypad_pending == 2u && !usb.logi_fs_ready);
+    setup(0xc0u, LIVE_USB_INFO, 0u, 12u);
+    assert(!usb.logi_fs_pending && !usb.logi_keypad_pending);
+    setup(0x40u, LIVE_USB_LOGI_KEYPAD, 30u, 0u);
+    live_usb_control_complete(&usb, 1u, NULL, 0u);
+    assert(usb.logi_fs_ready && usb.logi_keypad_seconds == 30u && !usb.logi_keypad_pending);
+    usb.logi_fs_ready = 0u; usb.logi_keypad_active = 1u;
+    setup(0x40u, LIVE_USB_LOGI_KEYPAD, 2u, 0u); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_PROBE, 0u, 0u); assert(usb.action == USB_ACTION_STALL);
+    usb.logi_keypad_valid = 1u;
+    usb.logi_keypad_events[31][14] = 32u;
+    setup(0xc0u, LIVE_USB_LOGI_KEYPAD_STATUS, 0u, 64u); assert(usb.action == USB_ACTION_IN);
+    setup(0xc0u, LIVE_USB_LOGI_KEYPAD_EVENT, 31u, 64u);
+    assert(usb.action == USB_ACTION_IN && usb.data[14] == 32u);
+    setup(0xc0u, LIVE_USB_LOGI_KEYPAD_EVENT, 32u, 64u); assert(usb.action == USB_ACTION_STALL);
+    setup(0xc0u, LIVE_USB_LOGI_KEYPAD_STATUS, 0u, 63u); assert(usb.action == USB_ACTION_STALL);
+    usb.logi_keypad_active = 0u;
     setup(0x40u, LIVE_USB_BOOTSEL, 0u, 0u);
     assert(!usb.reboot_requested);
     setup(0xc0u, LIVE_USB_INFO, 0u, 12u); assert(!usb.reboot_requested);
@@ -176,6 +196,7 @@ static void test_usb(void) {
     live_usb_control_reset(&usb);
     assert(!usb.logi_status_valid && !usb.reboot_requested && !usb.configured);
     assert(!usb.logi_fs_pending && !usb.logi_fs_ready && !usb.logi_fs_valid);
+    assert(!usb.logi_keypad_pending && !usb.logi_keypad_seconds && !usb.logi_keypad_valid);
 }
 
 int main(void) {

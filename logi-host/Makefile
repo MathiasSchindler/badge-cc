@@ -14,6 +14,7 @@ SOURCES := main.c board.c fs_wire.c fs_host.c fs_pio.c $(USB) $(SHARED) $(ROOT)/
 HEADERS := $(wildcard *.h $(ROOT)/src/shared/*.h $(ROOT)/src/usb/*.h \
 	$(ROOT)/src/radio/*.h $(ROOT)/src/arch/rp2350/*.h) $(ROOT)/src/tools/diagnostics_logic.h
 HEADERS += $(ROOT)/src/host/tools/usb_macos.h
+HEADERS += $(ROOT)/logi-keypad/keypad-descriptors.h $(ROOT)/logi-keypad/keypad-input.h
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o
 VPATH := $(sort $(dir $(SOURCES)))
 
