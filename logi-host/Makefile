@@ -8,18 +8,27 @@ FLAGS := -std=c11 -Oz -Wall -Wextra -Werror --target=arm-none-eabi -mthumb \
 SHARED := $(ROOT)/src/shared/usb_report.c $(ROOT)/src/tools/diagnostics_logic.c \
 	$(ROOT)/src/radio/wifi_usb_report.c $(ROOT)/src/radio/wifi_trace.c
 USB := $(ROOT)/src/usb/live_usb_control.c
-SOURCES := main.c board.c fs_wire.c fs_host.c fs_pio.c $(USB) $(SHARED) $(ROOT)/src/usb/live_usb_hw.c \
+SOURCES := main.c board.c fs_wire.c fs_host.c fs_pio.c fs_lcd.c $(USB) $(SHARED) $(ROOT)/src/usb/live_usb_hw.c \
 	$(ROOT)/src/arch/rp2350/start.c $(ROOT)/src/arch/rp2350/bootrom_reboot.c \
 	$(ROOT)/src/arch/rp2350/nametag_clock.c
 HEADERS := $(wildcard *.h $(ROOT)/src/shared/*.h $(ROOT)/src/usb/*.h \
 	$(ROOT)/src/radio/*.h $(ROOT)/src/arch/rp2350/*.h) $(ROOT)/src/tools/diagnostics_logic.h
 HEADERS += $(ROOT)/src/host/tools/usb_macos.h
 HEADERS += $(ROOT)/logi-keypad/keypad-descriptors.h $(ROOT)/logi-keypad/keypad-input.h
+HEADERS += $(ROOT)/logi-keypad/keypad-lcd-wire.h $(BUILD)/lcd-images.h
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SOURCES:.c=.o))) $(BUILD)/picobin.o
 VPATH := $(sort $(dir $(SOURCES)))
 
 .PHONY: all test force
 all: $(BUILD)/logi-host.uf2 $(BUILD)/logi-host-monitor
+
+$(BUILD)/lcd-prepare: lcd-prepare.c $(ROOT)/logi-keypad/keypad-lcd.h \
+		$(ROOT)/logi-keypad/keypad-lcd-wire.h $(ROOT)/src/shared/bytes.h | $(BUILD)
+	cc -std=c11 -O2 -Wall -Wextra -Werror $< -framework CoreGraphics -framework ImageIO -framework CoreFoundation -o $@
+
+$(BUILD)/lcd-images.h: $(BUILD)/lcd-prepare
+	$< > $@.tmp
+	mv $@.tmp $@
 
 $(BUILD):
 	mkdir -p $@
@@ -67,9 +76,9 @@ $(BUILD)/monitor-test: monitor-test.c monitor.c board.c fs_host.c fs_wire.c $(HE
 		-I$(BUILD) -DLIVE_USB_LOGI_HOST $< board.c fs_host.c fs_wire.c $(ROOT)/src/tools/diagnostics_logic.c \
 		-framework IOKit -framework CoreFoundation -o $@
 
-$(BUILD)/fs-test: fs-test.c fs_wire.c fs_host.c $(HEADERS) | $(BUILD)
+$(BUILD)/fs-test: fs-test.c fs_wire.c fs_host.c fs_lcd.c $(HEADERS) | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
-		$< fs_wire.c fs_host.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
+		-I$(BUILD) $< fs_wire.c fs_host.c fs_lcd.c $(ROOT)/src/tools/diagnostics_logic.c -o $@
 
 $(BUILD)/fs-pio-test: fs-pio-test.c fs_pio.c fs_wire.c $(HEADERS) | $(BUILD)
 	cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \

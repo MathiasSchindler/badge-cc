@@ -11,7 +11,10 @@ No build or test command flashes the badge.
 The separate [Waveshare PIO host](../logi-host/README.md#bounded-keypad-hid-sessions)
 now shares the verified descriptor/input helpers and supports bounded
 full-speed HID input capture without using the Mac as the peripheral host.
-Display uploads and navigation diversion on that PIO host remain future work.
+Its explicit [numbered LCD test](../logi-host/README.md#numbered-lcd-test) now
+uploads prepared JPEGs via HID SET_REPORT: all nine images/27 fragments and
+a 30-second keepalive hold passed. PIO-driven appearance still needs visual
+confirmation; navigation diversion on that host remains future work.
 
 ## What this device does
 
@@ -183,6 +186,13 @@ the observed request fragment values `a1,22,63` produce replies `c1,c2,c3`.
 Match feature/function/software ID while allowing only one outstanding
 request; do not reject the first reply because `c1 != a1`. Command replies
 are never decoded as key presses.
+
+On the [Waveshare full-speed PIO host](../logi-host/README.md#numbered-lcd-test),
+each complete 4095-byte report uses HID SET_REPORT on EP0, with 64-byte data
+packets and a final 63-byte packet. Simply streaming the report through its
+64-byte interrupt OUT endpoint did not produce a reliable complete upload.
+The same project-owned wire builder is shared by the Mac and target tools;
+the target embeds JPEGs prepared at build time rather than linking an encoder.
 
 ### LCD validation: 2026-10-29
 
@@ -518,6 +528,9 @@ power budget. This is positive descriptor evidence, not proof of working input,
 4095-byte HID output-report assembly or LCD transfers at 12 Mb/s.
 At full speed, a 4095-byte HID report requires assembly across USB packets.
 The RP2350 hardware, CC and VBUS gates still apply.
+The later [direct Waveshare qualification](../logi-host/README.md#pio-lcd-qualification)
+separately established full-speed HID input transport and acknowledged LCD
+uploads over HID SET_REPORT; it does not qualify the badge's USB-C host wiring.
 
 ### USB-C connector role and 5 V power
 

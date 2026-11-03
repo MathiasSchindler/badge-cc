@@ -4,11 +4,12 @@
 #include <assert.h>
 
 static uint8_t mocked_report[64];
-static unsigned keypad_mock, keypad_requests, keypad_started;
+static unsigned keypad_mock, keypad_requests, keypad_started, keypad_lcd;
 static void mock_keypad(IOUSBDevRequestTO *request) {
-    if (request->bRequest == LIVE_USB_LOGI_KEYPAD) {
+    if (request->bRequest == LIVE_USB_LOGI_KEYPAD || request->bRequest == LIVE_USB_LOGI_LCD_TEST) {
         assert(request->bmRequestType == 0x40u && request->wValue == 2u && !request->wLength);
         keypad_started = 1u;
+        keypad_lcd = request->bRequest == LIVE_USB_LOGI_LCD_TEST;
         return;
     }
     assert(request->bmRequestType == 0xc0u && request->wLength == 64u && !request->wIndex);
@@ -19,7 +20,16 @@ static void mock_keypad(IOUSBDevRequestTO *request) {
         if (keypad_mock == 1u && keypad_started) k.reports = FS_KEYPAD_EVENTS + 1u;
         if (keypad_mock == 4u) k.error = k.cleanup_error = FS_STALL;
         if (keypad_mock == 7u) k.query_done = 0u;
+        if (keypad_mock == 10u) { k.stage = keypad_started ? 4u : 0u; k.error = FS_LCD_REPLY; }
+        if (keypad_mock == 13u) k.cleanup_error = FS_STALL;
         fs_keypad_status(&k, USB_REPORT_BUILD_ID, keypad_started && keypad_mock != 5u ? 8u : 7u, bytes);
+        if (keypad_started && keypad_lcd) {
+            bytes[50] = keypad_mock == 9u ? 8u : 9u;
+            bytes[51] = 27u;
+            bytes[58] = keypad_mock != 11u;
+            bytes[59] = keypad_mock == 10u ? FS_LCD_FAILED : keypad_mock == 12u ? FS_LCD_HOLD : FS_LCD_DONE;
+            badger_bytes_store_u32(bytes + 60u, diag_crc32(bytes, 60u));
+        }
         if (keypad_mock == 3u && keypad_started) bytes[60] ^= 1u;
     } else {
         assert(request->bRequest == LIVE_USB_LOGI_KEYPAD_EVENT && request->wValue < 2u);
@@ -36,7 +46,8 @@ static void mock_keypad(IOUSBDevRequestTO *request) {
 
 static IOReturn mock_request(void *self, IOUSBDevRequestTO *request) {
     (void)self;
-    if (request->bRequest >= LIVE_USB_LOGI_KEYPAD && request->bRequest <= LIVE_USB_LOGI_KEYPAD_EVENT) {
+    if ((request->bRequest >= LIVE_USB_LOGI_KEYPAD && request->bRequest <= LIVE_USB_LOGI_KEYPAD_EVENT) ||
+        request->bRequest == LIVE_USB_LOGI_LCD_TEST) {
         mock_keypad(request);
         request->wLenDone = request->wLength;
         return kIOReturnSuccess;
@@ -112,10 +123,14 @@ int main(void) {
     IOUSBDeviceInterface500 *pointer = &device;
     assert(read_fs(&pointer, 10u, 1));
     assert(!read_fs(&pointer, 9u, 1));
-    assert(keypad_watch(&pointer, 2u) && keypad_requests == 4u);
+    assert(keypad_watch(&pointer, 2u, 0) && keypad_requests == 4u);
     for (unsigned mode = 1u; mode <= 7u; ++mode) {
         keypad_mock = mode; keypad_started = keypad_requests = 0u;
-        assert(!keypad_watch(&pointer, 2u));
+        assert(!keypad_watch(&pointer, 2u, 0));
+    }
+    for (unsigned mode = 8u; mode <= 13u; ++mode) {
+        keypad_mock = mode; keypad_started = keypad_requests = 0u;
+        assert(keypad_watch(&pointer, 2u, 1) == (mode == 8u));
     }
     mocked_report[60] ^= 1u;
     assert(!read_fs(&pointer, 10u, 1));
@@ -123,6 +138,8 @@ int main(void) {
     assert(monitor_main(3, args) == 2);
     char *bad_watch[] = {"monitor", "--keypad-watch", "31"};
     assert(monitor_main(3, bad_watch) == 2);
+    char *bad_lcd[] = {"monitor", "--lcd-test", "31"};
+    assert(monitor_main(3, bad_lcd) == 2);
     puts("Monitor: bounded CLI, build/CRC and sample/histogram invariants PASS");
     return 0;
 }

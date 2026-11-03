@@ -222,6 +222,7 @@ int32_t fs_keypad_start(const fs_bus_t *bus, fs_result_t *result, fs_keypad_t *k
         k->stage = 2u;
         k->query_started = bus->now(bus->context);
         k->input_pid = FS_DATA0;
+        k->output_pid = FS_DATA0;
         k->last_input = k->last_output = k->query_started;
         k->host.started = k->query_started;
         k->host.budget = 31000000u;
@@ -231,6 +232,25 @@ int32_t fs_keypad_start(const fs_bus_t *bus, fs_result_t *result, fs_keypad_t *k
 
 static const uint8_t feature_query[20] = {0x11u,0xffu,0u,1u,0x1bu,4u};
 
+static void queue_output(fs_keypad_t *k, const uint8_t *bytes, uint16_t length) {
+    k->output = bytes;
+    k->output_length = length;
+    k->output_offset = 0u;
+    k->output_control = 0u;
+    k->output_delay = 0u;
+    k->output_started = k->host.bus->now(k->host.bus->context);
+}
+
+int32_t fs_keypad_queue(fs_keypad_t *k, const uint8_t *bytes, uint16_t length) {
+    if (k->stage != 2u || !k->query_done || !bytes || !length ||
+        !((bytes[0] == 0x11u && length == 20u) || (bytes[0] == 0x13u && length == 32u) ||
+          (bytes[0] == 0x14u && length == 4095u))) return FS_LENGTH;
+    if (k->output_length) return FS_BUSY;
+    queue_output(k, bytes, length);
+    if (bytes[0] == 0x14u) k->output_control = 1u;
+    return 0;
+}
+
 int32_t fs_keypad_step(fs_keypad_t *k, fs_packet_t *packet) {
     host_t *h = &k->host;
     if (k->stage != 2u) return FS_DESCRIPTOR;
@@ -239,16 +259,58 @@ int32_t fs_keypad_step(fs_keypad_t *k, fs_packet_t *packet) {
     uint32_t now = h->bus->now(h->bus->context);
     fs_tx_t tx;
     fs_tx_init(&tx);
-    if (!k->query_sent && now - k->last_output >= (uint32_t)k->endpoints.output_interval * 1000u) {
-        error = fs_token(&tx, FS_OUT, 1u, k->endpoints.output & 15u);
-        if (!error) error = fs_data(&tx, FS_DATA0, feature_query, 20u);
+    if (!k->query_sent && !k->output_length) queue_output(k, feature_query, 20u);
+    now = h->bus->now(h->bus->context);
+    if (k->output_length && now - k->output_started >= 1000000u) return FS_DEADLINE;
+    uint32_t interval = k->output_control ? k->output_delay : (uint32_t)k->endpoints.output_interval * 1000u;
+    if (k->output_length && now - k->last_output >= interval) {
+        uint16_t count = k->output_length - k->output_offset;
+        uint8_t control = k->output_control;
+        if (control == 1u) {
+            const uint8_t request[] = {0x21u,9u,0x14u,2u,k->endpoints.interface,0u,0xffu,0x0fu};
+            h->result->phase = 1u;
+            error = fs_token(&tx, FS_SETUP, 1u, 0u);
+            if (!error) error = fs_data(&tx, FS_DATA0, request, 8u);
+        } else if (control == 3u) {
+            h->result->phase = 4u;
+            error = fs_token(&tx, FS_IN, 1u, 0u);
+        } else {
+            uint8_t mps = control ? h->result->mps : k->endpoints.output_size;
+            if (count > mps) count = mps;
+            if (control) h->result->phase = 5u;
+            error = fs_token(&tx, FS_OUT, 1u, control ? 0u : k->endpoints.output & 15u);
+            if (!error) error = fs_data(&tx, control ? k->control_pid : k->output_pid,
+                                      k->output + k->output_offset, (uint8_t)count);
+        }
         if (!error) error = exchange(h, &tx, 1u, packet);
         k->last_output = h->bus->now(h->bus->context);
         if (error) return error;
-        if (packet->pid == FS_NAK) ++h->result->naks;
+        if (packet->pid == FS_NAK) {
+            ++h->result->naks;
+            k->output_delay = 250u;
+        }
         else if (packet->pid == FS_STALL_PID) return FS_STALL;
+        else if (control == 3u) {
+            if (packet->pid != FS_DATA1) return FS_PID;
+            if (packet->length) return FS_LENGTH;
+            k->output_length = k->output_control = 0u;
+        }
         else if (packet->pid != FS_ACK) return FS_PID;
-        else k->query_sent = 1u;
+        else {
+            k->output_delay = 0u;
+            if (control == 1u) {
+                k->output_control = 2u;
+                k->control_pid = FS_DATA1;
+            } else {
+                if (control) k->control_pid ^= FS_DATA0 ^ FS_DATA1;
+                else k->output_pid ^= FS_DATA0 ^ FS_DATA1;
+                k->output_offset += count;
+                if (k->output_offset == k->output_length) {
+                    if (control) k->output_control = 3u;
+                    else { k->output_length = 0u; k->query_sent = 1u; }
+                }
+            }
+        }
     }
     now = h->bus->now(h->bus->context);
     if (!k->query_done && now - k->query_started >= 1000000u) return FS_DEADLINE;
@@ -297,6 +359,8 @@ int32_t fs_keypad_stop(fs_keypad_t *k) {
         if (!k->cleanup_error) k->configured = 0u;
     }
     if (!k->error) k->error = k->cleanup_error;
+    k->output_length = 0u;
+    k->output = 0;
     if (k->host.result) k->naks = k->host.result->naks;
     k->stage = k->error ? 4u : 3u;
     return k->error;

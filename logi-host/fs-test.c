@@ -1,4 +1,5 @@
 #include "fs.h"
+#include "fs_lcd.h"
 #include "../src/shared/bytes.h"
 #include "../src/tools/diagnostics_logic.h"
 #include <assert.h>
@@ -141,7 +142,101 @@ typedef struct {
     uint8_t bad_config, bad_hid, no_query, query_ready, hid_error, cleanup_stall;
     uint16_t control_offset;
     uint32_t last_input, last_output;
+    uint8_t lcd_mode, out_pid, in_pid, control_pid, reply[32], reply_length, image_part;
+    uint8_t lcd_images, busy_once, reject_image, drop_image_reply, output_nak, output_naked, early_reply;
+    uint8_t control_fault, control_setup_nak, control_status_nak;
+    uint8_t output_report[4095];
+    uint16_t output_count;
+    uint32_t image_offset, keepalives, fragments, last_keepalive;
 } device_t;
+
+static int32_t lcd_transfer(device_t *d, const fs_tx_t *tx, const uint8_t token[68],
+                              unsigned offset, fs_packet_t *p) {
+    p->length = 0u;
+    if (token[1] == FS_IN) {
+        assert(d->now - d->last_input >= 5000u); d->last_input = d->now;
+        if (!d->reply_length) { p->pid = FS_NAK; return 0; }
+        p->pid = d->in_pid; d->in_pid ^= FS_DATA0 ^ FS_DATA1;
+        p->length = d->reply_length; d->reply_length = 0u;
+        memcpy(p->data, d->reply, p->length);
+        return 0;
+    }
+    assert(token[1] == FS_OUT);
+    if (d->control_state != 4u) assert(d->now - d->last_output >= 5000u);
+    d->last_output = d->now;
+    uint8_t raw[68];
+    unsigned size = unpack(tx, &offset, raw) - 4u;
+    uint8_t *pid = d->control_state == 4u ? &d->control_pid : &d->out_pid;
+    assert(size && size <= 64u && raw[1] == *pid);
+    assert(fs_crc16(raw + 2u, (uint16_t)size) == (uint16_t)(raw[size + 2u] | raw[size + 3u] << 8u));
+    if (d->output_nak && d->output_count >= 64u && !d->output_naked) {
+        d->output_naked = 1u; p->pid = FS_NAK; return 0;
+    }
+    assert(d->output_count + size <= sizeof(d->output_report));
+    memcpy(d->output_report + d->output_count, raw + 2u, size);
+    d->output_count += size;
+    *pid ^= FS_DATA0 ^ FS_DATA1; p->pid = FS_ACK;
+    const uint8_t *report = d->output_report;
+    unsigned expected = report[0] == 0x11u ? 20u : 4095u;
+    if (report[0] == 0x14u) assert(d->control_state == 4u);
+    assert(d->output_count <= expected);
+    if (d->early_reply && report[0] == 0x14u && d->output_count == size) {
+        assert(!d->reply_length);
+        memset(d->reply, 0, sizeof(d->reply));
+        memcpy(d->reply, (uint8_t[]){0x13,0xff,2,0x2b}, 4u);
+        d->reply[4] = 0xc0u | d->image_part;
+        d->reply[5] = d->busy_once && d->image_part == 2u ? 0xfbu : 0u;
+        d->reply_length = 32u;
+    }
+    if (d->output_count != expected) { assert(size == (d->control_state == 4u ? d->mps : 64u)); return 0; }
+    assert(!d->reply_length);
+    memset(d->reply, 0, sizeof(d->reply));
+    d->output_count = 0u;
+    if (report[0] == 0x11u) {
+        assert(size == 20u && report[1] == 0xffu);
+        memcpy(d->reply, report, 4u);
+        d->reply_length = 20u;
+        if (report[2] == 0u) {
+            assert((report[3] >> 4u) == 0u);
+            assert((report[4] == 0x1bu && report[5] == 4u) || (!report[4] && report[5] == 8u));
+            d->reply[4] = report[4] == 0x1bu ? 0x0bu : 4u;
+        } else {
+            assert(report[2] == 4u && report[3] >> 4u == 1u && report[4] == 0x0bu && report[5] == 0xb8u);
+            ++d->keepalives; d->last_keepalive = d->now;
+        }
+    } else {
+        assert(report[0] == 0x14u && size == 4095u % d->mps && d->lcd_images < 9u && d->keepalives);
+        assert(d->now - d->last_keepalive < 3000000u);
+        const fs_lcd_image_t *image = &fs_lcd_images[d->lcd_images];
+        unsigned header = d->image_part == 1u ? 20u : 5u;
+        unsigned count = image->length - d->image_offset;
+        if (count > 4095u - header) count = 4095u - header;
+        int last = d->image_offset + count == image->length;
+        assert(report[4] == (d->image_part | 0x20u | (header == 20u ? 0x80u : 0u) | (last ? 0x40u : 0u)));
+        if (header == 20u) {
+            assert((report[9] << 8u | report[10]) == 23u + d->lcd_images % 3u * 158u);
+            assert((report[11] << 8u | report[12]) == 6u + d->lcd_images / 3u * 158u);
+            assert(report[13] == 0u && report[14] == 118u && report[15] == 0u && report[16] == 118u);
+            assert(((uint32_t)report[18] << 8u | report[19]) == image->length);
+        }
+        assert(!memcmp(report + header, image->bytes + d->image_offset, count));
+        for (unsigned i = header + count; i < 4095u; ++i) assert(!report[i]);
+        memcpy(d->reply, (uint8_t[]){0x13,0xff,2,0x2b}, 4u);
+        d->reply[4] = 0xc0u | d->image_part;
+        d->reply[5] = d->reject_image ? 1u : 0u;
+        if (d->busy_once && d->image_part == 2u) {
+            d->busy_once = 0u; d->reply[5] = 0xfbu;
+            d->image_part = 1u; d->image_offset = 0u;
+        } else {
+            ++d->fragments;
+            d->image_offset += count;
+            ++d->image_part;
+            if (last) { ++d->lcd_images; d->image_offset = 0u; d->image_part = 1u; }
+        }
+        d->reply_length = d->drop_image_reply || d->early_reply ? 0u : 32u;
+    }
+    return 0;
+}
 
 static int32_t keypad_exchange(device_t *d, const fs_tx_t *tx, unsigned bits,
                                const uint8_t token[68], unsigned offset, fs_packet_t *p) {
@@ -150,6 +245,7 @@ static int32_t keypad_exchange(device_t *d, const fs_tx_t *tx, unsigned bits,
     p->length = 0u;
     if (bits >> 7u) {
         assert((bits >> 7u) == 1u && d->configured);
+        if (d->lcd_mode) return lcd_transfer(d, tx, token, offset, p);
         if (token[1] == FS_OUT) {
             assert(d->now - d->last_output >= 5000u); d->last_output = d->now;
             assert(unpack(tx, &offset, raw) == 24u && raw[1] == FS_DATA0);
@@ -178,7 +274,15 @@ static int32_t keypad_exchange(device_t *d, const fs_tx_t *tx, unsigned bits,
         assert(unpack(tx, &offset, raw) == 12u && raw[1] == FS_DATA0);
         memcpy(d->request, raw + 2u, 8u);
         d->control_offset = 0u;
-        if (d->request[1] == 9u) {
+        if (d->request[0] == 0x21u) {
+            assert(d->lcd_mode && !memcmp(d->request, (uint8_t[]){0x21,9,0x14,2,0,0,0xff,0x0f}, 8u));
+            if (d->control_fault == 5u) { p->pid = FS_STALL_PID; return 0; }
+            if (d->control_fault == 6u || d->control_setup_nak) {
+                d->control_setup_nak = 0u; p->pid = FS_NAK; return 0;
+            }
+            d->control_state = 4u;
+            d->control_pid = FS_DATA1;
+        } else if (d->request[1] == 9u) {
             assert(!d->request[0] && d->request[2] <= 1u && !d->request[6] && !d->request[7]);
             d->control_state = 3u;
         } else {
@@ -187,6 +291,15 @@ static int32_t keypad_exchange(device_t *d, const fs_tx_t *tx, unsigned bits,
             d->control_state = 1u;
         }
         p->pid = FS_ACK;
+    } else if (d->control_state == 4u) {
+        int32_t error = lcd_transfer(d, tx, token, offset, p);
+        if (!d->output_count && p->pid == FS_ACK) d->control_state = 5u;
+        return error;
+    } else if (d->control_state == 5u) {
+        assert(token[1] == FS_IN);
+        if (d->control_status_nak) { d->control_status_nak = 0u; p->pid = FS_NAK; return 0; }
+        p->pid = d->control_fault == 4u ? FS_DATA0 : FS_DATA1;
+        d->control_state = 0u;
     } else if (d->control_state == 1u) {
         assert(token[1] == FS_IN);
         uint16_t length = keypad_u16(d->request + 6u);
@@ -367,10 +480,54 @@ static void keypad_tests(void) {
     puts("read-only HID++ query, raw events, malformed descriptors/replies and deconfiguration PASS");
 }
 
+static void lcd_tests(void) {
+    for (unsigned mode = 0u; mode < 10u; ++mode) {
+        device_t d = {.mps = mode < 7u ? 64u : (uint8_t)(8u << (mode - 7u)),
+                      .keypad = 1u, .lcd_mode = 1u, .out_pid = FS_DATA0,
+                      .in_pid = FS_DATA0, .image_part = 1u, .output_nak = 1u,
+                      .busy_once = mode == 1u, .reject_image = mode == 2u, .drop_image_reply = mode == 3u};
+        d.early_reply = mode == 1u;
+        d.control_fault = mode < 7u ? (uint8_t)mode : 0u;
+        d.control_setup_nak = d.control_status_nak = mode == 1u;
+        fs_bus_t bus = {.context = &d, .now = mock_now, .reset = mock_reset, .exchange = mock_exchange};
+        fs_keypad_t k; fs_result_t r; fs_lcd_t l; fs_packet_t p;
+        assert(!fs_keypad_start(&bus, &r, &k));
+        k.host.budget = 62000000u;
+        fs_lcd_begin(&l);
+        uint32_t began = d.now;
+        int32_t error = 0;
+        for (unsigned loops = 0u; loops < 40000u; ++loops) {
+            d.now += 1000u;
+            error = fs_lcd_step(&l, &k);
+            if (error) break;
+            int32_t result = fs_keypad_step(&k, &p);
+            if (result < 0) { error = result; break; }
+            if (result) error = fs_lcd_input(&l, &p);
+            assert(l.images <= d.lcd_images && l.fragments <= d.fragments);
+            if (error || (l.images == 9u && d.now - l.hold_started >= 1200000u)) break;
+        }
+        if (mode < 2u || mode >= 7u) {
+            assert(!error && l.images == 9u && d.lcd_images == 9u && d.output_naked);
+            assert(l.fragments == d.fragments && l.fragments >= 27u && d.keepalives >= 3u);
+            assert(d.now - began < 30000000u);
+            uint8_t status[64] = {0}; fs_lcd_status(&l, status);
+            assert(status[50] == 9u && status[58] == 1u);
+        } else {
+            assert(error == (mode == 2u ? FS_LCD_REPLY : mode == 4u ? FS_PID :
+                             mode == 5u ? FS_STALL : FS_DEADLINE));
+            k.error = error;
+        }
+        assert(fs_keypad_stop(&k) == error && !d.configured);
+    }
+    puts("LCD: nine prepared JPEGs reconstructed over HID SET_REPORT, EP0 8/16/32/64, final short packet,");
+    puts("SETUP/data/status NAKs, toggles, early reply, busy restart, keepalive, rejection/STALL/deadline PASS");
+}
+
 int main(void) {
     wire_tests();
     host_tests();
     keypad_tests();
+    lcd_tests();
     puts("Full-speed: independent wire vectors, all payload sizes/stuffing, bad CRC/PID/line,");
     puts("reset, SOF, EP0 8/16/32/64, address/status/toggle, duplicate/NAK/STALL/deadline PASS");
     return 0;

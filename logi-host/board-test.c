@@ -130,6 +130,7 @@ static void test_usb(void) {
     setup(0xc0u, LIVE_USB_LOGI_STATUS, 0u, 64u); assert(usb.action == USB_ACTION_STALL);
     setup(0x40u, LIVE_USB_LOGI_PROBE, 0u, 0u);
     assert(usb.action == USB_ACTION_STALL && !usb.logi_fs_ready);
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 1u, 0u); assert(usb.action == USB_ACTION_STALL);
     setup(0u, 5u, 1u, 0u); live_usb_control_complete(&usb, 1u, NULL, 0u);
     setup(0u, 9u, 1u, 0u); live_usb_control_complete(&usb, 1u, NULL, 0u);
     setup(0xc0u, LIVE_USB_LOGI_STATUS, 0u, 64u); assert(usb.action == USB_ACTION_STALL);
@@ -175,10 +176,13 @@ static void test_usb(void) {
     assert(!usb.logi_fs_pending && !usb.logi_keypad_pending);
     setup(0x40u, LIVE_USB_LOGI_KEYPAD, 30u, 0u);
     live_usb_control_complete(&usb, 1u, NULL, 0u);
-    assert(usb.logi_fs_ready && usb.logi_keypad_seconds == 30u && !usb.logi_keypad_pending);
+    assert(usb.logi_fs_ready && usb.logi_keypad_seconds == 30u && !usb.logi_keypad_pending &&
+           !usb.logi_lcd_requested);
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 1u, 0u); assert(usb.action == USB_ACTION_STALL);
     usb.logi_fs_ready = 0u; usb.logi_keypad_active = 1u;
     setup(0x40u, LIVE_USB_LOGI_KEYPAD, 2u, 0u); assert(usb.action == USB_ACTION_STALL);
     setup(0x40u, LIVE_USB_LOGI_PROBE, 0u, 0u); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 1u, 0u); assert(usb.action == USB_ACTION_STALL);
     usb.logi_keypad_valid = 1u;
     usb.logi_keypad_events[31][14] = 32u;
     setup(0xc0u, LIVE_USB_LOGI_KEYPAD_STATUS, 0u, 64u); assert(usb.action == USB_ACTION_IN);
@@ -187,6 +191,31 @@ static void test_usb(void) {
     setup(0xc0u, LIVE_USB_LOGI_KEYPAD_EVENT, 32u, 64u); assert(usb.action == USB_ACTION_STALL);
     setup(0xc0u, LIVE_USB_LOGI_KEYPAD_STATUS, 0u, 63u); assert(usb.action == USB_ACTION_STALL);
     usb.logi_keypad_active = 0u;
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 0u, 0u); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 31u, 0u); assert(usb.action == USB_ACTION_STALL);
+    setup(0xc0u, LIVE_USB_LOGI_LCD_TEST, 1u, 0u); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 1u, 1u); assert(usb.action == USB_ACTION_STALL);
+    const uint8_t lcd_index[] = {0x40u,LIVE_USB_LOGI_LCD_TEST,1u,0u,1u,0u,0u,0u};
+    live_usb_control_setup(&usb, lcd_index); assert(usb.action == USB_ACTION_STALL);
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 1u, 0u);
+    assert(usb.logi_lcd_pending && usb.logi_keypad_pending == 1u && !usb.logi_lcd_requested);
+    setup(0xc0u, LIVE_USB_INFO, 0u, 12u);
+    assert(!usb.logi_lcd_pending && !usb.logi_fs_pending && !usb.logi_fs_ready);
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 30u, 0u);
+    live_usb_control_complete(&usb, 1u, NULL, 0u);
+    assert(usb.logi_fs_ready && usb.logi_lcd_requested && !usb.logi_lcd_pending &&
+           usb.logi_keypad_seconds == 30u);
+    usb.logi_fs_ready = 0u;
+    setup(0x40u, LIVE_USB_LOGI_KEYPAD, 1u, 0u);
+    live_usb_control_complete(&usb, 1u, NULL, 0u);
+    assert(!usb.logi_lcd_requested);
+    usb.logi_fs_ready = 0u;
+    setup(0x40u, LIVE_USB_LOGI_LCD_TEST, 1u, 0u);
+    live_usb_control_complete(&usb, 1u, NULL, 0u);
+    live_usb_control_reset(&usb);
+    assert(!usb.logi_lcd_pending && !usb.logi_lcd_requested);
+    setup(0u, 5u, 1u, 0u); live_usb_control_complete(&usb, 1u, NULL, 0u);
+    setup(0u, 9u, 1u, 0u); live_usb_control_complete(&usb, 1u, NULL, 0u);
     setup(0x40u, LIVE_USB_BOOTSEL, 0u, 0u);
     assert(!usb.reboot_requested);
     setup(0xc0u, LIVE_USB_INFO, 0u, 12u); assert(!usb.reboot_requested);

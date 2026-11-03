@@ -27,7 +27,8 @@ enum {
     FS_CRC = -4504, FS_PID = -4505, FS_LENGTH = -4506,
     FS_STALL = -4507, FS_TOGGLE = -4508, FS_DESCRIPTOR = -4509,
     FS_LINE = -4510, FS_CLOCK = -4511, FS_FIFO = -4512,
-    FS_DEADLINE = -4513, FS_HID_REPLY = -4514, FS_CANCELLED = -4515
+    FS_DEADLINE = -4513, FS_HID_REPLY = -4514, FS_CANCELLED = -4515,
+    FS_BUSY = -4516, FS_LCD_REPLY = -4517
 };
 enum { FS_OUT = 0xe1, FS_IN = 0x69, FS_SOF = 0xa5, FS_SETUP = 0x2d,
        FS_DATA0 = 0xc3, FS_DATA1 = 0x4b, FS_ACK = 0xd2,
@@ -73,7 +74,11 @@ typedef struct {
     keypad_endpoints_t endpoints;
     uint32_t last_input, last_output, query_started, polls, reports, duplicates, buttons, report_crc, naks;
     int32_t error, cleanup_error;
-    uint8_t stage, phase, configured, input_pid, query_sent, query_done, feature, repeated;
+    const uint8_t *output;
+    uint32_t output_started;
+    uint16_t output_length, output_offset, output_delay;
+    uint8_t output_control, control_pid;
+    uint8_t stage, phase, configured, input_pid, output_pid, query_sent, query_done, feature, repeated;
 } fs_keypad_t;
 
 uint8_t fs_crc5(uint16_t bits);
@@ -90,6 +95,8 @@ int32_t fs_rx_finish(fs_rx_t *rx, fs_packet_t *packet);
 int32_t fs_probe(const fs_bus_t *bus, fs_result_t *result);
 int32_t fs_keypad_start(const fs_bus_t *bus, fs_result_t *result, fs_keypad_t *keypad);
 int32_t fs_keypad_step(fs_keypad_t *keypad, fs_packet_t *packet);
+/* Buffer remains owned by the caller and must stay unchanged until output_length becomes zero. */
+int32_t fs_keypad_queue(fs_keypad_t *keypad, const uint8_t *bytes, uint16_t length);
 int32_t fs_keypad_stop(fs_keypad_t *keypad);
 void fs_keypad_status(const fs_keypad_t *keypad, uint32_t build, uint16_t generation, uint8_t bytes[64]);
 void fs_keypad_event(const fs_keypad_t *keypad, const fs_packet_t *packet, uint32_t build,

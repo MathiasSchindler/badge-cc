@@ -10,13 +10,13 @@ all: $(PROBE)
 $(BUILD):
 	mkdir -p $@
 
-$(PROBE): keypad-probe.c keypad-lcd.h keypad-input.h | $(BUILD)
+$(PROBE): keypad-probe.c keypad-lcd.h keypad-lcd-wire.h keypad-input.h ../src/shared/bytes.h | $(BUILD)
 	$(CC) $(CFLAGS) $< $(FRAMEWORKS) -o $@
 
 inspect: $(PROBE)
 	$(PROBE) --inspect
 
-$(BUILD)/keypad-probe-test: keypad-probe-test.c keypad-probe.c keypad-lcd.h keypad-input.h | $(BUILD)
+$(BUILD)/keypad-probe-test: keypad-probe-test.c keypad-probe.c keypad-lcd.h keypad-lcd-wire.h keypad-input.h ../src/shared/bytes.h | $(BUILD)
 	$(CC) $(CFLAGS) $< $(FRAMEWORKS) -o $@
 
 test: $(PROBE) $(BUILD)/keypad-probe-test

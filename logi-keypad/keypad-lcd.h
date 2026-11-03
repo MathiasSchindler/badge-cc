@@ -6,8 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
-enum { LCD_KEY_SIZE = 118, LCD_PACKET_SIZE = 4095, LCD_PIXELS_SIZE = 118 * 118 * 4 };
+#include "keypad-lcd-wire.h"
 
 static void lcd_rectangle(uint8_t *pixels, unsigned x, unsigned y,
                            unsigned width, unsigned height) {
@@ -95,44 +94,12 @@ static CFDataRef lcd_jpeg(unsigned key) {
     return data;
 }
 
-static void lcd_put16(uint8_t *out, unsigned value) {
-    out[0] = (uint8_t)(value >> 8);
-    out[1] = (uint8_t)value;
-}
-
-static size_t lcd_packet(uint8_t out[LCD_PACKET_SIZE], unsigned key,
+static inline size_t lcd_packet(uint8_t out[LCD_PACKET_SIZE], unsigned key,
                          const uint8_t *jpeg, size_t size, size_t offset,
                          unsigned part) {
-    if (!out || !jpeg || key < 1 || key > 9 || !size || size > 65535 ||
-        offset >= size || part < 1 || part > 17) {
-        fputs("Invalid LCD packet geometry, size or sequence.\n", stderr);
-        return 0;
-    }
-    size_t expected_offset = part == 1 ? 0 : 4075u + (size_t)(part - 2) * 4090u;
-    if (offset != expected_offset) {
-        fputs("Invalid LCD fragment offset.\n", stderr);
-        return 0;
-    }
-    size_t header = part == 1 ? 20 : 5;
-    size_t count = size - offset;
-    if (count > LCD_PACKET_SIZE - header) count = LCD_PACKET_SIZE - header;
-    memset(out, 0, LCD_PACKET_SIZE);
-    out[0] = 0x14;
-    out[1] = 0xff;
-    out[2] = 0x02;
-    out[3] = 0x2b;
-    out[4] = (uint8_t)(part | 0x20 | (part == 1 ? 0x80 : 0) |
-                        (offset + count == size ? 0x40 : 0));
-    if (part == 1) {
-        lcd_put16(out + 5, 0x0100);
-        lcd_put16(out + 7, 0x0100);
-        lcd_put16(out + 9, 23 + (key - 1) % 3 * 158);
-        lcd_put16(out + 11, 6 + (key - 1) / 3 * 158);
-        lcd_put16(out + 13, LCD_KEY_SIZE);
-        lcd_put16(out + 15, LCD_KEY_SIZE);
-        lcd_put16(out + 18, (unsigned)size);
-    }
-    memcpy(out + header, jpeg + offset, count);
+    uint32_t count = size <= 65535u && offset <= 65535u ?
+        keypad_lcd_packet(out, key, jpeg, (uint32_t)size, (uint32_t)offset, part) : 0u;
+    if (!count) fputs("Invalid LCD packet geometry, size or sequence.\n", stderr);
     return count;
 }
 

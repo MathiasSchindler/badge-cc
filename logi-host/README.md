@@ -6,7 +6,7 @@ keypad, with events relayed to the badge over a separate connection.
 
 **Current milestone: experimental full-speed PIO transport, device/configuration/
 HID descriptors, SET_CONFIGURATION and bounded keypad input sessions,
-with passive diagnostics by default.**
+plus numbered LCD test images, with passive diagnostics by default.**
 The 144 MHz clock, active empty-port reset/send/timeout and passive recovery
 are physically verified. The directly connected keypad now completes both
 device-descriptor reads, their status stages and SET_ADDRESS at full speed:
@@ -18,8 +18,10 @@ of +/-0.5 bit; USB permits at most 7.5. This remains an experimental transport,
 not a compliant or complete USB host. A read-only HID++ feature query has
 completed over interrupt OUT/IN, and incoming reports are captured and decoded
 using the existing keypad helpers. Physical key presses still need user
-qualification. There is no hub support, navigation-diversion setup or LCD
-output yet. The Mac diagnostic connection uses the
+qualification. All nine numbered JPEGs have been acknowledged by the keypad
+over the PIO host, including a 30-second keepalive hold; visual confirmation
+of this PIO-driven test remains open. There is no hub support or
+navigation-diversion setup. The Mac diagnostic connection uses the
 separate native USB controller; it does not host the peripheral on behalf
 of the Waveshare board.
 
@@ -319,7 +321,7 @@ Configured vendor-IN `c0/74`, value/index zero, length 64 reads the result:
 | 54..55 | Result generation, incremented after each probe, skipping zero |
 | 56, 58 | Last received PID, qualified 144 MHz clock flag |
 | 57 | Reset levels: before in bits 1:0, during SE0 in 3:2, after release in 5:4; bits 7/6 mark drive/release |
-| 59 | Last control phase: 0 idle, 1 SETUP, 2 descriptor IN, 3 descriptor OUT status, 4 SET_ADDRESS IN status |
+| 59 | Last control phase: 0 idle, 1 SETUP, 2 descriptor IN, 3 descriptor OUT status, 4 control-write IN status, 5 HID SET_REPORT OUT data |
 | 60 | CRC32 over bytes 0..59 |
 
 Stages: `0` not run, `1` reset, `2` recovery, `3` initial descriptor,
@@ -410,13 +412,70 @@ client, another monitor invocation can request BOOTSEL; early recovery cancels
 the session.
 Passive counters are frozen while PIO0 is hosting and restart afterward.
 
-No navigation reporting settings are changed, no display keepalive is sent,
-and no image is uploaded. The existing
-[LCD framing documentation](../logi-keypad/README.md#lcd-transport) remains the
-next-layer reference: its 4095-byte reports must be split into full-speed
-64-byte OUT packets with correct toggles/intervals, not sent as 4095-byte USB
-packets. Prepared JPEG data or project-owned encoding is still required on
-the freestanding target.
+In `--keypad-watch`, no navigation reporting settings are changed, no display
+keepalive is sent, and no image is uploaded. Display writes require the
+separate explicit mode below.
+
+## Numbered LCD test
+
+```sh
+# Restart the installed firmware if it is in BOOTSEL:
+build/picotool-usb/picotool reboot --ser B72817DA2FE6A757
+
+# Replace all nine icons, then keep them alive for 30 seconds:
+build/logi-host/logi-host-monitor --serial B72817DA2FE6A757 --lcd-test 30
+```
+
+**This replaces the existing icons without backing them up.** The expected
+pattern is white digits 1..9 in row-major order, on colored checkerboards
+with white borders:
+
+```text
+1 2 3
+4 5 6
+7 8 9
+```
+
+The build-time [lcd-prepare.c](lcd-prepare.c) reuses the Mac test renderer and
+built-in ImageIO JPEG encoder, verifies the decoded 118x118 dimensions, and
+generates nine constant byte arrays. Only the prepared JPEG bytes are linked
+into the freestanding firmware: no target image encoder, framework or libc
+is added. [keypad-lcd-wire.h](../logi-keypad/keypad-lcd-wire.h) shares the
+existing Mac tool's geometry, fragment flags, padding and report assembly.
+
+The host discovers keepalive feature `0x0008` (index `04` on this device),
+sets its timeout to 3000 ms, and refreshes it about once per second.
+Each 4095-byte LCD output report uses HID **SET_REPORT** over EP0:
+`21/09`, value `0214`, interface zero, length `0fff`. On this keypad, the
+data stage is 63 full 64-byte packets plus a final 63-byte packet, beginning
+with DATA1 and alternating on acknowledged packets only, followed by a
+zero-length DATA1 IN status stage. A report is not complete until that
+status stage succeeds. Interrupt OUT remains in use for the 20-byte feature
+and keepalive commands, with its own independent DATA toggle and 5-ms interval.
+
+An earlier interrupt-OUT image experiment produced acknowledgments after
+the first 64-byte packet, an unexpected HID++ error, then a timeout after two
+images. Those early replies did not establish reception of a complete JPEG.
+The final EP0 path completed all nine images; there is no silent fallback to
+the failing interrupt path. Matching replies that arrive before USB transfer
+completion are retained without advancing or overwriting the report buffer.
+
+LCD fragments are serialized with at least 5 ms after acceptance. A `fb`
+busy reply restarts the current image, with at most three attempts and a
+100-ms pause; other rejection statuses fail explicitly. USB NAK retries retain
+the exact data and PID. Queued reports and missing command replies each have
+a one-second deadline, while native USB and watchdog servicing continue
+between packets. The upload is bounded to 30 seconds; the requested **1..30
+seconds is the hold after all nine images**, not the upload deadline. An
+overall `31 + hold` second limit also applies.
+
+The monitor requires nine accepted images, LCD state DONE, and successful
+deconfiguration before reporting success. On completion/error, the host
+attempts SET_CONFIGURATION(0), preserves primary/cleanup errors, restores
+passive sampling and stops keepalives. It does not claim exact restoration
+of previous icons or brightness; default animations may return afterward.
+Navigation diversion is not changed. The arbitrary-image API and permanent
+display ownership are outside this bounded test.
 
 ### Keypad diagnostic records
 
@@ -428,6 +487,8 @@ All requests require native USB configuration and index zero:
 - `c0/77`, value zero, length exactly 64: session status.
 - `c0/78`, value **0..31**, length exactly 64: read that ring slot without
   consuming it. Sequence `n` occupies slot `(n - 1) % 32`.
+- `40/79`, value **1..30 hold seconds**, length zero: explicitly arm the LCD
+  test after its status ACK, with the same abort/concurrency guards as `40/76`.
 
 Status fields (little-endian):
 
@@ -441,15 +502,20 @@ Status fields (little-endian):
 | 42, 43 | Interface number, discovered feature index |
 | 44 | Signed cleanup error |
 | 48..49 | Declared configuration demand, mA |
+| 50, 51 | Accepted LCD images, accepted LCD fragments |
 | 52 | Decoded LCD-key state count, including releases |
 | 56, 57 | Query reply confirmed, device still configured |
+| 58, 59 | LCD mode enabled, LCD stage |
 | 60 | CRC32 over bytes 0..59 |
 
 States: 0 idle, 1 enumerating, 2 polling, 3 complete, 4 failed.
 Phases: 1 device descriptor, 2 configuration header, 3 full configuration,
 4 SET_CONFIGURATION, 5 HID descriptor, 6 feature query, 7 input polling.
 Additional errors: `-4514` invalid/error HID++ reply, `-4515` cancelled by
-native USB deconfiguration/reset or recovery.
+native USB deconfiguration/reset or recovery, `-4516` output queue busy,
+`-4517` invalid/rejected LCD reply.
+LCD stages: 0 disabled, 1 feature discovery, 2 keepalive, 3 upload, 4 hold,
+5 done, 6 failed.
 
 Event fields: magic `FKE1` at 0, build at 4, one-based sequence at 8,
 generation at 12..13, raw length at 14, feature at 15, raw bytes at 16..47,
@@ -676,5 +742,41 @@ board and tested with successive **2-second, 30-second and 2-second** sessions:
 No human button presses were supplied: `LCD_states=0` is an explicit remaining
 physical test, not evidence that the switches fail. Next, run the bounded
 capture while pressing keys 1..9 and check presses/releases against the known
-row-major mapping. Navigation diversion and LCD report uploads remain separate
-future work; ACK timing still needs correction before claiming a compliant host.
+row-major mapping. Navigation diversion remains future work; LCD report
+uploads were subsequently qualified below. ACK timing still needs correction
+before claiming a compliant host.
+
+### PIO LCD qualification
+
+The HID SET_REPORT implementation passed a one-second hold, then the final
+firmware was flashed/readback-verified on the same board and passed a
+**30-second hold**:
+
+- All **nine JPEGs and 27 fragments** received LCD status `00`. Upload completed
+  in approximately **0.57 seconds**, before the requested hold began.
+- The final session captured **63 reports**, performed **6,087 IN polls**,
+  and counted 6,086 ordinary NAKs, with **zero duplicates, timeouts or wire
+  errors**. Keepalive replies continued through approximately 30.15 seconds.
+- Completion reported `LCD images=9/9 fragments=27 state=5`, with zero
+  primary/cleanup errors and successful SET_CONFIGURATION(0).
+- A subsequent two-second read-only HID session and descriptor-only probe
+  both passed without timeouts/wire errors. Passive samples then advanced
+  from 3,760 to 20,160 with no passive PIO/native USB errors. Acknowledged
+  BOOTSEL recovery was verified against the exact chip ID; the installed
+  firmware remains in BOOTSEL.
+- First-DATA ACK timing was 9.0 bit times during the LCD session, 8.5 during
+  the HID regression and 8.0 during the descriptor probe, each +/-0.5 bit.
+  The existing 7.5-bit host-limit qualification gap remains.
+- Sanitized tests reconstruct every JPEG over EP0 sizes 8/16/32/64 and cover
+  SETUP/data/status NAKs, PID retention, early replies, busy restart,
+  keepalive, rejection, STALL and deadlines. Native command tests cover
+  deferred commit/abort/reset and isolation; monitor tests reject incomplete
+  images, wrong mode/stage and cleanup failures. Mac keypad, badge-native host,
+  trace/replay and shared native USB regressions pass.
+- The final target is **101,348 bytes text, zero initialized data and 168,124
+  bytes BSS**, with no undefined symbols or target library dependencies.
+
+These are real protocol acknowledgments, not a camera/visual inspection.
+The user's earlier visual confirmation applies to the **Mac-driven** test;
+PIO-driven appearance/alignment and physical button input still require
+observation. No resistor, wiring or power-source changes were made.

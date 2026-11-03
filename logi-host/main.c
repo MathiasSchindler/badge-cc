@@ -1,5 +1,6 @@
 #include "board.h"
 #include "fs.h"
+#include "fs_lcd.h"
 #include "build_id.h"
 #include "../src/usb/live_usb_hw.h"
 #include "../src/arch/rp2350/bootrom_reboot.h"
@@ -10,6 +11,7 @@ static live_usb_control_t control;
 static logi_board_t board;
 static fs_result_t fs_result;
 static fs_keypad_t keypad;
+static fs_lcd_t lcd;
 static const fs_bus_t bus = {.context = &fs_result, .now = fs_pio_now,
                             .reset = fs_pio_reset, .exchange = fs_pio_exchange};
 static uint16_t keypad_generation;
@@ -54,12 +56,18 @@ static void restore_passive(const logi_io_t *io) {
     control.logi_status_valid = 0u;
 }
 
+static void publish_keypad(void) {
+    fs_keypad_status(&keypad, USB_REPORT_BUILD_ID, keypad_generation, control.logi_keypad_status);
+    fs_lcd_status(&lcd, control.logi_keypad_status);
+    control.logi_keypad_valid = 1u;
+}
+
 static void finish_keypad(const logi_io_t *io) {
     (void)fs_keypad_stop(&keypad);
+    if (lcd.stage && keypad.error) lcd.stage = FS_LCD_FAILED;
     restore_passive(io);
     control.logi_keypad_active = 0u;
-    fs_keypad_status(&keypad, USB_REPORT_BUILD_ID, keypad_generation, control.logi_keypad_status);
-    control.logi_keypad_valid = 1u;
+    publish_keypad();
 }
 
 void bare_main(void) {
@@ -115,12 +123,15 @@ void bare_main(void) {
             if (control.logi_keypad_seconds) {
                 if (!++keypad_generation) ++keypad_generation;
                 control.logi_keypad_active = 1u;
+                badger_bytes_zero((uint8_t *)&lcd, sizeof(lcd));
+                if (control.logi_lcd_requested) fs_lcd_begin(&lcd);
                 if (fs_clock_error) {
                     keypad.error = fs_clock_error;
                     keypad.stage = 4u;
                 } else {
                     (void)fs_keypad_start(&bus, &fs_result, &keypad);
                 }
+                if (lcd.stage) keypad.host.budget = 62000000u;
                 keypad_started = now(0);
                 if (keypad.error) finish_keypad(&io);
             } else if (!fs_clock_error) {
@@ -140,15 +151,27 @@ void bare_main(void) {
             if (!control.configured) {
                 keypad.error = FS_CANCELLED;
                 finish_keypad(&io);
-            } else if (tick - keypad_started >= (uint32_t)control.logi_keypad_seconds * 1000000u) {
+            } else if (!lcd.stage &&
+                       tick - keypad_started >= (uint32_t)control.logi_keypad_seconds * 1000000u) {
+                finish_keypad(&io);
+            } else if (lcd.stage && lcd.images == 9u && !lcd.waiting && !keypad.output_length &&
+                       tick - lcd.hold_started >= (uint32_t)control.logi_keypad_seconds * 1000000u) {
+                lcd.stage = FS_LCD_DONE;
+                finish_keypad(&io);
+            } else if (lcd.stage && ((!lcd.hold_started && tick - keypad_started >= 30000000u) ||
+                       tick - keypad_started >= (31u + control.logi_keypad_seconds) * 1000000u)) {
+                keypad.error = FS_DEADLINE;
                 finish_keypad(&io);
             } else {
                 fs_packet_t packet;
-                int32_t result = fs_keypad_step(&keypad, &packet);
+                int32_t result = fs_lcd_step(&lcd, &keypad);
+                if (!result) result = fs_keypad_step(&keypad, &packet);
                 if (result < 0) { keypad.error = result; finish_keypad(&io); }
                 else if (result > 0) {
                     fs_keypad_event(&keypad, &packet, USB_REPORT_BUILD_ID, keypad_generation,
                                     control.logi_keypad_events[(keypad.reports - 1u) % FS_KEYPAD_EVENTS]);
+                    int32_t error = fs_lcd_input(&lcd, &packet);
+                    if (error) keypad.error = error;
                     if (keypad.error) finish_keypad(&io);
                 }
             }
@@ -167,8 +190,7 @@ void bare_main(void) {
             fs_report(&fs_result, USB_REPORT_BUILD_ID, control.logi_status[52], control.logi_fs_status);
             fs_trace_report(&fs_result, USB_REPORT_BUILD_ID, control.logi_fs_trace);
             control.logi_fs_valid = 1u;
-            fs_keypad_status(&keypad, USB_REPORT_BUILD_ID, keypad_generation, control.logi_keypad_status);
-            control.logi_keypad_valid = 1u;
+            publish_keypad();
             published = tick;
         }
         uint32_t setups = live_usb_hw_stats()->setups;
