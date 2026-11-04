@@ -6,7 +6,8 @@ keypad, with events relayed to the badge over a separate connection.
 
 **Current milestone: experimental full-speed PIO transport, device/configuration/
 HID descriptors, SET_CONFIGURATION and bounded keypad input sessions,
-plus numbered LCD test images and an interactive per-key inversion demo,
+plus numbered LCD test images, an interactive per-key inversion demo and
+a 5-fps center-key animation,
 with passive diagnostics by default.**
 The 144 MHz clock, active empty-port reset/send/timeout and passive recovery
 are physically verified. The directly connected keypad now completes both
@@ -522,12 +523,14 @@ failure. The existing overall upload/session deadlines still apply. Neither
 `--lcd-test` nor default read-only capture acquires this behavior implicitly.
 Navigation diversion and page-button actions are unchanged.
 
-The target embeds **18 JPEGs: nine normal and nine inverted**, prepared with
+The target includes **18 key JPEGs: nine normal and nine inverted**, plus
+eight animation frames, prepared with
 the shared Mac renderer/encoder at build time. Decoded images are checked for
 118x118 dimensions and mean RGB error below 12 levels relative to their
 expected pixels. No target JPEG encoder, heap or new dependency is added.
-This establishes a button-to-state-to-redraw path; menus, counters, clocks and
-other dynamic content are future extensions, not implemented modes.
+This establishes a button-to-state-to-redraw path; menus, counters and clocks
+are future extensions. The separate animation experiment below adds timed
+frame changes without altering the toggle mode.
 
 ### Interactive validation, 2026-11-04
 
@@ -555,6 +558,63 @@ other dynamic content are future extensions, not implemented modes.
   undefined symbols. ACK timing remains experimentally 8.5..9.0 bit times,
   not compliance-qualified.
 
+## Animation experiment
+
+```sh
+# Restart the installed firmware if it is in BOOTSEL:
+build/picotool-usb/picotool reboot --ser B72817DA2FE6A757
+
+# Show a rotating indicator for 30 seconds after initial grid setup:
+build/logi-host/logi-host-monitor --serial B72817DA2FE6A757 --lcd-animate 30
+```
+
+The center key, **5**, shows an eight-frame cyan rotating indicator on a dark
+background, targeting **5 frames/s**: one revolution takes about 1.6 seconds.
+This is the test content, not a device error or a genuine busy indication.
+The other eight keys retain press-to-toggle normal/inverted behavior.
+Pressing key 5 does not change or stop its animation.
+
+Each animation JPEG is prepared and decoded/validated at build time, fits
+within the first fragment's **4075-byte JPEG payload**, and is transmitted as
+one complete 4095-byte HID report. No target encoder, GIF/video decoder,
+extra dependency or autonomous device-side playback command is involved.
+The RP2350 schedules and sends each frame.
+
+Timing uses a 200-ms start-to-start interval. Keepalives and pending button
+redraws take priority; a delayed frame starts when the transport becomes free,
+without accumulating an unbounded queue or issuing catch-up bursts. A frame's
+asset remains stable through ACK/busy handling. At the session deadline, new
+frames stop, the in-flight transfer and pending button redraws drain, then the
+usual deconfiguration/passive recovery applies.
+
+### Animation validation, 2026-11-04
+
+- Sanitized tests reconstruct the exact eight-frame cyclic JPEG sequence and
+  center-key geometry. An idle 25-frame test checks inter-frame intervals of
+  **195..220 ms** and average **199..205 ms**, rather than just counting loops.
+- Concurrent normal/inverted button redraws, reserved-center/held filtering,
+  keepalive, stable session timing and stopping during an in-flight animation
+  frame are covered. Native/monitor tests cover mode 3, including rejecting a
+  completed session with zero animation frames. Existing display modes and
+  shared native USB/trace regressions pass.
+- The firmware was flashed with readback verification. A **five-second real
+  session completed 25 acknowledged animation frames: 5.00 frames/s**, with
+  9/9 initial key images, zero duplicates, timeouts, wire errors, primary errors
+  or cleanup errors.
+- The user observed a rotating waiting-indicator-like image on **key 5**.
+  This confirms visible motion. Smoothness, tearing and the physical panel's
+  exact refresh rate are not yet qualified; the frame count measures completed
+  protocol transfers.
+- A subsequent **30-second viewing session completed 150 animation frames
+  (5.00 frames/s)** while capturing **nine presses and nine releases**.
+  The eight non-center presses produced **eight acknowledged three-fragment
+  key redraws**; the center press correctly caused no redraw. There were zero
+  duplicates, timeouts, wire errors or cleanup errors.
+- The target occupies **213600 bytes text, 0 data and 168144 BSS**, with no
+  undefined symbols or target libc/SDK linkage.
+- The pre-existing USB ACK timing limitation remains; this is still an
+  experimental PIO transport, not a USB compliance claim.
+
 ### Keypad diagnostic records
 
 All requests require native USB configuration and index zero:
@@ -569,6 +629,8 @@ All requests require native USB configuration and index zero:
   test after its status ACK, with the same abort/concurrency guards as `40/76`.
 - `40/7a`, value **1..30 input seconds**, length zero: arm the interactive
   toggle demo with the same deferred commit/abort/concurrency guards.
+- `40/7b`, value **1..30 animation seconds**, length zero: arm the center-key
+  animation plus eight interactive keys, with the same guards.
 
 Status fields (little-endian):
 
@@ -582,10 +644,10 @@ Status fields (little-endian):
 | 42, 43 | Interface number, discovered feature index |
 | 44 | Signed cleanup error |
 | 48..49 | Declared configuration demand, mA |
-| 50, 51 | Initial LCD images accepted (0..9), accepted LCD fragments (saturates at 255) |
+| 50, 51 | Initial LCD images accepted (0..9), count saturating at 255: accepted fragments in modes 1/2, completed animation frames in mode 3 |
 | 52 | Decoded LCD-key state count, including releases |
 | 56, 57 | Query reply confirmed, device still configured |
-| 58, 59 | LCD mode (0 disabled, 1 static, 2 toggle), LCD stage |
+| 58, 59 | LCD mode (0 disabled, 1 static, 2 toggle, 3 animation), LCD stage |
 | 60 | CRC32 over bytes 0..59 |
 
 States: 0 idle, 1 enumerating, 2 polling, 3 complete, 4 failed.

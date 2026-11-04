@@ -23,6 +23,11 @@ adds a per-key normal/inverted toggle on each press, without a target JPEG
 encoder. A user-assisted run captured **23 presses, 23 releases and 23
 acknowledged redraws**, without transport errors; the user confirmed that
 every press changed the image correctly. Simultaneous keys remain unqualified.
+The [PIO animation experiment](../logi-host/README.md#animation-experiment)
+adds an eight-frame rotating indicator on key 5 while the other eight keys
+remain interactive. Hardware confirmed **150 frames in 30 seconds** alongside
+eight acknowledged button redraws, without transport errors; the user observed
+the rotating indicator.
 Navigation diversion on that host remains future work.
 
 ## What this device does

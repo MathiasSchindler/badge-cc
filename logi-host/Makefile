@@ -22,7 +22,7 @@ VPATH := $(sort $(dir $(SOURCES)))
 .PHONY: all test force
 all: $(BUILD)/logi-host.uf2 $(BUILD)/logi-host-monitor
 
-$(BUILD)/lcd-prepare: lcd-prepare.c $(ROOT)/logi-keypad/keypad-lcd.h \
+$(BUILD)/lcd-prepare: lcd-prepare.c fs_lcd.h fs.h $(ROOT)/logi-keypad/keypad-lcd.h \
 		$(ROOT)/logi-keypad/keypad-lcd-wire.h $(ROOT)/src/shared/bytes.h | $(BUILD)
 	cc -std=c11 -O2 -Wall -Wextra -Werror $< -framework CoreGraphics -framework ImageIO -framework CoreFoundation -o $@
 

@@ -192,8 +192,9 @@ static void test_usb(void) {
     setup(0xc0u, LIVE_USB_LOGI_KEYPAD_EVENT, 32u, 64u); assert(usb.action == USB_ACTION_STALL);
     setup(0xc0u, LIVE_USB_LOGI_KEYPAD_STATUS, 0u, 63u); assert(usb.action == USB_ACTION_STALL);
     usb.logi_keypad_active = 0u;
-    for (uint8_t mode = 1u; mode <= 2u; ++mode) {
-        uint8_t request = mode == 2u ? LIVE_USB_LOGI_LCD_TOGGLE : LIVE_USB_LOGI_LCD_TEST;
+    for (uint8_t mode = 1u; mode <= 3u; ++mode) {
+        uint8_t request = mode == 3u ? LIVE_USB_LOGI_LCD_ANIMATE :
+                          mode == 2u ? LIVE_USB_LOGI_LCD_TOGGLE : LIVE_USB_LOGI_LCD_TEST;
         setup(0x40u, request, 0u, 0u); assert(usb.action == USB_ACTION_STALL);
         setup(0x40u, request, 31u, 0u); assert(usb.action == USB_ACTION_STALL);
         setup(0xc0u, request, 1u, 0u); assert(usb.action == USB_ACTION_STALL);

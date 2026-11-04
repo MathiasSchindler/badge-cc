@@ -55,12 +55,13 @@ static void print_status(const uint8_t bytes[64]) {
 }
 
 static void usage(FILE *out, const char *program) {
-    fprintf(out, "Usage: %s --serial SERIAL [--watch SECONDS | --bootsel | --probe-full-speed | --fs-status | --keypad-watch SECONDS | --lcd-test SECONDS | --lcd-toggle SECONDS]\n"
+    fprintf(out, "Usage: %s --serial SERIAL [--watch SECONDS | --bootsel | --probe-full-speed | --fs-status | --keypad-watch SECONDS | --lcd-test SECONDS | --lcd-toggle SECONDS | --lcd-animate SECONDS]\n"
             "Read passive USB-A line diagnostics (default: one snapshot).\n"
             "--probe-full-speed explicitly DRIVES GPIO12/13: reset, address, device descriptor.\n"
             "--keypad-watch captures HID input for 1..30 seconds and queries a feature read-only.\n"
             "--lcd-test SECONDS replaces all nine icons with numbered test images; holds for 1..30 seconds.\n"
             "--lcd-toggle SECONDS toggles each key's normal/inverted image on press for 1..30 seconds.\n"
+            "--lcd-animate SECONDS animates center key 5 at 5 fps; other keys remain interactive.\n"
             "Experimental full-speed direct-device only; no low-speed or hubs.\n"
             "--bootsel checks the matching firmware before requesting recovery.\n", program);
 }
@@ -156,7 +157,10 @@ static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd
     if (!generation) generation = 1u;
     if (lcd_mode) puts("LCD mode replaces existing icons (no image backup); uploading numbered keys 1..9.");
     if (lcd_mode == FS_LCD_TOGGLE) puts("Press a key to toggle its image; release does not toggle. Wait for 9/9 images.");
-    uint8_t request = lcd_mode == FS_LCD_TOGGLE ? LIVE_USB_LOGI_LCD_TOGGLE :
+    if (lcd_mode == FS_LCD_ANIMATE)
+        puts("Animation: rotating indicator on center key 5 at 5 fps; keys 1..4 and 6..9 toggle on press.");
+    uint8_t request = lcd_mode == FS_LCD_ANIMATE ? LIVE_USB_LOGI_LCD_ANIMATE :
+                      lcd_mode == FS_LCD_TOGGLE ? LIVE_USB_LOGI_LCD_TOGGLE :
                       lcd_mode ? LIVE_USB_LOGI_LCD_TEST : LIVE_USB_LOGI_KEYPAD;
     if (!usb_macos_transfer_value(usb, 0u, request,
                                   (uint16_t)seconds, NULL, 0u)) return 0;
@@ -173,7 +177,8 @@ static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd
         }
         if (lcd_mode && bytes[50] != images) {
             images = bytes[50];
-            printf("  LCD images accepted: %u/9 (%u acknowledged fragments).\n", images, bytes[51]);
+            printf("  LCD images accepted: %u/9 (%u %s).\n", images, bytes[51],
+                   lcd_mode == FS_LCD_ANIMATE ? "animation frames" : "acknowledged fragments");
         }
         uint32_t count = badger_bytes_load_u32(bytes + 16u);
         if (count < consumed || count - consumed > FS_KEYPAD_EVENTS) {
@@ -210,14 +215,19 @@ static int keypad_watch(IOUSBDeviceInterface500 **usb, unsigned seconds, int lcd
                    bytes[36], bytes[37], bytes[38], bytes[39], bytes[40], bytes[41], bytes[42]);
             printf("  Declared configuration demand: %u mA (not measured; power path unqualified).\n",
                    keypad_u16(bytes + 48u));
-            if (lcd_mode) printf("  LCD images=%u/9 fragments=%u state=%u; hold complete=%u.\n",
-                                 bytes[50], bytes[51], bytes[59], bytes[59] == FS_LCD_DONE);
+            if (lcd_mode) printf("  LCD images=%u/9 %s=%u state=%u; hold complete=%u.\n",
+                                 bytes[50], lcd_mode == FS_LCD_ANIMATE ? "animation_frames" : "fragments",
+                                 bytes[51], bytes[59], bytes[59] == FS_LCD_DONE);
+            if (lcd_mode == FS_LCD_ANIMATE)
+                printf("  Completed animation frames: %u / %u input seconds = %.2f fps (target 5).\n",
+                       bytes[51], seconds, (double)bytes[51] / seconds);
             if (!badger_bytes_load_u32(bytes + 52u))
                 puts("  No physical LCD key states observed; button operation is not yet verified.");
             int phy_ok = read_fs(usb, 0u, 0);
             return bytes[14] == 3u && !error && !badger_bytes_load_u32(bytes + 44u) &&
                 bytes[56] && !bytes[57] &&
                 (!lcd_mode || (bytes[58] == (unsigned)lcd_mode && bytes[50] == 9u && bytes[59] == FS_LCD_DONE)) &&
+                (lcd_mode != FS_LCD_ANIMATE || bytes[51] > 0u) &&
                 phy_ok;
         }
         if (clock_gettime(CLOCK_MONOTONIC, &tick)) { perror("keypad clock"); return 0; }
@@ -243,9 +253,10 @@ int main(int argc, char **argv) {
             if (!parse_seconds(argv[++i], &seconds)) { usage(stderr, argv[0]); return 2; }
             mode = 1;
         } else if ((!strcmp(argv[i], "--keypad-watch") || !strcmp(argv[i], "--lcd-test") ||
-                    !strcmp(argv[i], "--lcd-toggle")) &&
+                    !strcmp(argv[i], "--lcd-toggle") || !strcmp(argv[i], "--lcd-animate")) &&
                    !mode && i + 1 < argc) {
-            lcd_mode = !strcmp(argv[i], "--lcd-toggle") ? FS_LCD_TOGGLE :
+            lcd_mode = !strcmp(argv[i], "--lcd-animate") ? FS_LCD_ANIMATE :
+                       !strcmp(argv[i], "--lcd-toggle") ? FS_LCD_TOGGLE :
                        !strcmp(argv[i], "--lcd-test") ? FS_LCD_STATIC : 0;
             if (!parse_seconds(argv[++i], &keypad_seconds) || keypad_seconds > 30u) {
                 usage(stderr, argv[0]); return 2;

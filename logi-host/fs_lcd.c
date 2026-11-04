@@ -13,6 +13,7 @@ void fs_lcd_begin(fs_lcd_t *l, uint8_t mode) {
 }
 
 static const fs_lcd_image_t *current_image(const fs_lcd_t *l) {
+    if (l->animated) return &fs_lcd_animation[l->frame];
     return l->inverted ? &fs_lcd_inverted_images[l->key] : &fs_lcd_images[l->key];
 }
 
@@ -31,6 +32,8 @@ int32_t fs_lcd_step(fs_lcd_t *l, fs_keypad_t *k) {
     }
     if (now - l->pause_started < l->pause_us) return 0;
     if (k->output_length) return FS_BUSY;
+    int animate = l->mode == FS_LCD_ANIMATE && l->images == 9u && !l->stopping &&
+                  (!l->animation_frames || now - l->frame_started >= FS_LCD_FRAME_US);
     uint16_t length = 20u;
     if (!l->feature || !l->last_keepalive || now - l->last_keepalive >= 1000000u) {
         badger_bytes_zero(l->command, 20u);
@@ -46,14 +49,20 @@ int32_t fs_lcd_step(fs_lcd_t *l, fs_keypad_t *k) {
             l->command[3] |= 0x10u;
             l->command[4] = 0x0bu; l->command[5] = 0xb8u;
         }
-    } else if (l->images < 9u || l->rendering || l->desired != l->displayed) {
+    } else if (l->images < 9u || l->rendering || l->desired != l->displayed || animate) {
         if (!l->rendering) {
             l->inverted = 0u;
+            l->animated = 0u;
             if (l->images < 9u) l->key = l->images;
-            else {
+            else if (l->desired != l->displayed) {
                 uint16_t dirty = l->desired ^ l->displayed;
                 do { l->key = (uint8_t)((l->key + 1u) % 9u); } while (!(dirty & (1u << l->key)));
                 l->inverted = (l->desired >> l->key) & 1u;
+            } else {
+                l->animated = 1u;
+                l->key = FS_LCD_ANIMATION_KEY;
+                l->frame = l->next_frame;
+                l->frame_started = now;
             }
             l->rendering = 1u;
         }
@@ -78,10 +87,13 @@ int32_t fs_lcd_step(fs_lcd_t *l, fs_keypad_t *k) {
 
 int32_t fs_lcd_input(fs_lcd_t *l, const fs_packet_t *p) {
     if (!p->length) return 0;
-    if (l->mode == FS_LCD_TOGGLE && l->stage < FS_LCD_DONE && !l->stopping) {
+    if ((l->mode == FS_LCD_TOGGLE || l->mode == FS_LCD_ANIMATE) &&
+        l->stage < FS_LCD_DONE && !l->stopping) {
         int key = decode_button(p->data[0], p->data, p->length);
         if (key >= 0) {
-            if (key && key != l->pressed_key) l->desired ^= 1u << (key - 1);
+            if (key && key != l->pressed_key &&
+                !(l->mode == FS_LCD_ANIMATE && key == FS_LCD_ANIMATION_KEY + 1))
+                l->desired ^= 1u << (key - 1);
             l->pressed_key = (uint8_t)key;
             return 0;
         }
@@ -121,9 +133,14 @@ static int32_t accept_reply(fs_lcd_t *l, const fs_packet_t *p, uint32_t now) {
             ++l->part;
             l->pause_started = now; l->pause_us = 5000u;
             if (l->offset == current_image(l)->length) {
-                uint16_t bit = 1u << l->key;
-                if (l->inverted) l->displayed |= bit;
-                else l->displayed &= (uint16_t)~bit;
+                if (l->animated) {
+                    ++l->animation_frames;
+                    l->next_frame = (uint8_t)((l->frame + 1u) % FS_LCD_ANIMATION_FRAMES);
+                } else {
+                    uint16_t bit = 1u << l->key;
+                    if (l->inverted) l->displayed |= bit;
+                    else l->displayed &= (uint16_t)~bit;
+                }
                 l->rendering = 0u;
                 l->offset = 0u; l->part = 1u; l->retries = 0u;
                 if (l->images < 9u && ++l->images == 9u) {
@@ -137,7 +154,8 @@ static int32_t accept_reply(fs_lcd_t *l, const fs_packet_t *p, uint32_t now) {
 }
 
 void fs_lcd_status(const fs_lcd_t *l, uint8_t bytes[64]) {
-    bytes[50] = l->images; bytes[51] = l->fragments > 255u ? 255u : (uint8_t)l->fragments;
+    uint16_t count = l->mode == FS_LCD_ANIMATE ? l->animation_frames : l->fragments;
+    bytes[50] = l->images; bytes[51] = count > 255u ? 255u : (uint8_t)count;
     bytes[58] = l->mode; bytes[59] = l->stage;
     badger_bytes_store_u32(bytes + 60u, diag_crc32(bytes, 60u));
 }

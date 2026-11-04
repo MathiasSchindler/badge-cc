@@ -151,6 +151,8 @@ typedef struct {
     uint8_t update_key, update_inverted;
     uint16_t rendered_inverted;
     uint32_t updates;
+    uint8_t animation_mode, image_key, animation_frame;
+    uint32_t animation_frames, frame_times[64];
     uint32_t image_offset, keepalives, fragments, last_keepalive, configured_at;
 } device_t;
 
@@ -212,7 +214,20 @@ static int32_t lcd_transfer(device_t *d, const fs_tx_t *tx, const uint8_t token[
         assert(report[0] == 0x14u && size == 4095u % d->mps && d->keepalives);
         assert(d->now - d->last_keepalive < 3000000u);
         unsigned key = d->lcd_images < 9u ? d->lcd_images : d->update_key;
-        const fs_lcd_image_t *image = d->lcd_images < 9u || !d->update_inverted ?
+        if (d->animation_mode) {
+            if (d->image_part == 1u) {
+                unsigned x = report[9] << 8u | report[10], y = report[11] << 8u | report[12];
+                assert(x >= 23u && x <= 339u && !((x - 23u) % 158u));
+                assert(y >= 6u && y <= 322u && !((y - 6u) % 158u));
+                d->image_key = (uint8_t)((y - 6u) / 158u * 3u + (x - 23u) / 158u);
+            }
+            key = d->image_key;
+            assert(key == (d->lcd_images < 9u ? d->lcd_images : FS_LCD_ANIMATION_KEY) ||
+                   (d->lcd_images == 9u && key == d->update_key));
+        }
+        int animated = d->animation_mode && d->lcd_images == 9u && key == FS_LCD_ANIMATION_KEY;
+        const fs_lcd_image_t *image = animated ? &fs_lcd_animation[d->animation_frame] :
+                                      d->lcd_images < 9u || !d->update_inverted ?
                                       &fs_lcd_images[key] : &fs_lcd_inverted_images[key];
         unsigned header = d->image_part == 1u ? 20u : 5u;
         unsigned count = image->length - d->image_offset;
@@ -240,6 +255,11 @@ static int32_t lcd_transfer(device_t *d, const fs_tx_t *tx, const uint8_t token[
             if (last) {
                 d->visible_images |= 1u << key;
                 if (d->lcd_images < 9u) ++d->lcd_images;
+                else if (animated) {
+                    assert(d->animation_frames < sizeof(d->frame_times) / sizeof(*d->frame_times));
+                    d->frame_times[d->animation_frames++] = d->now;
+                    d->animation_frame = (uint8_t)((d->animation_frame + 1u) % FS_LCD_ANIMATION_FRAMES);
+                }
                 else {
                     if (d->update_inverted) d->rendered_inverted |= 1u << key;
                     else d->rendered_inverted &= (uint16_t)~(1u << key);
@@ -585,6 +605,56 @@ static void lcd_toggle_tests(void) {
     puts("in-flight snapshot, queued-toggle coalescing, busy/NAK retry, keepalive and stop/drain PASS");
 }
 
+static void lcd_animation_tests(void) {
+    device_t d = {.mps = 64u, .keypad = 1u, .lcd_mode = 1u,
+                  .out_pid = FS_DATA0, .in_pid = FS_DATA0, .image_part = 1u,
+                  .animation_mode = 1u, .update_key = 0u, .update_inverted = 1u};
+    fs_bus_t bus = {.context = &d, .now = mock_now, .reset = mock_reset, .exchange = mock_exchange};
+    fs_keypad_t k; fs_result_t r; fs_lcd_t l;
+    assert(!fs_keypad_start(&bus, &r, &k));
+    k.host.budget = 62000000u;
+    fs_lcd_begin(&l, FS_LCD_ANIMATE);
+    lcd_until_updates(&d, &k, &l, 0u);
+    uint32_t hold_started = l.hold_started;
+    unsigned loops = 0u;
+    while (l.animation_frames < 25u) {
+        assert(++loops < 20000u);
+        lcd_tick(&d, &k, &l);
+    }
+    assert(d.animation_frames == 25u);
+    for (unsigned i = 1u; i < d.animation_frames; ++i) {
+        uint32_t gap = d.frame_times[i] - d.frame_times[i - 1u];
+        assert(gap >= 195000u && gap <= 220000u);
+    }
+    uint32_t average = (d.frame_times[24] - d.frame_times[0]) / 24u;
+    assert(average >= 199000u && average <= 205000u);
+    lcd_key(&l, 1u);
+    lcd_until_updates(&d, &k, &l, 1u);
+    assert(l.displayed == 1u && d.rendered_inverted == 1u);
+    lcd_key(&l, 1u); lcd_key(&l, 5u); lcd_key(&l, 0u);
+    assert(l.desired == 1u);
+    loops = 0u;
+    while (l.animation_frames < 35u || !l.rendering || !l.animated) {
+        assert(++loops < 20000u);
+        lcd_tick(&d, &k, &l);
+    }
+    lcd_key(&l, 1u);
+    d.update_inverted = 0u;
+    l.stopping = 1u;
+    lcd_until_updates(&d, &k, &l, 2u);
+    assert(!l.displayed && !d.rendered_inverted && !l.desired);
+    uint16_t frames = l.animation_frames;
+    for (unsigned i = 0u; i < 500u; ++i) lcd_tick(&d, &k, &l);
+    assert(l.animation_frames == frames && frames == d.animation_frames && l.hold_started == hold_started);
+    assert(d.keepalives >= 5u);
+    uint8_t status[64] = {0};
+    fs_lcd_status(&l, status);
+    assert(status[58] == FS_LCD_ANIMATE && status[51] == frames);
+    assert(!fs_keypad_stop(&k) && !d.configured);
+    puts("LCD animation: exact eight-frame JPEG sequence/center geometry, 5-fps cadence,");
+    puts("concurrent key redraw, reserved center/held filtering, keepalive and in-flight stop/drain PASS");
+}
+
 static void lcd_tests(void) {
     for (unsigned mode = 0u; mode < 10u; ++mode) {
         device_t d = {.mps = mode < 7u ? 64u : (uint8_t)(8u << (mode - 7u)),
@@ -635,6 +705,7 @@ int main(void) {
     keypad_tests();
     lcd_tests();
     lcd_toggle_tests();
+    lcd_animation_tests();
     puts("Full-speed: independent wire vectors, all payload sizes/stuffing, bad CRC/PID/line,");
     puts("reset, SOF, EP0 8/16/32/64, address/status/toggle, duplicate/NAK/STALL/deadline PASS");
     return 0;
