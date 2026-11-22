@@ -103,6 +103,33 @@ LLVM still reaches 80 instructions in the ordinary, inlined build. The
 arithmetic case also improves (58 to 54 function bytes, 1,070 to 985 reached
 instructions); the other four cases are unchanged.
 
+### Follow-up: switch, literals, and indexed loads
+
+The opt-in `thumb-constants` backend compares small switch cases directly
+and folds branch pairs where the existing range and PHI-edge checks permit.
+It can replace two-word materializations with a Thumb-16 PC-relative load
+when a bounded tail pool, including alignment, does not grow code. It also
+folds single-use byte-offset addresses into aligned indexed loads, including
+adjacent sign or zero extensions. Low-bit masks and `0 - x` use direct
+Thumb extract and negate forms. Division is allowed in the existing
+stack-free leaf rewrite; it is not replaced by a shift.
+
+Against the preceding opt-in capture:
+
+| Program | Linked C function bytes | Reached QEMU instructions |
+| --- | ---: | ---: |
+| Arithmetic | 54 to 52 | 985 to 815 |
+| Control | 90 to 80 | 901 to 684 |
+| CRC32 | 70 to 64 | 2,290 to 1,970 |
+| Indexed memory | 70 to 64 | 950 to 790 |
+| Helper calls | 54, unchanged | 80, unchanged |
+| Fixed point | 54 to 38 | 80 to 55 |
+
+The 37-module fixed-IR comparison saved 2,446 executable bytes. No module or
+measured stack resource grew, and the qualified default output was identical.
+Fewer QEMU instructions do not establish a hardware speedup, especially where
+a literal load replaces immediate instructions and introduces an XIP access.
+
 ## Explore
 
 - **Project selector:** view one linked program at a time; translation units

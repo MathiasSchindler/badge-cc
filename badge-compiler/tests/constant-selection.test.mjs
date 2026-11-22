@@ -313,7 +313,7 @@ entry:
   run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
     file('pool.ll'), '-o', file('pool.s')]);
   const assembly = fs.readFileSync(file('pool.s'), 'utf8');
-  assert.equal((assembly.match(/ldr\.w r\d+, \.Lcg_shared_/g) ?? []).length, 2);
+  assert.equal((assembly.match(/ldr\.[nw] r\d+, \.Lcg_shared_/g) ?? []).length, 2);
   assert.match(assembly, /pop\.[wn] \{[^\n]*pc\}\n(?:@ [^\n]*\n)*\.p2align 2\n\.Lcg_shared_/);
   assert.equal((assembly.match(/\.word cell\+0/g) ?? []).length, 1);
   run(tool('badge-asm'), [file('pool.s'), '-o', file('owned.o')]);
@@ -520,6 +520,118 @@ entry:
   run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
     '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
     '-kernel', file('shift.elf')]);
+});
+
+test('compact switches preserve PHI edges and fold indexed narrow loads only when aligned', t => {
+  const file = files(t);
+  fs.writeFileSync(file('dispatch.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@table = constant [4 x i16] [i16 7, i16 257, i16 1024, i16 0], align 2
+define i32 @dispatch(i32 %x, i32 %index) {
+entry:
+  switch i32 %x, label %fallback [
+    i32 7, label %hit
+    i32 305419896, label %join
+  ]
+hit:
+  %addr = getelementptr i8, ptr @table, i32 %index
+  %byte = load volatile i16, ptr %addr, align 2
+  %value = zext i16 %byte to i32
+  br label %join
+fallback:
+  br label %join
+join:
+  %result = phi i32 [19, %entry], [%value, %hit], [5, %fallback]
+  ret i32 %result
+}
+define i32 @unaligned(i32 %index) {
+entry:
+  %addr = getelementptr i8, ptr @table, i32 %index
+  %half = load i16, ptr %addr, align 1
+  %value = zext i16 %half to i32
+  ret i32 %value
+}
+define i32 @main() {
+entry:
+  %a = call i32 @dispatch(i32 7, i32 2)
+  %b = call i32 @dispatch(i32 305419896, i32 0)
+  %c = call i32 @dispatch(i32 0, i32 0)
+  %d = call i32 @unaligned(i32 1)
+  %x = xor i32 %a, 257
+  %y = xor i32 %b, 19
+  %z = xor i32 %c, 5
+  %w = xor i32 %d, 256
+  %t = or i32 %x, %y
+  %u = or i32 %z, %w
+  %code = or i32 %t, %u
+  ret i32 %code
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('dispatch.ll'), '-o', file('dispatch.s')]);
+  const assembly = fs.readFileSync(file('dispatch.s'), 'utf8');
+  assert.match(assembly, /^cmp\.[nw] r\d+, #7$/m);
+  assert.match(assembly, /^ldrh\.[nw] r\d+, \[r\d+, r\d+\]$/m);
+  assert.match(assembly, /^\.word 305419896$/m);
+  assert.doesNotMatch(assembly.slice(assembly.indexOf('\nunaligned:'), assembly.indexOf('.size unaligned,')), /^ldrh/m);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('dispatch.s'), '-o', file('dispatch.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('dispatch.o'), '-o', file('dispatch.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('dispatch.elf')]);
+});
+
+test('straight-line leaf reuse removes saves and narrows instructions without crossing assembly effects', t => {
+  const file = files(t);
+  const seed = 0x12345678, low = seed ^ 41;
+  const expected = ((low ^ (low << 13)) + (seed >>> 3)) >>> 0;
+  fs.writeFileSync(file('leaf.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define i32 @leaf(i32 %x) {
+entry:
+  br label %body
+body:
+  %low = xor i32 %x, 41
+  %upper = lshr i32 %x, 3
+  %shift = shl i32 %low, 13
+  %mixed = xor i32 %low, %shift
+  %sum = add i32 %mixed, %upper
+  ret i32 %sum
+}
+define i32 @leaf_with_asm(i32 %x) {
+entry:
+  %low = xor i32 %x, 41
+  %upper = lshr i32 %x, 3
+  call void asm sideeffect "nop", "~{cc}"()
+  %shift = shl i32 %low, 13
+  %mixed = xor i32 %low, %shift
+  %sum = add i32 %mixed, %upper
+  ret i32 %sum
+}
+define i32 @main() {
+entry:
+  %a = call i32 @leaf(i32 ${seed})
+  %b = call i32 @leaf_with_asm(i32 ${seed})
+  %x = xor i32 %a, ${expected}
+  %y = xor i32 %b, ${expected}
+  %status = or i32 %x, %y
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('leaf.ll'), '-o', file('leaf.s')]);
+  const assembly = fs.readFileSync(file('leaf.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.match(body('leaf'), /leaf-registers: entry\/return copies removed 2/);
+  assert.doesNotMatch(body('leaf'), /^p(?:ush|op)|^mov r\d+, r0|^mov r0, r\d+/m);
+  assert.match(body('leaf'), /^lsrs\.n r\d+, r\d+, #3$/m);
+  assert.match(body('leaf'), /^eor\.w .* lsl #13$/m);
+  assert.doesNotMatch(body('leaf_with_asm'), /leaf-(?:registers|widths):/);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('leaf.s'), '-o', file('leaf.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('leaf.o'), '-o', file('leaf.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('leaf.elf')]);
 });
 
 test('shifted multiply-adds and direct comparisons preserve arithmetic and all signed/unsigned predicates', t => {

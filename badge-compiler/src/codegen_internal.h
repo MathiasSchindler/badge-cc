@@ -34,6 +34,7 @@ typedef struct cg_inst {
   unsigned scalar_call_arguments_plus_one;
   unsigned forwarded_store_register_plus_one;
   int ephemeral_address;
+  struct cg_inst *indexed_address;
 } cg_inst;
 typedef struct cg_assembly {
   char *text;
@@ -158,7 +159,7 @@ static inline int cg_operand_selection(const cg_context *c) {
          cg_width_selection(c);
 }
 void cg_reuse_constants(cg_context *c, size_t body_start);
-void cg_pool_symbol_addresses(cg_context *c, size_t start);
+void cg_pool_literals(cg_context *c, size_t start);
 void cg_reduce_branches(cg_context *c, size_t body_start);
 void cg_forward_byte_arguments(cg_context *c, size_t body_start);
 void cg_fold_zero_branches(cg_context *c, size_t body_start);
@@ -170,7 +171,7 @@ static inline int cg_effect_selection(const cg_context *c) {
 }
 cg_assembly *cg_instruction_assembly(cg_context *c, cg_inst *instruction);
 cg_inst *cg_selection_countdown(cg_context *c, cg_inst *instruction);
-cg_inst *cg_selection_signed_load(cg_context *c, cg_inst *instruction);
+cg_inst *cg_selection_extended_load(cg_context *c, cg_inst *instruction);
 int cg_emit_counted_leaf(cg_context *c);
 
 static inline int cg_global_residency(const cg_context *c) {
@@ -258,6 +259,8 @@ void cg_prepare_cfg(cg_context *c);
 int cg_target_has_phi(cg_context *c, const char *target);
 
 void cg_immediate(cg_context *c, unsigned r, uint32_t n);
+int cg_narrow_flag_binary(cg_context *c, const char *op, unsigned dst,
+                          unsigned left, unsigned right);
 int cg_compact_binary(cg_context *c, const char *op, unsigned dst,
                       unsigned left, unsigned right);
 void cg_address(cg_context *c, unsigned r, unsigned offset);

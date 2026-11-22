@@ -3,20 +3,8 @@
 #include <string.h>
 
 /* Only callers at an outside-IT scalar boundary with dead APSR may use this. */
-int cg_compact_binary(cg_context *c, const char *op, unsigned dst,
-                      unsigned left, unsigned right) {
-  if (cg_width_selection(c) && !strcmp(op, "add") &&
-      dst <= 12 && left <= 12 && right <= 12 &&
-      (dst == left || dst == right)) {
-    cg_emit(c, "add.n r%u, r%u\n", dst, dst == left ? right : left);
-    return 1;
-  }
-  if (!cg_compact_selection(c) || dst > 12 || left > 12 || right > 12)
-    return 0;
-  if (!strcmp(op, "add") && (dst == left || dst == right)) {
-    cg_emit(c, "add.n r%u, r%u\n", dst, dst == left ? right : left);
-    return 1;
-  }
+int cg_narrow_flag_binary(cg_context *c, const char *op, unsigned dst,
+                          unsigned left, unsigned right) {
   if (dst >= 8 || left >= 8 || right >= 8)
     return 0;
   if (!strcmp(op, "add") || !strcmp(op, "sub")) {
@@ -43,6 +31,17 @@ int cg_compact_binary(cg_context *c, const char *op, unsigned dst,
     return 0;
   cg_emit(c, "%s.n r%u, r%u, r%u\n", ins, dst, left, right);
   return 1;
+}
+
+int cg_compact_binary(cg_context *c, const char *op, unsigned dst,
+                      unsigned left, unsigned right) {
+  if ((cg_width_selection(c) || cg_compact_selection(c)) && !strcmp(op, "add") &&
+      dst <= 12 && left <= 12 && right <= 12 &&
+      (dst == left || dst == right)) {
+    cg_emit(c, "add.n r%u, r%u\n", dst, dst == left ? right : left);
+    return 1;
+  }
+  return cg_compact_selection(c) && cg_narrow_flag_binary(c, op, dst, left, right);
 }
 
 void cg_immediate(cg_context *c, unsigned r, uint32_t n) {

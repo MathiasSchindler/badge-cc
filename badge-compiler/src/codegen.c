@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "codegen_internal.h"
 #include "target.h"
+#include "thumb_immediate.h"
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -1109,7 +1110,7 @@ static void cg_forward_store(cg_context *c, cg_inst *store, cg_type *type,
   const char *address = c->tokens[pointer].text;
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       !cg_global_residency(c) || !load || !load->result ||
-      cg_selection_signed_load(c, load) || load->ephemeral_address ||
+      cg_selection_extended_load(c, load) || load->ephemeral_address ||
       (type->bits != 8 && type->bits != 16 && type->bits != 32) ||
       (*address != '%' && *address != '@') ||
       (store->end - pointer != 1 &&
@@ -1676,21 +1677,47 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_type *t = cg_type_parse(c, 0);
     if (t->size > 4)
       cg_error(c, "64-bit switch unsupported");
-    cg_value_read(c, t, 6, 0);
+    int compact = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
+    unsigned condition = compact ? cg_global_register(c, c->tokens[c->pos].text) : 0;
+    if (condition)
+      cg_take(c);
+    else {
+      condition = 6;
+      cg_value_read(c, t, condition, 0);
+    }
     cg_expect(c, ",");
     cg_expect(c, "label");
     char *fallback = cg_take(c);
     cg_expect(c, "[");
     while (!cg_accept(c, "]")) {
       (void)cg_type_parse(c, 0);
-      cg_value_read(c, t, 0, 0);
+      const char *constant = c->tokens[c->pos].text;
+      uint32_t value = 0;
+      int immediate = 0;
+      if (compact && (isdigit((unsigned char)constant[0]) ||
+                      (constant[0] == '-' && isdigit((unsigned char)constant[1])))) {
+        value = (uint32_t)cg_number(c, constant);
+        if (t->bits < 32)
+          value &= (UINT32_C(1) << t->bits) - 1;
+        immediate = thumb_modified(value) >= 0;
+      }
+      if (immediate)
+        cg_take(c);
+      else
+        cg_value_read(c, t, 0, 0);
       cg_expect(c, ",");
       cg_expect(c, "label");
       char *target = cg_take(c);
       unsigned next = c->pos, id = ++c->unique;
-      cg_emit(c, "cmp r6, r0\nbne%s .Lcg_switch%u\n", cg_branch_width(c), id);
+      if (immediate)
+        cg_emit(c, "cmp.%c r%u, #%" PRIu32 "\n", condition < 8 && value <= 255 ? 'n' : 'w',
+                condition, value);
+      else
+        cg_emit(c, "cmp r%u, r0\n", condition);
+      const char *edge = compact ? "edge" : "switch";
+      cg_emit(c, "bne%s .Lcg_%s%u\n", cg_branch_width(c), edge, id);
       cg_edge(c, block, target, 0);
-      cg_emit(c, ".Lcg_switch%u:\n", id);
+      cg_emit(c, ".Lcg_%s%u:\n", edge, id);
       c->pos = next;
     }
     cg_edge(c, block, fallback, i == block->last);
@@ -1718,6 +1745,29 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       cg_expect(c, ",");
     (void)cg_type_parse(c, 0);
     unsigned pointer = c->pos;
+    if (i->indexed_address) {
+      unsigned at = i->indexed_address->begin;
+      unsigned base = cg_global_register(c, c->tokens[at + 6].text);
+      unsigned index = cg_global_register(c, c->tokens[at + 9].text);
+      if (!base) {
+        c->pos = at + 6;
+        cg_value_read(c, NULL, 0, 0);
+      }
+      if (!index) {
+        index = base == 1 ? 2 : 1;
+        c->pos = at + 9;
+        cg_value_read(c, NULL, index, 0);
+      }
+      cg_inst *extension = cg_selection_extended_load(c, i);
+      cg_value *result = extension ? extension->result : i->result;
+      unsigned reg = cg_global_register(c, result->name);
+      int sign = extension && !strcmp(c->tokens[extension->begin + 2].text, "sext");
+      const char *suffix = t->size == 1 ? "b" : t->size == 2 ? "h" : "";
+      cg_emit(c, "ldr%s%s.%c r%u, [r%u, r%u]\n", sign ? "s" : "", suffix,
+              reg < 8 && base < 8 && index < 8 ? 'n' : 'w', reg, base, index);
+      cg_save_normalized(c, result, reg);
+      return;
+    }
     unsigned direct_base = cg_operand_selection(c)
                                ? cg_global_register(c, c->tokens[pointer].text) : 0;
     unsigned fallback_base = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
@@ -1737,12 +1787,15 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     }
     if (is_volatile && align < (t->size > 4 ? 4 : t->size))
       cg_error(c, "unaligned volatile scalar access unsupported");
-    cg_inst *signed_result = cg_selection_signed_load(c, i);
-    if (signed_result) {
-      unsigned dst = cg_global_register(c, signed_result->result->name);
-      cg_emit(c, "ldrs%s.w r%u, [r%u]\n", t->size == 1 ? "b" : "h",
-              dst, direct_base ? direct_base : fallback_base);
-      cg_save_normalized(c, signed_result->result, dst);
+    cg_inst *extension = cg_selection_extended_load(c, i);
+    if (extension) {
+      unsigned dst = cg_global_register(c, extension->result->name);
+      unsigned base = direct_base ? direct_base : fallback_base;
+      int sign = !strcmp(c->tokens[extension->begin + 2].text, "sext");
+      cg_emit(c, "ldr%s%c.%c r%u, [r%u]\n", sign ? "s" : "",
+              t->size == 1 ? 'b' : 'h', !sign && dst < 8 && base < 8 ? 'n' : 'w',
+              dst, base);
+      cg_save_normalized(c, extension->result, dst);
       return;
     }
     if (cg_operand_selection(c) && (t->size == 1 || t->size == 2 || t->size == 4) &&

@@ -125,6 +125,22 @@ programs are unchanged. The 37-module fixed-IR corpus saves 250 executable
 bytes across 12 modules. These are size and emulator measurements, not
 physical speed qualification.
 
+The opt-in backend also reassigns registers in eligible stack-free,
+straight-line scalar leaves before finalizing their prologue. It removes
+input/output copies when the body leaves the ABI register free and can move
+every touched callee-saved register into free low caller-saved registers.
+Branches, calls, memory operations, and inline assembly retain their normal
+lowering. On the same inlined IR this saves another eight function and flash
+bytes (70 to 62 and 236 to 228), and reaches 80 rather than 100 instructions
+across five QEMU inputs, matching LLVM's reached count for this benchmark.
+The same straight-line whitelist excludes flag consumers and IT blocks,
+so after reassignment the selector can use flag-setting Thumb-16 encodings
+for eligible low-register operations. Four such encodings reduce the
+function from 62 to 54 bytes and the flash image from 228 to 220 bytes,
+matching LLVM `-Oz` without changing the reached count. The other five
+microbenchmarks and 37 fixed production modules are unchanged by this
+width refinement. Neither profile has been timed on hardware.
+
 ## Qualification
 
 [The final persistent report](../build/po16-qualified-sharing/results.json)

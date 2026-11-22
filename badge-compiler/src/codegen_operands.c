@@ -774,8 +774,8 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
   if (assembly_lines) cg_error(c, "truncated constant selection assembly boundary");
 }
 
-void cg_pool_symbol_addresses(cg_context *c, size_t start) {
-  enum { MAX_LINES = 920, MAX_SYMBOLS = 32 };
+void cg_pool_literals(cg_context *c, size_t start) {
+  enum { MAX_LINES = 920, MAX_NARROW_LINES = 220, MAX_LITERALS = 32 };
   const char *source = c->out + start;
   if (strstr(source, "@ constant-assembly-lines:") || strstr(source, "\nit"))
     return;
@@ -790,7 +790,10 @@ void cg_pool_symbol_addresses(cg_context *c, size_t start) {
     lines[count++] = p;
     p = line(p);
   }
-  struct { const char *expression; unsigned uses; } entries[MAX_SYMBOLS] = {{0}};
+  /* At most four bytes per line, plus the aligned pool: 220*4+32*4+2
+     fits Thumb-16 literal reach even for the earliest load. */
+  int narrow_reach = count <= MAX_NARROW_LINES;
+  struct { const char *expression; unsigned uses, low_uses; } entries[MAX_LITERALS] = {{0}};
   unsigned entry_count = 0;
   unsigned site[MAX_LINES] = {0}, regs[MAX_LINES];
   for (unsigned i = 0; i + 1 < count; i++) {
@@ -801,39 +804,51 @@ void cg_pool_symbol_addresses(cg_context *c, size_t start) {
       return;
     unsigned lower, upper;
     const char *expr = symbol(p, "movw", &lower);
-    const char *high = expr ? symbol(lines[i + 1], "movt", &upper) : NULL;
-    if (!high || lower != upper || strcmp(expr, high))
-      continue;
+    if (expr) {
+      const char *high = symbol(lines[i + 1], "movt", &upper);
+      if (!high || lower != upper || strcmp(expr, high))
+        continue;
+    } else {
+      uint32_t lo, hi;
+      if (!narrow_reach || !immediate(p, "movw", &lower, &lo) || lower >= 8 ||
+          !immediate(lines[i + 1], "movt", &upper, &hi) || lower != upper)
+        continue;
+      char *decimal = cg_alloc(c, 12);
+      snprintf(decimal, 12, "%" PRIu32 ")", (hi << 16) | lo);
+      expr = decimal;
+    }
     unsigned k = 0;
     while (k < entry_count && strcmp(expr, entries[k].expression))
       k++;
     if (k == entry_count) {
-      if (k == MAX_SYMBOLS)
+      if (k == MAX_LITERALS)
         continue;
       entries[k].expression = expr;
       entry_count++;
     }
     entries[k].uses++;
+    entries[k].low_uses += narrow_reach && lower < 8;
     site[i] = k + 1;
     regs[i++] = lower;
   }
   unsigned pooled = 0;
   for (unsigned k = 0; k < entry_count; k++)
-    pooled += entries[k].uses > 1;
+    pooled += entries[k].uses > 1 || entries[k].low_uses;
   if (!pooled)
     return;
   c->size = start;
   for (unsigned i = 0; i < count; i++) {
     unsigned k = site[i];
-    if (k && entries[k - 1].uses > 1) {
-      cg_emit(c, "ldr.w r%u, .Lcg_shared_%u_%u\n", regs[i], c->fn->id, k);
+    if (k && (entries[k - 1].uses > 1 || entries[k - 1].low_uses)) {
+      char width = narrow_reach && regs[i] < 8 ? 'n' : 'w';
+      cg_emit(c, "ldr.%c r%u, .Lcg_shared_%u_%u\n", width, regs[i], c->fn->id, k);
       i++;
     } else
       cg_emit(c, "%s\n", lines[i]);
   }
   cg_emit(c, ".p2align 2\n");
   for (unsigned k = 0; k < entry_count; k++)
-    if (entries[k].uses > 1) {
+    if (entries[k].uses > 1 || entries[k].low_uses) {
       const char *expr = entries[k].expression;
       cg_emit(c, ".Lcg_shared_%u_%u:\n.word %.*s\n", c->fn->id, k + 1,
               (int)strlen(expr) - 1, expr);

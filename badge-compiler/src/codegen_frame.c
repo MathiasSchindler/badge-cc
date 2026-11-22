@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 unsigned cg_slot(cg_context *c, unsigned size, unsigned align) {
   if (!align || (align & (align - 1)) || align > 8)
@@ -237,8 +238,142 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   if (!calls) cg_emit(c, "bx lr\n");
   c->frame_sp_relative = 0;
 }
+
+static int leaf_register_move(const char *line, unsigned *dst, unsigned *src) {
+  int end = 0;
+  return sscanf(line, "mov r%u, r%u%n", dst, src, &end) == 2 &&
+         !line[end] && *dst <= 12 && *src <= 12;
+}
+
+static int narrow_leaf_instruction(cg_context *c, const char *line, const unsigned map[13]) {
+  char op[9];
+  unsigned dst, left, right;
+  int end = 0;
+  if (sscanf(line, "%8[a-z].w r%u, r%u, r%u%n", op, &dst, &left, &right, &end) == 4 &&
+      end && !line[end] && dst <= 12 && left <= 12 && right <= 12) {
+    const char *ir = !strcmp(op, "eor") ? "xor" : !strcmp(op, "orr") ? "or" :
+                     !strcmp(op, "lsl") ? "shl" : !strcmp(op, "lsr") ? "lshr" : op;
+    return cg_narrow_flag_binary(c, ir, map[dst], map[left], map[right]);
+  }
+  end = 0;
+  if (sscanf(line, "%8[a-z].w r%u, r%u, #%u%n", op, &dst, &left, &right, &end) != 4 ||
+      !end || line[end] || dst > 12 || left > 12 || map[dst] >= 8 || map[left] >= 8)
+    return 0;
+  if ((!strcmp(op, "lsl") && right <= 31) ||
+      ((!strcmp(op, "lsr") || !strcmp(op, "asr")) && right >= 1 && right <= 32)) {
+    cg_emit(c, "%ss.n r%u, r%u, #%u\n", op, map[dst], map[left], right);
+    return 1;
+  }
+  return 0;
+}
+
+static void compact_leaf_registers(cg_context *c, size_t start) {
+  cg_function *f = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT ||
+      f->frame || f->argc != 1 || f->byval[0] ||
+      f->args[0]->type->bits != 32 || f->ret->bits != 32)
+    return;
+  size_t length = c->size - start;
+  char *body = cg_alloc(c, length + 1);
+  memcpy(body, c->out + start, length);
+  if (strstr(body, "@ assembly-effects:") || strstr(body, "@ constant-assembly-lines:"))
+    return;
+  unsigned touched = 0, skip = 0, entry = 0, narrowed = 0;
+  char *first = NULL, *last = NULL;
+  for (char *p = body; p < body + length;) {
+    cg_register_work(c);
+    char *end = strchr(p, '\n');
+    if (!end)
+      cg_error(c, "unterminated leaf instruction");
+    *end = 0;
+    if (*p && *p != '@' &&
+        (strncmp(p, ".Lcg_", 5) || end[-1] != ':')) {
+      char opcode[16];
+      if (sscanf(p, "%15[a-z] ", opcode) != 1)
+        return;
+      const char *const allowed[] = {"mov", "movs", "movw", "movt", "mvn",
+          "add", "adds", "addw", "sub", "subs", "subw", "and", "ands",
+          "orr", "orrs", "eor", "eors", "lsl", "lsls", "lsr", "lsrs",
+          "asr", "asrs", "mul", "muls", "mla", "mls", "ubfx", "uxtb", "uxth",
+          "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs"};
+      int supported = 0;
+      for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); i++)
+        supported |= !strcmp(opcode, allowed[i]);
+      if (!supported || strchr(p, ':'))
+        return;
+      unsigned mentioned = mentioned_registers(c, p);
+      if (!mentioned || (mentioned & ~0x1fffu))
+        return;
+      if (!first) first = p;
+      else if (last != first) touched |= mentioned_registers(c, last);
+      last = p;
+    }
+    p = end + 1;
+  }
+  unsigned dst, src;
+  /* r0 can name the incoming value for the whole body only if the two ABI
+     copies are its only existing mentions. */
+  if (!first || first == last ||
+      !leaf_register_move(first, &entry, &src) || src != 0 || !entry ||
+      !leaf_register_move(last, &dst, &src) || dst != 0 || !src ||
+      (touched & 1))
+    return;
+  touched |= 1u << entry | 1u << src;
+  if (touched & ((1u << 7) | (1u << 12)))
+    return;
+  unsigned map[13];
+  for (unsigned r = 0; r <= 12; r++) map[r] = r;
+  map[entry] = 0;
+  unsigned occupied = touched & 14u;
+  if (entry < 4) occupied &= ~(1u << entry);
+  for (unsigned r = 4; r < 12; r++) {
+    if (!(touched & (1u << r)) || r == entry)
+      continue;
+    unsigned free = 14u & ~occupied;
+    if (!free)
+      return;
+    map[r] = (unsigned)__builtin_ctz(free);
+    occupied |= 1u << map[r];
+  }
+  c->size = start;
+  c->out[start] = 0;
+  for (char *p = body; p < body + length;) {
+    char *next = p + strlen(p) + 1;
+    if (p == first || (p == last && !map[src])) skip++;
+    else if (!*p || *p == '@' || *p == '.')
+      cg_emit(c, "%s\n", p);
+    /* The complete whitelist excludes flag consumers and IT, not just the
+       instruction immediately following a rewrite. */
+    else if (narrow_leaf_instruction(c, p, map))
+      narrowed++;
+    else {
+      const char *q = p;
+      while (*q) {
+        if (*q == 'r' && q > p && (q[-1] == ' ' || q[-1] == ',') &&
+            isdigit((unsigned char)q[1])) {
+          char *end;
+          unsigned long r = strtoul(q + 1, &end, 10);
+          if (r <= 12 && (!*end || *end == ',' || *end == ' ')) {
+            cg_emit(c, "r%u", map[r]);
+            q = end;
+            continue;
+          }
+        }
+        cg_emit(c, "%c", *q++);
+      }
+      cg_emit(c, "\n");
+    }
+    p = next;
+  }
+  cg_emit(c, "@ leaf-registers: entry/return copies removed %u\n", skip);
+  if (narrowed)
+    cg_emit(c, "@ leaf-widths: narrowed instructions %u\n", narrowed);
+}
+
 static void finish_function(cg_context *c, size_t header, size_t body_start) {
   cg_function *f = c->fn;
+  compact_leaf_registers(c, body_start);
   if (cg_light_frames(c)) finalize_frame(c, header, body_start);
   else {
     cg_emit(c, ".Lcg_return%u:\nmov sp, r7\n", f->id);
@@ -249,7 +384,7 @@ static void finish_function(cg_context *c, size_t header, size_t body_start) {
   }
   if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS) {
     summarize_registers(c, f, header);
-    cg_pool_symbol_addresses(c, header);
+    cg_pool_literals(c, header);
   }
   cg_emit(c, ".size %s, .-%s\n", f->name, f->name);
   c->fn = NULL;

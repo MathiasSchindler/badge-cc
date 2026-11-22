@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT, SELECT_SIGNED_LOAD, SELECT_SHIFTED_BINARY };
+enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT, SELECT_EXTENDED_LOAD, SELECT_SHIFTED_BINARY };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -430,12 +430,13 @@ static void signed_products(cg_context *c) {
     }
   }
 }
-static int signed_load(cg_context *c, cg_inst *i, cg_inst *next) {
+static int extended_load(cg_context *c, cg_inst *i, cg_inst *next) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       !cg_global_residency(c) ||
       !i->result || !next->result || strcmp(c->tokens[i->begin + 2].text, "load") ||
       next->end - next->begin != 7 ||
-      strcmp(c->tokens[next->begin + 2].text, "sext") ||
+      (strcmp(c->tokens[next->begin + 2].text, "sext") &&
+       strcmp(c->tokens[next->begin + 2].text, "zext")) ||
       strcmp(c->tokens[next->begin + 4].text, i->result->name) ||
       strcmp(c->tokens[next->begin + 5].text, "to") ||
       strcmp(c->tokens[next->begin + 6].text, "i32") ||
@@ -461,11 +462,10 @@ static int signed_load(cg_context *c, cg_inst *i, cg_inst *next) {
      number(c->tokens[at + 6].text, &align) && align >= i->result->type->size);
 }
 
-static void forward_spilled_address(cg_context *c, cg_inst *i, cg_inst *next) {
+static void forward_adjacent_address(cg_context *c, cg_inst *i, cg_inst *next) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       !cg_global_residency(c) || !i->result ||
       strcmp(c->tokens[i->begin + 2].text, "getelementptr") ||
-      cg_global_register(c, i->result->name) ||
       cg_register_lookup(c, i->result->name)->selection_uses != 1)
     return;
   unsigned at = next->begin + (next->result ? 2 : 0);
@@ -483,7 +483,22 @@ static void forward_spilled_address(cg_context *c, cg_inst *i, cg_inst *next) {
       strcmp(c->tokens[ptr - 1].text, "ptr") ||
       strcmp(c->tokens[ptr].text, i->result->name))
     return;
-  i->ephemeral_address = next->ephemeral_address = 1;
+  const char *base = c->tokens[i->begin + 6].text;
+  uint32_t align, bytes = !strcmp(type, "i8") ? 1 : !strcmp(type, "i16") ? 2 : 4;
+  if (!store && !pair(c, i)->instruction && i->end - i->begin == 10 &&
+      !strcmp(c->tokens[i->begin + 3].text, "i8") &&
+      !strcmp(c->tokens[i->begin + 4].text, ",") &&
+      !strcmp(c->tokens[i->begin + 5].text, "ptr") && (*base == '%' || *base == '@') &&
+      !strcmp(c->tokens[i->begin + 7].text, ",") &&
+      !strcmp(c->tokens[i->begin + 8].text, "i32") &&
+      c->tokens[i->begin + 9].text[0] == '%' &&
+      (end == 1 || (!strcmp(c->tokens[ptr + 1].text, ",") &&
+                    !strcmp(c->tokens[ptr + 2].text, "align") &&
+                    number(c->tokens[ptr + 3].text, &align) && align >= bytes))) {
+    *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
+    next->indexed_address = i;
+  } else if (!cg_global_register(c, i->result->name))
+    i->ephemeral_address = next->ephemeral_address = 1;
 }
 
 void cg_selection_prepare(cg_context *c) {
@@ -524,9 +539,9 @@ void cg_selection_prepare(cg_context *c) {
     for (cg_inst *i = b->first; i && i->next; i = i->next) {
       cg_register_work(c);
       cg_inst *next = i->next;
-      forward_spilled_address(c, i, next);
-      if (signed_load(c, i, next)) {
-        *pair(c, i) = (cg_selected_pair){.instruction = i, .producer = next, .kind = SELECT_SIGNED_LOAD};
+      forward_adjacent_address(c, i, next);
+      if (extended_load(c, i, next)) {
+        *pair(c, i) = (cg_selected_pair){.instruction = i, .producer = next, .kind = SELECT_EXTENDED_LOAD};
         *pair(c, next) = (cg_selected_pair){.instruction = next, .kind = SELECT_SKIP};
         continue;
       }
@@ -616,10 +631,10 @@ void cg_selection_prepare(cg_context *c) {
     }
   signed_products(c);
 }
-cg_inst *cg_selection_signed_load(cg_context *c, cg_inst *i) {
+cg_inst *cg_selection_extended_load(cg_context *c, cg_inst *i) {
   if (!c->selection) return NULL;
   cg_selected_pair *selected = pair(c, i);
-  return selected->kind == SELECT_SIGNED_LOAD ? selected->producer : NULL;
+  return selected->kind == SELECT_EXTENDED_LOAD ? selected->producer : NULL;
 }
 cg_inst *cg_selection_branch_compare(cg_context *c, cg_inst *i) {
   if (!c->selection) return NULL;
@@ -799,7 +814,7 @@ static int register_instruction(cg_context *c, cg_inst *i) {
   if (!ins && !divide)
     return 0;
   unsigned dst = destination(c, i), at = 4;
-  uint32_t n;
+  uint32_t n, initial;
   int shift_multiply = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
       !strcmp(op, "mul") && i->result->type->bits == 32;
   int constant = number(c->tokens[i->begin + 6].text, &n);
@@ -808,7 +823,18 @@ static int register_instruction(cg_context *c, cg_inst *i) {
     constant = number(c->tokens[i->begin + 4].text, &n);
     at = 6;
   }
-  if (shift_multiply && constant && n && !(n & (n - 1))) {
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      i->result->type->bits == 32 && constant && !strcmp(op, "and") &&
+      (n == 255 || n == 65535)) {
+    unsigned src = operand(c, i, at, 0);
+    cg_emit(c, "uxt%c.%c r%u, r%u\n", n == 255 ? 'b' : 'h',
+            dst < 8 && src < 8 ? 'n' : 'w', dst, src);
+  } else if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      i->result->type->bits == 32 && !strcmp(op, "sub") &&
+      number(c->tokens[i->begin + 4].text, &initial) && initial == 0) {
+    unsigned src = operand(c, i, 6, 0);
+    cg_emit(c, "rsb.w r%u, r%u, #0\n", dst, src);
+  } else if (shift_multiply && constant && n && !(n & (n - 1))) {
     unsigned src = operand(c, i, at, 0);
     if (n == 1) cg_move(c, dst, src);
     else cg_emit(c, "lsl.w r%u, r%u, #%u\n", dst, src, (unsigned)__builtin_ctz(n));
