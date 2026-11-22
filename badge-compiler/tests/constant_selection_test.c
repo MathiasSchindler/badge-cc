@@ -123,6 +123,9 @@ int main(int argc, char **argv) {
          "add.w r8", "memory-address-fold");
   expect("bne .Lcg_edge1\nb .Lcg_1_target\n.Lcg_edge1:\nnop\n.Lcg_1_target:\n",
          "beq.n .Lcg_1_target", "b .Lcg_1_target");
+  expect("b .Lcg_edge1\nbne .Lcg_edge1\nb .Lcg_1_target\n"
+         ".Lcg_edge1:\nnop\n.Lcg_1_target:\n",
+         "bne .Lcg_edge1", "branch-selection");
   expect("@ assembly-effects: known 0\n@ constant-assembly-lines: 3\n"
          "bne .Lcg_edge1\nb .Lcg_1_target\n.Lcg_edge1:\n.Lcg_1_target:\n",
          "bne .Lcg_edge1\nb .Lcg_1_target", "branch-selection");
@@ -133,8 +136,8 @@ int main(int argc, char **argv) {
     char source[1024] = "bne .Lcg_edge1\nb .Lcg_1_target\n.Lcg_edge1:\n";
     for (unsigned n = 0; n < count; n++) strcat(source, "nop\n");
     strcat(source, ".Lcg_1_target:\n");
-    expect(source, count == 58 ? "beq.n .Lcg_1_target" : "bne .Lcg_edge1",
-           count == 58 ? "b .Lcg_1_target" : "branch-selection");
+    expect(source, count == 58 ? "beq.n .Lcg_1_target" : "beq.w .Lcg_1_target",
+           "b .Lcg_1_target");
   }
   expect("movw r8, #65280\nmovt r8, #65535\n", "mvn.w r8, #255", "movt");
   expect("movw r0, #32\nmovt r0, #53248\nmov r5, r0\nmovw r0, #255\n",
@@ -169,6 +172,8 @@ int main(int argc, char **argv) {
          "\nnop\n\nnop\nmovw r0, #0\nmovt r0, #3072\n",
          "\nnop\n\nnop\nmov.w r0, #201326592", NULL);
   expect("movw r5, #32\nmovt r5, #53248\nbl effect\nmovw r0, #36\nmovt r0, #53248\n",
+         "addw r0, r5, #4", "movt r0, #53248");
+  expect("movw r3, #32\nmovt r3, #53248\nbl effect\nmovw r0, #36\nmovt r0, #53248\n",
          "movw r0, #36\nmovt r0, #53248", "constant-reuse");
   expect("movw r5, #32\nmovt r5, #53248\njoin:\nmovw r0, #36\nmovt r0, #53248\n",
          "movw r0, #36\nmovt r0, #53248", "constant-reuse");

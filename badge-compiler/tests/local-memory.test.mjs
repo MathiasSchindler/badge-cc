@@ -20,16 +20,83 @@ function files(t) {
   return name => path.join(dir, name);
 }
 const header = 'target triple = "thumbv8m.main-unknown-none-eabi"\ntarget datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n';
-function lower(file, body) {
+function lower(file, body, pass = 'local-memory') {
   fs.writeFileSync(file('input.ll'), header + body);
   for (const name of ['badge-opt', 'badge-opt-sanitize']) {
-    run(tool(name), ['--passes=local-memory', file('input.ll'), '-o', file(`${name}.ll`)]);
+    run(tool(name), [`--passes=${pass}`, file('input.ll'), '-o', file(`${name}.ll`)]);
     if (oracle)
       run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file(`${name}.ll`)]);
   }
   assert.deepEqual(fs.readFileSync(file('badge-opt.ll')), fs.readFileSync(file('badge-opt-sanitize.ll')));
   return fs.readFileSync(file('badge-opt.ll'), 'utf8');
 }
+  test('global reuse keeps multiple addresses but never crosses stores or calls', t => {
+    const f = files(t);
+    const text = lower(f, `@x = global i32 0
+  @y = global i32 1
+  declare void @effect()
+  define i32 @reuse(ptr %p) {
+  entry:
+    %first = load i32, ptr @x, align 4
+    %other = load i32, ptr @y, align 4
+    %again = load i32, ptr @x, align 4
+    %add = add i32 %again, %other
+    store i32 %first, ptr %p, align 4
+    %after_store = load i32, ptr @x, align 4
+    call void @effect()
+    %after_call = load i32, ptr @x, align 4
+    %sum0 = add i32 %add, %after_store
+    %sum1 = add i32 %sum0, %after_call
+    ret i32 %sum1
+  }`, 'global-memory');
+    assert.doesNotMatch(text, /%again = load/);
+    assert.match(text, /%add = add i32 %first, %other/);
+    assert.match(text, /%after_store = load/);
+    assert.match(text, /%after_call = load/);
+  });
+
+  test('aggregate forwarding removes only eligible private result copies', t => {
+    const f = files(t);
+    const fixture = `declare void @llvm.memcpy.inline.p0.p0.i32(ptr, ptr, i32, i1)
+  define internal void @make(ptr sret([8 x i8]) align 4 %p) {
+  entry:
+    store i32 37, ptr %p, align 4
+    %tail = getelementptr i8, ptr %p, i32 4
+    store i32 58, ptr %tail, align 4
+    ret void
+  }
+  define i32 @main() {
+  entry:
+    %temp = alloca [8 x i8], align 4
+    %dest = alloca [8 x i8], align 4
+    call void @make(ptr sret([8 x i8]) align 4 %temp)
+    call void @llvm.memcpy.inline.p0.p0.i32(ptr %dest, ptr %temp, i32 8, i1 false)
+    %x = load i32, ptr %dest, align 4
+    %tail = getelementptr i8, ptr %dest, i32 4
+    %y = load i32, ptr %tail, align 4
+    %sum = add i32 %x, %y
+    %status = xor i32 %sum, 95
+    ret i32 %status
+  }`;
+    const text = lower(f, fixture, 'sret-forward');
+    assert.match(text, /call void @make\(ptr sret\(\[8 x i8\]\) align 4 %dest\)/);
+    assert.doesNotMatch(text, /call void @llvm.memcpy/);
+    if (oracle) {
+      run(tool('badge-codegen'), ['--scalar-selection=thumb-constants', f('badge-opt.ll'), '-o', f('output.s')]);
+      run(tool('badge-asm'), [f('output.s'), '-o', f('output.o')]);
+      run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', f('start.o')]);
+      run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+        f('start.o'), f('output.o'), '-o', f('output.elf')]);
+      run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+        '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+        '-kernel', f('output.elf')]);
+    }
+    for (const rejected of [
+      fixture.replace('%dest = alloca [8 x i8], align 4', '%dest = alloca [8 x i8], align 2'),
+      fixture.replace('store i32 37, ptr %p, align 4', 'store volatile i32 37, ptr %p, align 4'),
+      fixture.replace('i32 8, i1 false)', 'i32 8, i1 true)'),
+    ]) assert.match(lower(f, rejected, 'sret-forward'), /call void @llvm.memcpy/);
+  });
 test('exact scalar load reuse never forwards stores or inserts new values and stays bounded', t => {
   assert.deepEqual(emittedMemory('@ note\n.section .text\nf:\nldr.w r0, [r7]\nstrb r1, [r0]\nbl f\nmov r1, r0\n'),
     { instructions: 4, loads: 1, stores: 1, calls: 1 });
@@ -179,7 +246,8 @@ if(calls(seed)!=seed+2u*(seed+7u)||observed!=seed)return 3;}return 0;}`;
   run(clang, [...target, '-Oz', '-c', f('source.c'), '-o', f('reference.o')]); execute(f('reference.o'));
   for (const optimizer of ['owned', 'llvm']) {
     run(tool('badge-opt'), ['--passes=mem2reg,scalar-cleanup,constant-fold,local-memory', f('frontend.ll'), '-o', f('memory.ll')]);
-    if (optimizer === 'llvm') run(opt, ['-S', '-passes=default<Oz>', f('memory.ll'), '-o', f('optimized.ll')]);
+    if (optimizer === 'llvm') run(clang, [...target, '-Oz', '-S', '-emit-llvm', '-x', 'ir',
+      f('memory.ll'), '-o', f('optimized.ll')]);
     else run(tool('badge-opt'), [f('memory.ll'), '-o', f('optimized.ll')]);
     run(opt, ['-passes=verify', '-disable-output', f('optimized.ll')]);
     run(clang, [...target, '-Oz', '-c', '-x', 'ir', f('optimized.ll'), '-o', f('llvm.o')]); execute(f('llvm.o'));

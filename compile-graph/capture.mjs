@@ -9,6 +9,8 @@ import { stages, irRegions, assemblyRegions, objectRegions, astRegions, sourceRe
   sections, symbols, inventory } from './analysis.mjs';
 import { projectIndex, preprocessingStats, tokens, tokenDifference, conditionalDirectives } from './web/insights.mjs';
 import { captureCrossover, verifyCrossover } from '../badge-compiler/tools/assembler-crossover.mjs';
+import { backendFlags } from '../badge-compiler/tools/backend-attribution.mjs';
+import { diagnosticObjectMatch, fixedBackendComparison, optimizationRemarks, optimizationTrace } from './optimization.mjs';
 
 const ownFile = fileURLToPath(import.meta.url);
 const root = path.resolve(path.dirname(ownFile), '..');
@@ -70,6 +72,14 @@ function wrapper(role, directory, args) {
     compile(['-S', '-emit-llvm', '-Xclang', '-disable-llvm-passes'], 'initial.ll');
     compile(['-S', '-emit-llvm'], 'optimized.ll');
     compile(['-S'], 'assembly.s');
+    const names = new Set(irRegions(fs.readFileSync(target('initial.ll'), 'utf8')).map(item => item.name));
+    const traced = config.trace.filter(name => names.has(name));
+    const traceFlags = traced.length ? ['-mllvm', `-filter-print-funcs=${traced.join(',')}`,
+      '-mllvm', '-print-changed=diff-quiet'] : [];
+    run(command, [...parsed.flags, '-gline-tables-only', '-fsave-optimization-record',
+      `-foptimization-record-file=${target('remarks.yaml')}`, ...traceFlags,
+      '-c', parsed.source, '-o', target('diagnostic.o')], target('optimization.log'));
+    writeJSON(target('traced.json'), traced);
   }
   const preprocessingAst = run(config.llvm.clang, [...preprocessedFlags(parsed.flags),
     '-fsyntax-only', '-x', 'cpp-output', '-Xclang', '-ast-dump=json', target('preprocessed.i')],
@@ -92,6 +102,7 @@ function buildReport(directory, config) {
   const report = { schema: 1, status: 'complete', created: new Date().toISOString(),
     title: 'Compile Graph', stages, policy: config.policy, llvm_version: config.llvm_version,
     provenance: config.provenance, modules: [], images: [], artifacts: [],
+    optimization_diagnostics: { trace: config.trace },
     limitations: [
       'End-to-end comparison: frontend, optimizer, assembler and linker can all differ.',
       'Function correspondence uses exact names within a translation unit, not semantic equivalence.',
@@ -99,6 +110,8 @@ function buildReport(directory, config) {
       'AST formats differ. Clang combines parsing and semantic analysis; its typed AST is shared between both views.',
       'Lowered LLVM IR disables LLVM passes; optimized LLVM IR and assembly are separate reruns of the production flags.',
       'Owned pass snapshots replay prefixes from initial IR and the final snapshot is checked against production IR.',
+      'LLVM remarks are selective. The line-table diagnostic build is checked against production allocated bytes and relocations; a mismatch is shown, not hidden.',
+      'The fixed-IR comparison uses owned optimized IR with LLVM IR passes disabled. Frame accesses are static direct references, not spill or timing counts.',
       'Blocks are discovered independently. Label or block order does not establish cross-compiler correspondence.',
       'Source/preprocessing ranges come from Clang AST byte offsets; no source-to-IR or instruction mapping is claimed.',
       'Text bytes and static counts are not execution time, optimization scores or semantic correctness evidence.',
@@ -175,6 +188,28 @@ function buildReport(directory, config) {
       artifact(record.recordFile);
     }
     module.functions = inventory(module);
+    const llvmDir = path.resolve(root, `${peer.output}.stages`);
+    const llvmFile = name => path.join(llvmDir, name);
+    const input = path.join(directory, module.roles.owned.stages.optimized.file);
+    const fixed = llvmFile('fixed-ir.o'), disassembly = llvmFile('fixed-ir.txt');
+    run(config.llvm.clang, [...backendFlags, '-c', input, '-o', fixed], llvmFile('fixed-ir.log'));
+    fs.writeFileSync(disassembly, run(config.llvm.objdump, ['-d', '--triple=thumbv8m.main-none-eabi', fixed]));
+    const traced = readJSON(llvmFile('traced.json'));
+    module.optimization = {
+      remarks: optimizationRemarks(fs.readFileSync(llvmFile('remarks.yaml'), 'utf8')),
+      remarks_artifact: artifact(llvmFile('remarks.yaml')).file,
+      diagnostic_object: artifact(llvmFile('diagnostic.o')).file,
+      matches_production: diagnosticObjectMatch(path.resolve(root, peer.output), llvmFile('diagnostic.o')),
+      trace_artifact: artifact(llvmFile('optimization.log')).file,
+      traced,
+      passes: traced.length ? optimizationTrace(fs.readFileSync(llvmFile('optimization.log'), 'utf8')) : [],
+      fixed_object: artifact(fixed).file,
+      fixed_disassembly: artifact(disassembly).file,
+      fixed_command: artifact(llvmFile('fixed-ir.log')).file,
+      fixed_input_sha256: module.roles.owned.stages.optimized.sha256,
+      backend: fixedBackendComparison(fs.readFileSync(path.join(directory, module.roles.owned.stages.object.file), 'utf8'),
+        fs.readFileSync(disassembly, 'utf8')),
+    };
     const preprocessingTokens = roles.map(role => tokens(fs.readFileSync(path.join(directory,
       module.roles[role].stages.preprocessed.token_artifact), 'utf8')));
     module.preprocessing_comparison = tokenDifference(...preprocessingTokens);
@@ -226,6 +261,9 @@ function buildReport(directory, config) {
 function capture(directory, targets) {
   assert(targets.length && new Set(targets).size === targets.length, 'provide unique Makefile targets');
   assert(targets.every(target => /^[a-z][a-z0-9-]*$/.test(target)), 'invalid target name');
+  const trace = process.env.COMPILE_GRAPH_LLVM_TRACE?.split(',') ?? [];
+  assert(trace.length <= 4 && new Set(trace).size === trace.length &&
+    trace.every(name => /^[A-Za-z_][A-Za-z0-9_.$]*$/.test(name)), 'provide up to four distinct LLVM function names');
   fs.mkdirSync(directory, { recursive: false });
   writeJSON(path.join(directory, 'report.json'), { schema: 1, status: 'in-progress' });
   const llvmTools = Object.fromEntries([['clang', 'LLVM_CLANG'], ['objcopy', 'LLVM_OBJCOPY'],
@@ -245,13 +283,14 @@ function capture(directory, targets) {
     ...walk(path.join(root, 'badge-compiler/scripts')), path.join(root, 'Makefile'),
     path.join(root, 'badge-compiler/tools/assembler-crossover.mjs'),
     path.join(root, 'badge-compiler/tools/assembler-listing.mjs'),
+    path.join(root, 'badge-compiler/tools/backend-attribution.mjs'),
     path.join(root, 'badge-compiler/Makefile'), ...walk(path.dirname(ownFile)).filter(f =>
       !f.includes(`${path.sep}build${path.sep}`) && /\.(mjs|js|css|html)$/.test(f)),
     ...Object.values(llvmTools), ...['badge-cpp', 'badge-parse', 'badge-sema', 'badge-ir',
       'badge-opt', 'badge-codegen', 'badge-codegen-attribution', 'badge-asm', 'badge-link'].map(name => path.join(tools, name))];
   const provenance = provenanceFiles.filter(file => !file.endsWith('.DS_Store'))
     .map(file => ({ file, sha256: sha(file) }));
-  const config = { targets, llvm: llvmTools, policy, provenance,
+  const config = { targets, llvm: llvmTools, policy, provenance, trace,
     llvm_version: run(llvmTools.clang, ['--version']).trim() };
   writeJSON(path.join(directory, 'config.json'), config);
   const env = { ...process.env, ...policy };
@@ -314,6 +353,28 @@ export function verify(directory) {
     assert(file.startsWith(directory + path.sep), 'artifact outside report directory');
     assert.equal(fs.statSync(file).size, artifact.bytes, `size mismatch: ${artifact.file}`);
     assert.equal(sha(file), artifact.sha256, `hash mismatch: ${artifact.file}`);
+  }
+  const artifactPaths = new Set(report.artifacts.map(item => item.file));
+  for (const module of report.modules) {
+    if (!report.optimization_diagnostics) continue;
+    const data = module.optimization;
+    assert(data, `missing optimization diagnostics: ${module.id}`);
+    const file = entry => {
+      assert(artifactPaths.has(entry), 'unregistered optimization artifact');
+      return path.join(directory, entry);
+    };
+    const read = entry => fs.readFileSync(file(entry), 'utf8');
+    assert.deepEqual(optimizationRemarks(read(data.remarks_artifact)), data.remarks, 'optimization remarks mismatch');
+    assert.equal(diagnosticObjectMatch(file(module.roles.llvm.object.file), file(data.diagnostic_object)),
+      data.matches_production, 'optimization diagnostic object mismatch');
+    const names = new Set(module.roles.llvm.stages.initial.regions.map(item => item.name));
+    assert.deepEqual(data.traced, report.optimization_diagnostics.trace.filter(name => names.has(name)));
+    assert.deepEqual(data.traced.length ? optimizationTrace(read(data.trace_artifact)) : [], data.passes,
+      'optimization trace mismatch');
+    assert(artifactPaths.has(data.fixed_object) && artifactPaths.has(data.fixed_command), 'unregistered fixed-IR artifact');
+    assert.equal(data.fixed_input_sha256, module.roles.owned.stages.optimized.sha256, 'fixed-IR input mismatch');
+    assert.deepEqual(fixedBackendComparison(read(module.roles.owned.stages.object.file), read(data.fixed_disassembly)),
+      data.backend, 'fixed-IR backend inventory mismatch');
   }
   for (const module of report.modules)
     for (const role of roles) {
@@ -388,6 +449,7 @@ function main(args) {
     console.log('Usage: node compile-graph/capture.mjs --capture NEW_DIRECTORY [MAKE_TARGET ...]\n' +
       '       node compile-graph/capture.mjs --verify REPORT_DIRECTORY\n' +
       'Default targets: red-square tilt-maze. Set LLVM_BIN or LLVM_* tool paths as needed.\n' +
+      'Set COMPILE_GRAPH_LLVM_TRACE to a comma-separated list of up to four function names.\n' +
       'Capture uses owned defaults unless BADGE_* policies are explicitly set. No badge access.');
   }
 }

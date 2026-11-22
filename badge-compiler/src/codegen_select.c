@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT };
+enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT, SELECT_SIGNED_LOAD };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -401,6 +401,62 @@ static void signed_products(cg_context *c) {
     }
   }
 }
+static int signed_load(cg_context *c, cg_inst *i, cg_inst *next) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      !cg_global_residency(c) ||
+      !i->result || !next->result || strcmp(c->tokens[i->begin + 2].text, "load") ||
+      next->end - next->begin != 7 ||
+      strcmp(c->tokens[next->begin + 2].text, "sext") ||
+      strcmp(c->tokens[next->begin + 4].text, i->result->name) ||
+      strcmp(c->tokens[next->begin + 5].text, "to") ||
+      strcmp(c->tokens[next->begin + 6].text, "i32") ||
+      cg_register_lookup(c, i->result->name)->selection_uses != 1 ||
+      pair(c, i)->instruction || pair(c, next)->instruction)
+    return 0;
+  unsigned at = i->begin + 3;
+  if (!strcmp(c->tokens[at].text, "volatile")) at++;
+  unsigned count = i->end - at;
+  if ((count != 4 && count != 7) ||
+      strcmp(c->tokens[at].text, c->tokens[next->begin + 3].text) ||
+      (strcmp(c->tokens[at].text, "i8") && strcmp(c->tokens[at].text, "i16")) ||
+      strcmp(c->tokens[at + 1].text, ",") || strcmp(c->tokens[at + 2].text, "ptr"))
+    return 0;
+  const char *ptr = c->tokens[at + 3].text;
+  if (*ptr != '%' && *ptr != '@')
+    return 0;
+  uint32_t align;
+  return count == 4 ||
+    (!strcmp(c->tokens[at + 4].text, ",") &&
+     !strcmp(c->tokens[at + 5].text, "align") &&
+     c->tokens[at + 6].text[0] != '-' &&
+     number(c->tokens[at + 6].text, &align) && align >= i->result->type->size);
+}
+
+static void forward_spilled_address(cg_context *c, cg_inst *i, cg_inst *next) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      !cg_global_residency(c) || !i->result ||
+      strcmp(c->tokens[i->begin + 2].text, "getelementptr") ||
+      cg_global_register(c, i->result->name) ||
+      cg_register_lookup(c, i->result->name)->selection_uses != 1)
+    return;
+  unsigned at = next->begin + (next->result ? 2 : 0);
+  int store = !strcmp(c->tokens[at].text, "store");
+  if (!store && strcmp(c->tokens[at].text, "load"))
+    return;
+  if (!strcmp(c->tokens[++at].text, "volatile")) at++;
+  const char *type = c->tokens[at].text;
+  if (strcmp(type, "i8") && strcmp(type, "i16") && strcmp(type, "i32"))
+    return;
+  unsigned ptr = at + (store ? 4 : 3);
+  unsigned end = next->end - ptr;
+  if (ptr >= next->end || (end != 1 && end != 4) ||
+      strcmp(c->tokens[ptr - 2].text, ",") ||
+      strcmp(c->tokens[ptr - 1].text, "ptr") ||
+      strcmp(c->tokens[ptr].text, i->result->name))
+    return;
+  i->ephemeral_address = next->ephemeral_address = 1;
+}
+
 void cg_selection_prepare(cg_context *c) {
   c->selection = NULL;
   if (c->scalar_selection == BADGE_SELECTION_LEGACY)
@@ -439,6 +495,12 @@ void cg_selection_prepare(cg_context *c) {
     for (cg_inst *i = b->first; i && i->next; i = i->next) {
       cg_register_work(c);
       cg_inst *next = i->next;
+      forward_spilled_address(c, i, next);
+      if (signed_load(c, i, next)) {
+        *pair(c, i) = (cg_selected_pair){.instruction = i, .producer = next, .kind = SELECT_SIGNED_LOAD};
+        *pair(c, next) = (cg_selected_pair){.instruction = next, .kind = SELECT_SKIP};
+        continue;
+      }
       if (cg_branch_selection(c) &&
           compare_profitable &&
           c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT &&
@@ -516,6 +578,11 @@ void cg_selection_prepare(cg_context *c) {
         *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i, .kind=SELECT_DIVISION};
     }
   signed_products(c);
+}
+cg_inst *cg_selection_signed_load(cg_context *c, cg_inst *i) {
+  if (!c->selection) return NULL;
+  cg_selected_pair *selected = pair(c, i);
+  return selected->kind == SELECT_SIGNED_LOAD ? selected->producer : NULL;
 }
 cg_inst *cg_selection_branch_compare(cg_context *c, cg_inst *i) {
   if (!c->selection) return NULL;
@@ -640,19 +707,39 @@ static unsigned destination(cg_context *c, cg_inst *i) {
 }
 int cg_selection_compare_operands(cg_context *c, cg_inst *i, cg_type *type) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
-      !register_operands(c) ||
-      (strcmp(c->tokens[i->begin + 4].text, "i32") &&
-       strcmp(c->tokens[i->begin + 4].text, "ptr")))
+      !register_operands(c) || i->end - i->begin != 8 ||
+      strcmp(c->tokens[i->begin + 6].text, ","))
     return 0;
-  unsigned left = typed_operand(c, i, 5, 0, type);
+  const char *kind = c->tokens[i->begin + 4].text;
+  const char *pred = c->tokens[i->begin + 3].text;
+  int narrow = !strcmp(kind, "i8") || !strcmp(kind, "i16");
+  if (narrow ? pred[0] == 's' : strcmp(kind, "i32") && strcmp(kind, "ptr"))
+    return 0;
+  unsigned a = 5, b = 7;
+  uint32_t unused;
+  if ((!strcmp(pred, "eq") || !strcmp(pred, "ne")) &&
+      c->tokens[i->begin + b].text[0] == '%' &&
+      (number(c->tokens[i->begin + a].text, &unused) ||
+       !strcmp(c->tokens[i->begin + a].text, "null"))) {
+    a = 7;
+    b = 5;
+  }
+  unsigned left = typed_operand(c, i, a, 0, type);
+  const char *token = c->tokens[i->begin + b].text;
   uint32_t n;
-  if (number(c->tokens[i->begin + 7].text, &n) && thumb_modified(n) >= 0) {
+  int constant = number(token, &n);
+  if (!strcmp(token, "null")) {
+    n = 0;
+    constant = 1;
+  }
+  if (constant && narrow)
+    n &= (UINT32_C(1) << type->bits) - 1;
+  if (constant && thumb_modified(n) >= 0) {
     cg_emit(c, "cmp.%s r%u, #%" PRIu32 "\n", left < 8 && n <= 255 ? "n" : "w",
             left, n);
   } else {
-    unsigned right = typed_operand(c, i, 7, 1, type);
-    cg_emit(c, "cmp.%s r%u, r%u\n", left < 8 && right < 8 ? "n" : "w",
-            left, right);
+    unsigned right = typed_operand(c, i, b, 1, type);
+    cg_emit(c, "cmp.n r%u, r%u\n", left, right);
   }
   return 1;
 }
@@ -676,13 +763,20 @@ static int register_instruction(cg_context *c, cg_inst *i) {
     return 0;
   unsigned dst = destination(c, i), at = 4;
   uint32_t n;
+  int shift_multiply = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      !strcmp(op, "mul") && i->result->type->bits == 32;
   int constant = number(c->tokens[i->begin + 6].text, &n);
   if (!constant && (!strcmp(op, "add") || !strcmp(op, "and") ||
-                    !strcmp(op, "or") || !strcmp(op, "xor"))) {
+                    !strcmp(op, "or") || !strcmp(op, "xor") || shift_multiply)) {
     constant = number(c->tokens[i->begin + 4].text, &n);
     at = 6;
   }
-  if (constant && immediate_supported(op, n)) {
+  if (shift_multiply && constant && n && !(n & (n - 1))) {
+    unsigned src = operand(c, i, at, 0);
+    if (n == 1) cg_move(c, dst, src);
+    else cg_emit(c, "lsl.w r%u, r%u, #%u\n", dst, src, (unsigned)__builtin_ctz(n));
+    c->selection->immediates++;
+  } else if (constant && immediate_supported(op, n)) {
     unsigned src = operand(c, i, at, 0);
     if (!immediate(c, op, n, dst, src))
       cg_error(c, "register immediate eligibility mismatch");
@@ -690,12 +784,16 @@ static int register_instruction(cg_context *c, cg_inst *i) {
   } else {
     unsigned left = operand(c, i, 4, 0), right = operand(c, i, 6, 2);
     if (divide) {
-      /* Adjacent div/rem selection retains its quotient in r4. */
-      cg_emit(c, "%s r4, r%u, r%u\n", op[0] == 's' ? "sdiv" : "udiv",
-              left, right);
-      if (strstr(op, "rem"))
+      int remainder = strstr(op, "rem") != NULL;
+      const cg_selected_pair *consumer = i->next ? pair(c, i->next) : NULL;
+      int shared = consumer && consumer->kind == SELECT_DIVISION && consumer->producer == i;
+      unsigned quotient = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+          !remainder && !shared ? dst : 4;
+      cg_emit(c, "%s r%u, r%u, r%u\n", op[0] == 's' ? "sdiv" : "udiv",
+              quotient, left, right);
+      if (remainder)
         cg_emit(c, "mls r%u, r4, r%u, r%u\n", dst, right, left);
-      else
+      else if (quotient != dst)
         cg_emit(c, "mov r%u, r4\n", dst);
     } else if (!cg_compact_binary(c, op, dst, left, right)) {
       cg_machine_opcode machine = !strcmp(op, "add") ? CG_M_ADD :

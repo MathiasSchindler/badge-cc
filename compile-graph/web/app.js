@@ -115,6 +115,84 @@ function insightTable(headers, rows) {
       }
       return table;
     }
+function optimizationInsights(container) {
+  const data = module.optimization;
+  if (!data) return;
+  const rows = selected ? data.remarks.filter(item => item.function === selected) : data.remarks;
+  const detail = node('details');
+  detail.append(node('summary', `LLVM optimization remarks (${number(rows.length)})`));
+  detail.append(node('p', data.matches_production ?
+    'Diagnostic and production objects agree on allocated bytes, relocations and public symbols.' :
+    'Diagnostic object differs from production. Treat these remarks as observations from the diagnostic replay.'));
+  const artifact = node('a', 'Raw LLVM optimization record');
+  artifact.href = data.remarks_artifact;
+  detail.append(artifact);
+  const filter = node('select'), results = node('div');
+  filter.setAttribute('aria-label', 'Remark kind');
+  option(filter, '', 'All remark kinds');
+  for (const kind of [...new Set(rows.map(item => item.kind))]) option(filter, kind, kind);
+  const paintRemarks = () => {
+    const matches = filter.value ? rows.filter(item => item.kind === filter.value) : rows;
+    results.replaceChildren();
+    if (!matches.length)
+      results.append(node('p', 'No matching remarks. LLVM does not report every transformation.'));
+    else {
+      results.append(insightTable(['Kind', 'Pass / reason', 'Function / location', 'Evidence'],
+        matches.slice(0, 80).map(item => [item.kind, `${item.pass} / ${item.name}`,
+          item.location ? `${item.function} · ${item.location.file}:${item.location.line}:${item.location.column}` : item.function,
+          item.args.map(arg => arg.key === 'String' ? arg.value : `${arg.key}=${arg.value}`).join(' ')])));
+      if (matches.length > 80) results.append(node('p', `Showing 80 of ${number(matches.length)}. See the raw record for all results.`));
+    }
+  };
+  filter.addEventListener('change', paintRemarks);
+  detail.append(filter, results);
+  paintRemarks();
+  container.append(detail);
+
+  if (data.traced.length) {
+    const trace = node('details'), select = node('select'), excerpt = node('pre');
+    select.setAttribute('aria-label', 'LLVM changed IR pass');
+    trace.append(node('summary', 'LLVM pass-by-pass changes'));
+    trace.append(node('p', `Trace filters: ${data.traced.join(', ')}. Module-wide dumps are not claims about an individual function.`));
+    const raw = node('a', 'Raw LLVM trace');
+    raw.href = data.trace_artifact;
+    trace.append(raw);
+    const passes = !selected ? data.passes : data.traced.includes(selected) ?
+      data.passes.filter(pass => pass.scope === selected || pass.scope === '[module]') : [];
+    if (!passes.length)
+      trace.append(node('p', 'No indexed change events for this selection. Use the raw trace for other scopes.'));
+    option(select, '', 'Select a changed pass');
+    passes.forEach((pass, i) => option(select, String(i), `${i + 1}. ${pass.pass} — ${pass.scope}`));
+    select.addEventListener('change', async () => {
+      const pass = select.value === '' ? null : passes[Number(select.value)];
+      if (!pass) { excerpt.textContent = ''; return; }
+      try {
+        const text = await load(raw.getAttribute('href'));
+        if (select.value === '' || passes[Number(select.value)] !== pass) return;
+        const lines = text.split('\n').slice(pass.start - 1, Math.min(pass.end, pass.start + 299));
+        excerpt.textContent = lines.join('\n') + (pass.end - pass.start >= 300 ? '\n… see raw trace for the remainder.' : '');
+      } catch (failure) { excerpt.textContent = failure.message; }
+    });
+    trace.append(select, excerpt);
+    container.append(trace);
+  }
+
+  const backend = node('details'), link = node('a', 'LLVM same-IR disassembly');
+  backend.open = Boolean(selected);
+  backend.append(node('summary', 'Same optimized IR, two backends'));
+  link.href = data.fixed_disassembly;
+  backend.append(node('p', 'Both consume the owned optimized IR. LLVM IR passes are disabled; this is static code, not a timing measurement. Direct frame accesses are not all spills.'), link);
+  const comparison = selected ? data.backend.filter(item => item.name === selected) :
+    data.backend.filter(item => item.owned && item.llvm)
+      .sort((a, b) => (b.owned.bytes - b.llvm.bytes) - (a.owned.bytes - a.llvm.bytes) || a.name.localeCompare(b.name)).slice(0, 12);
+  const metric = (item, key) => `${item.owned?.[key] ?? 'absent'} / ${item.llvm?.[key] ?? 'absent'}`;
+  backend.append(comparison.length ? insightTable(
+    ['Function', 'Instruction bytes', 'Instructions', 'Literal bytes', 'Direct frame accesses', 'Register copies', 'Calls'],
+    comparison.map(item => [item.name, ...['bytes', 'instructions', 'literals', 'frame_accesses', 'copies', 'calls']
+      .map(key => metric(item, key))])) : node('p', 'No machine symbol for the selected function.'));
+  backend.append(node('p', 'Each value is owned / LLVM. Data and literal pool bytes are excluded from instruction bytes.'));
+  container.append(backend);
+}
     function insights() {
       const container = $('insights');
       container.replaceChildren();
@@ -189,6 +267,7 @@ function insightTable(headers, rows) {
           Math.abs((counts[0][a] ?? 0) - (counts[1][a] ?? 0)) || a.localeCompare(b)).map(op =>
           [op, regions[0].length ? counts[0][op] ?? 0 : 'absent', regions[1].length ? counts[1][op] ?? 0 : 'absent'])));
         container.append(node('p', 'Counts reveal representation differences such as allocas, loads/stores, PHIs and branches. They do not score optimization quality or predict runtime. Owned pass snapshots and final LLVM IR are different pipeline boundaries.'));
+        if (stage === 'optimized') optimizationInsights(container);
       } else {
         const controls = report.assembler?.modules.filter(item => item.module === module.id);
         if (stage === 'object' && controls) {

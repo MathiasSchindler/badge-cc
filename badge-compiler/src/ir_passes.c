@@ -2,6 +2,7 @@
 
 void ir_constant_fold(ir_context *, ir_module *);
 void ir_aggregate_memory(ir_context *, ir_module *);
+void ir_sret_forward(ir_context *, ir_module *);
 void ir_wide_division(ir_context *, ir_module *);
 void ir_dead_instructions(ir_context *, ir_module *);
 void ir_scalar_promotion(ir_context *, ir_module *);
@@ -17,6 +18,7 @@ void ir_cross_function(ir_context *, ir_module *);
 void ir_hot_inline(ir_context *, ir_module *);
 void ir_target_strength_reduce(ir_context *, ir_module *);
 void ir_local_memory(ir_context *, ir_module *);
+void ir_global_memory(ir_context *, ir_module *);
 
 const ir_pass badge_ir_passes[] = {
     {"cross-function",
@@ -31,12 +33,18 @@ const ir_pass badge_ir_passes[] = {
     {"local-memory",
      "Reuse exact-pointer scalar loads within bounded same-block windows",
      ir_local_memory, IR_PASS_OPTIMIZATION},
+    {"global-memory",
+     "Reuse exact global-address loads in a bounded same-block window without crossing writes or calls",
+     ir_global_memory, IR_PASS_OPTIMIZATION},
     {"constant-fold",
      "Fold unflagged scalar integer constants and propagate SSA literals",
      ir_constant_fold, IR_PASS_OPTIMIZATION},
     {"aggregate-memory",
      "Legalize wide array-carrier loads/stores into scalar memory operations",
      ir_aggregate_memory, IR_PASS_LEGALIZATION},
+    {"sret-forward",
+     "Forward copied internal aggregate results directly into private byte buffers",
+     ir_sret_forward, IR_PASS_OPTIMIZATION},
     {"wide-division",
      "Lower general i64 division/remainder to owned restoring-division IR",
      ir_wide_division, IR_PASS_LEGALIZATION},

@@ -99,8 +99,9 @@ static void effects(const char *text, cg_constant facts[13]) {
   const char *writes[] = {"mov", "mov.w", "movs.n", "movw", "movt", "add.w", "add.n", "addw",
     "sub.w", "subw", "subs.w", "mul", "mla", "mls", "udiv", "sdiv",
     "and.w", "orr.w", "eor.w", "lsl.w", "lsr.w", "asr.w", "rsb.w",
-    "ubfx", "sxtb", "sxth", "uxtb.n", "uxth.n",
-    "ldr", "ldr.w", "ldr.n", "ldrb", "ldrb.w", "ldrb.n", "ldrh", "ldrh.w", "ldrh.n"};
+    "ubfx", "sxtb", "sxth", "sxtb.n", "sxtb.w", "sxth.n", "sxth.w", "uxtb.n", "uxth.n",
+    "ldr", "ldr.w", "ldr.n", "ldrb", "ldrb.w", "ldrb.n", "ldrh", "ldrh.w", "ldrh.n",
+    "ldrsb.w", "ldrsh.w"};
   for (unsigned n = 0; n < sizeof(writes) / sizeof(*writes); n++)
     if (!strcmp(op, writes[n]) && sscanf(text + strlen(op), " r%u,", &dst) == 1 &&
         dst <= 12) {
@@ -111,6 +112,8 @@ static void effects(const char *text, cg_constant facts[13]) {
   memset(facts, 0, 13 * sizeof(*facts));
 }
 static const char *find_label(cg_context *c, const char *body, const char *name);
+static int sole_label_entry(cg_context *c, const char *body, const char *name,
+                            const char *label, const char *jump);
 static int flags_overwritten(cg_context *c, const char *body, const char *text) {
   /* Follow only neutral instructions and unconditional edges to an NZCV kill. */
   unsigned instructions = 0;
@@ -186,7 +189,7 @@ static const char *find_label(cg_context *c, const char *body, const char *name)
   }
   return NULL;
 }
-static int short_branch_span(cg_context *c, const char *from, const char *to) {
+static int branch_span(cg_context *c, const char *from, const char *to, unsigned limit) {
   if (from > to) {
     const char *swap = from;
     from = to;
@@ -204,7 +207,7 @@ static int short_branch_span(cg_context *c, const char *from, const char *to) {
         if (strncmp(from, ".Lcg_", 5) || end[-1] != ':') return 0;
       } else bytes += 4;
     }
-    if (bytes > 240) return 0;
+    if (bytes > limit) return 0;
     from = end + 1;
   }
   return 1;
@@ -236,13 +239,18 @@ void cg_reduce_branches(cg_context *c, size_t body_start) {
           jump + consumed == jump_end && !strncmp(target, ".Lcg_", 5)) {
         snprintf(label, sizeof(label), "%s:", edge);
         const char *destination = find_label(c, body, target);
+        const char *original = find_label(c, body, edge);
         if ((size_t)(edge_end - edge_line) == strlen(label) &&
             !memcmp(edge_line, label, strlen(label)) && destination &&
-            short_branch_span(c, p, destination)) {
-          cg_emit(c, "b%s.n %s\n@ branch-selection: saved 2\n",
-                  cg_inverse_condition(opcode + 1), target);
-          p = edge_line;
-          continue;
+            original == edge_line &&
+            sole_label_entry(c, body, edge, original, strstr(p, edge))) {
+          int narrow = branch_span(c, p, destination, 240);
+          if (narrow || branch_span(c, p, destination, 32760)) {
+            cg_emit(c, "b%s.%c %s\n@ branch-selection: folded edge\n",
+                    cg_inverse_condition(opcode + 1), narrow ? 'n' : 'w', target);
+            p = edge_line;
+            continue;
+          }
         }
       }
     }
@@ -754,7 +762,11 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
       }
       facts[dst] = next;
     } else {
-      effects(current, facts);
+      if (synthesis && (!strncmp(current, "bl ", 3) || !strncmp(current, "blx ", 4))) {
+        memset(facts, 0, 4 * sizeof(*facts));
+        facts[12] = (cg_constant){0};
+      } else
+        effects(current, facts);
       cg_emit(c, "%s\n", current);
     }
     current = after;

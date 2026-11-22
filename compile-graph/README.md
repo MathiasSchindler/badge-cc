@@ -44,6 +44,18 @@ BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants \
   node compile-graph/capture.mjs --capture compile-graph/build/constants
 ```
 
+Choose up to four comma-separated LLVM IR function names for changed-pass
+traces. Remarks and the fixed-IR comparison are captured without this option.
+
+```sh
+COMPILE_GRAPH_LLVM_TRACE=generate_maze,collide_wall \
+  node compile-graph/capture.mjs --capture compile-graph/build/maze-optimizer tilt-maze
+```
+
+Open **Optimized IR** and select a function to filter its remarks and backend
+metrics. The trace picker loads a bounded excerpt on demand; the full trace can
+be large because LLVM includes module events even with a function filter.
+
 ## Explore
 
 - **Project selector:** view one linked program at a time; translation units
@@ -57,6 +69,18 @@ BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants \
   Each side has independent navigation.
 - **Optimizer snapshots:** owned pass-prefix replays, verified to finish with
   the exact production optimized IR.
+- **LLVM optimization diagnostics:** successful, missed and analysis remarks
+  filtered by the selected function, with source locations when present.
+  The line-table diagnostic object is compared with production allocated
+  sections, relocations and public symbols. The status and raw YAML remain
+  available; absence of remarks is not evidence of no optimization.
+- **LLVM changed-pass trace:** optional, function-filtered excerpts from the
+  actual Clang invocation, with the full artifact downloadable. Module-wide
+  events are marked and are not attributed to an individual function.
+- **Same-IR backend comparison:** owned optimized IR through both backends,
+  disabling LLVM IR passes for the crossover. Inspect decoded instruction and
+  literal bytes, direct frame accesses, register copies and calls in the
+  Optimized IR tab. These are static counts, not dynamic spills or time.
 - **Linked output:** disassembly, sections and symbols retained in the report.
 - **Provenance:** commands, tool hashes, compiler policy and artifact SHA-256s.
 - **Preprocessing insights:** distinguish line-marker/whitespace presentation

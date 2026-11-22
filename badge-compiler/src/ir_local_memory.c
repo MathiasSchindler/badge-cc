@@ -10,8 +10,9 @@ typedef struct {
   ir_analysis a;
   const char **values;
   uint64_t work;
+  unsigned global_only;
 } memory;
-enum { MEMORY_WINDOW = 2 };
+enum { MEMORY_WINDOW = 2, GLOBAL_WINDOW = 12, GLOBAL_ENTRIES = 4 };
 
 static void spend(memory *p) {
   if (!p->work--)
@@ -49,7 +50,7 @@ static int bounded_users(memory *p, unsigned i) {
        k != IR_NONE; k = p->a.operands[k].next_use) {
     spend(p);
     unsigned user = p->a.operands[k].instruction;
-    if (user <= i || user > i + MEMORY_WINDOW ||
+    if (user <= i || user > i + (p->global_only ? GLOBAL_WINDOW : MEMORY_WINDOW) ||
         p->a.instructions[user].block != in->block ||
         p->a.instructions[user].opcode == IR_OP_PHI)
       return 0;
@@ -59,32 +60,35 @@ static int bounded_users(memory *p, unsigned i) {
   for (unsigned k = i + 1; k <= end; ++k) {
     spend(p);
     const ir_instruction *user = &p->a.instructions[k];
-    if ((user->effects & (IR_EFFECT_CALL | IR_EFFECT_OPAQUE)) ||
+    if ((user->effects & IR_EFFECT_OPAQUE) ||
+        ((user->effects & IR_EFFECT_CALL) && !(p->global_only && k == end)) ||
         ((user->effects & IR_EFFECT_CONTROL) &&
          !(k == end && user->opcode == IR_OP_RET)))
       return 0;
   }
   return end != i;
 }
-void ir_local_memory(ir_context *c, ir_module *m) {
+static void run_memory(ir_context *c, ir_module *m, unsigned global_only) {
   ir_allocation *mark = c->allocations;
-  memory p = {.c = c, .work = IR_LOCAL_MEMORY_WORK_LIMIT};
+  memory p = {.c = c, .work = IR_LOCAL_MEMORY_WORK_LIMIT, .global_only = global_only};
   ir_analyze(c, m, &p.a);
   p.values = ir_allocate(c, p.a.definition_count * sizeof(*p.values));
   for (unsigned b = 0; b < p.a.block_count; ++b) {
     const ir_block *block = &p.a.blocks[b];
-    unsigned previous = IR_NONE;
+    unsigned previous[GLOBAL_ENTRIES] = {IR_NONE, IR_NONE, IR_NONE, IR_NONE};
+    unsigned entries = global_only ? GLOBAL_ENTRIES : 1;
     for (unsigned i = block->first_instruction;
          i < block->first_instruction + block->instruction_count; ++i) {
       spend(&p);
       const ir_instruction *in = &p.a.instructions[i];
       c->line = in->line;
-      if (previous != IR_NONE && i - previous > MEMORY_WINDOW)
-        previous = IR_NONE;
+      for (unsigned k = 0; k < entries; k++)
+        if (previous[k] != IR_NONE && i - previous[k] > (global_only ? GLOBAL_WINDOW : MEMORY_WINDOW))
+          previous[k] = IR_NONE;
       if ((in->effects & (IR_EFFECT_CALL | IR_EFFECT_OPAQUE | IR_EFFECT_WRITE |
                           IR_EFFECT_VOLATILE | IR_EFFECT_CONTROL)) ||
           (in->opcode == IR_OP_LOAD && !plain(&p, in))) {
-        previous = IR_NONE;
+        for (unsigned k = 0; k < entries; k++) previous[k] = IR_NONE;
         continue;
       }
       if (in->opcode != IR_OP_LOAD) {
@@ -92,22 +96,30 @@ void ir_local_memory(ir_context *c, ir_module *m) {
       }
       unsigned address = in->first_operand;
       const ir_operand *ptr = &p.a.operands[address];
+      if (global_only && ptr->kind != IR_OPERAND_GLOBAL)
+        continue;
       if (ptr->kind != IR_OPERAND_LOCAL && ptr->kind != IR_OPERAND_GLOBAL) {
-        previous = IR_NONE;
+        previous[0] = IR_NONE;
         continue;
       }
-      if (previous != IR_NONE && bounded_users(&p, i)) {
-        const ir_instruction *old = &p.a.instructions[previous];
+      int forwarded = 0;
+      for (unsigned k = 0; k < entries && !forwarded; k++) {
+        if (previous[k] == IR_NONE)
+          continue;
+        const ir_instruction *old = &p.a.instructions[previous[k]];
         const ir_operand *old_ptr = &p.a.operands[old->first_operand];
         if (ir_type_equal(&p.a, in->type, old->type) &&
-            !strcmp(value(&p, ptr), value(&p, old_ptr))) {
+            !strcmp(value(&p, ptr), value(&p, old_ptr)) && bounded_users(&p, i)) {
           p.values[in->definition] = p.a.definitions[old->definition].name;
           m->lines[in->line - 1].replacement = "";
           ir_note(c, "transformed", "load_to_load", 1);
-          continue;
+          forwarded = 1;
         }
       }
-      previous = i;
+      if (!forwarded) {
+        for (unsigned k = entries - 1; k > 0; k--) previous[k] = previous[k - 1];
+        previous[0] = i;
+      }
     }
   }
   for (unsigned k = 0; k < p.a.operand_count; ++k) {
@@ -118,3 +130,5 @@ void ir_local_memory(ir_context *c, ir_module *m) {
   }
   ir_reparse(c, m, mark);
 }
+void ir_local_memory(ir_context *c, ir_module *m) { run_memory(c, m, 0); }
+void ir_global_memory(ir_context *c, ir_module *m) { run_memory(c, m, 1); }

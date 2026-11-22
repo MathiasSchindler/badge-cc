@@ -112,6 +112,8 @@ entry:
 }
 define internal i32 @hot(i32 %x) !prof !0 {
 entry:
+ br label %body
+body:
  store volatile i32 %x, ptr @sink
  %y = add i32 %x, 1
  ret i32 %y

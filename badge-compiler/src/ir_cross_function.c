@@ -605,11 +605,18 @@ static int share_helper(cross *p, unsigned f, const unsigned *calls,
 }
 static int inline_calls(cross *p, unsigned f, const unsigned *calls,
                         unsigned count, module_cost *baseline, char **best,
-                        uint32_t *best_bytes, int *forwarding) {
+                        uint32_t *best_bytes, int *forwarding, int entry_jump) {
   const ir_function *fn = &p->a.functions[f];
-  if (fn->block_count != 1)
-    return 0;
   const ir_block *block = &p->a.blocks[fn->first_block];
+  if (fn->block_count != 1) {
+    if (!entry_jump || fn->block_count != 2 || block->instruction_count != 1 ||
+        block->successor_count != 1 ||
+        p->a.successors[block->first_successor] != fn->first_block + 1 ||
+        p->a.instructions[block->first_instruction].opcode != IR_OP_BR ||
+        p->a.instructions[block->first_instruction].operand_count != 1)
+      return 0;
+    block++;
+  }
   if (block->instruction_count > 16)
     return 0;
   if (p->a.instructions[block->first_instruction + block->instruction_count - 1]
@@ -632,7 +639,7 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
   for (unsigned i = block->first_instruction;
        i < block->first_instruction + block->instruction_count; i++) {
     const ir_instruction *in = &p->a.instructions[i];
-    if (in->effects & IR_EFFECT_OPAQUE || in->opcode == IR_OP_ALLOCA ||
+    if (in->effects & IR_EFFECT_OPAQUE || in->opcode == IR_OP_ALLOCA || in->opcode == IR_OP_PHI ||
         (in->opcode == IR_OP_CALL && !forward) ||
         (in->opcode == IR_OP_RET &&
          i + 1 != block->first_instruction + block->instruction_count))
@@ -822,7 +829,7 @@ static void run_cross_function(ir_context *c, ir_module *m, int hot_inline) {
       kind = "constant_specialization";
     int forwarding = 0;
     if (inline_calls(&p, chosen, calls, count, &before, &best, &best_bytes,
-                     &forwarding)) {
+                     &forwarding, hot_inline)) {
       kind = hot_inline ? "profiled_helper_inlined" :
           forwarding ? "tail_forwarder_inlined" : "straight_line_inlined";
       clone = NULL;

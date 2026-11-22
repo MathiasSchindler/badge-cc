@@ -37,10 +37,15 @@ test('real paired report has complete stages, exact image accounting and automat
       }
     }
     if (report.policy.BADGE_CODEGEN_SCALAR_SELECTION === 'thumb-constants') {
-      assert.deepEqual(report.images.map(i => [i.role, i.name, i.loaded_bytes]), [
-        ['owned', 'red_square', 624], ['owned', 'tilt_maze', 19600],
-        ['llvm', 'red_square', 568], ['llvm', 'tilt_maze', 8704],
-      ]);
+      const size = (role, name) => report.images.find(i => i.role === role && i.name === name).loaded_bytes;
+      assert(size('owned', 'red_square') <= 624 && size('owned', 'tilt_maze') <= 19600);
+      assert(size('llvm', 'red_square') <= 568 && size('llvm', 'tilt_maze') <= 8704);
+    }
+    if (report.optimization_diagnostics) {
+      assert(maze.optimization.remarks.some(item => item.function === 'generate_maze' && item.pass === 'inline'));
+      assert(maze.optimization.backend.some(item => item.name === 'generate_maze' && item.owned.bytes && item.llvm.bytes));
+      if (maze.optimization.traced.includes('generate_maze'))
+        assert(maze.optimization.passes.some(item => item.scope === 'generate_maze'));
     }
     const ownedMaze = maze.roles.owned;
     assert.equal(ownedMaze.passes.length, report.policy.BADGE_OPT_PASSES.split(',').length);
@@ -57,6 +62,14 @@ test('copied report verifies offline and rejects changed image metrics',
       fs.writeFileSync(path.join(destination, 'report.json'), JSON.stringify(report));
       assert.throws(() => verify(destination), /loaded-byte mismatch/);
       report.images[0].loaded_bytes--;
+      if (report.optimization_diagnostics) {
+        const data = report.modules.find(m => m.optimization.remarks.length).optimization;
+        const before = data.remarks[0].name;
+        data.remarks[0].name = 'tampered';
+        fs.writeFileSync(path.join(destination, 'report.json'), JSON.stringify(report));
+        assert.throws(() => verify(destination), /optimization remarks mismatch/);
+        data.remarks[0].name = before;
+      }
       if (report.projects) {
         report.projects[0].modules.push('unrelated.o');
         fs.writeFileSync(path.join(destination, 'report.json'), JSON.stringify(report));

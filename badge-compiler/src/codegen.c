@@ -1109,6 +1109,7 @@ static void cg_forward_store(cg_context *c, cg_inst *store, cg_type *type,
   const char *address = c->tokens[pointer].text;
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       !cg_global_residency(c) || !load || !load->result ||
+      cg_selection_signed_load(c, load) || load->ephemeral_address ||
       (type->bits != 8 && type->bits != 16 && type->bits != 32) ||
       (*address != '%' && *address != '@') ||
       (store->end - pointer != 1 &&
@@ -1175,7 +1176,8 @@ static int cg_direct_gep(cg_context *c, cg_inst *i, unsigned stride,
     cg_add_offset(c, dst, base, offset);
   i->result->memory_align = proof->memory_align;
   i->result->memory_size = proof->memory_size;
-  cg_save_normalized(c, i->result, dst);
+  if (!i->ephemeral_address)
+    cg_save_normalized(c, i->result, dst);
   return 1;
 }
 static int cg_memory_pointer(cg_context *c, cg_arg *arg, unsigned length) {
@@ -1451,7 +1453,10 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
       if (!strcmp(c->tokens[k].text, "asm"))
         return 0;
     }
-    if (c->scalar_stream_selection && at + 4 < i->end &&
+    if ((c->scalar_stream_selection ||
+         (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+          at + 2 < i->end && c->tokens[at + 2].text[0] == '@')) &&
+        at + 4 < i->end &&
         (!strcmp(c->tokens[at + 1].text, "void") ||
          !strcmp(c->tokens[at + 1].text, "i32") ||
          !strcmp(c->tokens[at + 1].text, "ptr")) &&
@@ -1717,7 +1722,10 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
                                ? cg_global_register(c, c->tokens[pointer].text) : 0;
     unsigned fallback_base = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
         !store && (t->size == 1 || t->size == 2 || t->size == 4) ? 0 : 4;
-    if (direct_base) cg_take(c);
+    if (i->ephemeral_address) {
+      cg_take(c);
+      if (fallback_base) cg_move(c, fallback_base, 0);
+    } else if (direct_base) cg_take(c);
     else cg_value_read(c, NULL, fallback_base, 0);
     unsigned align = t->align;
     while (c->pos < i->end) {
@@ -1729,6 +1737,14 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     }
     if (is_volatile && align < (t->size > 4 ? 4 : t->size))
       cg_error(c, "unaligned volatile scalar access unsupported");
+    cg_inst *signed_result = cg_selection_signed_load(c, i);
+    if (signed_result) {
+      unsigned dst = cg_global_register(c, signed_result->result->name);
+      cg_emit(c, "ldrs%s.w r%u, [r%u]\n", t->size == 1 ? "b" : "h",
+              dst, direct_base ? direct_base : fallback_base);
+      cg_save_normalized(c, signed_result->result, dst);
+      return;
+    }
     if (cg_operand_selection(c) && (t->size == 1 || t->size == 2 || t->size == 4) &&
         align >= t->size) {
       unsigned base = direct_base;
@@ -1823,7 +1839,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     }
     i->result->memory_align = proof.memory_align;
     i->result->memory_size = proof.memory_size;
-    cg_save(c, i->result, 0, 0);
+    if (!i->ephemeral_address)
+      cg_save(c, i->result, 0, 0);
     return;
   }
   if (!strcmp(op, "insertvalue") || !strcmp(op, "extractvalue")) {
@@ -1871,6 +1888,18 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_to_type(c);
     cg_type *from = cg_type_parse(c, 0);
     unsigned at = c->pos;
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+        !strcmp(op, "sext") && (from->bits == 8 || from->bits == 16) &&
+        i->result->type->bits == 32) {
+      unsigned src = cg_global_register(c, c->tokens[at].text);
+      if (src) {
+        unsigned dst = cg_global_register(c, i->result->name);
+        cg_emit(c, "sxt%s.%s r%u, r%u\n", from->bits == 8 ? "b" : "h",
+                src < 8 && dst < 8 ? "n" : "w", dst, src);
+        cg_save_normalized(c, i->result, dst);
+        return;
+      }
+    }
     if (cg_operand_selection(c) && !strcmp(op, "zext") &&
         from->size <= 4 && i->result->type->size == 4 &&
         c->tokens[at].text[0] == '%') {
@@ -1939,6 +1968,14 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_accept(c, "samesign");
     char *pred = cg_take(c);
     cg_type *t = cg_type_parse(c, 0);
+    const char *condition = cg_comparison_condition(pred);
+    if (condition && cg_selection_compare_operands(c, i, t)) {
+      unsigned dst = cg_global_register(c, i->result->name);
+      cg_emit(c, "mov.w r%u, #0\nit %s\nmov%s r%u, #1\n",
+              dst, condition, condition, dst);
+      cg_save_normalized(c, i->result, dst);
+      return;
+    }
     unsigned left = c->pos;
     cg_value_read(c, t, 0, 0);
     cg_expect(c, ",");

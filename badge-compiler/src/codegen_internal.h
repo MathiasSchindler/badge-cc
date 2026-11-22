@@ -33,6 +33,7 @@ typedef struct cg_inst {
   int assembly_checked;
   unsigned scalar_call_arguments_plus_one;
   unsigned forwarded_store_register_plus_one;
+  int ephemeral_address;
 } cg_inst;
 typedef struct cg_assembly {
   char *text;
@@ -169,6 +170,7 @@ static inline int cg_effect_selection(const cg_context *c) {
 }
 cg_assembly *cg_instruction_assembly(cg_context *c, cg_inst *instruction);
 cg_inst *cg_selection_countdown(cg_context *c, cg_inst *instruction);
+cg_inst *cg_selection_signed_load(cg_context *c, cg_inst *instruction);
 int cg_emit_counted_leaf(cg_context *c);
 
 static inline int cg_global_residency(const cg_context *c) {

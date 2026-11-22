@@ -610,6 +610,52 @@ pair was found in the production corpus. Its encoding and behavior are
 checked against LLVM at signed boundaries. Production gains above are from
 `SMULL`, not multi-lane packed DSP.
 
+[Compile Graph](../compile-graph/README.md) adds LLVM remarks and an identical-IR
+backend view. Its maze comparison highlighted excess register transport.
+`thumb-constants` now compares normalized narrow values directly for equality
+and unsigned predicates, uses narrow register CMP encodings even with high
+registers, and can materialize the boolean in its allocated destination.
+Signed narrow predicates keep explicit sign extension. On fixed inputs this
+saves 5,298 executable bytes across 37 modules; no module or measured frame
+resources grew. The linked maze shrank from 18,644 to 18,184 bytes. The maze
+oracle reached 32,335 fewer instructions in QEMU (0.065%); no physical timing
+or default promotion is claimed.
+
+The profiled maze follow-up keeps the qualified default unchanged. Use
+`thumb-constants` with the optional IR passes `global-memory` and
+`sret-forward` appended to the default pass list:
+
+```sh
+passes=$(badge-compiler/build/badge-opt --default-passes)
+BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants \
+  BADGE_OPT_PASSES="$passes,global-memory,sret-forward" \
+  make -C badge-compiler test-tilt-maze
+```
+
+| Change, measured in order | Maze QEMU instructions saved |
+| --- | ---: |
+| Preserve callee-saved residency across simple direct calls | 915,967 |
+| Fuse sole-use signed loads and emit extensions directly | 2,190,325 |
+| Retain address facts across ABI calls and reuse nearby global loads | 1,004,258 |
+| Forward private aggregate return buffers | 623,154 |
+| Write standalone division results directly | 429,023 |
+| Forward adjacent spilled addresses and use exact shift scaling | 1,697,385 |
+| Fold in-range wide conditional branch pairs | 243,808 |
+
+The `hot-inline` pass also accepts profiled straight-line helpers behind an
+unconditional entry jump, with the same size and stack gates. Its focused
+oracle measures 110 to 90 executable bytes and about 2,192 to 1,169 reached
+instructions. This is separate from the maze count; the maze was not built
+with a profile.
+
+The combined maze reaches 42,564,433 versus 49,668,353 instructions and
+2,431,002 versus 4,521,858 direct frame accesses. In a fixed 37-module
+corpus, executable bytes fall from 145,152 to 141,176 with no module growing.
+Some save areas and frames grow; the maze generation frame increases from
+1,040 to 1,056 bytes, and its reached frame traffic increases. The opt-in
+maze image shrinks from 18,184 to 17,420 flash bytes. These are QEMU and
+offline measurements, not physical clock or XIP timing.
+
 The original backend policies remain available for controlled comparisons:
 
 ```sh
