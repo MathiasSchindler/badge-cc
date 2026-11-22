@@ -291,6 +291,113 @@ ${cells.map((p, i) => `  store volatile i32 ${i + 1}, ptr ${p}, align 4`).join('
   }
 });
 
+test('fixed positive loops use a countdown only when the counter is unobserved', t => {
+  const file = files(t);
+  const loop = (name, limit, value) => `define i32 @${name}(i32 %seed) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [0, %entry], [%next, %body]
+  %acc = phi i32 [%seed, %entry], [%sum, %body]
+  %go = icmp ult i32 %i, ${limit}
+  br i1 %go, label %body, label %done
+body:
+  %sum = add i32 %acc, ${value}
+  %next = add i32 %i, 1
+  br label %header
+done:
+  ret i32 %acc
+}`;
+  fs.writeFileSync(file('count.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+${loop('fixed', 3, '7')}
+${loop('zero', 0, '7')}
+${loop('observed', 3, '%i')}
+define i32 @main() {
+entry:
+  %a = call i32 @fixed(i32 9)
+  %b = call i32 @zero(i32 9)
+  %c = call i32 @observed(i32 9)
+  %x = xor i32 %a, 30
+  %y = xor i32 %b, 9
+  %z = xor i32 %c, 12
+  %xy = or i32 %x, %y
+  %status = or i32 %xy, %z
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('count.ll'), '-o', file('count.s')]);
+  const assembly = fs.readFileSync(file('count.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.match(body('fixed'), /@ loop-countdown:/);
+  assert.doesNotMatch(body('zero') + body('observed'), /@ loop-countdown:/);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('count.s'), '-o', file('count.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('count.o'), '-o', file('count.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('count.elf')]);
+});
+
+test('bounded loops hoist immutable literals but retain loads across calls or clobbers', t => {
+  const file = files(t);
+  const loop = (name, update, result) => `define i32 @${name}(i32 %n) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [0, %entry], [%next, %body]
+  %sum = phi i32 [7, %entry], [${result}, %body]
+  %go = icmp ult i32 %i, %n
+  br i1 %go, label %body, label %done
+body:
+  %a = add i32 %sum, 305419896
+${update}
+  %next = add i32 %i, 1
+  br label %header
+done:
+  ret i32 %sum
+}`;
+  fs.writeFileSync(file('pool.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define void @effect() {
+entry:
+  ret void
+}
+${loop('hoist', '', '%a')}
+${loop('clobber', '  %b = sub i32 %a, 3180503887', '%b')}
+${loop('call_barrier', '  call void @effect()', '%a')}
+define i32 @main() {
+entry:
+  %zero = call i32 @hoist(i32 0)
+  %three = call i32 @hoist(i32 3)
+  %changed = call i32 @clobber(i32 3)
+  %called = call i32 @call_barrier(i32 3)
+  %a = xor i32 %zero, 7
+  %b = xor i32 %three, 916259695
+  %c = xor i32 %changed, ${(7 + 3 * (305419896 - 3180503887)) >>> 0}
+  %d = xor i32 %called, 916259695
+  %ab = or i32 %a, %b
+  %cd = or i32 %c, %d
+  %status = or i32 %ab, %cd
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('pool.ll'), '-o', file('pool.s')]);
+  const assembly = fs.readFileSync(file('pool.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.match(body('hoist'), /ldr\.n r\d+, \.Lcg_shared_\d+_\d+\n@ loop-pool:.*\n\.Lcg_\d+_header:/);
+  for (const name of ['clobber', 'call_barrier']) {
+    assert.match(body(name), /ldr\.[nw].*\.Lcg_shared_/);
+    assert.doesNotMatch(body(name), /@ loop-pool:/);
+  }
+  run(tool('badge-asm'), [file('pool.s'), '-o', file('pool.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('pool.o'), '-o', file('pool.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('pool.elf')]);
+});
+
 test('repeated symbol addresses share one unreachable literal with both assemblers', t => {
   const file = files(t);
   fs.writeFileSync(file('pool.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"

@@ -9,6 +9,8 @@ void ir_scalar_promotion(ir_context *, ir_module *);
 void ir_mem2reg(ir_context *, ir_module *);
 void ir_sccp(ir_context *, ir_module *);
 void ir_instruction_combine(ir_context *, ir_module *);
+void ir_low_bits(ir_context *, ir_module *);
+void ir_linear_bias(ir_context *, ir_module *);
 void ir_scalar_cleanup(ir_context *, ir_module *);
 void ir_local_cse(ir_context *, ir_module *);
 void ir_loop_invariant(ir_context *, ir_module *);
@@ -70,6 +72,12 @@ const ir_pass badge_ir_passes[] = {
      "Eliminate typed neutral arithmetic and simplify proven integer cast "
      "chains",
      ir_instruction_combine, IR_PASS_OPTIMIZATION},
+    {"low-bits",
+     "Remove masks whose changed bits cannot reach observable single-use consumers",
+     ir_low_bits, IR_PASS_OPTIMIZATION},
+    {"linear-bias",
+     "Combine constant offsets in unflagged two-term modular sums",
+     ir_linear_bias, IR_PASS_OPTIMIZATION},
     {"scalar-cleanup",
      "Combine scalar expressions and forward equality/nonzero tests of "
      "extended i1 values",

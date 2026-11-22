@@ -97,8 +97,8 @@ static void effects(const char *text, cg_constant facts[13]) {
       !strcmp(op, "strh") || !strcmp(op, "strh.w") || !strcmp(op, "strh.n") ||
       !strcmp(op, "cmp") || !strcmp(op, "cmp.w") || !strcmp(op, "cmp.n")) return;
   const char *writes[] = {"mov", "mov.w", "movs.n", "movw", "movt", "add.w", "add.n", "addw",
-    "sub.w", "subw", "subs.w", "mul", "mla", "mls", "udiv", "sdiv",
-    "and.w", "orr.w", "eor.w", "lsl.w", "lsr.w", "asr.w", "rsb.w",
+    "sub.w", "subw", "subs.w", "adds.n", "subs.n", "mul", "mla", "mls", "udiv", "sdiv",
+    "and.w", "orr.w", "eor.w", "lsl.w", "lsr.w", "asr.w", "lsls.n", "lsrs.n", "asrs.n", "rsb.w",
     "ubfx", "sxtb", "sxth", "sxtb.n", "sxtb.w", "sxth.n", "sxth.w", "uxtb.n", "uxth.n",
     "ldr", "ldr.w", "ldr.n", "ldrb", "ldrb.w", "ldrb.n", "ldrh", "ldrh.w", "ldrh.n",
     "ldrsb.w", "ldrsh.w"};
@@ -774,6 +774,171 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
   if (assembly_lines) cg_error(c, "truncated constant selection assembly boundary");
 }
 
+static int pool_label(const char *line, const char *name) {
+  size_t n = strlen(name);
+  return !strncmp(line, name, n) && !strcmp(line + n, ":");
+}
+
+static int pool_exits_without_value(char *const *lines, unsigned exit,
+                                    unsigned count, unsigned reg) {
+  for (unsigned i = exit + 1; i < count; i++) {
+    const char *p = lines[i];
+    if (!*p || *p == '@' || *p == '.')
+      continue;
+    if (!strcmp(p, "bx lr"))
+      return reg != 0;
+    if (!strncmp(p, "pop.", 4) && mentions(p, reg))
+      return 1;
+    if (!mentions(p, reg))
+      continue;
+    char op[24];
+    unsigned dst;
+    int operands = 0;
+    if (sscanf(p, "%23s r%u,%n", op, &dst, &operands) != 2 ||
+        !operands || dst != reg || mentions(p + operands, reg))
+      return 0;
+    /* movt, writeback, and other partial writes do not kill the old value. */
+    return !strcmp(op, "mov") || !strcmp(op, "mov.w") ||
+           !strcmp(op, "movw") || !strcmp(op, "movs.n");
+  }
+  return 0;
+}
+
+typedef struct {
+  unsigned header, guard, latch, exit;
+  char head_name[128];
+} closed_loop;
+
+static int find_closed_loop(cg_context *c, char *const *lines, unsigned count,
+                            closed_loop *loop) {
+  unsigned latch = count, guard = count;
+  char head[128] = "", exit[128] = "";
+  for (unsigned i = 0; i < count; i++) {
+    const char *p = lines[i];
+    if (!*p || *p == '@' || *p == '.' || p[strlen(p) - 1] == ':' || !strcmp(p, "bx lr") ||
+        !strncmp(p, "push.", 5) || !strncmp(p, "pop.", 4))
+      continue;
+    cg_register_work(c);
+    char op[24], target[128];
+    int end = 0;
+    if (sscanf(p, "%23s %127s%n", op, target, &end) == 2 && end && !p[end] &&
+        !strncmp(target, ".Lcg_", 5)) {
+      char *width = strchr(op, '.');
+      if (width) *width = 0;
+      if (!strcmp(op, "b") && latch == count) {
+        strcpy(head, target);
+        latch = i;
+        continue;
+      }
+      if (op[0] == 'b' && cg_inverse_condition(op + 1) && guard == count) {
+        strcpy(exit, target);
+        guard = i;
+        continue;
+      }
+    }
+    cg_constant facts[13] = {{0}};
+    for (unsigned r = 0; r < 13; r++) facts[r].known = 1;
+    effects(p, facts);
+    unsigned known = 0;
+    for (unsigned r = 0; r < 13; r++) known += facts[r].known != 0;
+    if (!known)
+      return 0;
+  }
+  if (guard >= latch || latch == count)
+    return 0;
+  unsigned header = 0, done = latch + 1;
+  while (header < guard && !pool_label(lines[header], head)) header++;
+  while (done < count && !pool_label(lines[done], exit)) done++;
+  if (header == guard || done == count)
+    return 0;
+  for (unsigned i = header + 1; i < latch; i++) {
+    const char *p = lines[i];
+    if (!strcmp(p, "bx lr") || !strncmp(p, "push.", 5) || !strncmp(p, "pop.", 4))
+      return 0;
+  }
+  *loop = (closed_loop){header, guard, latch, done, ""};
+  strcpy(loop->head_name, head);
+  return 1;
+}
+
+static void hoist_pool_loads(cg_context *c, char *const *lines, unsigned count,
+                             const closed_loop *loop, const unsigned *site,
+                             const unsigned *regs, unsigned char *hoisted) {
+  for (unsigned i = loop->guard + 1; i + 1 < loop->latch; i++) {
+    if (!site[i] || regs[i] > 3)
+      continue;
+    unsigned reg = regs[i];
+    unsigned j = loop->header + 1;
+    for (; j < i; j++) {
+      cg_register_work(c);
+      if (*lines[j] != '@' && *lines[j] != '.' && mentions(lines[j], reg))
+        break;
+    }
+    if (j != i || !pool_exits_without_value(lines, loop->exit, count, reg))
+      continue;
+    /* The only incoming edges were verified above: fallthrough into the
+       header and the latch. No iteration may redefine the hoisted register. */
+    for (j = i + 2; j < loop->latch; j++) {
+      cg_register_work(c);
+      const char *p = lines[j];
+      if (!*p || *p == '@' || *p == '.')
+        continue;
+      cg_constant facts[13] = {{0}};
+      facts[reg].known = 1;
+      effects(p, facts);
+      if (!facts[reg].known)
+        break;
+    }
+    if (j == loop->latch)
+      hoisted[i] = 1;
+  }
+}
+
+static int loop_metadata(const char *line) {
+  return !*line || *line == '@' || *line == '.';
+}
+
+static int countdown_loop(cg_context *c, char *const *lines, unsigned count,
+                          const closed_loop *loop, unsigned *init, unsigned *compare,
+                          unsigned *step, unsigned *reg, unsigned *trips) {
+  *compare = loop->header + 1;
+  while (*compare < loop->guard && loop_metadata(lines[*compare])) (*compare)++;
+  if (*compare + 1 != loop->guard || strncmp(lines[loop->guard], "bhs.n ", 6))
+    return 0;
+  int end = 0;
+  if (sscanf(lines[*compare], "cmp.n r%u, #%u%n", reg, trips, &end) != 2 ||
+      !end || lines[*compare][end] || *reg >= 8 || !*trips || *trips > 255)
+    return 0;
+  *step = loop->latch - 1;
+  while (*step > loop->guard && loop_metadata(lines[*step])) (*step)--;
+  unsigned dst, src, increment;
+  end = 0;
+  if (sscanf(lines[*step], "adds.n r%u, r%u, #%u%n", &dst, &src, &increment, &end) != 3 ||
+      !end || lines[*step][end] || dst != *reg || src != *reg || increment != 1)
+    return 0;
+  *init = loop->header;
+  while (*init && !mentions(lines[*init - 1], *reg)) (*init)--;
+  if (!*init)
+    return 0;
+  (*init)--;
+  unsigned seed;
+  end = 0;
+  if (sscanf(lines[*init], "movs.n r%u, #%u%n", &dst, &seed, &end) != 2 ||
+      !end || lines[*init][end] || dst != *reg || seed ||
+      !pool_exits_without_value(lines, loop->exit, count, *reg))
+    return 0;
+  unsigned instructions = 0;
+  for (unsigned i = loop->guard + 1; i < loop->exit; i++) {
+    cg_register_work(c);
+    if (!loop_metadata(lines[i])) {
+      if (i > loop->latch || (i != *step && mentions(lines[i], *reg)))
+        return 0;
+      instructions++;
+    }
+  }
+  return instructions <= 60;
+}
+
 void cg_pool_literals(cg_context *c, size_t start) {
   enum { MAX_LINES = 920, MAX_NARROW_LINES = 220, MAX_LITERALS = 32 };
   const char *source = c->out + start;
@@ -834,19 +999,49 @@ void cg_pool_literals(cg_context *c, size_t start) {
   unsigned pooled = 0;
   for (unsigned k = 0; k < entry_count; k++)
     pooled += entries[k].uses > 1 || entries[k].low_uses;
-  if (!pooled)
+  unsigned char hoisted[MAX_LINES] = {0};
+  closed_loop loop = {0};
+  int closed = narrow_reach && find_closed_loop(c, lines, count, &loop);
+  unsigned init, compare, step, reg, trips;
+  int countdown = closed && countdown_loop(c, lines, count, &loop, &init, &compare,
+                                            &step, &reg, &trips);
+  if (!pooled && !countdown)
     return;
+  if (closed && pooled)
+    hoist_pool_loads(c, lines, count, &loop, site, regs, hoisted);
   c->size = start;
   for (unsigned i = 0; i < count; i++) {
+    if (closed && i == loop.header)
+      for (unsigned j = loop.header + 1; j < count; j++)
+        if (hoisted[j])
+          cg_emit(c, "ldr.n r%u, .Lcg_shared_%u_%u\n@ loop-pool: materialized before header\n",
+                  regs[j], c->fn->id, site[j]);
+    if (countdown) {
+      if (i == init) {
+        cg_emit(c, "movs.n r%u, #%u\n", reg, trips);
+        continue;
+      }
+      if (i == compare || i == loop.guard)
+        continue;
+      if (i == step) {
+        cg_emit(c, "subs.n r%u, r%u, #1\n", reg, reg);
+        continue;
+      }
+      if (i == loop.latch) {
+        cg_emit(c, "bne.n %s\n@ loop-countdown: fixed positive trip count\n", loop.head_name);
+        continue;
+      }
+    }
     unsigned k = site[i];
     if (k && (entries[k - 1].uses > 1 || entries[k - 1].low_uses)) {
       char width = narrow_reach && regs[i] < 8 ? 'n' : 'w';
-      cg_emit(c, "ldr.%c r%u, .Lcg_shared_%u_%u\n", width, regs[i], c->fn->id, k);
+      if (!hoisted[i])
+        cg_emit(c, "ldr.%c r%u, .Lcg_shared_%u_%u\n", width, regs[i], c->fn->id, k);
       i++;
     } else
       cg_emit(c, "%s\n", lines[i]);
   }
-  cg_emit(c, ".p2align 2\n");
+  if (pooled) cg_emit(c, ".p2align 2\n");
   for (unsigned k = 0; k < entry_count; k++)
     if (entries[k].uses > 1 || entries[k].low_uses) {
       const char *expr = entries[k].expression;

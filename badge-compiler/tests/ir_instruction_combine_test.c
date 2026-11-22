@@ -391,6 +391,22 @@ int main(void) {
   flow_tests();
   failures_and_scaling();
   boolean_tests();
+  pipeline = "low-bits";
+  fixture(TARGET FN("%small = and i32 %x, 7\n%scale = mul i32 %small, 2\n"
+                    "%a = add i32 %scale, 1\n%r = and i32 %a, 15\nret i32 %r"),
+          "%scale = mul i32 %x, 2", "%small =", 1);
+  fixture(TARGET FN("%small = and i32 %x, 7\n%scale = mul i32 %small, 2\n"
+                    "%r = and i32 %scale, 31\nret i32 %r"),
+          "%small = and", NULL, 0);
+  pipeline = "linear-bias";
+  fixture(TARGET FN("%a = sub i32 %x, 7\n%b = sub i32 %x, 11\n"
+                    "%am = mul i32 %a, 3\n%bm = mul i32 %b, 2\n"
+                    "%r = add i32 %am, %bm\nret i32 %r"),
+          ", 43\nret", "%a = sub", 1);
+  fixture(TARGET FN("%a = sub nsw i32 %x, 7\n%b = sub i32 %x, 11\n"
+                    "%am = mul i32 %a, 3\n%bm = mul i32 %b, 2\n"
+                    "%r = add i32 %am, %bm\nret i32 %r"),
+          "%a = sub nsw", NULL, 0);
   printf("M07: %u LLVM-verified/idempotent positive/negative fixtures, "
          "8000 aliases and atomic invalid-input/work-budget failure PASS\n",
          fixtures);

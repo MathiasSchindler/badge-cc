@@ -319,3 +319,136 @@ static void run(ir_context *c, ir_module *m, int booleans) {
 }
 void ir_instruction_combine(ir_context *c, ir_module *m) { run(c, m, 0); }
 void ir_scalar_cleanup(ir_context *c, ir_module *m) { run(c, m, 1); }
+
+static int low_bits_only(combining *p, unsigned definition, uint32_t mask) {
+  for (unsigned step = 0, shifted = 0; step < 8; step++) {
+    const ir_definition *def = &p->a.definitions[definition];
+    if (def->use_count != 1) return 0;
+    const ir_operand *use = &p->a.operands[def->first_use];
+    const ir_instruction *in = &p->a.instructions[use->instruction];
+    spend(p);
+    if (in->opcode != IR_OP_BINARY || in->operand_count != 2 ||
+        p->a.types[in->type].bits != 32 || in->end_line != in->line ||
+        p->a.text->lines[in->line - 1].count != 7)
+      return 0;
+    const ir_operand *left = &p->a.operands[in->first_operand];
+    const ir_operand *other = left + (use == left);
+    uint64_t value;
+    int literal = other->kind == IR_OPERAND_LITERAL &&
+        ir_integer(ir_text(p->a.text, other->token), &value);
+    const char *op = in->operation;
+    if (!strcmp(op, "and"))
+      return literal && !(((uint32_t)value >> shifted) & ~mask);
+    if (!strcmp(op, "shl") || !strcmp(op, "mul")) {
+      if (!literal) return 0;
+      unsigned n;
+      if (!strcmp(op, "shl")) {
+        if (use != left || value >= 32) return 0;
+        n = (unsigned)value;
+      } else {
+        uint32_t multiplier = (uint32_t)value;
+        n = multiplier ? (unsigned)__builtin_ctz(multiplier) : 32;
+      }
+      shifted += n;
+      if (shifted >= 32) return 1;
+    } else if (strcmp(op, "add") && strcmp(op, "sub") &&
+               strcmp(op, "or") && strcmp(op, "xor"))
+      return 0;
+    definition = in->definition;
+  }
+  return 0;
+}
+
+void ir_low_bits(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  combining p = {.c = c, .work = IR_COMBINE_WORK_LIMIT};
+  ir_analyze(c, m, &p.a);
+  for (unsigned i = 0; i < p.a.instruction_count; i++) {
+    spend(&p);
+    const ir_instruction *in = &p.a.instructions[i];
+    if (in->opcode != IR_OP_BINARY || strcmp(in->operation, "and") ||
+        in->operand_count != 2 || p.a.types[in->type].bits != 32 ||
+        in->end_line != in->line || m->lines[in->line - 1].count != 7)
+      continue;
+    const ir_operand *left = &p.a.operands[in->first_operand], *right = left + 1;
+    const ir_operand *src = left->kind == IR_OPERAND_LOCAL ? left : right;
+    const ir_operand *mask = src == left ? right : left;
+    uint64_t value;
+    if (src->kind != IR_OPERAND_LOCAL || mask->kind != IR_OPERAND_LITERAL ||
+        !ir_integer(ir_text(m, mask->token), &value) ||
+        !low_bits_only(&p, in->definition, (uint32_t)value))
+      continue;
+    const ir_token *token = &m->tokens[src->token];
+    const ir_operand *use = &p.a.operands[p.a.definitions[in->definition].first_use];
+    m->tokens[use->token].replacement = token->replacement ? token->replacement : token->text;
+    m->lines[in->line - 1].replacement = "";
+    ir_note(c, "transformed", "unobserved_upper_bits_mask", 1);
+  }
+  ir_reparse(c, m, mark);
+}
+
+static int plain_i32_binary(const ir_analysis *a, const ir_instruction *in,
+                            const char *name) {
+  return in->opcode == IR_OP_BINARY && !strcmp(in->operation, name) &&
+      in->operand_count == 2 && a->types[in->type].bits == 32 &&
+      in->end_line == in->line && a->text->lines[in->line - 1].count == 7 &&
+      !a->text->lines[in->line - 1].replacement;
+}
+
+void ir_linear_bias(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  combining p = {.c = c, .work = IR_COMBINE_WORK_LIMIT};
+  ir_analysis *a = &p.a;
+  ir_analyze(c, m, a);
+  for (unsigned i = 0; i < a->instruction_count; i++) {
+    spend(&p);
+    const ir_instruction *add = &a->instructions[i];
+    if (!plain_i32_binary(a, add, "add"))
+      continue;
+    const ir_instruction *sub[2];
+    const ir_operand *input[2], *biased[2];
+    uint32_t correction = 0;
+    unsigned n = 0;
+    for (; n < 2; n++) {
+      const ir_operand *sum = &a->operands[add->first_operand + n];
+      if (sum->kind != IR_OPERAND_LOCAL) break;
+      const ir_definition *scaled = &a->definitions[sum->definition];
+      if (scaled->use_count != 1 || scaled->instruction == IR_NONE) break;
+      const ir_instruction *mul = &a->instructions[scaled->instruction];
+      if (mul->block != add->block || !plain_i32_binary(a, mul, "mul")) break;
+      const ir_operand *left = &a->operands[mul->first_operand];
+      biased[n] = left->kind == IR_OPERAND_LOCAL ? left : left + 1;
+      const ir_operand *factor = left + (biased[n] == left);
+      uint64_t scale, bias;
+      if (biased[n]->kind != IR_OPERAND_LOCAL || factor->kind != IR_OPERAND_LITERAL ||
+          !ir_integer(ir_text(m, factor->token), &scale))
+        break;
+      const ir_definition *def = &a->definitions[biased[n]->definition];
+      if (def->use_count != 1 || def->instruction == IR_NONE) break;
+      sub[n] = &a->instructions[def->instruction];
+      if (sub[n]->block != add->block || !plain_i32_binary(a, sub[n], "sub")) break;
+      input[n] = &a->operands[sub[n]->first_operand];
+      const ir_operand *offset = input[n] + 1;
+      if (input[n]->kind != IR_OPERAND_LOCAL || offset->kind != IR_OPERAND_LITERAL ||
+          !ir_integer(ir_text(m, offset->token), &bias))
+        break;
+      correction += (uint32_t)scale * (uint32_t)bias;
+    }
+    if (n != 2)
+      continue;
+    for (n = 0; n < 2; n++) {
+      m->tokens[biased[n]->token].replacement = ir_text(m, input[n]->token);
+      m->lines[sub[n]->line - 1].replacement = "";
+    }
+    if (correction) {
+      const char *sum = ir_fresh(c, m, '%');
+      m->lines[add->line - 1].replacement = ir_format(c,
+          "  %s = add i32 %s, %s\n  %s = sub i32 %s, %u\n",
+          sum, ir_text(m, a->operands[add->first_operand].token),
+          ir_text(m, a->operands[add->first_operand + 1].token),
+          a->definitions[add->definition].name, sum, correction);
+    }
+    ir_note(c, "transformed", "combined_linear_bias", 1);
+  }
+  ir_reparse(c, m, mark);
+}

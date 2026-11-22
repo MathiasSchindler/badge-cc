@@ -195,8 +195,12 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   if (based) mask |= 1u << 7;
   if (calls) mask |= 1u << 14;
   unsigned count = (unsigned)__builtin_popcount(mask);
-  if ((count & 1u) && (calls || f->frame || (count == 1 && (mask & 0xff00u))))
-    mask |= 1u << 3;
+  int alignment_word = (count & 1u) &&
+      (calls || f->frame || (count == 1 && (mask & 0xff00u)));
+  int fused_return = alignment_word && !calls &&
+      c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
+  if (alignment_word)
+    mask |= 1u << (fused_return ? 14 : 3);
   c->register_saved_bytes = (unsigned)__builtin_popcount(mask) * 4;
   c->size = header;
   c->out[header] = 0;
@@ -235,7 +239,7 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
     cg_emit(c, "add.w sp, sp, r12\n");
   }
   if (mask) register_list(c, mask, 1);
-  if (!calls) cg_emit(c, "bx lr\n");
+  if (!calls && !fused_return) cg_emit(c, "bx lr\n");
   c->frame_sp_relative = 0;
 }
 
@@ -267,6 +271,18 @@ static int narrow_leaf_instruction(cg_context *c, const char *line, const unsign
   return 0;
 }
 
+static int leaf_branch(const char *line, char target[128]) {
+  char mnemonic[16];
+  int consumed = 0;
+  if (sscanf(line, "%15s %127s%n", mnemonic, target, &consumed) != 2 ||
+      !consumed || line[consumed] || strncmp(target, ".Lcg_", 5))
+    return 0;
+  char *width = strchr(mnemonic, '.');
+  if (width) *width = 0;
+  return !strcmp(mnemonic, "b") ||
+         (mnemonic[0] == 'b' && cg_inverse_condition(mnemonic + 1));
+}
+
 static void compact_leaf_registers(cg_context *c, size_t start) {
   cg_function *f = c->fn;
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
@@ -279,7 +295,7 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
   memcpy(body, c->out + start, length);
   if (strstr(body, "@ assembly-effects:") || strstr(body, "@ constant-assembly-lines:"))
     return;
-  unsigned touched = 0, skip = 0, entry = 0, narrowed = 0;
+  unsigned touched = 0, skip = 0, entry = 0, narrowed = 0, branches = 0;
   char *first = NULL, *last = NULL;
   for (char *p = body; p < body + length;) {
     cg_register_work(c);
@@ -296,14 +312,17 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
           "add", "adds", "addw", "sub", "subs", "subw", "and", "ands",
           "orr", "orrs", "eor", "eors", "lsl", "lsls", "lsr", "lsrs",
           "asr", "asrs", "mul", "muls", "mla", "mls", "ubfx", "uxtb", "uxth",
-          "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs"};
+          "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs", "cmp"};
       int supported = 0;
       for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); i++)
         supported |= !strcmp(opcode, allowed[i]);
-      if (!supported || strchr(p, ':'))
+      char target[128];
+      int branch = leaf_branch(p, target);
+      branches += branch;
+      if ((!supported && !branch) || strchr(p, ':') || branches > 32)
         return;
       unsigned mentioned = mentioned_registers(c, p);
-      if (!mentioned || (mentioned & ~0x1fffu))
+      if ((!mentioned && !branch) || (mentioned & ~0x1fffu))
         return;
       if (!first) first = p;
       else if (last != first) touched |= mentioned_registers(c, last);
@@ -319,6 +338,20 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
       !leaf_register_move(last, &dst, &src) || dst != 0 || !src ||
       (touched & 1))
     return;
+  if (branches)
+    for (const char *p = first + strlen(first) + 1; p < last; p += strlen(p) + 1) {
+      char target[128];
+      if (!leaf_branch(p, target))
+        continue;
+      size_t n = strlen(target);
+      unsigned destinations = 0;
+      for (const char *label = first + strlen(first) + 1; label < last; label += strlen(label) + 1) {
+        cg_register_work(c);
+        destinations += !strncmp(label, target, n) && !strcmp(label + n, ":");
+      }
+      if (destinations != 1)
+        return;
+    }
   touched |= 1u << entry | 1u << src;
   if (touched & ((1u << 7) | (1u << 12)))
     return;
@@ -345,9 +378,18 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
       cg_emit(c, "%s\n", p);
     /* The complete whitelist excludes flag consumers and IT, not just the
        instruction immediately following a rewrite. */
-    else if (narrow_leaf_instruction(c, p, map))
+    else if (!branches && narrow_leaf_instruction(c, p, map))
       narrowed++;
     else {
+      unsigned reg, constant;
+      int end = 0;
+      if (sscanf(p, "cmp.w r%u, #%u%n", &reg, &constant, &end) == 2 &&
+          end && !p[end] && reg <= 12 && map[reg] < 8 && constant <= 255) {
+        cg_emit(c, "cmp.n r%u, #%u\n", map[reg], constant);
+        narrowed++;
+        p = next;
+        continue;
+      }
       const char *q = p;
       while (*q) {
         if (*q == 'r' && q > p && (q[-1] == ' ' || q[-1] == ',') &&
@@ -369,6 +411,8 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
   cg_emit(c, "@ leaf-registers: entry/return copies removed %u\n", skip);
   if (narrowed)
     cg_emit(c, "@ leaf-widths: narrowed instructions %u\n", narrowed);
+  if (branches)
+    cg_fold_zero_branches(c, start);
 }
 
 static void finish_function(cg_context *c, size_t header, size_t body_start) {

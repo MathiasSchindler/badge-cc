@@ -130,6 +130,62 @@ measured stack resource grew, and the qualified default output was identical.
 Fewer QEMU instructions do not establish a hardware speedup, especially where
 a literal load replaces immediate instructions and introduces an XIP access.
 
+For small generated loops with a single fallthrough entry, conditional exit,
+and unconditional backedge, `thumb-constants` can move a pooled constant
+or symbol load before the header. It retains the existing scratch register
+only when the loop doesn't read it before the original load or overwrite it
+later, and the exit can't observe the change. Calls, additional branches,
+and inline assembly fall back to the original placement. A zero-trip loop
+may still do the preheader read of the compiler's read-only literal.
+
+Across the five microbenchmark inputs, this moves two arithmetic constants
+out of a 17-trip loop (815 to 655 instructions), the CRC polynomial out of
+a 32-trip loop (1,970 to 1,815), and the table base out of a 16-trip loop
+(790 to 715). LLVM reaches 765 instructions on indexed memory. Neither
+function nor flash bytes changed in any of the six programs. The fixed
+37-module production corpus had no eligible loops and retained its prior
+encoded size and measured stack resources. Qualified defaults remain
+unchanged; these counts are not on-badge timings.
+
+### Countdown, control, and late size follow-up
+
+`thumb-constants` can turn a positive fixed-trip, single-backedge loop into
+a countdown when its induction value is unused by the body and exit.
+It also tries last-case switch fallthrough, preserving PHI transfers,
+and can remap small register-only loops into caller-saved registers,
+without introducing flag writes across their branches. A stack-using leaf
+can reuse an already-required alignment word to save LR and restore PC.
+
+Append optional `low-bits,linear-bias` to the optimizer pass list. `low-bits`
+removes masks only through bounded, single-use modular operations ending in
+a mask that discards the changed bits. `linear-bias` combines offsets in an
+unflagged two-term multiply–add. Neither pass changes the default pipeline.
+
+Compared with the loop-pool capture, the retained changes measure:
+
+| Program | Linked C function bytes | Reached QEMU instructions | LLVM `-Oz`, bytes / instructions |
+| --- | ---: | ---: | ---: |
+| Arithmetic | 52 to 48 | 655 to 475 | 40 / 550 |
+| Control | 80 to 56 | 684 to 606 | 56 / 646 |
+| CRC32 | 64 to 60 | 1,815 to 1,485 | 44 / 1,635 |
+| Indexed memory | 64 to 60 | 715 to 710 | 40 / 765 |
+| Helper calls | 54, unchanged | 80, unchanged | 54 / 80 |
+| Fixed point | 38 to 34 | 55 to 50 | 32 / 50 |
+
+On the same five inputs, source-level conditional CRC feedback grew the
+function from 60 to 64 bytes and executed 1,867 rather than 1,485
+instructions. Signed bias-and-shift division grew fixed point from 34 to 48
+bytes and executed 68 rather than 50. Two-way unrolling with the arithmetic
+odd tail grew arithmetic from 48 to 72 bytes and CRC32 from 60 to 92;
+instruction counts also increased slightly. These variants passed execution
+checks, but were not added as compiler transforms.
+
+The literal-placement study changes only the two preheader arithmetic
+materializations: pooled loads measure 212 flash bytes and 475 QEMU
+instructions; MOVW/MOVT measures 216 and 485. Both UF2 payloads and all five
+outputs verify. Warm/cold XIP timing still requires an RP2350; the
+instruction counts cannot choose a physical speed winner.
+
 ## Explore
 
 - **Project selector:** view one linked program at a time; translation units

@@ -1715,6 +1715,13 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       else
         cg_emit(c, "cmp r%u, r0\n", condition);
       const char *edge = compact ? "edge" : "switch";
+      if (compact && cg_is(c, "]") && cg_next_block(c, block, cg_name(c, target))) {
+        cg_emit(c, "beq%s .Lcg_%s%u\n", cg_branch_width(c), edge, id);
+        cg_edge(c, block, fallback, 0);
+        cg_emit(c, ".Lcg_%s%u:\n", edge, id);
+        cg_edge(c, block, target, i == block->last);
+        return;
+      }
       cg_emit(c, "bne%s .Lcg_%s%u\n", cg_branch_width(c), edge, id);
       cg_edge(c, block, target, 0);
       cg_emit(c, ".Lcg_%s%u:\n", edge, id);

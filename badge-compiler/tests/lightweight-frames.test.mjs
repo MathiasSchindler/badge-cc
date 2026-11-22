@@ -63,6 +63,36 @@ done:
   assert(before.includes('push.w'));
   assert.throws(() => parseAssembly(after.replace('mask 0', 'mask 16'), 'tamper'), /metadata differs/);
 });
+test('compact leaf returns reuse an existing alignment word without increasing saves', t => {
+  const file = files(t);
+  const source = `define i32 @leaf(i32 %x) {
+entry:
+ %p = alloca i32, align 4
+ store volatile i32 %x, ptr %p, align 4
+ %a = load volatile i32, ptr %p, align 4
+ ret i32 %a
+}
+define i32 @main() {
+entry:
+ %v = call i32 @leaf(i32 305419896)
+ %status = xor i32 %v, 305419896
+ ret i32 %status
+}`;
+  const baseline = compile(file, source, 'thumb-widths');
+  const candidate = compile(file, source, 'thumb-constants');
+  const leaf = candidate.slice(candidate.indexOf('\nleaf:'), candidate.indexOf('.size leaf,'));
+  assert.match(leaf, /^push\.[nw] \{[^}]*lr\}$/m);
+  assert.match(leaf, /^pop\.[nw] \{[^}]*pc\}$/m);
+  assert.doesNotMatch(leaf, /^bx lr$/m);
+  const before = parseAssembly(baseline, 'before').get('leaf');
+  const after = parseAssembly(candidate, 'after').get('leaf');
+  assert.equal(after.saves_bytes, before.saves_bytes);
+  assert.equal(after.frame_bytes, before.frame_bytes);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('thumb-constants.s'), '-o', file('candidate.o')]);
+  execute(file, [file('candidate.o')], 'fused');
+});
+
 test('mixed AAPCS calls, high-register scratch, large incoming offsets, composites, indirect and recursive calls execute', t => {
   const file = files(t);
   run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
