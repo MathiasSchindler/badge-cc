@@ -96,6 +96,35 @@ semantically valid but have **no PO16 profitability qualification**. No
 whole-program time estimate is inferred from byte savings; physical timing,
 flash behavior and software-delayed peripheral waits remain promotion gates.
 
+## Opt-in `compact-inline`
+
+`compact-inline` tries inlining at the end of an owned optimization pipeline
+without requiring profile metadata. It accepts the same bounded straight-line
+body, optionally behind a single unconditional entry jump. It does not
+specialize, share, or inline bodies containing nested calls. It retains the
+existing ABI, reference, recursion, and `noinline` checks.
+
+The pass measures both complete modules with
+`direct/global-compact/thumb-constants/word`. The candidate must shrink the
+encoded module without increasing any surviving function's frame, callee
+saves, or spills. It has its own completion marker, so it can run after
+`cross-function` without repeating that pass's other transformations. Neither
+the qualified default passes nor default scalar selector change.
+
+```sh
+passes=$(badge-compiler/build/badge-opt --default-passes)
+BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants \
+  BADGE_OPT_PASSES="$passes,global-memory,sret-forward,compact-inline" \
+  node compile-graph/capture.mjs --capture compile-graph/build/micro-inline micro-calls
+```
+
+In the six-program comparison, the unprofiled helper-call image drops from
+80 to 70 linked C function bytes, 244 to 236 flash bytes, and 245 to 100
+kernel instructions in Cortex-M33 QEMU across five inputs. The other five
+programs are unchanged. The 37-module fixed-IR corpus saves 250 executable
+bytes across 12 modules. These are size and emulator measurements, not
+physical speed qualification.
+
 ## Qualification
 
 [The final persistent report](../build/po16-qualified-sharing/results.json)

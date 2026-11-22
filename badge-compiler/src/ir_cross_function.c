@@ -29,7 +29,9 @@ typedef struct {
   uint64_t work;
   unsigned *call_at_token, *attribute_lines, attribute_count,
       *function_at_token;
+  badge_scalar_selection selection;
 } cross;
+typedef enum { CROSS_SIZE, CROSS_HOT, CROSS_COMPACT } cross_policy;
 
 static void spend(cross *p, uint64_t n) {
   if (n > p->work)
@@ -150,7 +152,7 @@ static module_cost measure(cross *p, const char *source, size_t size) {
           source, size, p->c->file,
           (badge_codegen_options){BADGE_FRAME_DIRECT,
                                   BADGE_RESIDENCY_GLOBAL_COMPACT},
-          BADGE_SELECTION_THUMB_OPERANDS, BADGE_MEMORY_WORD, &assembly,
+          p->selection, BADGE_MEMORY_WORD, &assembly,
           &length))
     ir_error(p->c, "cross-function backend admission failed");
   module_cost result = {0};
@@ -603,10 +605,10 @@ static int share_helper(cross *p, unsigned f, const unsigned *calls,
   }
   return 0;
 }
-static int inline_calls(cross *p, unsigned f, const unsigned *calls,
-                        unsigned count, module_cost *baseline, char **best,
-                        uint32_t *best_bytes, int *forwarding, int entry_jump) {
+static const ir_block *inline_body(cross *p, unsigned f, int entry_jump) {
   const ir_function *fn = &p->a.functions[f];
+  if (!fn->block_count)
+    return NULL;
   const ir_block *block = &p->a.blocks[fn->first_block];
   if (fn->block_count != 1) {
     if (!entry_jump || fn->block_count != 2 || block->instruction_count != 1 ||
@@ -614,13 +616,22 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
         p->a.successors[block->first_successor] != fn->first_block + 1 ||
         p->a.instructions[block->first_instruction].opcode != IR_OP_BR ||
         p->a.instructions[block->first_instruction].operand_count != 1)
-      return 0;
+      return NULL;
     block++;
   }
-  if (block->instruction_count > 16)
-    return 0;
-  if (p->a.instructions[block->first_instruction + block->instruction_count - 1]
+  if (!block->instruction_count || block->instruction_count > 16 ||
+      p->a.instructions[block->first_instruction + block->instruction_count - 1]
           .opcode != IR_OP_RET)
+    return NULL;
+  return block;
+}
+
+static int inline_calls(cross *p, unsigned f, const unsigned *calls,
+                        unsigned count, module_cost *baseline, char **best,
+                        uint32_t *best_bytes, int *forwarding, cross_policy policy) {
+  const ir_function *fn = &p->a.functions[f];
+  const ir_block *block = inline_body(p, f, policy != CROSS_SIZE);
+  if (!block)
     return 0;
   const ir_type *ret = &p->a.types[fn->return_type];
   if (ret->kind != IR_VOID && ret->kind != IR_INT && ret->kind != IR_PTR)
@@ -629,7 +640,7 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
   const ir_instruction *last = &p->a.instructions[block->first_instruction +
                                                   block->instruction_count - 1];
   int forward =
-      block->instruction_count == 2 && first->opcode == IR_OP_CALL &&
+      policy != CROSS_COMPACT && block->instruction_count == 2 && first->opcode == IR_OP_CALL &&
       first->callee != IR_NONE &&
       p->a.operands[first->callee].kind == IR_OPERAND_GLOBAL &&
       ((ret->kind == IR_VOID && !last->operand_count) ||
@@ -756,8 +767,11 @@ static uint64_t *entry_counts(cross *p) {
   return counts;
 }
 
-static void run_cross_function(ir_context *c, ir_module *m, int hot_inline) {
-  cross p = {.c = c, .m = m, .work = IR_CROSS_FUNCTION_WORK_LIMIT};
+static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy) {
+  const int hot_inline = policy == CROSS_HOT;
+  const int compact_inline = policy == CROSS_COMPACT;
+  cross p = {.c = c, .m = m, .work = IR_CROSS_FUNCTION_WORK_LIMIT,
+             .selection = compact_inline ? BADGE_SELECTION_THUMB_CONSTANTS : BADGE_SELECTION_THUMB_OPERANDS};
   analyze(&p);
   for (unsigned k = 0; k < m->count; k++)
     if (!strcmp(ir_text(m, k), "musttail"))
@@ -771,7 +785,8 @@ static void run_cross_function(ir_context *c, ir_module *m, int hot_inline) {
     ir_note(c, "skipped", "untracked_assembly_symbol_references", 1);
     return;
   }
-  const char *marker = hot_inline ? "; badge-hot-inline: bounded selection complete" :
+  const char *marker = compact_inline ? "; badge-compact-inline: bounded selection complete" :
+      hot_inline ? "; badge-hot-inline: bounded selection complete" :
       "; badge-cross-function: bounded selection complete";
   if (strstr(m->source, marker)) {
     ir_note(c, "skipped", "already_costed_module", 1);
@@ -794,6 +809,8 @@ static void run_cross_function(ir_context *c, ir_module *m, int hot_inline) {
       if (ir_map_get(&attempted, p.a.functions[f].name))
         continue;
       if (entries && entries[f] <= hottest)
+        continue;
+      if (compact_inline && !inline_body(&p, f, 1))
         continue;
       unsigned n;
       if (eligible(&p, f, other_calls, &n)) {
@@ -822,15 +839,16 @@ static void run_cross_function(ir_context *c, ir_module *m, int hot_inline) {
     char *best = NULL;
     uint32_t best_bytes = before.bytes;
     const char *kind = "retained_shared_helper", *clone = NULL;
-    if (!hot_inline && share_helper(&p, chosen, calls, count, &before, &best, &best_bytes))
+    if (policy == CROSS_SIZE && share_helper(&p, chosen, calls, count, &before, &best, &best_bytes))
       kind = "identical_helpers_shared";
-    if (!hot_inline && specialize(&p, chosen, calls, count, &before, &best, &best_bytes,
+    if (policy == CROSS_SIZE && specialize(&p, chosen, calls, count, &before, &best, &best_bytes,
                    &clone))
       kind = "constant_specialization";
     int forwarding = 0;
     if (inline_calls(&p, chosen, calls, count, &before, &best, &best_bytes,
-                     &forwarding, hot_inline)) {
-      kind = hot_inline ? "profiled_helper_inlined" :
+                     &forwarding, policy)) {
+      kind = compact_inline ? "compact_helper_inlined" :
+          hot_inline ? "profiled_helper_inlined" :
           forwarding ? "tail_forwarder_inlined" : "straight_line_inlined";
       clone = NULL;
     }
@@ -864,5 +882,6 @@ static void run_cross_function(ir_context *c, ir_module *m, int hot_inline) {
   c->size = 0;
 }
 
-void ir_cross_function(ir_context *c, ir_module *m) { run_cross_function(c, m, 0); }
-void ir_hot_inline(ir_context *c, ir_module *m) { run_cross_function(c, m, 1); }
+void ir_cross_function(ir_context *c, ir_module *m) { run_cross_function(c, m, CROSS_SIZE); }
+void ir_hot_inline(ir_context *c, ir_module *m) { run_cross_function(c, m, CROSS_HOT); }
+void ir_compact_inline(ir_context *c, ir_module *m) { run_cross_function(c, m, CROSS_COMPACT); }

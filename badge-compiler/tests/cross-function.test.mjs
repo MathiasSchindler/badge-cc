@@ -21,11 +21,11 @@ function files(t) {
 }
 const target = 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
   'target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n';
-function optimize(file, source) {
+function optimize(file, source, pass = 'cross-function') {
   fs.writeFileSync(file('input.ll'), target + source);
-  run(tool('badge-opt-sanitize'), ['--passes=cross-function', file('input.ll'), '-o', file('candidate.ll')]);
+  run(tool('badge-opt-sanitize'), [`--passes=${pass}`, file('input.ll'), '-o', file('candidate.ll')]);
   run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
-  run(tool('badge-opt-sanitize'), ['--passes=cross-function', file('candidate.ll'), '-o', file('twice.ll')]);
+  run(tool('badge-opt-sanitize'), [`--passes=${pass}`, file('candidate.ll'), '-o', file('twice.ll')]);
   assert.deepEqual(fs.readFileSync(file('twice.ll')), fs.readFileSync(file('candidate.ll')));
   return fs.readFileSync(file('candidate.ll'), 'utf8');
 }
@@ -40,8 +40,8 @@ function production(file, sources, main) {
   run(tool('badge-opt-sanitize'), ['--passes=cross-function', file('input.ll'), '-o', file('candidate.ll')]);
   run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
 }
-function execute(file, role, trace = false) {
-  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-operands', file(`${role === 'control' ? 'input' : 'candidate'}.ll`),
+function execute(file, role, trace = false, scalar = 'thumb-operands') {
+  run(tool('badge-codegen-sanitize'), [`--scalar-selection=${scalar}`, file(`${role === 'control' ? 'input' : 'candidate'}.ll`),
     '-o', file(`${role}.s`)]);
   const assembly = fs.readFileSync(file(`${role}.s`), 'utf8'), frames = parseAssembly(assembly, role);
   run(tool('badge-asm'), [file(`${role}.s`), '-o', file(`${role}.o`)]);
@@ -147,6 +147,37 @@ exit:
   const a = execute(file, 'control', true), b = execute(file, 'candidate', true);
   assert(b.bytes < a.bytes && b.count < a.count);
   console.log(`Profiled inlining: ${a.bytes} -> ${b.bytes} bytes; ${a.count} -> ${b.count} reached instructions`);
+});
+
+test('compact inlining admits an unprofiled entry-jump helper only at lower final cost', t => {
+  const file = files(t);
+  const source = `define internal i32 @scramble(i32 %a) {
+entry:
+ br label %body
+body:
+ %shift = shl i32 %a, 9
+ %result = xor i32 %a, %shift
+ ret i32 %result
+}
+define i32 @main() {
+entry:
+ %a = call i32 @scramble(i32 7)
+ %b = call i32 @scramble(i32 %a)
+ %status = xor i32 %b, 1835015
+ ret i32 %status
+}
+`;
+  const candidate = optimize(file, source, 'compact-inline');
+  assert.match(candidate, /compact_helper_inlined scramble/);
+  assert.doesNotMatch(candidate, /(?:define|call).*@scramble/);
+  const a = execute(file, 'control', true, 'thumb-constants');
+  const b = execute(file, 'candidate', true, 'thumb-constants');
+  assert(b.bytes < a.bytes && b.count < a.count);
+  const before = a.frames.get('main'), after = b.frames.get('main');
+  for (const key of ['frame_bytes', 'saves_bytes', 'max_outgoing_bytes'])
+    assert(after[key] <= before[key]);
+  const noinline = source.replace('@scramble(i32 %a) {', '@scramble(i32 %a) noinline {');
+  assert.equal(optimize(file, noinline, 'compact-inline'), target + noinline);
 });
 test('identical non-address-taken helpers share one body without changing call multiplicity', t => {
   const file = files(t);

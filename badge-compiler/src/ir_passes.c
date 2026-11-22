@@ -16,6 +16,7 @@ void ir_loop_cost(ir_context *, ir_module *);
 void ir_loop_scalar(ir_context *, ir_module *);
 void ir_cross_function(ir_context *, ir_module *);
 void ir_hot_inline(ir_context *, ir_module *);
+void ir_compact_inline(ir_context *, ir_module *);
 void ir_target_strength_reduce(ir_context *, ir_module *);
 void ir_local_memory(ir_context *, ir_module *);
 void ir_global_memory(ir_context *, ir_module *);
@@ -27,6 +28,9 @@ const ir_pass badge_ir_passes[] = {
     {"hot-inline",
      "Prioritize measured internal helpers for final-byte and stack-gated inlining",
      ir_hot_inline, IR_PASS_OPTIMIZATION},
+    {"compact-inline",
+     "Inline bounded internal helpers using thumb-constants final bytes and stack admission",
+     ir_compact_inline, IR_PASS_OPTIMIZATION},
     {"loop-scalar",
      "Bounded unflagged scalar motion and modular induction with conservative loop-pressure budgets",
      ir_loop_scalar, IR_PASS_OPTIMIZATION},
