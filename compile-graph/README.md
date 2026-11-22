@@ -56,6 +56,53 @@ Open **Optimized IR** and select a function to filter its remarks and backend
 metrics. The trace picker loads a bounded excerpt on demand; the full trace can
 be large because LLVM includes module events even with a function filter.
 
+## Six small RP2350 programs
+
+For a narrower comparison than red square or maze, capture six independent UF2
+images: arithmetic recurrence, branch/switch control, CRC32, indexed
+read-only data, helper calls, and signed fixed-point scaling. Each links one C
+translation unit with a shared assembly reset, harness, and RP2350 boot metadata.
+`micro_kernel` receives the seed across a separate assembly call, so neither C
+compiler can precompute the answer from the startup seed. No display, radio,
+SDK, or library code is linked.
+
+```sh
+COMPILE_GRAPH_LLVM_TRACE=micro_kernel,mix \
+  node compile-graph/capture.mjs --capture compile-graph/build/micro-demo \
+  micro-arithmetic micro-control micro-crc micro-memory micro-calls micro-fixed-point
+node compile-graph/check-micro.mjs compile-graph/build/micro-demo \
+  > compile-graph/build/micro-demo/micro-results.json
+python3 -m http.server 8000 --bind 127.0.0.1 --directory compile-graph/build/micro-demo
+```
+
+For a control and candidate, capture into separate directories with the same
+six targets. Set `BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants` to measure
+the opt-in backend instead of the qualified default. The LLVM flags are
+unchanged.
+
+The check also requires `qemu-system-arm` and can use `HOST_CC`, `LLVM_CLANG`,
+`LLVM_LLD`, `LLVM_OBJDUMP`, and `QEMU_ARM`. It checks identical C tokens and
+boot input bytes/relocations, verifies every UF2 block against its flash
+payload, and runs the exact captured C objects on Cortex-M33 QEMU against
+native results for five seeds. The JSON distinguishes raw flash, UF2 file
+size, linked C function extents, decoded instructions and literal bytes,
+and remaining flash bytes (read-only data and alignment). Reached instruction
+counts exclude the common test harness and are **not physical timing**.
+In the firmware, the shared harness uses `0x12345678` and writes the result
+at `0x20000000`, then the completion word `0x444f4e45` at `0x20000004`.
+There is deliberately no screen or USB output. Physical boot is not part
+of the offline check.
+
+The helper-call case isolates two differences: LLVM `-Oz` inlines `mix`,
+and even on identical optimized IR its Thumb backend can use shifts as part
+of a binary instruction. The opt-in owned selector now folds adjacent,
+single-use 32-bit shifts into eligible arithmetic and logical operations.
+With that change, the helper-call image's C functions shrink from 92 to 80
+bytes and reach 245 rather than 290 QEMU instructions across the five inputs.
+LLVM still reaches 80 instructions in the ordinary, inlined build. The
+arithmetic case also improves (58 to 54 function bytes, 1,070 to 985 reached
+instructions); the other four cases are unchanged.
+
 ## Explore
 
 - **Project selector:** view one linked program at a time; translation units

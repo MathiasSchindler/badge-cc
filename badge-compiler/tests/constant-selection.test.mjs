@@ -481,6 +481,47 @@ entry:
     '-kernel', file('load.elf')]);
 });
 
+test('adjacent shifted operands fold without changing multi-use or reversed subtraction', t => {
+  const file = files(t);
+  fs.writeFileSync(file('shift.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define i32 @case(i32 %a, i32 %b) {
+entry:
+  %ls = shl i32 %a, 13
+  %x = xor i32 %ls, %a
+  %rs = lshr i32 %b, 31
+  %y = add i32 %x, %rs
+  %as = ashr i32 %b, 24
+  %z = sub i32 %y, %as
+  %keep = shl i32 %a, 1
+  %first = xor i32 %z, %keep
+  %second = sub i32 %keep, %first
+  %reverse = lshr i32 %b, 17
+  %result = sub i32 %reverse, %second
+  ret i32 %result
+}
+define i32 @main() {
+entry:
+  %actual = call i32 @case(i32 3, i32 -1)
+  %status = xor i32 %actual, 57340
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('shift.ll'), '-o', file('shift.s')]);
+  const assembly = fs.readFileSync(file('shift.s'), 'utf8');
+  assert.match(assembly, /^eor\.w .* lsl #13$/m);
+  assert.match(assembly, /^add\.w .* lsr #31$/m);
+  assert.match(assembly, /^sub\.w .* asr #24$/m);
+  assert.match(assembly, /^lsls?\.([wn]) .*#1$/m);
+  assert.match(assembly, /^lsrs?\.([wn]) .*#17$/m);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('shift.s'), '-o', file('shift.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('shift.o'), '-o', file('shift.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('shift.elf')]);
+});
+
 test('shifted multiply-adds and direct comparisons preserve arithmetic and all signed/unsigned predicates', t => {
   const file = files(t);
   let ir = 'target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n' +

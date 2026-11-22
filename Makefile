@@ -1251,6 +1251,22 @@ $(FIRMWARE_DIR)/start_red_square.o: $(ARCH_DIR)/start_red_square.S | $(FIRMWARE_
 $(FIRMWARE_DIR)/red_square.o: $(TOOLS_DIR)/red_square.c | $(FIRMWARE_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
 
+MICRO_PROGRAMS := arithmetic control crc memory calls fixed-point
+.PHONY: $(addprefix micro-,$(MICRO_PROGRAMS))
+$(addprefix micro-,$(MICRO_PROGRAMS)): micro-%: $(UF2_DIR)/micro-%.uf2
+
+$(FIRMWARE_DIR)/micro_boot.o: $(ARCH_DIR)/micro_boot.S | $(FIRMWARE_DIR)
+	$(RP2350_CC) $(RP2350_ASFLAGS) -c $< -o $@
+
+$(FIRMWARE_DIR)/micro-%.o: $(TOOLS_DIR)/compiler_micro/%.c $(SHARED_DIR)/stdint.h | $(FIRMWARE_DIR)
+	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
+
+$(FIRMWARE_DIR)/micro-%.elf: $(FIRMWARE_DIR)/micro-%.o $(FIRMWARE_DIR)/start_red_square.o $(FIRMWARE_DIR)/micro_boot.o $(FIRMWARE_DIR)/picobin.o $(ARCH_DIR)/memmap_red_square.ld
+	$(RP2350_CC) $(RP2350_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
+		-T$(ARCH_DIR)/memmap_red_square.ld $(filter %.o,$^) -Wl,-Map=$(@:.elf=.map) -o $@
+	@test -z "$$($(RP2350_NM) -u $@)" || { $(RP2350_NM) -u $@; exit 1; }
+	$(RP2350_SIZE) $@
+
 $(FIRMWARE_DIR)/red_square_shared.o: $(TOOLS_DIR)/red_square.c $(PLATFORM_DIR)/display.h | $(FIRMWARE_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -I$(PLATFORM_DIR) -DRED_SQUARE_SHARED_DISPLAY -c $< -o $@
 

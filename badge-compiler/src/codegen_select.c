@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT, SELECT_SIGNED_LOAD };
+enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT, SELECT_SIGNED_LOAD, SELECT_SHIFTED_BINARY };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -24,6 +24,35 @@ struct cg_selection {
   unsigned wrapper_value_register;
   int wrapper_value_emitted;
 };
+
+static int number(const char *s, uint32_t *value);
+
+static const char *shifted_binary(cg_context *c, cg_inst *shift, cg_inst *use,
+                                  uint32_t *amount, unsigned *other) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      !cg_global_residency(c) || shift->result->type->bits != 32 ||
+      use->result->type->bits != 32 ||
+      cg_register_lookup(c, shift->result->name)->selection_uses != 1 ||
+      !number(c->tokens[shift->begin + 6].text, amount) || !*amount || *amount >= 32)
+    return NULL;
+  const char *operation = c->tokens[shift->begin + 2].text;
+  if (strcmp(operation, "shl") && strcmp(operation, "lshr") && strcmp(operation, "ashr"))
+    return NULL;
+  const char *user = c->tokens[use->begin + 2].text;
+  if (strcmp(user, "xor") && strcmp(user, "or") && strcmp(user, "and") &&
+      strcmp(user, "add") && strcmp(user, "sub"))
+    return NULL;
+  if (!strcmp(c->tokens[use->begin + 6].text, shift->result->name))
+    *other = 4;
+  else if (strcmp(user, "sub") &&
+           !strcmp(c->tokens[use->begin + 4].text, shift->result->name))
+    *other = 6;
+  else
+    return NULL;
+  if (c->tokens[use->begin + *other].text[0] != '%')
+    return NULL;
+  return !strcmp(operation, "shl") ? "lsl" : !strcmp(operation, "lshr") ? "lsr" : "asr";
+}
 
 static int number(const char *s, uint32_t *value) {
   char *end;
@@ -559,6 +588,14 @@ void cg_selection_prepare(cg_context *c) {
       if (!scalar(c, i) || !scalar(c, next) || pair(c, i)->instruction ||
           pair(c, next)->instruction)
         continue;
+      uint32_t amount;
+      unsigned other;
+      if (shifted_binary(c, i, next, &amount, &other)) {
+        *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
+                                          .kind = SELECT_SHIFTED_BINARY};
+        continue;
+      }
       const char *op = c->tokens[i->begin + 2].text;
       const char *following = c->tokens[next->begin + 2].text;
       if (!strcmp(op, "mul") && !strcmp(following, "add") &&
@@ -884,6 +921,23 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (selected->kind == SELECT_SKIP || selected->kind == SELECT_COMPARE_SKIP ||
       selected->kind == SELECT_COUNT_SKIP)
     return 1;
+  if (selected->kind == SELECT_SHIFTED_BINARY) {
+    uint32_t amount;
+    unsigned other;
+    cg_inst *producer = selected->producer;
+    const char *shift = shifted_binary(c, producer, i, &amount, &other);
+    if (!shift)
+      cg_error(c, "shifted operand eligibility changed");
+    const char *op = c->tokens[i->begin + 2].text;
+    const char *mnemonic = !strcmp(op, "xor") ? "eor" : !strcmp(op, "or") ? "orr" : op;
+    unsigned src = operand(c, producer, 4, 0);
+    unsigned base = operand(c, i, other, 1);
+    unsigned dst = destination(c, i);
+    cg_emit(c, "%s.w r%u, r%u, r%u, %s #%" PRIu32 "\n",
+            mnemonic, dst, base, src, shift, amount);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
   if (selected->kind == SELECT_MLA) {
     if (register_operands(c)) {
       unsigned at =
