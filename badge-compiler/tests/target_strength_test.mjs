@@ -26,8 +26,9 @@ function fixture(t) {
   return name => path.join(dir, name);
 }
 const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+const irTarget = 'target triple = "thumbv8m.main-unknown-none-eabi"\ntarget datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n';
 function matrix() {
-  let ir = 'target triple = "thumbv8m.main-unknown-none-eabi"\ntarget datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n', caller = '';
+  let ir = irTarget, caller = '';
   for (let shift = 0; shift < 32; shift++) {
     const d = 2 ** shift;
     for (const [name, op] of [['q', 'udiv'], ['r', 'urem']]) {
@@ -127,6 +128,165 @@ entry:
       invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
         '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file(`${name}.elf`)]);
     }
+  }
+});
+
+test('wide literal division switches paths without changing signed or unsigned results', t => {
+  const file = fixture(t);
+  const limits = [1n, 3n, 125440000n, (1n << 31n) - 1n, 1n << 31n,
+    (1n << 31n) + 1n, 4294967291n, 1n << 32n, 1n << 62n, 1n << 63n];
+  let ir = irTarget;
+  let declarations = '', rows = '';
+  const fixtureValues = [0n, 1n, 0xffffffffn, 0x100000000n,
+    0x100000001n, 0x8000000000000000n, 0x7fffffffffffffffn,
+    0x8000000000000001n, 0xffffffff00000000n, 0xffffffffffffffffn];
+  const literal = x => `${BigInt.asUintN(64, x)}ull`;
+  for (const [i, d] of limits.entries()) {
+    const values = new Set([...fixtureValues, d - 1n, d, d + 1n,
+      BigInt.asUintN(64, -d + 1n), BigInt.asUintN(64, -d), BigInt.asUintN(64, -d - 1n)]);
+    let seed = BigInt(i + 17);
+    for (let j = 0; j < 24; j++) {
+      seed = BigInt.asUintN(64, seed * 6364136223846793005n + 1n);
+      values.add(seed);
+    }
+    for (const kind of ['u', 's']) {
+      if (kind === 's' && d === (1n << 63n)) continue;
+      for (const op of ['div', 'rem']) {
+        const fn = `${kind}${op}${i}`;
+        ir += `define i64 @${fn}(i64 %x) {\nentry:\n%v = ${kind}${op} i64 %x, ${d}\nret i64 %v\n}\n`;
+        declarations += `extern u64 ${fn}(u64);\n`;
+        for (const n of values) {
+          const x = kind === 's' ? BigInt.asIntN(64, n) : n;
+          rows += `{${fn}, ${literal(n)}, ${literal(op === 'div' ? x / d : x % d)}},\n`;
+        }
+      }
+    }
+  }
+  ir += `define i64 @exact(i64 %x) {
+entry:
+%v = sdiv exact i64 %x, 4294967296
+ret i64 %v
+}
+define i64 @dynamic(i64 %x, i64 %y) {
+entry:
+%v = udiv i64 %x, %y
+ret i64 %v
+}
+`;
+  fs.writeFileSync(file('input.ll'), ir);
+  invoke(tool('badge-opt-sanitize'), [file('input.ll'), '-o', file('ready.ll')]);
+  const optimized = fs.readFileSync(file('ready.ll'), 'utf8');
+  assert.match(optimized, /call i64 [^(]+\([^,]+, i32 125440000\)/);
+  assert.match(optimized, /call i64 [^(]+\([^,]+, i64 2147483649\)/);
+  assert.match(optimized, /call i64 [^(]+\([^,]+, i64 4294967291\)/);
+  assert.match(optimized, /ashr exact i64 %x, 32/);
+  assert.match(optimized, /lshr i64 %x, 63/);
+  assert.match(optimized, /and i64 %x, 9223372036854775807/);
+  if (!oracle) return;
+  fs.writeFileSync(file('caller.c'), `
+typedef unsigned long long u64;
+${declarations}
+extern u64 exact(u64);
+extern u64 dynamic(u64, u64);
+static const struct {u64 (*call)(u64); u64 n, want;} cases[] = {
+${rows}
+};
+int main(void) {
+  for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++)
+    if (cases[i].call(cases[i].n) != cases[i].want) return 1;
+  return exact(0x8000000000000000ull) != 0xffffffff80000000ull ||
+         dynamic(0xffffffffffffffffull, 4294967296ull) != 4294967295ull;
+}
+`);
+  invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('ready.ll')]);
+  invoke(tool('badge-codegen'), [file('ready.ll'), '-o', file('ready.s')]);
+  invoke(tool('badge-asm'), [file('ready.s'), '-o', file('ready.o')]);
+  invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
+  invoke(clang, [...target, '-ffreestanding', '-Oz', '-c', file('caller.c'), '-o', file('caller.o')]);
+  invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+    file('start.o'), file('caller.o'), file('ready.o'), '-o', file('ready.elf')]);
+  invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('ready.elf')]);
+});
+
+test('normalized runtime division and wide shifts match independent integer results', t => {
+  const file = fixture(t);
+  const ops = ['udiv', 'urem', 'sdiv', 'srem', 'shl'];
+  const ir = irTarget + 'declare i64 @"llvm.ctlz.i64"(i64, i1 immarg)\n' +
+    ops.map(op => `define i64 @test_${op}(i64 %x, i64 %y) {
+entry:
+  %r = ${op} i64 %x, %y
+  ret i64 %r
+}
+`).join('') + `define i64 @test_clz(i64 %x) {
+entry:
+  %r = call i64 @llvm.ctlz.i64(i64 %x, i1 false)
+  ret i64 %r
+}
+`;
+  fs.writeFileSync(file('input.ll'), ir);
+  invoke(tool('badge-opt-sanitize'), [file('input.ll'), '-o', file('out.ll')]);
+  const optimized = fs.readFileSync(file('out.ll'), 'utf8');
+  assert.equal(optimized.match(/^declare i64 @"?llvm\.ctlz\.i64"?\(/gm)?.length, 1);
+  assert.match(optimized, /call i64 @llvm\.ctlz\.i64/);
+  if (!oracle) return;
+  const bits = n => BigInt.asUintN(64, n);
+  const literal = n => `${bits(n)}ull`;
+  const rows = [];
+  function vector(op, a, b, expected) {
+    rows.push(`{test_${op},${literal(a)},${literal(b)},${literal(expected)}}`);
+  }
+  const edges = [0n, 1n, 2n, (1n << 31n) - 1n, 1n << 31n,
+    (1n << 32n) - 1n, 1n << 32n, (1n << 32n) + 1n,
+    (1n << 63n) - 1n, 1n << 63n, (1n << 63n) + 1n, bits(-1n)];
+  let seed = 19n;
+  const next = () => (seed = bits(seed * 6364136223846793005n + 1n));
+  const pairs = edges.flatMap(x => edges.slice(1).map(y => [x, y]));
+  for (let i = 0; i < 384; i++)
+    pairs.push([next(), (next() >> BigInt(i % 64)) || 1n]);
+  for (const [x, y] of pairs) {
+    vector('udiv', x, y, x / y);
+    vector('urem', x, y, x % y);
+    const a = BigInt.asIntN(64, x), b = BigInt.asIntN(64, y);
+    if (a === -(1n << 63n) && b === -1n) continue;
+    vector('sdiv', a, b, a / b);
+    vector('srem', a, b, a % b);
+  }
+  for (const x of edges)
+    for (let n = 0n; n < 64n; n++)
+      vector('shl', x, n, x << n);
+  fs.writeFileSync(file('caller.c'), `
+typedef unsigned long long u64;
+${ops.map(op => `extern u64 test_${op}(u64, u64);`).join('\n')}
+extern u64 test_clz(u64);
+static const struct { u64 (*fn)(u64, u64); u64 x, y, want; } cases[] = {
+${rows.join(',\n')}
+};
+int main(void) {
+  for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); i++)
+    if (cases[i].fn(cases[i].x, cases[i].y) != cases[i].want) return 1;
+  if (test_clz(0) != 64) return 2;
+  u64 power = 1;
+  for (unsigned i = 0; i < 64; i++, power <<= 1)
+    if (test_clz(power) != 63 - i) return 3;
+  return 0;
+}`);
+  invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('out.ll')]);
+  invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
+  invoke(clang, [...target, '-ffreestanding', '-Oz', '-c', file('caller.c'), '-o', file('caller.o')]);
+  for (const policy of [[], ['--scalar-selection=legacy']]) {
+    invoke(tool('badge-codegen-sanitize'), [...policy, file('out.ll'), '-o', file('out.s')]);
+    if (!policy.length) {
+      assert.match(fs.readFileSync(file('out.s'), 'utf8'), /itt eq\nmoveq r0, r2\nmoveq r1, r3/);
+      invoke(clang, [...target, '-c', file('out.s'), '-o', file('encoded.o')]);
+    }
+    invoke(tool('badge-asm'), [file('out.s'), '-o', file('out.o')]);
+    invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+      file('start.o'), file('caller.o'), file('out.o'), '-o', file('out.elf')]);
+    invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('out.elf')]);
   }
 });
 

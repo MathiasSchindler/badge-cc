@@ -221,7 +221,7 @@ exit:
   console.log(`Profiled inlining: ${a.bytes} -> ${b.bytes} bytes; ${a.count} -> ${b.count} reached instructions`);
 });
 
-test('compact inlining admits an unprofiled entry-jump helper only at lower final cost', t => {
+test('compact inlining reduces final bytes for an unprofiled entry-jump helper', t => {
   const file = files(t);
   const source = `define internal i32 @scramble(i32 %a) {
 entry:
@@ -251,6 +251,44 @@ entry:
   const noinline = source.replace('@scramble(i32 %a) {', '@scramble(i32 %a) noinline {');
   assert.equal(optimize(file, noinline, 'compact-inline'), target + noinline);
 });
+
+test('a tiny integer helper can remove repeated calls without growing the caller frame', t => {
+  const file = files(t);
+  run(tool('badge-cpp'), ['-I../src/shared', '../src/shared/bitmap_font.c',
+    '-o', file('font.i')]);
+  run(tool('badge-ir'), [file('font.i'), '-o', file('font.ll')]);
+  run(tool('badge-opt-sanitize'), [file('font.ll'), '-o', file('compact.ll')]);
+  const compact = fs.readFileSync(file('compact.ll'), 'utf8');
+  assert.match(compact, /compact_helper_inlined badger_font_alpha_round/);
+  assert.doesNotMatch(compact, /\b(?:define|call)\b[^\n]*@(?:"badger_font_alpha_round"|badger_font_alpha_round\b)/);
+  run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('compact.ll')]);
+  run(tool('badge-codegen-sanitize'), [file('compact.ll'), '-o', file('compact.s')]);
+  const assembly = fs.readFileSync(file('compact.s'), 'utf8');
+  assert.doesNotMatch(assembly, /^bl badger_font_alpha_round$/m);
+  const frames = parseAssembly(assembly, 'production font');
+  for (const name of ['coverage', 'badger_rgb565_blend']) {
+    const f = frames.get(name);
+    assert(f && f.calls.length === 0);
+  }
+});
+
+test('equal-size leaf-read inlining keeps the production frame timer out of the call path', t => {
+  const file = files(t);
+  run(tool('badge-cpp'), ['-I../src/shared', '-I../src/platform/badger',
+    '../src/tools/tilt_breakout.c', '-o', file('breakout.i')]);
+  run(tool('badge-ir'), [file('breakout.i'), '-o', file('breakout.ll')]);
+  run(tool('badge-opt-sanitize'), [file('breakout.ll'), '-o', file('ready.ll')]);
+  const ir = fs.readFileSync(file('ready.ll'), 'utf8');
+  const decision = ir.split('\n').find(line => line.includes('compact_helper_inlined time_us'));
+  assert.match(decision ?? '', /badge-cross-decision: compact_helper_inlined time_us - (\d+) \1$/);
+  run(tool('badge-codegen-sanitize'), [file('ready.ll'), '-o', file('ready.s')]);
+  const assembly = fs.readFileSync(file('ready.s'), 'utf8');
+  const frame = parseAssembly(assembly, 'tilt breakout').get('wait_frame');
+  assert(frame && frame.calls.length === 0);
+  const wait = assembly.slice(assembly.indexOf('\nwait_frame:\n'), assembly.indexOf('.size wait_frame,'));
+  assert.equal([...wait.matchAll(/^ldr\.n .* \[r\d+\]$/gm)].length, 1);
+});
+
 test('identical non-address-taken helpers share one body without changing call multiplicity', t => {
   const file = files(t);
   const helper = name => `define internal void @${name}(i32 %x) {

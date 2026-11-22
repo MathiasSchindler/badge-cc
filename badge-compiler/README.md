@@ -162,6 +162,24 @@ to the preceding eight passes. Query the exact list with
 `badge-opt --default-passes`. `divrem-pairs` also replaces profitable
 unsigned power-of-two divisions and remainders with shifts and masks.
 See the [qualification results](docs/current-promotion.md#november-default-update).
+The [short Thumb and tiny-leaf follow-up](docs/current-promotion.md#short-thumb-instruction-and-tiny-leaf-follow-up)
+adds five instruction selections and a bounded exception for inlining
+tiny integer helpers.
+The [constant arithmetic follow-up](docs/current-promotion.md#constant-arithmetic-and-bit-masks)
+adds six more selections for masks, scaled integer operations and comparisons.
+The [integer cast and wide comparison follow-up](docs/current-promotion.md#direct-integer-casts-and-wide-comparisons)
+removes register moves and uses a shorter unsigned 64-bit comparison sequence.
+The [wide arithmetic follow-up](docs/current-promotion.md#wide-integer-arithmetic)
+shortens 64-bit shifts, signed power-of-two division, negation, bitwise
+operations and multiplication.
+The [constant-divisor specialization](docs/current-promotion.md#constant-divisor-specialization)
+also uses native word division and a shorter restoring loop when the
+wide divisor is a known positive constant below `2^31`.
+The [runtime-divisor follow-up](docs/current-promotion.md#runtime-divisor-specialization)
+also dispatches variable divisors to the word path when possible and
+bounds the wide loop by the number of possible quotient bits.
+The [address and register-copy follow-up](docs/current-promotion.md#address-and-register-copy-folding)
+folds temporary addresses and register moves into their memory transfers.
 The earlier `thumb-widths`/eight-pass profile remains explicitly selectable.
 Target-costed optimizer defaults require the
 badge backend's supported IR contract; the earlier explicit six-pass

@@ -6,7 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT, SELECT_EXTENDED_LOAD, SELECT_SHIFTED_BINARY };
+enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP,
+       SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE,
+       SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST,
+       SELECT_SIGNED_PRODUCT, SELECT_EXTENDED_LOAD, SELECT_SHIFTED_BINARY,
+       SELECT_BITFIELD, SELECT_MLS, SELECT_MASK_TEST, SELECT_INVERTED_BINARY };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -27,31 +31,57 @@ struct cg_selection {
 
 static int number(const char *s, uint32_t *value);
 
+static int power_of_two(uint32_t value) {
+  return value && !(value & (value - 1));
+}
+static unsigned low_mask_width(uint32_t value) {
+  return value && !(value & (value + 1)) ? 32 - (unsigned)__builtin_clz(value) : 0;
+}
+static int commutative_literal(cg_context *c, cg_inst *i, unsigned *at,
+                               uint32_t *value) {
+  *at = 4;
+  if (number(c->tokens[i->begin + 6].text, value))
+    return 1;
+  *at = 6;
+  return number(c->tokens[i->begin + 4].text, value);
+}
 static const char *shifted_binary(cg_context *c, cg_inst *shift, cg_inst *use,
-                                  uint32_t *amount, unsigned *other) {
+                                  uint32_t *amount, unsigned *input,
+                                  unsigned *other) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       !cg_global_residency(c) || shift->result->type->bits != 32 ||
       use->result->type->bits != 32 ||
-      cg_register_lookup(c, shift->result->name)->selection_uses != 1 ||
-      !number(c->tokens[shift->begin + 6].text, amount) || !*amount || *amount >= 32)
+      cg_register_lookup(c, shift->result->name)->selection_uses != 1)
     return NULL;
   const char *operation = c->tokens[shift->begin + 2].text;
-  if (strcmp(operation, "shl") && strcmp(operation, "lshr") && strcmp(operation, "ashr"))
-    return NULL;
   const char *user = c->tokens[use->begin + 2].text;
   if (strcmp(user, "xor") && strcmp(user, "or") && strcmp(user, "and") &&
       strcmp(user, "add") && strcmp(user, "sub"))
     return NULL;
+  int scaled_sub = !strcmp(operation, "mul") && !strcmp(user, "sub");
+  *input = 4;
+  if (scaled_sub) {
+    uint32_t factor;
+    if (!commutative_literal(c, shift, input, &factor) ||
+        factor < 2 || !power_of_two(factor))
+      return NULL;
+    *amount = (unsigned)__builtin_ctz(factor);
+  } else if ((strcmp(operation, "shl") && strcmp(operation, "lshr") &&
+              strcmp(operation, "ashr")) ||
+             !number(c->tokens[shift->begin + 6].text, amount) ||
+             !*amount || *amount >= 32)
+    return NULL;
   if (!strcmp(c->tokens[use->begin + 6].text, shift->result->name))
     *other = 4;
-  else if (strcmp(user, "sub") &&
+  else if ((scaled_sub || strcmp(user, "sub")) &&
            !strcmp(c->tokens[use->begin + 4].text, shift->result->name))
     *other = 6;
   else
     return NULL;
   if (c->tokens[use->begin + *other].text[0] != '%')
     return NULL;
-  return !strcmp(operation, "shl") ? "lsl" : !strcmp(operation, "lshr") ? "lsr" : "asr";
+  return scaled_sub || !strcmp(operation, "shl") ? "lsl" :
+         !strcmp(operation, "lshr") ? "lsr" : "asr";
 }
 
 static int number(const char *s, uint32_t *value) {
@@ -88,6 +118,69 @@ static int scalar(cg_context *c, cg_inst *i) {
       return 0;
   }
   return 1;
+}
+static int bitfield(cg_context *c, cg_inst *shift, cg_inst *use,
+                    uint32_t *lsb, unsigned *width) {
+  if (shift->result->type->bits != 32 || use->result->type->bits != 32 ||
+      strcmp(c->tokens[shift->begin + 2].text, "lshr") ||
+      strcmp(c->tokens[use->begin + 2].text, "and") ||
+      cg_register_lookup(c, shift->result->name)->selection_uses != 1 ||
+      !number(c->tokens[shift->begin + 6].text, lsb) || !*lsb || *lsb >= 32)
+    return 0;
+  uint32_t mask;
+  for (unsigned k = 4; k <= 6; k += 2)
+    if (!strcmp(c->tokens[use->begin + k].text, shift->result->name) &&
+        number(c->tokens[use->begin + (k == 4 ? 6 : 4)].text, &mask)) {
+      *width = low_mask_width(mask);
+      return *width && *width <= 32 - *lsb;
+    }
+  return 0;
+}
+static const char *inverted_binary(cg_context *c, cg_inst *invert, cg_inst *use,
+                                   unsigned *source, unsigned *other) {
+  if (invert->result->type->bits != 32 || use->result->type->bits != 32 ||
+      strcmp(c->tokens[invert->begin + 2].text, "xor") ||
+      cg_register_lookup(c, invert->result->name)->selection_uses != 1)
+    return NULL;
+  const char *op = c->tokens[use->begin + 2].text;
+  if (strcmp(op, "and") && strcmp(op, "or"))
+    return NULL;
+  uint32_t mask;
+  if (!commutative_literal(c, invert, source, &mask) || mask != UINT32_MAX ||
+      c->tokens[invert->begin + *source].text[0] != '%')
+    return NULL;
+  for (unsigned at = 4; at <= 6; at += 2)
+    if (!strcmp(c->tokens[use->begin + at].text, invert->result->name)) {
+      *other = at == 4 ? 6 : 4;
+      if (c->tokens[use->begin + *other].text[0] == '%')
+        return !strcmp(op, "and") ? "bic" : "orn";
+    }
+  return NULL;
+}
+static int mask_test(cg_context *c, cg_inst *mask, cg_inst *compare) {
+  if (!scalar(c, mask) || mask->result->type->bits != 32 ||
+      strcmp(c->tokens[mask->begin + 2].text, "and") ||
+      cg_register_lookup(c, mask->result->name)->selection_uses != 1 ||
+      !compare->result || compare->end - compare->begin != 8 ||
+      strcmp(c->tokens[compare->begin + 2].text, "icmp") ||
+      strcmp(c->tokens[compare->begin + 4].text, "i32") ||
+      strcmp(c->tokens[compare->begin + 6].text, ","))
+    return 0;
+  const char *pred = c->tokens[compare->begin + 3].text;
+  if (strcmp(pred, "eq") && strcmp(pred, "ne"))
+    return 0;
+  const char *left = c->tokens[compare->begin + 5].text;
+  const char *right = c->tokens[compare->begin + 7].text;
+  uint32_t value;
+  if ((!strcmp(left, mask->result->name) && number(right, &value) && !value) ||
+      (!strcmp(right, mask->result->name) && number(left, &value) && !value)) {
+    const char *a = c->tokens[mask->begin + 4].text;
+    const char *b = c->tokens[mask->begin + 6].text;
+    if (number(b, &value) || number(a, &value))
+      return value && thumb_modified(value) >= 0;
+    return 1;
+  }
+  return 0;
 }
 static cg_block *counted_block(cg_context *c, const char *token) {
   const char *name = cg_name(c, token);
@@ -535,6 +628,8 @@ void cg_selection_prepare(cg_context *c) {
       cg_alloc(c, c->selection->capacity * sizeof(*c->selection->pairs));
   absolute_stores(c);
   absolute_wrapper(c);
+  int constants = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+                  cg_global_residency(c);
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i && i->next; i = i->next) {
       cg_register_work(c);
@@ -543,6 +638,13 @@ void cg_selection_prepare(cg_context *c) {
       if (extended_load(c, i, next)) {
         *pair(c, i) = (cg_selected_pair){.instruction = i, .producer = next, .kind = SELECT_EXTENDED_LOAD};
         *pair(c, next) = (cg_selected_pair){.instruction = next, .kind = SELECT_SKIP};
+        continue;
+      }
+      if (constants && !assembly && !pair(c, i)->instruction &&
+          !pair(c, next)->instruction && mask_test(c, i, next)) {
+        *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
+                                           .kind = SELECT_MASK_TEST};
         continue;
       }
       if (cg_branch_selection(c) &&
@@ -576,7 +678,9 @@ void cg_selection_prepare(cg_context *c) {
               !(cg_control_selection(c) && !strcmp(s, "null"))) operands = 0;
         }
         if (operands) {
-          *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_COMPARE_SKIP};
+          cg_selected_pair *cmp = pair(c, i);
+          *cmp = (cg_selected_pair){.instruction=i, .kind=SELECT_COMPARE_SKIP,
+            .producer=cmp->kind == SELECT_MASK_TEST ? cmp->producer : NULL};
           *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i, .kind=SELECT_COMPARE_BRANCH};
           if (cg_control_selection(c) && !strcmp(c->tokens[i->begin + 4].text, "i32") &&
               (!strcmp(c->tokens[i->begin + 3].text, "ne") ||
@@ -604,8 +708,21 @@ void cg_selection_prepare(cg_context *c) {
           pair(c, next)->instruction)
         continue;
       uint32_t amount;
-      unsigned other;
-      if (shifted_binary(c, i, next, &amount, &other)) {
+      unsigned width;
+      if (constants && bitfield(c, i, next, &amount, &width)) {
+        *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
+                                           .kind = SELECT_BITFIELD};
+        continue;
+      }
+      unsigned source, other;
+      if (constants && inverted_binary(c, i, next, &source, &other)) {
+        *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
+                                           .kind = SELECT_INVERTED_BINARY};
+        continue;
+      }
+      if (shifted_binary(c, i, next, &amount, &source, &other)) {
         *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
         *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
                                           .kind = SELECT_SHIFTED_BINARY};
@@ -613,12 +730,16 @@ void cg_selection_prepare(cg_context *c) {
       }
       const char *op = c->tokens[i->begin + 2].text;
       const char *following = c->tokens[next->begin + 2].text;
-      if (!strcmp(op, "mul") && !strcmp(following, "add") &&
+      int subtract_product = constants && i->result->type->bits == 32 &&
+          next->result->type->bits == 32 && !strcmp(following, "sub") &&
+          !strcmp(c->tokens[next->begin + 6].text, i->result->name);
+      if (!strcmp(op, "mul") && (!strcmp(following, "add") || subtract_product) &&
           cg_register_lookup(c, i->result->name)->selection_uses == 1 &&
           (!strcmp(c->tokens[next->begin + 4].text, i->result->name) ||
            !strcmp(c->tokens[next->begin + 6].text, i->result->name))) {
         *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
-        *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i, .kind=SELECT_MLA};
+        *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i,
+          .kind=subtract_product ? SELECT_MLS : SELECT_MLA};
       } else if (((!strcmp(op, "udiv") && !strcmp(following, "urem")) ||
                   (!strcmp(op, "urem") && !strcmp(following, "udiv")) ||
                   (!strcmp(op, "sdiv") && !strcmp(following, "srem")) ||
@@ -648,7 +769,7 @@ int cg_selection_barrier(cg_context *c, cg_inst *i) {
   if (!c->selection)
     return 0;
   unsigned kind = pair(c, i)->kind;
-  return kind == SELECT_SKIP || kind == SELECT_MLA;
+  return kind == SELECT_SKIP || kind == SELECT_MLA || kind == SELECT_MLS;
 }
 static void read(cg_context *c, cg_inst *i, unsigned operand, unsigned reg) {
   c->pos = i->begin + operand;
@@ -762,6 +883,23 @@ int cg_selection_compare_operands(cg_context *c, cg_inst *i, cg_type *type) {
       !register_operands(c) || i->end - i->begin != 8 ||
       strcmp(c->tokens[i->begin + 6].text, ","))
     return 0;
+  cg_selected_pair *selected = pair(c, i);
+  cg_inst *mask = selected->kind == SELECT_MASK_TEST ||
+                  selected->kind == SELECT_COMPARE_SKIP ? selected->producer : NULL;
+  if (mask) {
+    uint32_t value;
+    const char *a = c->tokens[mask->begin + 4].text;
+    const char *b = c->tokens[mask->begin + 6].text;
+    if (number(b, &value))
+      cg_emit(c, "tst.w r%u, #%" PRIu32 "\n", operand(c, mask, 4, 0), value);
+    else if (number(a, &value))
+      cg_emit(c, "tst.w r%u, #%" PRIu32 "\n", operand(c, mask, 6, 0), value);
+    else {
+      unsigned left = operand(c, mask, 4, 0), right = operand(c, mask, 6, 1);
+      cg_emit(c, "tst.%c r%u, r%u\n", left < 8 && right < 8 ? 'n' : 'w', left, right);
+    }
+    return 1;
+  }
   const char *kind = c->tokens[i->begin + 4].text;
   const char *pred = c->tokens[i->begin + 3].text;
   int narrow = !strcmp(kind, "i8") || !strcmp(kind, "i16");
@@ -789,6 +927,10 @@ int cg_selection_compare_operands(cg_context *c, cg_inst *i, cg_type *type) {
   if (constant && thumb_modified(n) >= 0) {
     cg_emit(c, "cmp.%s r%u, #%" PRIu32 "\n", left < 8 && n <= 255 ? "n" : "w",
             left, n);
+  } else if (constant && !strcmp(kind, "i32") && (n & UINT32_C(0x80000000)) &&
+             (!strcmp(pred, "eq") || !strcmp(pred, "ne")) &&
+             thumb_modified(0u - n) >= 0) {
+    cg_emit(c, "cmn.w r%u, #%" PRIu32 "\n", left, 0u - n);
   } else {
     unsigned right = typed_operand(c, i, b, 1, type);
     cg_emit(c, "cmp.n r%u, r%u\n", left, right);
@@ -823,6 +965,7 @@ static int register_instruction(cg_context *c, cg_inst *i) {
     constant = number(c->tokens[i->begin + 4].text, &n);
     at = 6;
   }
+  unsigned width = constant ? low_mask_width(n) : 0;
   if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
       i->result->type->bits == 32 && constant && !strcmp(op, "and") &&
       (n == 255 || n == 65535)) {
@@ -831,14 +974,32 @@ static int register_instruction(cg_context *c, cg_inst *i) {
             dst < 8 && src < 8 ? 'n' : 'w', dst, src);
   } else if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
       i->result->type->bits == 32 && !strcmp(op, "sub") &&
-      number(c->tokens[i->begin + 4].text, &initial) && initial == 0) {
+      number(c->tokens[i->begin + 4].text, &initial) && thumb_modified(initial) >= 0) {
     unsigned src = operand(c, i, 6, 0);
-    cg_emit(c, "rsb.w r%u, r%u, #0\n", dst, src);
-  } else if (shift_multiply && constant && n && !(n & (n - 1))) {
+    cg_emit(c, "rsb.w r%u, r%u, #%" PRIu32 "\n", dst, src, initial);
+  } else if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      i->result->type->bits == 32 && constant && !strcmp(op, "and") &&
+      thumb_modified(n) < 0 && thumb_modified(~n) >= 0) {
+    unsigned src = operand(c, i, at, 0);
+    cg_emit(c, "bic.w r%u, r%u, #%" PRIu32 "\n", dst, src, ~n);
+  } else if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      i->result->type->bits == 32 && width && !strcmp(op, "and") &&
+      thumb_modified(n) < 0) {
+    unsigned src = operand(c, i, at, 0);
+    cg_emit(c, "ubfx r%u, r%u, #0, #%u\n", dst, src, width);
+  } else if (shift_multiply && constant && power_of_two(n)) {
     unsigned src = operand(c, i, at, 0);
     if (n == 1) cg_move(c, dst, src);
     else cg_emit(c, "lsl.w r%u, r%u, #%u\n", dst, src, (unsigned)__builtin_ctz(n));
     c->selection->immediates++;
+  } else if (shift_multiply && constant && power_of_two(n - 1)) {
+    unsigned src = operand(c, i, at, 0);
+    cg_emit(c, "add.w r%u, r%u, r%u, lsl #%u\n", dst, src, src,
+            (unsigned)__builtin_ctz(n - 1));
+  } else if (shift_multiply && constant && n > 2 && power_of_two(n + 1)) {
+    unsigned src = operand(c, i, at, 0);
+    cg_emit(c, "rsb.w r%u, r%u, r%u, lsl #%u\n", dst, src, src,
+            (unsigned)__builtin_ctz(n + 1));
   } else if (constant && immediate_supported(op, n)) {
     unsigned src = operand(c, i, at, 0);
     if (!immediate(c, op, n, dst, src))
@@ -947,20 +1108,52 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (selected->kind == SELECT_SKIP || selected->kind == SELECT_COMPARE_SKIP ||
       selected->kind == SELECT_COUNT_SKIP)
     return 1;
+  if (selected->kind == SELECT_BITFIELD) {
+    uint32_t lsb;
+    unsigned width;
+    if (!bitfield(c, selected->producer, i, &lsb, &width))
+      cg_error(c, "bitfield eligibility changed");
+    unsigned src = operand(c, selected->producer, 4, 0);
+    unsigned dst = destination(c, i);
+    cg_emit(c, "ubfx r%u, r%u, #%" PRIu32 ", #%u\n", dst, src, lsb, width);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
+  if (selected->kind == SELECT_INVERTED_BINARY) {
+    unsigned source, other;
+    cg_inst *producer = selected->producer;
+    const char *mnemonic = inverted_binary(c, producer, i, &source, &other);
+    if (!mnemonic)
+      cg_error(c, "inverted operand eligibility changed");
+    unsigned right = operand(c, producer, source, 0);
+    unsigned left = operand(c, i, other, 1), dst = destination(c, i);
+    cg_emit(c, "%s.w r%u, r%u, r%u\n", mnemonic, dst, left, right);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
   if (selected->kind == SELECT_SHIFTED_BINARY) {
     uint32_t amount;
-    unsigned other;
+    unsigned source, other;
     cg_inst *producer = selected->producer;
-    const char *shift = shifted_binary(c, producer, i, &amount, &other);
+    const char *shift = shifted_binary(c, producer, i, &amount, &source, &other);
     if (!shift)
       cg_error(c, "shifted operand eligibility changed");
     const char *op = c->tokens[i->begin + 2].text;
-    const char *mnemonic = !strcmp(op, "xor") ? "eor" : !strcmp(op, "or") ? "orr" : op;
-    unsigned src = operand(c, producer, 4, 0);
+    const char *mnemonic = !strcmp(op, "xor") ? "eor" : !strcmp(op, "or") ? "orr" :
+                           !strcmp(op, "sub") && other == 6 ? "rsb" : op;
+    unsigned src = operand(c, producer, source, 0);
     unsigned base = operand(c, i, other, 1);
     unsigned dst = destination(c, i);
     cg_emit(c, "%s.w r%u, r%u, r%u, %s #%" PRIu32 "\n",
             mnemonic, dst, base, src, shift, amount);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
+  if (selected->kind == SELECT_MLS) {
+    unsigned left = operand(c, selected->producer, 4, 0);
+    unsigned right = operand(c, selected->producer, 6, 2);
+    unsigned base = operand(c, i, 4, 1), dst = destination(c, i);
+    cg_emit(c, "mls r%u, r%u, r%u, r%u\n", dst, left, right, base);
     cg_save_normalized(c, i->result, dst);
     return 1;
   }

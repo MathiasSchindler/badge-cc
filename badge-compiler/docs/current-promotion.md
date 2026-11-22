@@ -86,6 +86,332 @@ string-timing caveat still needs a physical retest. Local CSE and broader
 loop hoisting grew some modules; `loop-bounds` and profile-free `hot-inline`
 did not improve this corpus. They are not promoted by this update.
 
+### Short Thumb instruction and tiny-leaf follow-up
+
+Five instruction selections are enabled in the default `thumb-constants`
+backend. The following one-at-a-time measurements use the same 129 archived
+optimized IR modules. Bytes are executable section sizes before linking.
+
+| Selection | Net bytes saved | Modules smaller / larger |
+| --- | ---: | ---: |
+| `RSB` for an encodable constant minus a value | 286 | 36 / 0 |
+| `BIC` when the complement of an AND mask is encodable | 220 | 25 / 0 |
+| `UBFX` for a single-use logical shift and contiguous low mask | 116 | 16 / 0 |
+| `MLS` for an adjacent, single-use product subtracted from an accumulator | 52 | 4 / 3 |
+| `TST` for a single-use mask compared for equality or inequality with zero | 354 | 47 / 3 |
+| Combined selector | 1,018 | 78 / 0 |
+
+The selector does not fuse multi-use intermediates or change the order of
+volatile operations. Masked comparisons are not fused in functions containing
+inline assembly. Independent LLVM assembly and a Cortex-M33 execution test
+check the encodings and results.
+
+The first full build lost inlining of a tiny Nametag helper: the new
+encoding made the inlined module two bytes larger at the admission point,
+and leaving the calls in increased reached work. The default
+`compact-inline` policy now has one exception per module: it may spend at
+most two encoded bytes to eliminate all of at least two calls to a pure
+one-argument i32 leaf with at most four arithmetic instructions. Frame,
+register-save and spill growth still reject the candidate, and a
+size-saving candidate takes precedence. Only one module used the
+exception in this replay, eliminating five calls while preserving the
+firmware sizes of the selector-only candidate.
+
+The final from-source build saved **1,416 loaded flash bytes** across 24 of
+33 verified images; none grew. All six microbenchmark payloads were
+byte-identical. No matched function's measured local frame plus save area
+grew; these measurements do not establish a worst-case call-chain bound.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 16,092 | 16,040 |
+| IMU Demo | 12,240 | 12,204 |
+| Diagnostics | 30,000 | 29,920 |
+| Compiler Test | 16,856 | 16,820 |
+
+With matching results, the four-level Maze QEMU probe reached
+21,196,267 instructions instead of 21,196,867, and the IMU renderer
+reached 669,523 instead of 671,235. All three IMU pixel paths also reached
+fewer instructions. The production Nametag blend probe went from
+1,291,423 to 1,283,294 instructions, and glyph coverage from 56,925
+to 55,901; these totals include the unchanged oracle harness. These are
+offline instruction counts, not physical timing or GPIOC qualification.
+
+### Constant arithmetic and bit masks
+
+Six more selections are active under `thumb-constants`. The fixed-IR
+ablation compiled the same 129 optimized modules with each change alone.
+The control reproduced the previous executable sizes in every module.
+
+| Selection | Net bytes saved | Modules smaller / larger |
+| --- | ---: | ---: |
+| `UBFX` for a contiguous low mask not encodable by `AND` or `BIC` | 272 | 16 / 0 |
+| Shifted `ADD` for multiplication by `2^k + 1` | 52 | 7 / 0 |
+| Shifted `RSB` for multiplication by `2^k - 1` | 168 | 17 / 0 |
+| Shifted `SUB` or `RSB` for an adjacent scaled subtraction | 12 | 3 / 0 |
+| Register `BIC` or `ORN` for a single-use inverted operand | 8 | 2 / 0 |
+| `CMN` for equality or inequality with an encodable negated constant | 6 | 1 / 0 |
+| Combined | 498 | 36 / 0 |
+
+Scaled subtraction requires a nonconstant unscaled operand: the wider
+candidate increased two objects when it forced an immediate into a
+register. Standalone `MVN` selection was dropped because XOR with all
+ones already encoded as one instruction and the substitution saved no
+bytes. The focused C/IR oracle checks modular arithmetic, reversed
+subtraction, shared operands, and ordered comparisons; emitted encodings
+also match LLVM's assembler.
+
+All 33 from-source UF2 builds verified. **24 shrank and none grew**,
+saving **652 loaded flash bytes**. All six microbenchmark payloads
+were byte-identical. No local frame or register-save area grew among
+1,532 matched functions; that is not a call-chain stack bound.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 16,040 | 16,020 |
+| IMU Demo | 12,204 | 12,192 |
+| Diagnostics | 29,920 | 29,884 |
+| Compiler Test | 16,820 | 16,796 |
+
+The four-level Maze probe matched all four digests (21,196,267 to
+21,196,263 reached instructions). The IMU renderer changed from 669,523
+to 669,355 instructions, and all three pixel paths improved with matching
+digests: live full-screen generation reached 78,592,462 instead of
+78,889,670. Nametag's blend probe was unchanged; the glyph-coverage
+probe went from 55,901 to 55,389 instructions. These are Cortex-M33 QEMU
+counts. This round did not flash or time a physical badge.
+
+### Direct integer casts and wide comparisons
+
+The default `thumb-constants` backend now lowers these integer operations
+directly. The per-rule ablation holds the input IR fixed across 129 modules
+and uses the corrected peephole in both the control and each variant.
+
+| Selection | Net executable bytes saved | Modules smaller / larger |
+| --- | ---: | ---: |
+| Truncate into an 8- or 16-bit destination with `UXTB`/`UXTH` | 2,524 | 91 / 0 |
+| Read the low word of an i64 truncation directly into the destination | 24 | 4 / 0 |
+| Forward normalized narrow values through zero extensions up to i32 | 1,010 | 40 / 4 |
+| Store the resident low word directly when zero-extending to i64 | 28 | 4 / 0 |
+| Sign-extend a resident byte or halfword directly when widening to i64 | 10 | 1 / 0 |
+| Compare high words first for 64-bit equality or inequality | 8 | 1 / 0 |
+| Compare high words first for unsigned 64-bit ordering | 48 | 3 / 0 |
+
+Wide comparisons use a one-instruction `IT EQ` block: the low-word compare
+runs only when the high words compare equal. Signed 64-bit ordering still
+uses its previous signed-high/unsigned-low lowering. The cast paths keep
+the existing scalar home, register and ABI contracts.
+
+The peephole now recognizes `UXTB.W` and `UXTH.W` as flag-neutral writes to
+their destination registers. This preserves safe constant shrinking and
+address folding without carrying facts through an overwritten base. By
+itself this saved six bytes in three modules. Before that fix, five of the
+combined candidate's objects grew; the final combined selector saved
+**3,646 executable bytes across 94 modules**, with no object growth.
+
+All 33 firmware images were rebuilt and verified: **25 shrank**, saving
+**4,928 loaded flash bytes**, and none grew. All six microbenchmark payloads
+were byte-identical. Neither local frames nor register-save areas grew in
+1,532 matched functions; this is not a worst-case stack bound.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 16,020 | 15,832 |
+| IMU Demo | 12,192 | 12,120 |
+| Diagnostics | 29,884 | 29,568 |
+| Compiler Test | 16,796 | 16,524 |
+
+The four-level Maze QEMU replay matched all digests and reached
+21,096,547 instructions instead of 21,196,263. IMU live full-screen pixel
+generation went from 78,592,462 to 76,402,838 instructions; the error-screen
+and dirty-region paths improved too. The exact Nametag blend and coverage
+objects passed their reference probes, saving 16,258 and 2,048 reached
+instructions respectively. LLVM encoding checks, signed and unsigned
+boundary oracles, and the Maze gameplay and collision checks passed.
+No physical timing or flash deployment was performed in this round.
+
+### Wide integer arithmetic
+
+Six more rules are enabled under `thumb-constants`. This ablation uses
+129 fixed optimized IR modules; the control reproduced the previous
+executable sizes. No module grew under any retained rule.
+
+| Selection | Net executable bytes saved |
+| --- | ---: |
+| Shifts below 32: skip the unused count registers and combine the cross-word shift with `ORR` | 26 |
+| Shifts of 32 or more: load only the word that contributes to the result | 40 |
+| Signed power-of-two division: generate the negative rounding bias from its sign | 48 |
+| Wide negation: use `RSBS`, `MVN`, and carry into the high word | 6 |
+| Constant bitwise operations: leave identity halves alone and encode other halves directly where possible | 4 |
+| Wide multiply: accumulate the cross products before `UMULL` writes the result registers | 6 |
+| Combined | 134 |
+
+The candidate for adding a 32-bit constant to an i64 value saved no
+object bytes and was dropped. The retained fast paths pass independent
+LLVM encoding checks and target execution at signed boundaries, around
+the 32-bit word boundary, and with carry/borrow and nontrivial high words.
+The existing mixed-compiler AAPCS and wide division/remainder oracles
+also pass.
+
+Three of 33 verified firmware images shrank by **140 loaded flash bytes**
+in total. None grew, no frame or save area grew among 1,532 matched
+functions, and all six microbenchmark payloads were byte-identical.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Breakout | 10,536 | 10,488 |
+| IMU Demo | 12,120 | 12,072 |
+| Compiler Test | 16,524 | 16,480 |
+
+The Tilt Breakout probe ran 4,096 paddle updates against an independent
+integer reference. With matching position and velocity on every update,
+the production function and its two division helpers reached **32,465,694
+instructions instead of 35,284,242 (8.0% fewer)**, excluding the unchanged
+reference harness. The IMU renderer reached 669,277 instead of 669,349
+instructions. Maze and the three IMU pixel paths matched their prior
+digests and instruction counts. These are Cortex-M33 QEMU measurements,
+not elapsed time on the badge.
+
+### Constant-divisor specialization
+
+The default `wide-division` pass now uses shifts and masks for unsigned
+power-of-two divisors, an exact arithmetic shift for exact signed division
+by a positive power of two, and a sign-derived bias for signed remainders
+and larger signed powers of two. The existing direct backend path still
+handles ordinary signed division by smaller positive powers of two.
+
+Other known positive divisors below `2^31` use a short helper. If the
+dividend magnitude fits in one word, a native `UDIV` is sufficient.
+Otherwise, native 32-bit division handles the high word and a 32-step
+restoring loop handles the low word. A shifted remainder is always less
+than twice the divisor, so it fits in 32 bits. The loop reuses the quotient
+bit for subtraction, which the backend selects as `MLS`, and folds adjacent
+shifts into `ORR`. Nonnegative signed dividends skip the sign corrections.
+Variable divisors, large non-powers of two, and unsupported signed cases
+retain the general helper.
+
+All stages matched an independent reference on **4,096 Tilt Breakout
+paddle updates**. Instruction counts exclude the unchanged reference
+harness.
+
+| Stage | Breakout production QEMU instructions | Loaded flash (bytes) |
+| --- | ---: | ---: |
+| Previous default | 32,465,694 | 10,488 |
+| Word-divisor helper | 3,551,184 | 10,124 |
+| Fused restoring loop | 2,944,784 | 10,112 |
+| Signed fast entry (final default) | 2,801,468 | 10,084 |
+
+All 33 firmware images verified. Breakout saved **404 bytes**, and no image
+grew. Maze and IMU Demo payloads were byte-identical to the previous
+default. No measured local frame plus save area grew among matched
+functions. The boundary oracle exercises the native and restoring paths,
+signed minima, carry across words, and both sides of the divisor cutoff;
+the existing LLVM verifier, mixed AAPCS and general division/remainder
+oracles also pass. These are Cortex-M33 QEMU instruction counts, not badge
+timings.
+
+### Runtime-divisor specialization
+
+The default general divider now checks for a nonzero word divisor below
+`2^31` and shares the constant-divisor helper. For larger divisors it
+returns zero if the numerator is smaller. Otherwise it aligns the divisor
+using the difference in leading-zero counts and runs one step per possible
+quotient bit, at most 33 for this path. Operands with the same bit length
+and a numerator at least as large as the divisor return one without a loop.
+The divide-by-zero trap is retained.
+
+The backend lowers i64 leading-zero count and variable left shift directly.
+It also shares one condition across both words of a wide select, and
+extracts the sign bit directly for `icmp slt i64 x, 0`. The latter two changes
+improved size and instruction counts after the divider itself was working.
+
+Eight Cortex-M33 QEMU workloads each check 256 independent integer
+results. Counts cover the quotient/remainder functions and helpers only.
+
+| Runtime operand group | Previous instructions | Final instructions |
+| --- | ---: | ---: |
+| Dividend fits in one word, word divisor | 2,043,648 | 19,114 |
+| Wide dividend, word divisor | 2,043,648 | 172,032 |
+| Wide dividend, very small divisor | 2,043,648 | 172,032 |
+| Numerator below divisor | 2,022,177 | 15,104 |
+| Similar-width large operands | 2,019,840 | 52,330 |
+| Large dividend with a wide quotient | 2,037,840 | 730,727 |
+| Signed division | 2,057,385 | 314,956 |
+| Signed and unsigned remainder | 2,046,294 | 335,597 |
+
+Dispatch alone slightly increased the wide-quotient workload; it was not
+adopted without alignment. A leaner normalized helper lost much of the
+small-divisor speedup. Removing the immediate quotient-one exit, adding
+a divide-by-one check, or branching separately for signed corrections
+did not justify their size/speed trade-offs. The final object containing all
+four runtime operations is **1,266 bytes versus 1,038**: this is a speed
+default, not a claim that every future image using runtime division shrinks.
+
+All 33 production and microbenchmark UF2s verified. Three images saved
+**196 loaded flash bytes** total; none grew. Both Nametag images saved
+80 bytes each, with unchanged blend and glyph-coverage probe results and
+counts. Tilt Breakout saved 36 bytes (10,084 to 10,048), and its 4,096
+checked paddle updates used 2,769,047 production instructions instead
+of 2,801,468. Maze and IMU Demo were byte-identical to the previous default.
+No measured local frame plus save area grew among matched functions.
+
+Randomized signed and unsigned quotient/remainder checks, all 64 valid
+variable shift counts, leading-zero boundaries including zero, LLVM
+assembly, and mixed-compiler ABI tests pass. No physical badge was
+reflashed or timed.
+
+### Address and register-copy folding
+
+The default `thumb-constants` backend folds an in-place address add
+into its transfer when the old register is dead or the load replaces it.
+It also removes temporary moves used only as a store value, an address base,
+or a load result. Access widths and memory order are unchanged. The bounded
+overwrite check also recognizes byte/halfword loads and zero extensions that
+replace the old value without reading it; opaque assembly and uses of the
+old value still block the rewrite.
+
+| Fixed-IR selection | Executable bytes saved | Modules smaller / larger |
+| --- | ---: | ---: |
+| In-place address add folding | 644 | 54 / 0 |
+| Store-value copy removal | 562 | 51 / 0 |
+| Address-base copy removal | 428 | 55 / 0 |
+| Load-result copy removal | 18 | 4 / 0 |
+| Combined, with expanded overwrite proof | 1,686 | 102 / 0 |
+
+The expanded proof saved 48 bytes beyond the same four folds with the
+previous overwrite rules. Negative displacements, adding two immediate
+offsets, and alternate signed indexed encodings were tested separately
+but saved no executable bytes in these 129 modules; they were dropped.
+
+The base-copy fold exposed an inlining size tie for Breakout's timer
+helper, costing eight register-save bytes if the call was retained.
+`compact-inline` can now remove repeated calls to a no-argument leaf
+that returns one word load at the same encoded size. The load may use a
+literal address, and the existing frame, save, and spill gates still
+apply. This kept the timer read inlined without adding a save area or
+changing the number or order of volatile reads.
+
+**26 of 33 verified firmware images** shrank, saving **2,528 loaded flash
+bytes**. No image, object, or measured local frame or register-save area
+grew among the 1,531 matched functions. All six microbenchmark payloads
+were byte-identical.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 15,832 | 15,800 |
+| Tilt Breakout | 10,048 | 10,016 |
+| IMU Demo | 12,072 | 12,044 |
+| Diagnostics | 29,568 | 29,496 |
+
+The four-level Maze replay reached 21,095,461 instead of 21,096,547
+instructions. The IMU renderer went from 669,277 to 667,995, and
+Breakout's 4,096 checked paddle updates reached 2,761,085 instead of
+2,769,047 production instructions. Results matched; all three IMU pixel
+paths and both Nametag font probes also had unchanged instruction counts.
+Independent LLVM encoding and Cortex-M33 memory checks, mixed AAPCS,
+and Maze gameplay and collision oracles passed. No badge was reflashed
+or physically timed.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

@@ -612,7 +612,8 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
           "add", "adds", "addw", "sub", "subs", "subw", "and", "ands",
           "orr", "orrs", "eor", "eors", "lsl", "lsls", "lsr", "lsrs",
           "asr", "asrs", "mul", "muls", "mla", "mls", "ubfx", "uxtb", "uxth",
-          "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs", "cmp"};
+          "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs", "cmp", "cmn",
+          "bic", "tst", "orn"};
       int supported = 0;
       for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); i++)
         supported |= !strcmp(opcode, allowed[i]);

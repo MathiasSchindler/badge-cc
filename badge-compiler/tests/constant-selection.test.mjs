@@ -94,6 +94,295 @@ int main(void) {
     '-kernel', file('llvm.elf')]);
 });
 
+test('short integer forms preserve wraparound, bit fields, and masked conditions', t => {
+  const file = files(t);
+  const fn = (name, parameters, body) =>
+    `define i32 @${name}(${parameters}) {\nentry:\n${body}\n}\n`;
+  fs.writeFileSync(file('input.ll'), 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
+    fn('reverse', 'i32 %x', '%r = sub i32 228, %x\nret i32 %r') +
+    fn('clear', 'i32 %x', '%r = and i32 4294967291, %x\nret i32 %r') +
+    fn('extract', 'i32 %x', '%s = lshr i32 %x, 23\n%r = and i32 511, %s\nret i32 %r') +
+    fn('middle', 'i32 %x', '%s = lshr i32 %x, 9\n%r = and i32 %s, 2047\nret i32 %r') +
+    fn('msub', 'i32 %x, i32 %y, i32 %z',
+      '%p = mul i32 %x, %y\n%r = sub i32 %z, %p\nret i32 %r') +
+    fn('opposite', 'i32 %x, i32 %y, i32 %z',
+      '%p = mul i32 %x, %y\n%r = sub i32 %p, %z\nret i32 %r') +
+    fn('keep_shift', 'i32 %x',
+      '%s = lshr i32 %x, 11\n%m = and i32 %s, 7\n%r = xor i32 %s, %m\nret i32 %r') +
+    fn('masked_eq', 'i32 %x',
+      '%m = and i32 %x, 2147483648\n%c = icmp eq i32 0, %m\n%r = zext i1 %c to i32\nret i32 %r') +
+    fn('masked_branch', 'i32 %x, i32 %y',
+      '%m = and i32 %x, %y\n%c = icmp ne i32 %m, 0\nbr i1 %c, label %yes, label %no\n' +
+      'yes:\nret i32 77\nno:\nret i32 91') +
+    fn('opaque', 'i32 %x',
+      'call void asm sideeffect "nop", "~{cc}"()\n' +
+      '%m = and i32 %x, 16\n%c = icmp eq i32 %m, 0\n%r = zext i1 %c to i32\nret i32 %r'));
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned reverse(unsigned), clear(unsigned), extract(unsigned), middle(unsigned);
+extern unsigned msub(unsigned, unsigned, unsigned), opposite(unsigned, unsigned, unsigned);
+extern unsigned keep_shift(unsigned), masked_eq(unsigned), masked_branch(unsigned, unsigned), opaque(unsigned);
+int main(void) {
+  unsigned rng = 17;
+  for (unsigned i = 0; i < 258; i++) {
+    unsigned x = i == 0 ? 0u : i == 1 ? ~0u : rng;
+    unsigned y = i % 7 ? rng ^ 0xba2fe3b9u : 0u;
+    unsigned z = rng * 17u;
+    if (reverse(x) != 228u - x || clear(x) != (x & ~4u) ||
+        extract(x) != x >> 23 || middle(x) != ((x >> 9) & 2047u) ||
+        msub(x, y, z) != z - x * y ||
+        opposite(x, y, z) != x * y - z ||
+        keep_shift(x) != ((x >> 11) ^ ((x >> 11) & 7u)) ||
+        masked_eq(x) != (x >> 31 == 0) ||
+        masked_branch(x, y) != ((x & y) ? 77u : 91u) ||
+        opaque(x) != ((x & 16u) == 0)) return 1;
+    rng = rng * 1664525u + 1013904223u;
+  }
+  return 0;
+}
+`);
+  run(tool('badge-codegen-sanitize'), [file('input.ll'), '-o', file('input.s')]);
+  const asm = fs.readFileSync(file('input.s'), 'utf8');
+  const body = name => asm.slice(asm.indexOf(`\n${name}:`), asm.indexOf(`.size ${name},`));
+  assert.match(body('reverse'), /^rsb\.w .*#228$/m);
+  assert.match(body('clear'), /^bic\.w .*#4$/m);
+  assert.match(body('extract'), /^ubfx .*#23, #9$/m);
+  assert.match(body('middle'), /^ubfx .*#9, #11$/m);
+  assert.match(body('msub'), /^mls /m);
+  assert.match(body('masked_eq'), /^tst\.w .*#2147483648$/m);
+  assert.match(body('masked_branch'), /^tst\.[nw] r\d+, r\d+$/m);
+  assert.doesNotMatch(body('opposite'), /^mls /m);
+  assert.doesNotMatch(body('keep_shift'), /^ubfx .*#11, #3$/m);
+  assert.doesNotMatch(body('opaque'), /^tst\./m);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-asm'), [file('input.s'), '-o', file('input.o')]);
+  run(clang, [...target, '-c', file('input.s'), '-o', file('llvm.o')]);
+  const code = name => decodeElf(fs.readFileSync(file(name))).sections
+    .filter(s => s.flags & 4).map(s => [s.name, s.data]);
+  assert.deepEqual(code('input.o'), code('llvm.o'));
+  run(clang, [...target, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('caller.o'), file('input.o'), '-o', file('input.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('input.elf')]);
+});
+
+test('short constant arithmetic and inverted operands preserve Thumb results', t => {
+  const file = files(t);
+  const fn = (name, args, body) => `define i32 @${name}(${args}) {\nentry:\n${body}\n}\n`;
+  const unary = 'i32 %x', binary = 'i32 %x, i32 %y';
+  fs.writeFileSync(file('arith.ll'), 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
+    fn('low', unary, '%r = and i32 %x, 2047\nret i32 %r') +
+    fn('plus', unary, '%r = mul i32 5, %x\nret i32 %r') +
+    fn('minus', unary, '%r = mul i32 %x, 2147483647\nret i32 %r') +
+    fn('scaled', binary, '%p = mul i32 %x, 64\n%r = sub i32 %y, %p\nret i32 %r') +
+    fn('reverse', binary, '%p = mul i32 8, %x\n%r = sub i32 %p, %y\nret i32 %r') +
+    fn('literal', unary, '%p = mul i32 8, %x\n%r = sub i32 %p, 3\nret i32 %r') +
+    fn('clear_reg', binary, '%n = xor i32 %x, -1\n%r = and i32 %n, %y\nret i32 %r') +
+    fn('set_reg', binary, '%n = xor i32 -1, %x\n%r = or i32 %y, %n\nret i32 %r') +
+    fn('keep_reg', binary, '%n = xor i32 %x, -1\n%r = and i32 %n, %y\n%a = xor i32 %n, %r\nret i32 %a') +
+    fn('equal', unary, '%c = icmp eq i32 -17, %x\nbr i1 %c, label %yes, label %no\n' +
+      'yes:\nret i32 8\nno:\nret i32 3') +
+    fn('ordered', unary, '%c = icmp ult i32 %x, -17\n%r = zext i1 %c to i32\nret i32 %r'));
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned low(unsigned), plus(unsigned), minus(unsigned), literal(unsigned),
+                equal(unsigned), ordered(unsigned);
+extern unsigned scaled(unsigned, unsigned), clear_reg(unsigned, unsigned),
+                set_reg(unsigned, unsigned), keep_reg(unsigned, unsigned),
+                reverse(unsigned, unsigned);
+int main(void) {
+  unsigned seed = 9;
+  for (unsigned i = 0; i < 264; i++) {
+    unsigned x = i == 0 ? 0 : i == 1 ? ~0u : i == 2 ? 0x80000000u :
+                 i < 6 ? ~0u - (i + 12u) : seed;
+    unsigned y = seed ^ 0xba2fe3b9u;
+    if (low(x) != (x & 2047u) || plus(x) != 5u * x ||
+        minus(x) != 2147483647u * x || scaled(x, y) != y - 64u * x ||
+        reverse(x, y) != 8u * x - y || literal(x) != 8u * x - 3u ||
+        clear_reg(x, y) != (~x & y) || set_reg(x, y) != (~x | y) ||
+        keep_reg(x, y) != (~x ^ (~x & y)) ||
+        equal(x) != (x == -17u ? 8u : 3u) || ordered(x) != (x < -17u)) return 1;
+    seed = seed * 1664525u + 1013904223u;
+  }
+  return 0;
+}
+`);
+  run(tool('badge-codegen-sanitize'), [file('arith.ll'), '-o', file('arith.s')]);
+  const asm = fs.readFileSync(file('arith.s'), 'utf8');
+  const body = name => asm.slice(asm.indexOf(`\n${name}:`), asm.indexOf(`.size ${name},`));
+  for (const [name, expected] of Object.entries({
+    low: /^ubfx .*#0, #11$/m, plus: /^add\.w .*lsl #2$/m,
+    minus: /^rsb\.w .*lsl #31$/m, scaled: /^sub\.w .*lsl #6$/m,
+    reverse: /^rsb\.w .*lsl #3$/m,
+    clear_reg: /^bic\.w r\d+, r\d+, r\d+$/m, set_reg: /^orn\.w r\d+, r\d+, r\d+$/m,
+    equal: /^cmn\.w .*#17$/m,
+  })) assert.match(body(name), expected);
+  assert.doesNotMatch(body('keep_reg'), /^bic\.w /m);
+  assert.doesNotMatch(body('literal'), /^rsb\.w .*lsl #3$/m);
+  assert.doesNotMatch(body('ordered'), /^cmn\.w /m);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-asm'), [file('arith.s'), '-o', file('arith.o')]);
+  run(clang, [...target, '-c', file('arith.s'), '-o', file('llvm.o')]);
+  const text = name => decodeElf(fs.readFileSync(file(name))).sections
+    .filter(s => s.flags & 4).map(s => [s.name, s.data]);
+  assert.deepEqual(text('arith.o'), text('llvm.o'));
+  run(clang, [...target, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('caller.o'), file('arith.o'), '-o', file('arith.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('arith.elf')]);
+});
+
+test('direct casts and compact wide compares preserve signed and unsigned boundaries', t => {
+  const file = files(t);
+  const compare = ['eq', 'ne', 'ult', 'ule', 'ugt', 'uge', 'slt', 'sge'];
+  const fn = (name, args, type, body) =>
+    `define ${type} @${name}(${args}) {\nentry:\n${body}\n}\n`;
+  const wide = 'i64 %x, i64 %y';
+  fs.writeFileSync(file('input.ll'), 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
+    fn('word_low', 'i64 %x', 'i32', '%r = trunc i64 %x to i32\nret i32 %r') +
+    fn('byte_low', 'i32 %x', 'i8', '%r = trunc i32 %x to i8\nret i8 %r') +
+    fn('half_low', 'i32 %x', 'i16', '%r = trunc i32 %x to i16\nret i16 %r') +
+    fn('zero_half', 'i8 %x', 'i16', '%r = zext i8 %x to i16\nret i16 %r') +
+    fn('zero_wide', 'i32 %x', 'i64', '%r = zext i32 %x to i64\nret i64 %r') +
+    fn('sign_wide', 'i16 %x', 'i64', '%r = sext i16 %x to i64\nret i64 %r') +
+    compare.map(op => fn(`is_${op}`, wide, 'i32',
+      `%c = icmp ${op} i64 %x, %y\n%r = zext i1 %c to i32\nret i32 %r`)).join(''));
+  fs.writeFileSync(file('caller.c'), `
+typedef unsigned long long u64;
+typedef long long s64;
+extern unsigned word_low(u64);
+extern unsigned char byte_low(unsigned);
+extern unsigned short half_low(unsigned), zero_half(unsigned char);
+extern u64 zero_wide(unsigned);
+extern s64 sign_wide(short);
+${compare.map(op => `extern unsigned is_${op}(u64, u64);`).join('\n')}
+int main(void) {
+  static const u64 values[] = {
+    0, 1, 0xfffffffeu, 0xffffffffu, 0x100000000ull, 0x7fffffffffffffffull,
+    0x8000000000000000ull, 0x8000000000000001ull, 0xffffffff00000000ull, ~0ull,
+    0x123456789abcdef0ull, 0x12345678fedcba98ull
+  };
+  for (unsigned i = 0; i < sizeof(values) / sizeof(*values); i++) {
+    u64 x = values[i];
+    if (word_low(x) != (unsigned)x || byte_low((unsigned)x) != (unsigned char)x ||
+        half_low((unsigned)x) != (unsigned short)x ||
+        zero_half((unsigned char)x) != (unsigned char)x ||
+        zero_wide((unsigned)x) != (unsigned)x || sign_wide((short)x) != (short)x)
+      return 1;
+    for (unsigned j = 0; j < sizeof(values) / sizeof(*values); j++) {
+      u64 y = values[j];
+      if (is_eq(x,y) != (x == y) || is_ne(x,y) != (x != y) ||
+          is_ult(x,y) != (x < y) || is_ule(x,y) != (x <= y) ||
+          is_ugt(x,y) != (x > y) || is_uge(x,y) != (x >= y) ||
+          is_slt(x,y) != ((s64)x < (s64)y) || is_sge(x,y) != ((s64)x >= (s64)y))
+        return 2;
+    }
+  }
+  return 0;
+}
+`);
+  run(tool('badge-codegen-sanitize'), [file('input.ll'), '-o', file('input.s')]);
+  const asm = fs.readFileSync(file('input.s'), 'utf8');
+  const body = name => asm.slice(asm.indexOf(`\n${name}:`), asm.indexOf(`.size ${name},`));
+  for (const op of compare.slice(0, 6))
+    assert.match(body(`is_${op}`), /^cmp\.n r2, r3\nit eq\ncmpeq\.n r0, r1$/m);
+  assert.doesNotMatch(body('is_slt'), /^cmpeq\.n /m);
+  assert.doesNotMatch(body('zero_half'), /^uxth[. ]/m);
+  assert.match(body('sign_wide'), /^sxth\.[nw] r0, r[3-9]\d*$/m);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-asm'), [file('input.s'), '-o', file('input.o')]);
+  run(clang, [...target, '-c', file('input.s'), '-o', file('llvm.o')]);
+  const text = name => decodeElf(fs.readFileSync(file(name))).sections
+    .filter(s => s.flags & 4).map(s => [s.name, s.data]);
+  assert.deepEqual(text('input.o'), text('llvm.o'));
+  run(clang, [...target, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('caller.o'), file('input.o'), '-o', file('input.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('input.elf')]);
+});
+
+test('wide arithmetic lowers carry, borrow and word boundaries exactly', t => {
+  const file = files(t);
+  const fn = (name, args, body) => `define i64 @${name}(${args}) {\nentry:\n${body}\n}\n`;
+  const unary = 'i64 %x', binary = 'i64 %x, i64 %y';
+  const shifts = ['shl', 'lshr', 'ashr'].flatMap(op =>
+    [0, 1, 31, 32, 33, 63].map(n => [op, n]));
+  const masks = [
+    ['keep_low', 'and', '4294967295', 'x & 0xffffffffull'],
+    ['keep_high', 'and', '-4294967296', 'x & 0xffffffff00000000ull'],
+    ['or_low', 'or', '4275878552', 'x | 4275878552ull'],
+    ['xor_high', 'xor', '1095216660480', 'x ^ 1095216660480ull'],
+  ];
+  fs.writeFileSync(file('wide.ll'), 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
+    shifts.map(([op, n]) => fn(`${op}${n}`, unary, `%v = ${op} i64 %x, ${n}\nret i64 %v`)).join('') +
+    masks.map(([name, op, value]) => fn(name, unary, `%v = ${op} i64 ${value}, %x\nret i64 %v`)).join('') +
+    fn('neg', unary, '%v = sub i64 0, %x\nret i64 %v') +
+    fn('product', binary, '%v = mul i64 %x, %y\nret i64 %v') +
+    [1, 1024, 2147483648].map(n => fn(`div${n}`, unary,
+      `%v = sdiv i64 %x, ${n}\nret i64 %v`)).join(''));
+  fs.writeFileSync(file('caller.c'), `
+typedef unsigned long long u64;
+typedef long long s64;
+${[...shifts.map(([op, n]) => `${op}${n}`), ...masks.map(([name]) => name),
+    'neg', 'div1', 'div1024', 'div2147483648']
+    .map(name => `extern u64 ${name}(u64);`).join('\n')}
+extern u64 product(u64, u64);
+int main(void) {
+  static const u64 values[] = {
+    0, 1, 1023, 1024, 0xffffffffu, 0x100000000ull, 0x100000001ull,
+    0x7fffffffffffffffull, 0x8000000000000000ull, 0x8000000000000001ull,
+    0xffffffff00000000ull, ~1022ull, ~0ull, 0x123456789abcdef0ull
+  };
+  for (unsigned i = 0; i < sizeof(values) / sizeof(*values); i++) {
+    u64 x = values[i];
+    ${shifts.map(([op, n]) => `if (${op}${n}(x) != (u64)(${op === 'ashr' ? '(s64)x' : 'x'} ${op === 'shl' ? '<<' : '>>'} ${n})) return 1;`).join('\n    ')}
+    ${masks.map(([name, , , expr]) => `if (${name}(x) != (${expr})) return 2;`).join('\n    ')}
+    if (neg(x) != 0ull - x || div1(x) != x || (s64)div1024(x) != (s64)x / 1024ll ||
+        (s64)div2147483648(x) != (s64)x / 2147483648ll) return 3;
+    for (unsigned j = 0; j < sizeof(values) / sizeof(*values); j++) {
+      u64 y = values[j];
+      if (product(x, y) != x * y) return 4;
+    }
+  }
+  return 0;
+}
+`);
+  run(tool('badge-codegen-sanitize'), [file('wide.ll'), '-o', file('wide.s')]);
+  const assembly = fs.readFileSync(file('wide.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.match(body('shl1'), /^orr\.w r1, r1, r0, lsr #31$/m);
+  assert.match(body('ashr31'), /^orr\.w r0, r0, r1, lsl #1$/m);
+  assert.doesNotMatch(body('lshr32'), /^movw r[23],/m);
+  assert.doesNotMatch(body('keep_low'), /^and\./m);
+  assert.match(body('neg'), /^rsbs\.n r0, r0, #0\nmvn\.w r1, r1\nadc r1, r1, #0$/m);
+  assert.match(body('product'), /^umull r0, r1, r0, r2$/m);
+  assert.match(body('div1024'), /^lsr(?:\.w|s\.n) r4, r4, #22$/m);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-asm'), [file('wide.s'), '-o', file('wide.o')]);
+  run(clang, [...target, '-c', file('wide.s'), '-o', file('llvm.o')]);
+  const text = name => decodeElf(fs.readFileSync(file(name))).sections
+    .filter(s => s.flags & 4).map(s => [s.name, s.data]);
+  assert.deepEqual(text('wide.o'), text('llvm.o'));
+  run(clang, [...target, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('caller.o'), file('wide.o'), '-o', file('wide.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('wide.elf')]);
+});
+
 test('direct scaled and frame addresses preserve indexed volatile accesses', t => {
   const file = files(t);
   fs.writeFileSync(file('address.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"

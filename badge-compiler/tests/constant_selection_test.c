@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
   int runtime = argc == 2 && !strcmp(argv[1], "--runtime");
   expect("movw r0, #0\nmovt r0, #3072\n", "mov.w r0, #201326592", "movt");
   expect("movw r1, #41\ncmp r0, r1\n", "movs.n r1, #41", "movw");
+  expect("movw r1, #41\nuxtb.w r8, r1\ncmp r0, r8\n",
+         "movs.n r1, #41", "movw");
   expect("movw r1, #41\nbeq somewhere\n", "movw r1, #41", "movs");
   expect("movw r8, #41\ncmp r0, r8\n", "movw r8, #41", "movs");
   expect("movw r1, #256\ncmp r0, r1\n", "movw r1, #256", "movs");
@@ -96,8 +98,30 @@ int main(int argc, char **argv) {
          "ldrb.n r2, [r1, r5]", "add.w r2");
   expect("addw r2, r1, #62\nstrh.n r0, [r2]\nmovw r2, #7\n",
          "strh.n r0, [r1, #62]", "addw");
+  expect("addw r2, r1, #62\nuxth.w r8, r0\nstrh.w r8, [r2]\nmovw r2, #7\n",
+         "strh.w r8, [r1, #62]", "addw");
+  expect("addw r2, r1, #62\nuxth.w r1, r0\nstrh.w r1, [r2]\nmovw r2, #7\n",
+         "addw r2, r1, #62", "memory-address-fold");
   expect("addw r2, r1, #64\nldrh.n r2, [r2]\n",
          "ldrh.w r2, [r1, #64]", "addw");
+  expect("add.w r1, r1, #3\nldrb.n r1, [r1]\n",
+         "ldrb.n r1, [r1, #3]", "add.w");
+  expect("add.w r2, r1, #12\nldr.n r0, [r2]\nstr.n r2, [r1]\n",
+         "add.w r2, r1, #12", "memory-address-fold");
+  expect("ldr.n r0, [r1, #4]\nmov r3, r0\nmovw r0, #7\n",
+         "ldr.n r3, [r1, #4]", "mov r3, r0");
+  expect("mov r0, r3\nldr.n r0, [r0, #4]\n",
+         "ldr.n r0, [r3, #4]", "mov r0, r3");
+  expect("mov r0, r8\nstr.n r0, [r7, #12]\nmovw r0, #7\n",
+         "str.w r8, [r7, #12]", "mov r0, r8");
+  expect("mov r0, r8\nstr.n r0, [r7, #12]\nldrb.n r0, [r2]\n",
+         "str.w r8, [r7, #12]", "mov r0, r8");
+  expect("mov r0, r2\nstr.n r0, [r0, #4]\nmovw r0, #7\n",
+         "mov r0, r2", "memory-move-fold");
+  expect("ldr.n r0, [r1, #4]\nmov r3, r0\nadd.w r0, r0, r3\n",
+         "mov r3, r0", "memory-move-fold");
+  expect("@ constant-assembly-lines: 3\nldr.n r0, [r1, #4]\n"
+         "mov r3, r0\nmovw r0, #7\n", "mov r3, r0", "memory-move-fold");
   expect("addw r2, r1, #4096\nldrb.n r2, [r2]\n",
          "addw r2", "memory-address-fold");
   expect("addw r2, r1, #4\nstrb.n r2, [r2]\nmovw r2, #7\n",
@@ -196,6 +220,17 @@ int main(int argc, char **argv) {
       printf("%scmp r0, #33\nbne constant_failed\n", out);
       free(out);
     }
+    puts("movw r1, #:lower16:memory_test\nmovt r1, #:upper16:memory_test\n"
+         "mov.w r8, #128");
+    char *transfer = select(
+        "mov r0, r8\nstrb.n r0, [r1, #16]\nmovw r0, #7\n"
+        "mov r2, r1\nadd.w r2, r2, #16\nldrb.n r2, [r2]\n");
+    printf("%scmp r2, #128\nbne constant_failed\n", transfer);
+    free(transfer);
+    transfer = select("mov r2, r1\nldrb.n r2, [r2, #16]\n"
+                      "ldrb.n r0, [r1, #16]\nmov r3, r0\nmovw r0, #7\n");
+    printf("%scmp r2, #128\nbne constant_failed\ncmp r3, r2\nbne constant_failed\n", transfer);
+    free(transfer);
     const uint32_t inputs[] = {0, 0x7fffffffu, 0x80000000u, 0xffffffffu};
     for (unsigned half = 0; half < 2; half++)
       for (unsigned carry = 0; carry < 2; carry++)

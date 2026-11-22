@@ -103,13 +103,15 @@ static void effects(const char *text, cg_constant facts[13]) {
   if (!strcmp(op, "str") || !strcmp(op, "str.w") || !strcmp(op, "str.n") ||
       !strcmp(op, "strb") || !strcmp(op, "strb.w") || !strcmp(op, "strb.n") ||
       !strcmp(op, "strh") || !strcmp(op, "strh.w") || !strcmp(op, "strh.n") ||
-      !strcmp(op, "cmp") || !strcmp(op, "cmp.w") || !strcmp(op, "cmp.n")) return;
-  const char *writes[] = {"mov", "mov.w", "movs.n", "movw", "movt", "add.w", "add.n", "addw",
+      !strcmp(op, "cmp") || !strcmp(op, "cmp.w") || !strcmp(op, "cmp.n") ||
+      !strcmp(op, "tst.w") || !strcmp(op, "tst.n") || !strcmp(op, "cmn.w")) return;
+  const char *writes[] = {"mov", "mov.w", "movs.n", "movw", "movt", "orn.w", "add.w", "add.n", "addw",
     "sub.w", "subw", "subs.w", "adds.n", "subs.n", "mul", "mla", "mls", "udiv", "sdiv",
-    "and.w", "orr.w", "eor.w", "lsl.w", "lsr.w", "asr.w", "lsls.n", "lsrs.n", "asrs.n", "rsb.w",
-    "ubfx", "sxtb", "sxth", "sxtb.n", "sxtb.w", "sxth.n", "sxth.w", "uxtb.n", "uxth.n",
+    "and.w", "bic.w", "orr.w", "eor.w", "lsl.w", "lsr.w", "asr.w", "lsls.n", "lsrs.n", "asrs.n", "rsb.w",
+    "ubfx", "sxtb", "sxth", "sxtb.n", "sxtb.w", "sxth.n", "sxth.w",
+    "uxtb.n", "uxtb.w", "uxth.n", "uxth.w",
     "ldr", "ldr.w", "ldr.n", "ldrb", "ldrb.w", "ldrb.n", "ldrh", "ldrh.w", "ldrh.n",
-    "ldrsb.w", "ldrsh.w"};
+    "ldrsb", "ldrsh", "ldrsb.n", "ldrsh.n", "ldrsb.w", "ldrsh.w"};
   for (unsigned n = 0; n < sizeof(writes) / sizeof(*writes); n++)
     if (!strcmp(op, writes[n]) && sscanf(text + strlen(op), " r%u,", &dst) == 1 &&
         dst <= 12) {
@@ -146,7 +148,7 @@ static int flags_overwritten(cg_context *c, const char *body, const char *text) 
     if (sscanf(instruction, "%23s", opcode) != 1) return 0;
     /* AAPCS calls do not consume incoming NZCV. */
     if (!strcmp(opcode, "bl") || !strcmp(opcode, "cmp") ||
-        !strcmp(opcode, "cmp.n") || !strcmp(opcode, "cmp.w") ||
+        !strcmp(opcode, "cmp.n") || !strcmp(opcode, "cmp.w") || !strcmp(opcode, "cmn.w") ||
         !strcmp(opcode, "adds.n") || !strcmp(opcode, "adds.w") ||
         !strcmp(opcode, "subs.n") || !strcmp(opcode, "subs.w")) return 1;
     instructions++;
@@ -167,7 +169,8 @@ static int flags_overwritten(cg_context *c, const char *body, const char *text) 
     const char *ops[] = {"mov.w", "addw", "subw", "add.w", "sub.w",
       "str", "str.n", "str.w", "strb", "strb.n", "strb.w", "strh", "strh.n", "strh.w",
       "ldr", "ldr.n", "ldr.w", "ldrb", "ldrb.n", "ldrb.w", "ldrh", "ldrh.n", "ldrh.w",
-      "ubfx", "uxtb.n", "uxth.n", "and.w", "orr.w", "eor.w", "lsl.w", "lsr.w", "asr.w", "nop"};
+      "ubfx", "uxtb.n", "uxtb.w", "uxth.n", "uxth.w", "and.w", "bic.w", "orr.w", "orn.w",
+      "eor.w", "lsl.w", "lsr.w", "asr.w", "nop"};
     for (unsigned n = 0; n < sizeof(ops) / sizeof(*ops); n++)
       if (!strcmp(opcode, ops[n])) neutral = 1;
     if (!neutral && !immediate(instruction, "movw", &reg, &number) &&
@@ -418,7 +421,11 @@ static int overwritten_before_use(cg_context *c, const char *text, unsigned reg)
           operand && dst == reg &&
           (!strcmp(op, "movw") || !strcmp(op, "mov") || !strcmp(op, "mov.w") ||
            !strcmp(op, "movs.n") || !strcmp(op, "add.w") || !strcmp(op, "sub.w") ||
-           !strcmp(op, "ldr.n") || !strcmp(op, "ldr.w")) &&
+           !strcmp(op, "ldr.n") || !strcmp(op, "ldr.w") ||
+           !strcmp(op, "ldrb.n") || !strcmp(op, "ldrb.w") ||
+           !strcmp(op, "ldrh.n") || !strcmp(op, "ldrh.w") ||
+           !strcmp(op, "uxtb.n") || !strcmp(op, "uxtb.w") ||
+           !strcmp(op, "uxth.n") || !strcmp(op, "uxth.w")) &&
           !mentions(instruction + operand, reg))
         return 1;
       if (mentions(instruction, reg) || sscanf(instruction, "%23s", op) != 1)
@@ -433,19 +440,118 @@ static int overwritten_before_use(cg_context *c, const char *text, unsigned reg)
   }
   return 0;
 }
-static unsigned scalar_transfer(const char *op, int *narrow) {
-  if (strncmp(op, "ldr", 3) && strncmp(op, "str", 3))
+typedef struct {
+  char op[24];
+  unsigned reg, base, bytes, shift;
+  int offset, index, narrow, sign;
+} scalar_transfer;
+
+static int parse_transfer(const char *p, const char *end, scalar_transfer *m) {
+  int at = 0, used = 0;
+  char base[8];
+  *m = (scalar_transfer){.index = -1};
+  if (sscanf(p, "%23s r%u, [%7[a-z0-9]%n", m->op, &m->reg, base, &at) != 3 ||
+      !at || p + at >= end || m->reg > 12 ||
+      (strncmp(m->op, "ldr", 3) && strncmp(m->op, "str", 3)))
     return 0;
-  const char *suffix = op + 3;
-  int sign = *suffix == 's' && !strncmp(op, "ldr", 3);
-  if (sign)
+  const char *suffix = m->op + 3;
+  m->sign = *suffix == 's' && m->op[0] == 'l';
+  if (m->sign)
     suffix++;
-  unsigned bytes = 4;
+  m->bytes = 4;
   if (*suffix == 'b' || *suffix == 'h')
-    bytes = *suffix++ == 'b' ? 1 : 2;
-  *narrow = !strcmp(suffix, ".n");
-  return *narrow || !strcmp(suffix, ".w") ? bytes : 0;
+    m->bytes = *suffix++ == 'b' ? 1 : 2;
+  m->narrow = !strcmp(suffix, ".n");
+  if (!(m->narrow || !strcmp(suffix, ".w")) || (m->sign && m->bytes == 4))
+    return 0;
+  if (!strcmp(base, "sp"))
+    m->base = 13;
+  else if (sscanf(base, "r%u%n", &m->base, &used) != 1 ||
+           !used || base[used] || m->base > 12)
+    return 0;
+  p += at;
+  if (p + 1 == end && *p == ']')
+    return 1;
+  used = 0;
+  if (sscanf(p, ", #%d]%n", &m->offset, &used) == 1 && used && p + used == end)
+    return m->offset >= 0 && m->offset <= 4095;
+  unsigned index;
+  used = 0;
+  if ((sscanf(p, ", r%u, lsl #%u]%n", &index, &m->shift, &used) != 2 ||
+       !used || p + used != end) &&
+      (sscanf(p, ", r%u]%n", &index, &used) != 1 || !used || p + used != end))
+    return 0;
+  if (index > 12 || m->shift > 3)
+    return 0;
+  m->index = (int)index;
+  return 1;
 }
+
+static int narrow_transfer(const scalar_transfer *m) {
+  if (m->reg >= 8)
+    return 0;
+  if (m->index >= 0)
+    return m->base < 8 && m->index < 8 && !m->shift;
+  return !m->sign && m->offset >= 0 && !(m->offset % (int)m->bytes) &&
+      (m->base < 8 ? m->offset < (int)m->bytes * 32 :
+       m->base == 13 && m->bytes == 4 && m->offset <= 1020);
+}
+
+static void emit_transfer(cg_context *c, const scalar_transfer *m, int narrow) {
+  const char *dot = strchr(m->op, '.');
+  cg_emit(c, "%.*s.%c r%u, [", (int)(dot - m->op), m->op,
+          narrow ? 'n' : 'w', m->reg);
+  if (m->base == 13)
+    cg_emit(c, "sp");
+  else
+    cg_emit(c, "r%u", m->base);
+  if (m->index >= 0) {
+    cg_emit(c, ", r%d", m->index);
+    if (m->shift)
+      cg_emit(c, ", lsl #%u", m->shift);
+  } else if (m->offset)
+    cg_emit(c, ", #%d", m->offset);
+  cg_emit(c, "]\n");
+}
+
+static int parse_move(const char *p, const char *end, unsigned *dst,
+                      unsigned *src) {
+  int used = 0;
+  return sscanf(p, "mov r%u, r%u%n", dst, src, &used) == 2 &&
+         p + used == end && *dst <= 12 && *src <= 12 && *dst != *src;
+}
+
+static const char *fold_transfer_move(cg_context *c, const char *p,
+                                       const char *end) {
+  const char *next = end + 1, *finish = strchr(next, '\n');
+  if (!finish)
+    return NULL;
+  scalar_transfer m;
+  unsigned dst, src, reg;
+  int replaced = 0;
+  if (parse_move(p, end, &dst, &src) && parse_transfer(next, finish, &m)) {
+    reg = dst;
+    if (m.op[0] == 's' && m.reg == dst && m.base != dst && m.index != (int)dst)
+      m.reg = src;
+    else if (m.base == dst && m.index != (int)dst && (m.op[0] == 'l' || m.reg != dst)) {
+      m.base = src;
+      replaced = m.op[0] == 'l' && m.reg == dst;
+    } else
+      return NULL;
+  } else if (parse_transfer(p, end, &m) && m.op[0] == 'l' &&
+             parse_move(next, finish, &dst, &src) && m.reg == src) {
+    reg = src;
+    m.reg = dst;
+  } else
+    return NULL;
+  if (!replaced && !overwritten_before_use(c, finish + 1, reg))
+    return NULL;
+  int narrow = narrow_transfer(&m);
+  emit_transfer(c, &m, narrow);
+  cg_emit(c, "@ memory-move-fold: saved %u\n", (m.narrow ? 4u : 6u) - (narrow ? 2u : 4u));
+  return finish + 1;
+}
+
 void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
@@ -463,6 +569,11 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
     else if (!strncmp(p, "@ constant-assembly-lines:", 26))
       sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
     else {
+      const char *after = fold_transfer_move(c, p, end);
+      if (after) {
+        p = after;
+        continue;
+      }
       indexed = (sscanf(p, "add.w r%u, r%u, r%u, lsl #%u%n",
                         &dst, &base, &index, &shift, &consumed) == 4 &&
                  p + consumed == end) ||
@@ -482,29 +593,22 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
       for (unsigned n = 0; n < 16 && *memory; n++) {
         const char *finish = strchr(memory, '\n');
         if (!finish || finish - memory >= 256) break;
-        char instruction[256], op[24];
+        char instruction[256];
         memcpy(instruction, memory, (size_t)(finish - memory));
         instruction[finish - memory] = 0;
-        unsigned value, address;
-        int used = 0, narrow;
-        unsigned bytes;
-        if (sscanf(instruction, "%23s r%u, [r%u]%n", op, &value, &address, &used) == 3 &&
-            used && !instruction[used] && address == dst && value <= 12 &&
-            (bytes = scalar_transfer(op, &narrow)) &&
-            (dst != base || !strncmp(op, "ldrs", 4)) &&
-            (value == dst ? op[0] == 'l' : overwritten_before_use(c, finish + 1, dst))) {
-          int signed_load = !strncmp(op, "ldrs", 4);
-          int short_form = !signed_load && base < 8 && value < 8 &&
-              (indexed ? index < 8 && !shift : offset < bytes * 32 && offset % bytes == 0);
-          int mnemonic = (int)(strchr(op, '.') - op);
+        scalar_transfer m;
+        if (parse_transfer(instruction, instruction + (finish - memory), &m) &&
+            m.base == dst && m.index < 0 && !m.offset &&
+            (m.reg == dst ? m.op[0] == 'l' : overwritten_before_use(c, finish + 1, dst))) {
+          m.base = base;
+          m.index = indexed ? (int)index : -1;
+          m.shift = shift;
+          m.offset = (int)offset;
+          int short_form = !m.sign && narrow_transfer(&m);
           cg_emit(c, "%.*s", (int)(memory - end - 1), end + 1);
-          cg_emit(c, "%.*s.%c r%u, [r%u", mnemonic, op, short_form ? 'n' : 'w', value, base);
-          if (indexed)
-            cg_emit(c, ", r%u", index);
-          if (indexed ? shift : offset)
-            cg_emit(c, indexed ? ", lsl #%u" : ", #%u", indexed ? shift : offset);
-          cg_emit(c, "]\n@ memory-address-fold: saved %u\n",
-                  4u + (narrow ? 2u : 4u) - (short_form ? 2u : 4u));
+          emit_transfer(c, &m, short_form);
+          cg_emit(c, "@ memory-address-fold: saved %u\n",
+                  4u + (m.narrow ? 2u : 4u) - (short_form ? 2u : 4u));
           p = finish + 1;
           break;
         }

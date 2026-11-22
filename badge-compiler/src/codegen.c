@@ -1490,6 +1490,22 @@ static void cg_call(cg_context *c, cg_inst *i) {
       c->pos = after;
       return;
     }
+    if (!strcmp(callee, "@llvm.ctlz.i64")) {
+      if (count != 2 || !i->result || i->result->type->bits != 64 ||
+          args[0].type->bits != 64 || args[1].type->bits != 1)
+        cg_error(c, "invalid i64 count-leading-zeros intrinsic");
+      c->pos = args[0].start;
+      cg_value_read(c, args[0].type, 0, 0);
+      c->pos = args[0].start;
+      cg_value_read(c, args[0].type, 1, 1);
+      cg_emit(c, "clz r0, r0\nadd.w r0, r0, #32\n"
+                 "cmp.n r1, #0\nit ne\nclzne r0, r1\n");
+      cg_save(c, i->result, 0, 0);
+      cg_immediate(c, 1, 0);
+      cg_save(c, i->result, 1, 1);
+      c->pos = after;
+      return;
+    }
     if (count != 2 || !i->result)
       cg_error(c, "unsupported LLVM intrinsic");
     if (args[0].type->size > 4)
@@ -1842,6 +1858,120 @@ cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
   return exit;
 #undef FILL_TOKEN
 #undef FILL_MATCH
+}
+
+static void cg_wide_read(cg_context *c, cg_type *t, unsigned at) {
+  c->pos = at;
+  cg_value_read(c, t, 0, 0);
+  c->pos = at;
+  cg_value_read(c, t, 1, 1);
+}
+static void cg_wide_save(cg_context *c, cg_inst *i) {
+  cg_save(c, i->result, 0, 0);
+  cg_save(c, i->result, 1, 1);
+}
+static int cg_wide_variable_lsl(cg_context *c, cg_inst *i, cg_type *t,
+                                unsigned left) {
+  unsigned right = left + 2;
+  if (t->bits != 64 || i->end - left != 3 ||
+      strcmp(c->tokens[left + 1].text, ",") || c->tokens[right].text[0] != '%')
+    return 0;
+  unsigned id = ++c->unique;
+  cg_wide_read(c, t, left);
+  c->pos = right;
+  cg_value_read(c, t, 2, 0);
+  cg_emit(c, "cmp.n r2, #32\nbhs.n .Lcg_wshift_hi%u\n"
+             "rsb.w r3, r2, #32\nlsl.w r1, r1, r2\n"
+             "lsr.w r3, r0, r3\norr.w r1, r1, r3\n"
+             "lsl.w r0, r0, r2\nb.n .Lcg_wshift_end%u\n"
+             ".Lcg_wshift_hi%u:\nsub.w r2, r2, #32\n"
+             "lsl.w r1, r0, r2\nmovw r0, #0\n"
+             ".Lcg_wshift_end%u:\n", id, id, id, id);
+  cg_wide_save(c, i);
+  return 1;
+}
+static int cg_number_token(const char *s) {
+  if (*s == '-')
+    s++;
+  return isdigit((unsigned char)*s);
+}
+static int cg_wide_literals(cg_context *c, cg_inst *i, const char *op,
+                            cg_type *t, unsigned left) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      t->bits != 64 || i->end - left != 3 ||
+      strcmp(c->tokens[left + 1].text, ","))
+    return 0;
+  unsigned right = left + 2;
+  const char *lhs = c->tokens[left].text, *rhs = c->tokens[right].text;
+  int literal = cg_number_token(rhs);
+  uint64_t n = literal ? cg_number(c, rhs) : 0;
+  int shl = !strcmp(op, "shl"), ashr = !strcmp(op, "ashr");
+  if (literal && n < 64 && (shl || ashr || !strcmp(op, "lshr"))) {
+    unsigned shift = (unsigned)n;
+    const char *down = ashr ? "asr" : "lsr";
+    if (shift >= 32) {
+      c->pos = left;
+      cg_value_read(c, t, shl ? 1 : 0, shl ? 0 : 1);
+      if (shift != 32)
+        cg_emit(c, "%s.w r%u, r%u, #%u\n", shl ? "lsl" : down,
+                shl ? 1 : 0, shl ? 1 : 0, shift - 32);
+      if (ashr)
+        cg_emit(c, "asr.w r1, r0, #31\n");
+      else
+        cg_immediate(c, shl ? 0 : 1, 0);
+    } else {
+      cg_wide_read(c, t, left);
+      if (shift && shl)
+        cg_emit(c, "lsl.w r1, r1, #%u\n"
+                   "orr.w r1, r1, r0, lsr #%u\nlsl.w r0, r0, #%u\n",
+                shift, 32 - shift, shift);
+      else if (shift)
+        cg_emit(c, "lsr.w r0, r0, #%u\n"
+                   "orr.w r0, r0, r1, lsl #%u\n%s.w r1, r1, #%u\n",
+                shift, 32 - shift, down, shift);
+    }
+  } else if (literal && !strcmp(op, "sdiv") && badge_direct_i64_sdiv(n)) {
+    cg_wide_read(c, t, left);
+    unsigned shift = (unsigned)__builtin_ctzll(n);
+    /* Bias negative dividends before shifting to round toward zero. */
+    if (shift)
+      cg_emit(c, "asr.w r4, r1, #31\nlsr.w r4, r4, #%u\n"
+                 "adds.w r0, r0, r4\nadc r1, r1, #0\n"
+                 "lsr.w r0, r0, #%u\norr.w r0, r0, r1, lsl #%u\n"
+                 "asr.w r1, r1, #%u\n", 32 - shift, shift, 32 - shift, shift);
+  } else if (!strcmp(op, "sub") && cg_number_token(lhs) && !cg_number(c, lhs)) {
+    cg_wide_read(c, t, right);
+    cg_emit(c, "rsbs.n r0, r0, #0\nmvn.w r1, r1\nadc r1, r1, #0\n");
+  } else if (!strcmp(op, "and") || !strcmp(op, "or") || !strcmp(op, "xor")) {
+    if (!literal) {
+      if (!cg_number_token(lhs))
+        return 0;
+      n = cg_number(c, lhs);
+      left = right;
+    }
+    int and = !strcmp(op, "and");
+    const char *mnemonic = and ? "and" : !strcmp(op, "or") ? "orr" : "eor";
+    for (unsigned w = 0; w < 2; w++) {
+      uint32_t bits = (uint32_t)(n >> (w * 32));
+      if (and && !bits) {
+        cg_immediate(c, w, 0);
+        continue;
+      }
+      c->pos = left;
+      cg_value_read(c, t, w, w);
+      if (bits == (and ? UINT32_MAX : 0))
+        continue;
+      if (thumb_modified(bits) >= 0)
+        cg_emit(c, "%s.w r%u, r%u, #%" PRIu32 "\n", mnemonic, w, w, bits);
+      else {
+        cg_immediate(c, 2, bits);
+        cg_emit(c, "%s.w r%u, r%u, r2\n", mnemonic, w, w);
+      }
+    }
+  } else
+    return 0;
+  cg_wide_save(c, i);
+  return 1;
 }
 
 void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
@@ -2242,15 +2372,53 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_to_type(c);
     cg_type *from = cg_type_parse(c, 0);
     unsigned at = c->pos;
+    unsigned to_bits = i->result->type->bits;
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+        c->tokens[at].text[0] == '%' && cg_global_residency(c)) {
+      unsigned src = cg_global_register(c, c->tokens[at].text);
+      unsigned dst = cg_global_register(c, i->result->name);
+      if (!strcmp(op, "trunc") && (to_bits == 8 || to_bits == 16) &&
+          (src || dst)) {
+        unsigned input = src ? src : dst;
+        if (!src)
+          cg_value_read(c, from, input, 0);
+        cg_emit(c, "uxt%c.%c r%u, r%u\n", to_bits == 8 ? 'b' : 'h',
+                dst < 8 && input < 8 ? 'n' : 'w', dst, input);
+        cg_save_normalized(c, i->result, dst);
+        return;
+      }
+      if (!strcmp(op, "trunc") && from->bits == 64 && to_bits == 32 && dst) {
+        cg_value_read(c, from, dst, 0);
+        cg_save_normalized(c, i->result, dst);
+        return;
+      }
+      if (!strcmp(op, "zext") && from->bits && from->bits < to_bits &&
+          to_bits <= 32 && (src || dst)) {
+        if (!src)
+          cg_value_read(c, from, dst, 0);
+        cg_save_normalized(c, i->result, src ? src : dst);
+        return;
+      }
+      if (!strcmp(op, "zext") && to_bits == 64 && from->bits <= 32 && src) {
+        cg_save_normalized(c, i->result, src);
+        cg_immediate(c, 1, 0);
+        cg_save(c, i->result, 1, 1);
+        return;
+      }
+    }
     if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
         !strcmp(op, "sext") && (from->bits == 8 || from->bits == 16) &&
-        i->result->type->bits == 32) {
+        (to_bits == 32 || to_bits == 64)) {
       unsigned src = cg_global_register(c, c->tokens[at].text);
       if (src) {
         unsigned dst = cg_global_register(c, i->result->name);
         cg_emit(c, "sxt%s.%s r%u, r%u\n", from->bits == 8 ? "b" : "h",
                 src < 8 && dst < 8 ? "n" : "w", dst, src);
         cg_save_normalized(c, i->result, dst);
+        if (to_bits == 64) {
+          cg_emit(c, "asr.w r1, r%u, #31\n", dst);
+          cg_save(c, i->result, 1, 1);
+        }
         return;
       }
     }
@@ -2308,6 +2476,16 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     }
     (void)cg_type_parse(c, 0);
     unsigned no = c->pos;
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && t->bits == 64) {
+      cg_wide_read(c, t, yes);
+      c->pos = no;
+      cg_value_read(c, t, 2, 0);
+      c->pos = no;
+      cg_value_read(c, t, 3, 1);
+      cg_emit(c, "cmp.n r4, #0\nitt eq\nmoveq r0, r2\nmoveq r1, r3\n");
+      cg_wide_save(c, i);
+      return;
+    }
     for (unsigned w = 0; w < cg_round(t->size, 4) / 4; w++) {
       c->pos = yes;
       cg_value_read(c, t, 0, w);
@@ -2323,6 +2501,15 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     char *pred = cg_take(c);
     cg_type *t = cg_type_parse(c, 0);
     const char *condition = cg_comparison_condition(pred);
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && t->bits == 64 &&
+        !strcmp(pred, "slt") && i->end - c->pos == 3 &&
+        !strcmp(c->tokens[c->pos + 1].text, ",") &&
+        !strcmp(c->tokens[c->pos + 2].text, "0")) {
+      cg_value_read(c, t, 0, 1);
+      cg_emit(c, "lsr.w r0, r0, #31\n");
+      cg_save_normalized(c, i->result, 0);
+      return;
+    }
     if (condition && cg_selection_compare_operands(c, i, t)) {
       unsigned dst = cg_global_register(c, i->result->name);
       cg_emit(c, "mov.w r%u, #0\nit %s\nmov%s r%u, #1\n",
@@ -2340,7 +2527,13 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       cg_value_read(c, t, 2, 1);
       c->pos = right;
       cg_value_read(c, t, 3, 1);
-      if (!strcmp(pred, "eq") || !strcmp(pred, "ne")) {
+      if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && condition &&
+          (pred[0] == 'u' || !strcmp(pred, "eq") || !strcmp(pred, "ne"))) {
+        cg_emit(c,
+                "cmp.n r2, r3\nit eq\ncmpeq.n r0, r1\n"
+                "mov.w r0, #0\nit %s\nmov%s r0, #1\n",
+                condition, condition);
+      } else if (!strcmp(pred, "eq") || !strcmp(pred, "ne")) {
         cg_emit(c,
                 "eor.w r0, r0, r1\neor.w r2, r2, r3\norr.w r0, r0, r2\ncmp r0, "
                 "#0\nmov.w r0, #0\nit %s\nmov%s r0, #1\n",
@@ -2381,6 +2574,10 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
   cg_to_type(c);
   cg_type *t = cg_type_parse(c, 0);
   unsigned left = c->pos;
+  if (!strcmp(op, "shl") && cg_wide_variable_lsl(c, i, t, left))
+    return;
+  if (cg_wide_literals(c, i, op, t, left))
+    return;
   cg_value_read(c, t, 0, 0);
   cg_expect(c, ",");
   unsigned right = c->pos;
@@ -2398,7 +2595,11 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     if (t->size == 8)
       cg_emit(c, "%s.w r1, r1, r3\n", !strcmp(op, "add") ? "adc" : "sbc");
   } else if (!strcmp(op, "mul")) {
-    if (t->size == 8)
+    /* Finish the cross products before UMULL overwrites the low input. */
+    if (t->size == 8 && c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS)
+      cg_emit(c, "mul r3, r0, r3\nmla r3, r1, r2, r3\n"
+                 "umull r0, r1, r0, r2\nadd.n r1, r3\n");
+    else if (t->size == 8)
       cg_emit(c, "mul r1, r1, r2\nmla r1, r0, r3, r1\numull r4, r5, r0, "
                  "r2\nadd.w r1, r1, r5\nmov r0, r4\n");
     else if (!cg_compact_binary(c, op, 0, 0, 2))

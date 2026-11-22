@@ -204,8 +204,8 @@ static function_cost *find_cost(module_cost *cost, const char *name) {
       return &cost->functions[k];
   return NULL;
 }
-static int admit(cross *p, module_cost *before, module_cost *after, unsigned f,
-                 const char *clone) {
+static int fits_allocation(cross *p, module_cost *before, module_cost *after,
+                           unsigned f, const char *clone) {
   function_cost *generic =
       find_cost(before, assembly_name(p, p->a.functions[f].name));
   if (!generic)
@@ -225,6 +225,12 @@ static int admit(cross *p, module_cost *before, module_cost *after, unsigned f,
       return 0;
     }
   }
+  return 1;
+}
+static int admit(cross *p, module_cost *before, module_cost *after, unsigned f,
+                 const char *clone) {
+  if (!fits_allocation(p, before, after, f, clone))
+    return 0;
   if (after->bytes >= before->bytes) {
     ir_note(p->c, "skipped", "whole_module_not_smaller", 1);
     return 0;
@@ -740,9 +746,52 @@ static const ir_block *inline_body(cross *p, unsigned f, int entry_jump) {
   return block;
 }
 
+static int tiny_integer_leaf(cross *p, const ir_function *fn,
+                             const ir_block *block) {
+  if (fn->parameter_count != 1 ||
+      p->a.types[p->a.parameters[fn->first_parameter]].bits != 32 ||
+      p->a.types[fn->return_type].kind != IR_INT ||
+      p->a.types[fn->return_type].bits != 32 ||
+      block->instruction_count > 5)
+    return 0;
+  for (unsigned k = 0; k + 1 < block->instruction_count; k++) {
+    const ir_instruction *in = &p->a.instructions[block->first_instruction + k];
+    if (in->opcode != IR_OP_BINARY || in->effects ||
+        p->a.types[in->type].bits != 32)
+      return 0;
+  }
+  return 1;
+}
+
+static int leaf_read(cross *p, const ir_function *fn, const ir_block *block) {
+  if (fn->parameter_count ||
+      (block->instruction_count != 2 && block->instruction_count != 3) ||
+      p->a.types[fn->return_type].kind != IR_INT ||
+      p->a.types[fn->return_type].bits != 32)
+    return 0;
+  const ir_instruction *load =
+      &p->a.instructions[block->first_instruction + block->instruction_count - 2];
+  const ir_instruction *ret = load + 1;
+  if (load->opcode != IR_OP_LOAD || load->operand_count != 1 ||
+      ret->operand_count != 1)
+    return 0;
+  if (block->instruction_count == 3) {
+    const ir_instruction *address = load - 1;
+    const ir_operand *ptr = &p->a.operands[load->first_operand];
+    if (address->opcode != IR_OP_CAST || strcmp(address->operation, "inttoptr") ||
+        address->operand_count != 1 ||
+        p->a.operands[address->first_operand].kind != IR_OPERAND_LITERAL ||
+        ptr->kind != IR_OPERAND_LOCAL || ptr->definition != address->definition)
+      return 0;
+  }
+  const ir_operand *value = &p->a.operands[ret->first_operand];
+  return value->kind == IR_OPERAND_LOCAL && value->definition == load->definition;
+}
+
 static int inline_calls(cross *p, unsigned f, const unsigned *calls,
                         unsigned count, module_cost *baseline, char **best,
-                        uint32_t *best_bytes, int *forwarding, cross_policy policy) {
+                        uint32_t *best_bytes, int *forwarding,
+                        cross_policy policy, int tiny_budget) {
   const ir_function *fn = &p->a.functions[f];
   const ir_block *block = inline_body(p, f, policy != CROSS_SIZE);
   if (!block)
@@ -834,7 +883,20 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
           forward ? "tail_forwarder_inline_with_helper_removed"
                   : "straight_line_inline_with_helper_removed",
           1);
-  int accepted = admit(p, baseline, &cost, f, NULL) && cost.bytes < *best_bytes;
+  int fits = fits_allocation(p, baseline, &cost, f, NULL);
+  /* Prefer removing every call to a leaf read at equal size; a tiny pure
+     integer leaf may spend one Thumb halfword. Neither displaces a size win. */
+  int equal_size_read = cost.bytes == baseline->bytes && leaf_read(p, fn, block);
+  int tiny = policy == CROSS_COMPACT && tiny_budget && count >= 2 && !*best &&
+      cost.bytes >= baseline->bytes &&
+      (equal_size_read ||
+       (cost.bytes - baseline->bytes <= 2 && tiny_integer_leaf(p, fn, block)));
+  int accepted = fits && (cost.bytes < *best_bytes || tiny);
+  if (accepted && tiny)
+    ir_note(p->c, "transformed", equal_size_read ? "leaf_read_calls_removed" :
+                                                  "tiny_integer_leaf_calls_removed", count);
+  else if (fits && !accepted && cost.bytes >= baseline->bytes)
+    ir_note(p->c, "skipped", "whole_module_not_smaller", 1);
   if (accepted) {
     *best = candidate;
     *best_bytes = cost.bytes;
@@ -909,6 +971,7 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
   ir_map attempted = {0};
   ir_map_init(c, &attempted, CROSS_ATTEMPTS * 2);
   unsigned changes = 0, attempts = 0;
+  int tiny_budget = 1;
   while (attempts < CROSS_ATTEMPTS) {
     ir_allocation *mark = c->allocations;
     ir_map original_names = m->names;
@@ -963,13 +1026,15 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
       kind = "literal_result_calls_folded";
     int forwarding = 0;
     if (inline_calls(&p, chosen, calls, count, &before, &best, &best_bytes,
-                     &forwarding, policy)) {
+                     &forwarding, policy, tiny_budget)) {
       kind = compact_inline ? "compact_helper_inlined" :
           hot_inline ? "profiled_helper_inlined" :
           forwarding ? "tail_forwarder_inlined" : "straight_line_inlined";
       clone = NULL;
     }
     if (best) {
+      if (best_bytes >= before.bytes)
+        tiny_budget = 0;
       for (unsigned l = 0; l < m->line_count; l++)
         m->lines[l].replacement = "";
       m->lines[0].replacement = best;
@@ -978,8 +1043,9 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
                             clone ? assembly_name(&p, clone) : "-",
                             before.bytes, best_bytes);
       ir_note(c, "transformed", kind, 1);
-      ir_note(c, "transformed", "whole_module_code_bytes_saved",
-              before.bytes - best_bytes);
+      if (best_bytes < before.bytes)
+        ir_note(c, "transformed", "whole_module_code_bytes_saved",
+                before.bytes - best_bytes);
       ir_reparse(c, m, mark);
       changes++;
     } else {

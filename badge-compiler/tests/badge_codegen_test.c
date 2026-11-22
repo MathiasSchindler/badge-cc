@@ -984,6 +984,9 @@ int main(int argc, char **argv) {
       {TARGET FN("%a = sext i32 %x to i64\n%b = shl i64 %a, 1\n%c = trunc i64 "
                  "%b to i32\nret i32 %c"),
        "lsl.w r1"},
+      {TARGET FN("%s = zext i32 %x to i64\n%a = shl i64 1, %s\n"
+                 "%b = trunc i64 %a to i32\nret i32 %b"),
+       "lsl.w r1, r1, r2"},
       {TARGET FN("%a = sext i32 %x to i64\n%b = lshr i64 %a, 63\n%c = trunc "
                  "i64 %b to i32\nret i32 %c"),
        "lsr.w r0, r1, #31"},
@@ -1021,7 +1024,6 @@ int main(int argc, char **argv) {
       "",
       "target triple = \"x86_64-unknown-linux-gnu\"\n",
       TARGET "module asm \"nop\"\n",
-      TARGET FN("%s = zext i32 %x to i64\n%a = shl i64 1, %s\nret i32 0"),
       TARGET FN("%a = udiv i64 4, 2\nret i32 0"),
       TARGET FN("%a = sdiv i64 4, 3\nret i32 0"),
       TARGET FN("%a = fadd float 1.0, 2.0\nret i32 0"),
