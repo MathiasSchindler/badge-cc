@@ -551,10 +551,16 @@ void cg_generate_function(cg_context *c, cg_function *f) {
         cg_stack(c, 1, 5, v->slot);
     }
   }
-  for (cg_block *b = f->blocks; b; b = b->next) {
+  for (cg_block *b = f->blocks, *pre = NULL; b;) {
     c->schedule_active = 0;
     cg_register_block(c, b);
     cg_emit(c, ".Lcg_%u_%s:\n", f->id, b->name);
+    cg_block *exit = cg_fixed_fill(c, pre, b);
+    if (exit) {
+      pre = NULL;
+      b = exit;
+      continue;
+    }
     c->schedule_active = cg_schedule_selection(c);
     for (cg_inst *i = b->first; i; i = i->next) {
 #ifdef CG_ATTRIBUTION_TRACE
@@ -565,6 +571,8 @@ void cg_generate_function(cg_context *c, cg_function *f) {
     }
     cg_schedule_flush(c);
     c->schedule_active = 0;
+    pre = b;
+    b = b->next;
   }
   cg_register_finish(c);
   cg_selection_finish(c);

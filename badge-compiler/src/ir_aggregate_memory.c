@@ -2,6 +2,8 @@
 #include <inttypes.h>
 #include <string.h>
 
+void ir_mem2reg(ir_context *, ir_module *);
+
 static unsigned result_buffer_align(ir_module *m, unsigned start,
                                     unsigned end) {
   for (unsigned k = start; k + 1 < end; k++) {
@@ -28,6 +30,165 @@ static unsigned byte_buffer(const ir_analysis *a, const ir_definition *def) {
                  a->types[type->element].bits == 8
              ? type->count
              : 0;
+}
+
+typedef struct {
+  const ir_operand *pointer;
+  unsigned lane, words;
+} record_use;
+
+static unsigned i32_words(const ir_analysis *a, unsigned type) {
+  const ir_type *t = &a->types[type];
+  if (t->kind == IR_INT && t->bits == 32)
+    return 1;
+  return t->kind == IR_ARRAY && t->count >= 2 && t->count <= 4 &&
+                 a->types[t->element].kind == IR_INT &&
+                 a->types[t->element].bits == 32
+             ? t->count : 0;
+}
+
+static int record_access(ir_analysis *a, unsigned use, unsigned lane,
+                         unsigned lanes, record_use *out) {
+  const ir_operand *p = &a->operands[use];
+  const ir_instruction *in = &a->instructions[p->instruction];
+  const ir_line *line = &a->text->lines[in->line - 1];
+  if (in->line != in->end_line || line->replacement)
+    return 0;
+  unsigned words = 0;
+  if (in->opcode == IR_OP_CALL && !lane && in->callee != IR_NONE &&
+      in->operand_count == 5 && use == in->first_operand + 1 &&
+      !strcmp(ir_text(a->text, a->operands[in->callee].token),
+              "@llvm.memset.inline.p0.i32")) {
+    uint64_t n;
+    if (strcmp(ir_text(a->text, (p + 1)->token), "0") ||
+        strcmp(ir_text(a->text, (p + 3)->token), "false") ||
+        !ir_integer(ir_text(a->text, (p + 2)->token), &n) || n != 4 * lanes)
+      return 0;
+    words = lanes;
+  } else {
+    int store = in->opcode == IR_OP_STORE;
+    if ((!store && in->opcode != IR_OP_LOAD) ||
+        in->effects != ((store ? IR_EFFECT_WRITE : IR_EFFECT_READ) | IR_EFFECT_TRAP) ||
+        use != in->first_operand + (unsigned)store ||
+        p->token + 4 != line->first + line->count ||
+        strcmp(ir_text(a->text, p->token + 1), ",") ||
+        strcmp(ir_text(a->text, p->token + 2), "align") ||
+        strcmp(ir_text(a->text, p->token + 3), "4"))
+      return 0;
+    words = i32_words(a, store ? (p - 1)->type : in->type);
+    if (!words || words > lanes - lane)
+      return 0;
+    if (store && words > 1) {
+      const char *v = ir_text(a->text, (p - 1)->token);
+      if (*v != '%' && strcmp(v, "zeroinitializer") && strcmp(v, "poison") &&
+          strcmp(v, "undef"))
+        return 0;
+    }
+  }
+  *out = (record_use){p, lane, words};
+  return 1;
+}
+
+void ir_small_aggregate(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  ir_analysis a;
+  ir_analyze(c, m, &a);
+  unsigned changed = 0;
+  for (unsigned i = 0; i < a.instruction_count; i++) {
+    const ir_instruction *allocation = &a.instructions[i];
+    if (allocation->opcode != IR_OP_ALLOCA)
+      continue;
+    const ir_definition *slot = &a.definitions[allocation->definition];
+    unsigned size = byte_buffer(&a, slot);
+    ir_line *decl = &m->lines[allocation->line - 1];
+    if (size < 8 || size > 16 || size % 4 ||
+        allocation->block != a.functions[a.blocks[allocation->block].function].first_block ||
+        result_buffer_align(m, decl->op, decl->first + decl->count) < 4)
+      continue;
+    unsigned lanes = size / 4, use_count = 0, gep_count = 0;
+    record_use uses[128];
+    unsigned geps[64];
+    int valid = 1;
+    for (unsigned u = slot->first_use; u != IR_NONE && valid;
+         u = a.operands[u].next_use) {
+      const ir_instruction *in = &a.instructions[a.operands[u].instruction];
+      if (in->opcode != IR_OP_GEP) {
+        if (use_count == 128 || !record_access(&a, u, 0, lanes, &uses[use_count]))
+          valid = 0;
+        else
+          use_count++;
+        continue;
+      }
+      const ir_line *line = &m->lines[in->line - 1];
+      uint64_t offset;
+      if (gep_count == 64 || in->end_line != in->line || line->replacement ||
+          line->first + line->count != line->op + 8 ||
+          strcmp(ir_text(m, line->op + 1), "i8") || in->operand_count != 2 ||
+          u != in->first_operand ||
+          !ir_integer(ir_text(m, a.operands[u + 1].token), &offset) ||
+          offset >= size || offset % 4) {
+        valid = 0;
+        break;
+      }
+      geps[gep_count++] = in->line;
+      for (unsigned v = a.definitions[in->definition].first_use; v != IR_NONE;
+           v = a.operands[v].next_use) {
+        if (use_count == 128 || !record_access(&a, v, (unsigned)offset / 4,
+                                               lanes, &uses[use_count])) {
+          valid = 0;
+          break;
+        }
+        use_count++;
+      }
+    }
+    if (!valid || !use_count)
+      continue;
+    size_t start = c->size;
+    const char *fields[4];
+    for (unsigned k = 0; k < lanes; k++) {
+      fields[k] = ir_fresh(c, m, '%');
+      ir_emit(c, "  %s = alloca i32, align 4\n", fields[k]);
+    }
+    decl->replacement = ir_copy(c, c->output + start, c->size - start);
+    c->size = start;
+    for (unsigned g = 0; g < gep_count; g++)
+      m->lines[geps[g] - 1].replacement = "";
+    for (unsigned j = 0; j < use_count; j++) {
+      record_use u = uses[j];
+      const ir_instruction *in = &a.instructions[u.pointer->instruction];
+      if (in->opcode != IR_OP_CALL && u.words == 1) {
+        m->tokens[u.pointer->token].replacement = fields[u.lane];
+        continue;
+      }
+      const char *previous = "poison";
+      for (unsigned k = 0; k < u.words; k++) {
+        const char *address = fields[u.lane + k];
+        if (in->opcode == IR_OP_CALL)
+          ir_emit(c, "  store i32 0, ptr %s, align 4\n", address);
+        else if (in->opcode == IR_OP_STORE) {
+          const char *part = ir_fresh(c, m, '%');
+          ir_emit(c, "  %s = extractvalue [%u x i32] %s, %u\n"
+                     "  store i32 %s, ptr %s, align 4\n",
+                  part, u.words, ir_text(m, (u.pointer - 1)->token), k, part, address);
+        } else {
+          const char *part = ir_fresh(c, m, '%');
+          const char *next = k + 1 == u.words ? a.definitions[in->definition].name
+                                             : ir_fresh(c, m, '%');
+          ir_emit(c, "  %s = load i32, ptr %s, align 4\n"
+                     "  %s = insertvalue [%u x i32] %s, i32 %s, %u\n",
+                  part, address, next, u.words, previous, part, k);
+          previous = next;
+        }
+      }
+      m->lines[in->line - 1].replacement = ir_copy(c, c->output + start, c->size - start);
+      c->size = start;
+    }
+    changed++;
+    ir_note(c, "transformed", "private_word_record", 1);
+  }
+  ir_reparse(c, m, mark);
+  if (changed)
+    ir_mem2reg(c, m);
 }
 
 static int buffer_used_after_copy(const ir_analysis *a, unsigned definition,

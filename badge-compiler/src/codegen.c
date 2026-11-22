@@ -1093,6 +1093,72 @@ static unsigned cg_arguments(cg_context *c, cg_arg *args) {
   }
   return count;
 }
+static unsigned cg_argument_positions(cg_context *c, const cg_arg *args,
+                                      unsigned count, unsigned *positions) {
+  unsigned cursor = 0;
+  for (unsigned k = 0; k < count; k++) {
+    if (args[k].align >= 8)
+      cursor = cg_round(cursor, 2);
+    positions[k] = cursor;
+    cursor += cg_round(args[k].byval ? args[k].byval : args[k].type->size, 4) / 4;
+    if (cursor > 16388)
+      cg_error(c, "outgoing arguments exceed 64 KiB stack bound");
+  }
+  return cursor;
+}
+
+static cg_value *cg_record_load(cg_context *c, cg_inst *i) {
+  if (!i || !i->result || i->end - i->begin != 14)
+    return NULL;
+  cg_token *t = &c->tokens[i->begin];
+  const char *const shape[] = {"load", "[", "2", "x", "i32", "]", ",", "ptr",
+                               NULL, ",", "align", "4"};
+  for (unsigned k = 0; k < sizeof(shape) / sizeof(*shape); k++)
+    if (shape[k] && strcmp(t[k + 2].text, shape[k]))
+      return NULL;
+  if (*t[10].text != '%')
+    return NULL;
+  cg_value *source = cg_find(c, t[10].text);
+  return source->object_size >= 8 && source->object_align >= 4 ? source : NULL;
+}
+
+static int cg_forward_record_load(cg_context *c, cg_inst *i) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->frame_addressing != BADGE_FRAME_DIRECT || !cg_global_residency(c))
+    return 0;
+  cg_value *source = cg_record_load(c, i);
+  if (!source || cg_register_lookup(c, i->result->name)->selection_uses != 1)
+    return 0;
+  cg_inst *call = i->next;
+  for (unsigned n = 0; n < 4 && cg_record_load(c, call); n++)
+    call = call->next;
+  if (!call || strcmp(c->tokens[call->begin + (call->result ? 2 : 0)].text, "call"))
+    return 0;
+  for (unsigned k = call->begin; k + 1 < call->end; k++) {
+    const char *token = c->tokens[k].text;
+    if (*token != '@' || strcmp(c->tokens[k + 1].text, "("))
+      continue;
+    if (!strncmp(cg_name(c, token), "llvm.", 5))
+      return 0;
+    unsigned saved = c->pos;
+    c->pos = k + 1;
+    cg_arg args[256] = {0};
+    unsigned positions[256], count = cg_arguments(c, args);
+    c->pos = saved;
+    unsigned cursor = cg_argument_positions(c, args, count, positions);
+    if (c->frame_sp_relative && cursor > 4)
+      return 0;
+    for (unsigned a = 0; a < count; a++)
+      if (positions[a] <= 2 && !args[a].byval && !args[a].sign &&
+          args[a].type->size == 8 &&
+          !strcmp(c->tokens[args[a].start].text, i->result->name)) {
+        i->result->argument_record = source;
+        return 1;
+      }
+    return 0;
+  }
+  return 0;
+}
 static void cg_memory_offset(cg_value *proof, uint64_t offset) {
   if (offset > proof->memory_size) {
     proof->memory_align = proof->memory_size = 0;
@@ -1406,16 +1472,8 @@ static void cg_call(cg_context *c, cg_inst *i) {
     c->pos = after;
     return;
   }
-  unsigned cursor = 0, positions[256];
-  for (unsigned k = 0; k < count; k++) {
-    if (args[k].align >= 8)
-      cursor = cg_round(cursor, 2);
-    positions[k] = cursor;
-    cursor +=
-        cg_round(args[k].byval ? args[k].byval : args[k].type->size, 4) / 4;
-    if (cursor > 16388)
-      cg_error(c, "outgoing arguments exceed 64 KiB stack bound");
-  }
+  unsigned positions[256];
+  unsigned cursor = cg_argument_positions(c, args, count, positions);
   unsigned outgoing = cursor > 4 ? cg_round((cursor - 4) * 4, 8) : 0;
   if (outgoing) {
     cg_immediate(c, 12, outgoing);
@@ -1424,6 +1482,16 @@ static void cg_call(cg_context *c, cg_inst *i) {
   for (unsigned k = 0; k < count; k++) {
     unsigned words =
         cg_round(args[k].byval ? args[k].byval : args[k].type->size, 4) / 4;
+    const char *name = c->tokens[args[k].start].text;
+    if (!args[k].byval && words == 2 && positions[k] <= 2 && *name == '%') {
+      const cg_value *record = cg_find(c, name)->argument_record;
+      if (record) {
+        for (unsigned w = 0; w < words; w++)
+          cg_stack(c, 0, positions[k] + w, record->object + 4 * w);
+        cg_emit(c, "@ record-argument: words forwarded 2\n");
+        continue;
+      }
+    }
     for (unsigned w = 0; w < words; w++) {
       unsigned position = positions[k] + w, r = position < 4 ? position : 5;
       unsigned direct = cg_operand_selection(c) && cg_call_selection(c) &&
@@ -1608,6 +1676,113 @@ static void cg_conditional_edge(cg_context *c, cg_block *block, cg_inst *i,
   c->layout_inversions += invert;
 }
 
+static int cg_fill_tokens(cg_context *c, cg_inst *i, unsigned count,
+                          const char *const *pattern) {
+  if (!i || i->end - i->begin != count)
+    return 0;
+  for (unsigned k = 0; k < count; k++)
+    if (pattern[k] && strcmp(c->tokens[i->begin + k].text, pattern[k]))
+      return 0;
+  return 1;
+}
+static int cg_fill_label(const char *token, const char *name) {
+  if (*token++ != '%')
+    return 0;
+  size_t n = strlen(name);
+  return !strcmp(token, name) ||
+         (*token == '"' && strlen(token) == n + 2 &&
+          !strncmp(token + 1, name, n) && token[n + 1] == '"');
+}
+
+cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
+#define FILL_MATCH(i, ...) \
+  cg_fill_tokens(c, i, sizeof((const char *[]){__VA_ARGS__}) / sizeof(char *), \
+                 (const char *[]){__VA_ARGS__})
+#define FILL_TOKEN(i, k) (c->tokens[(i)->begin + (k)].text)
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      !cg_global_residency(c) || !pre || !head->next || !head->next->next ||
+      !head->next->next->next || !FILL_MATCH(pre->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(pre->last, 2), head->name))
+    return NULL;
+  cg_block *body = head->next, *latch = body->next, *exit = latch->next;
+  cg_inst *phi = head->first, *cmp = phi ? phi->next : NULL;
+  cg_inst *step = latch->first;
+  if (!FILL_MATCH(phi, NULL, "=", "phi", "i32", "[", "0", ",", NULL, "]",
+                  ",", "[", NULL, ",", NULL, "]") ||
+      !cg_fill_label(FILL_TOKEN(phi, 7), pre->name) ||
+      !cg_fill_label(FILL_TOKEN(phi, 13), latch->name) ||
+      !FILL_MATCH(cmp, NULL, "=", "icmp", "ult", "i32", FILL_TOKEN(phi, 0), ",", NULL) ||
+      cmp->next != head->last ||
+      !FILL_MATCH(head->last, "br", "i1", FILL_TOKEN(cmp, 0), ",", "label", NULL,
+                  ",", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(head->last, 5), body->name) ||
+      !cg_fill_label(FILL_TOKEN(head->last, 8), exit->name) ||
+      !FILL_MATCH(step, FILL_TOKEN(phi, 11), "=", "add", "i32", FILL_TOKEN(phi, 0), ",", "1") ||
+      step->next != latch->last || !FILL_MATCH(latch->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(latch->last, 2), head->name) ||
+      (exit->first && exit->first->result && !strcmp(FILL_TOKEN(exit->first, 2), "phi")))
+    return NULL;
+  cg_inst *scale = body->first, *gep = scale ? scale->next : NULL;
+  cg_inst *store = gep ? gep->next : NULL;
+  if (!FILL_MATCH(scale, NULL, "=", "mul", "i32", FILL_TOKEN(phi, 0), ",", "2") ||
+      !FILL_MATCH(gep, NULL, "=", "getelementptr", "i8", ",", "ptr", NULL, ",", "i32",
+                  FILL_TOKEN(scale, 0)) || *FILL_TOKEN(gep, 6) != '@' ||
+      !FILL_MATCH(store, "store", "i16", NULL, ",", "ptr", FILL_TOKEN(gep, 0), ",",
+                  "align", "2") ||
+      store->next != body->last || !FILL_MATCH(body->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(body->last, 2), latch->name))
+    return NULL;
+  const char *lit = FILL_TOKEN(cmp, 7);
+  if (!isdigit((unsigned char)*lit))
+    return NULL;
+  uint64_t trips = cg_number(c, lit);
+  if (trips < 4 || trips > INT32_MAX / 2)
+    return NULL;
+  const char *color = FILL_TOKEN(store, 2);
+  const char *removed[] = {FILL_TOKEN(phi, 0), FILL_TOKEN(cmp, 0), FILL_TOKEN(scale, 0),
+                           FILL_TOKEN(gep, 0), FILL_TOKEN(step, 0)};
+  for (unsigned k = 0; k < sizeof(removed) / sizeof(*removed); k++)
+    if (!strcmp(color, removed[k]))
+      return NULL;
+  // This replaces a closed CFG region, with no observable loop-local SSA values.
+  for (cg_block *b = c->fn->blocks; b; b = b->next) {
+    if (b == head || b == body || b == latch)
+      continue;
+    for (cg_inst *i = b->first; i; i = i->next) {
+      if (b == pre && i == pre->last)
+        continue;
+      for (unsigned k = i->begin; k < i->end; k++) {
+        cg_register_work(c);
+        const char *s = c->tokens[k].text;
+        if (*s != '%') continue;
+        if (cg_fill_label(s, head->name) || cg_fill_label(s, body->name) ||
+            cg_fill_label(s, latch->name))
+          return NULL;
+        for (unsigned j = 0; j < sizeof(removed) / sizeof(*removed); j++)
+          if (!strcmp(s, removed[j]))
+            return NULL;
+      }
+    }
+  }
+  for (unsigned k = 0; k < c->register_capacity; k++)
+    if (c->register_table[k].reg && c->register_table[k].reg <= 2)
+      return NULL;
+  cg_register_instruction(c, head->first, "br");
+  c->pos = store->begin + 1;
+  cg_type *type = cg_type_parse(c, 0);
+  cg_value_read(c, type, 2, 0);
+  cg_symbol(c, 1, cg_name(c, FILL_TOKEN(gep, 6)), 0);
+  cg_immediate(c, 0, (uint32_t)trips);
+  unsigned id = ++c->unique;
+  cg_emit(c, "@ fixed-halfword-fill: hoisted pointer and value\n.Lcg_fill%u:\n"
+             "strh.w r2, [r1], #2\nsubs.n r0, #1\nbne.n .Lcg_fill%u\n",
+          id, id);
+  cg_register_after_instruction(c);
+  return exit;
+#undef FILL_TOKEN
+#undef FILL_MATCH
+}
+
 void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
   c->pos = i->begin;
   c->line = c->tokens[i->begin].line;
@@ -1620,6 +1795,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     op = cg_take(c);
   cg_register_instruction(c, i, cg_selection_barrier(c, i) ? "call" : op);
   if (cg_selection_instruction(c, i))
+    return;
+  if (!strcmp(op, "load") && cg_forward_record_load(c, i))
     return;
   if (i->forwarded_store_register_plus_one) {
     cg_save_normalized(c, i->result, i->forwarded_store_register_plus_one - 1);

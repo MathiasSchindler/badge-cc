@@ -10,8 +10,28 @@
 static const int regular_sizes[] = {12, 14, 16, 18};
 static const int bold_sizes[] = {24, 28, 32, 36, 40, 44};
 
+typedef struct {
+    FILE *metadata, *assembly, *pixels;
+    const char *path;
+} pixel_assets_t;
+
+static void emit_metadata(FILE *output, const badger_font_glyph_t *glyphs, unsigned count,
+                          unsigned number, size_t bytes, int size, unsigned height,
+                          unsigned ascent, unsigned bits, unsigned bold) {
+    fprintf(output, "static const badger_font_glyph_t glyphs_%u[] = {\n", number);
+    for (unsigned i = 0u; i < count; ++i) {
+        const badger_font_glyph_t *glyph = &glyphs[i];
+        fprintf(output, "{%uu,%uu,%d,%d,%d,%u,%u},\n", glyph->codepoint, glyph->offset,
+                glyph->advance, glyph->left, glyph->top, glyph->width, glyph->height);
+    }
+    fprintf(output, "};\nstatic const badger_font_t font_%u = "
+        "{glyphs_%u,pixels_%u,%zuu,206,%d,%u,%u,%u,%u};\n",
+        number, number, number, bytes, size, height, ascent, bits, bold);
+}
+
 static int emit_font(FILE *output, FrFont *font, FrTtfFont *ttf, unsigned number,
-                      int size, unsigned bold, unsigned bits, size_t *total) {
+                      int size, unsigned bold, unsigned bits, size_t *total,
+                      const pixel_assets_t *assets) {
     badger_font_glyph_t glyphs[206];
     uint8_t *pixels = malloc(206u * 128u * 128u);
     if (pixels == NULL) { fputs("glyph workspace allocation failed\n", stderr); return 0; }
@@ -61,20 +81,29 @@ static int emit_font(FILE *output, FrFont *font, FrTtfFont *ttf, unsigned number
     if (count != 206u) { fputs("repertoire count mismatch\n", stderr); free(pixels); return 0; }
     fprintf(output, "static const uint8_t pixels_%u[] = {", number);
     for (size_t i = 0u; i < bytes; ++i) fprintf(output, "%s%u,", i % 24u == 0u ? "\n" : "", pixels[i]);
-    fprintf(output, "\n};\nstatic const badger_font_glyph_t glyphs_%u[] = {\n", number);
-    for (unsigned i = 0u; i < count; ++i) {
-        const badger_font_glyph_t *glyph = &glyphs[i];
-        fprintf(output, "{%uu,%uu,%d,%d,%d,%u,%u},\n", glyph->codepoint, glyph->offset,
-                glyph->advance, glyph->left, glyph->top, glyph->width, glyph->height);
-    }
+    fputs("\n};\n", output);
     unsigned height = (unsigned)fr_font_line_height(font, size);
     if (ascent + descent > height) height = ascent + descent;
-    fprintf(output, "};\nstatic const badger_font_t font_%u = "
-        "{glyphs_%u,pixels_%u,%zuu,206,%d,%u,%u,%u,%u};\n",
-        number, number, number, bytes, size, height, ascent, bits, bold);
+    emit_metadata(output, glyphs, count, number, bytes, size, height, ascent, bits, bold);
+    int ok = 1;
+    if (assets->pixels) {
+        fprintf(assets->metadata, "extern const uint8_t pixels_%u[%zu];\n", number, bytes);
+        emit_metadata(assets->metadata, glyphs, count, number, bytes, size, height, ascent, bits, bold);
+        fprintf(assets->assembly, ".section .rodata.pixels_%u,\"a\",%%progbits\n"
+                ".global pixels_%u\n.hidden pixels_%u\n.type pixels_%u, %%object\npixels_%u:\n"
+                ".incbin \"", number, number, number, number, number);
+        for (const char *p = assets->path; *p; p++) {
+            if (*p == '\\' || *p == '"') fputc('\\', assets->assembly);
+            fputc(*p, assets->assembly);
+        }
+        fprintf(assets->assembly, "\", %zu, %zu\n.size pixels_%u, .-pixels_%u\n",
+                *total, bytes, number, number);
+        ok = fwrite(pixels, 1, bytes, assets->pixels) == bytes &&
+             !ferror(assets->metadata) && !ferror(assets->assembly);
+    }
     *total += bytes;
     free(pixels);
-    return !ferror(output);
+    return ok && !ferror(output);
 }
 
 static int emit_license(FILE *output, const char *name) {
@@ -103,24 +132,48 @@ static int emit_license(FILE *output, const char *name) {
     return !ferror(output);
 }
 
+static void emit_families(FILE *output) {
+    for (unsigned family = 0u; family < 2u; ++family) {
+        fprintf(output, "const badger_nametag_fonts_t nametag_%s_fonts = {{",
+                family == 0u ? "mono" : "code");
+        for (unsigned i = 0u; i < 4u; ++i) fprintf(output, "&font_%u,", family * 10u + i);
+        fputs("},{", output);
+        for (unsigned i = 0u; i < 6u; ++i) fprintf(output, "&font_%u,", family * 10u + 4u + i);
+        fputs("},nametag_font_license};\n", output);
+    }
+}
+
 int main(int argc, char **argv) {
-    if (argc != 9 || (strcmp(argv[7], "8") != 0 && strcmp(argv[7], "4") != 0)) {
-        fputs("Usage: nametag_font_compile OUTPUT.c OUTPUT.h MONO_REGULAR.ttf MONO_BOLD.ttf CODE_REGULAR.ttf CODE_BOLD.ttf 8|4 LICENSE\n", stderr);
+    if ((argc != 9 && argc != 12) || (strcmp(argv[7], "8") != 0 && strcmp(argv[7], "4") != 0) ||
+        (argc == 12 && strpbrk(argv[11], "\r\n"))) {
+        fputs("Usage: nametag_font_compile OUTPUT.c OUTPUT.h MONO_REGULAR.ttf MONO_BOLD.ttf CODE_REGULAR.ttf CODE_BOLD.ttf 8|4 LICENSE [METADATA.c PIXELS.S PIXELS.bin]\n", stderr);
         return 2;
     }
     if (host_font_platform_install() != 0) { fputs("font platform initialization failed\n", stderr); return 1; }
-    FILE *output = fopen(argv[1], "wb");
-    if (output == NULL) { perror(argv[1]); return 1; }
-    FILE *header = fopen(argv[2], "wb");
-    if (header == NULL) { perror(argv[2]); fclose(output); return 1; }
-    int ok;
+    const int paths[] = {1, 2, 9, 10, 11};
+    unsigned outputs = argc == 12 ? 5u : 2u, opened = 0u;
+    FILE *files[5] = {0};
+    for (; opened < outputs; ++opened) {
+        const char *path = argv[paths[opened]];
+        files[opened] = fopen(path, "wb");
+        if (!files[opened]) { perror(path); break; }
+    }
+    FILE *output = files[0], *header = files[1];
+    pixel_assets_t assets = {files[2], files[3], files[4], argc == 12 ? argv[11] : NULL};
+    int ok = opened == outputs;
     size_t bytes = 0u;
     unsigned number = 0u, bits = (unsigned)(argv[7][0] - '0');
-    fputs("#include \"nametag_fonts.h\"\n", output);
-    ok = emit_license(output, argv[8]);
-    fputs("#ifndef UNIVERSE26_NAMETAG_FONTS_H\n#define UNIVERSE26_NAMETAG_FONTS_H\n"
-          "#include \"nametag.h\"\nextern const badger_nametag_fonts_t nametag_mono_fonts;\n"
-          "extern const badger_nametag_fonts_t nametag_code_fonts;\n#endif\n", header);
+    if (ok) {
+        fputs("#include \"nametag_fonts.h\"\n", output);
+        ok = emit_license(output, argv[8]);
+        if (assets.metadata) {
+            fputs("#include \"nametag_fonts.h\"\n", assets.metadata);
+            ok = ok && emit_license(assets.metadata, argv[8]);
+        }
+        fputs("#ifndef UNIVERSE26_NAMETAG_FONTS_H\n#define UNIVERSE26_NAMETAG_FONTS_H\n"
+              "#include \"nametag.h\"\nextern const badger_nametag_fonts_t nametag_mono_fonts;\n"
+              "extern const badger_nametag_fonts_t nametag_code_fonts;\n#endif\n", header);
+    }
     for (unsigned file = 0u; file < 4u && ok; ++file) {
         FrFont *font = NULL;
         FrTtfFont *ttf = NULL;
@@ -132,28 +185,23 @@ int main(int argc, char **argv) {
         unsigned count = (file & 1u) ? 6u : 4u;
         const int *sizes = (file & 1u) ? bold_sizes : regular_sizes;
         for (unsigned i = 0u; i < count && ok; ++i) {
-            ok = emit_font(output, font, ttf, number++, sizes[i], file & 1u, bits, &bytes);
+            ok = emit_font(output, font, ttf, number++, sizes[i], file & 1u, bits, &bytes, &assets);
         }
         fr_font_close(font);
         fr_ttf_close(ttf);
     }
     if (ok) {
-        for (unsigned family = 0u; family < 2u; ++family) {
-            fprintf(output, "const badger_nametag_fonts_t nametag_%s_fonts = {{",
-                    family == 0u ? "mono" : "code");
-            for (unsigned i = 0u; i < 4u; ++i) fprintf(output, "&font_%u,", family * 10u + i);
-            fputs("},{", output);
-            for (unsigned i = 0u; i < 6u; ++i) fprintf(output, "&font_%u,", family * 10u + 4u + i);
-            fputs("},nametag_font_license};\n", output);
-        }
+        emit_families(output);
+        if (assets.metadata) emit_families(assets.metadata);
     }
-    if (ferror(output) || ferror(header)) ok = 0;
-    if (fclose(output) != 0) ok = 0;
-    if (fclose(header) != 0) ok = 0;
+    for (unsigned i = 0u; i < opened; ++i) {
+        if (ferror(files[i])) ok = 0;
+        if (fclose(files[i]) != 0) ok = 0;
+    }
     if (!ok) {
         fputs("font generation failed; removing incomplete outputs\n", stderr);
-        if (remove(argv[1]) != 0) perror(argv[1]);
-        if (remove(argv[2]) != 0) perror(argv[2]);
+        for (unsigned i = 0u; i < opened; ++i)
+            if (remove(argv[paths[i]]) != 0) perror(argv[paths[i]]);
         return 1;
     }
     printf("20 fonts, 206 glyphs/font, %u-bit coverage, %zu bitmap bytes\n", bits, bytes);

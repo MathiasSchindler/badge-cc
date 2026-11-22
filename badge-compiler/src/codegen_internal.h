@@ -22,6 +22,7 @@ typedef struct cg_value {
   unsigned slot, object;
   unsigned object_size, object_align;
   unsigned memory_align, memory_size;
+  struct cg_value *argument_record;
   int rematerialize_frame_address;
   struct cg_value *next;
 } cg_value;
@@ -257,6 +258,7 @@ cg_value *cg_define(cg_context *c, char *name, cg_type *t);
 void cg_generate_function(cg_context *c, cg_function *f);
 void cg_prepare_cfg(cg_context *c);
 int cg_target_has_phi(cg_context *c, const char *target);
+cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head);
 
 void cg_immediate(cg_context *c, unsigned r, uint32_t n);
 int cg_narrow_flag_binary(cg_context *c, const char *op, unsigned dst,

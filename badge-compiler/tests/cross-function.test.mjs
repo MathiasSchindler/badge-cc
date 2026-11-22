@@ -81,6 +81,78 @@ yes:\nret i32 0\nno:\nret i32 1\n}`;
   assert(b.count < a.count);
   console.log(`PO16 encoder oracle: ${a.count} -> ${b.count} reached instructions`);
 });
+test('compact helper folding removes different literal calls but retains dynamic calls', t => {
+  const file = files(t);
+  const result = optimize(file, `@seed = global i32 4
+define internal i32 @blend(i32 %x, i32 %y) {
+entry:
+ %a = xor i32 %x, %y
+ %b = shl i32 %x, 3
+ %c = add i32 %a, %b
+ ret i32 %c
+}
+define i32 @main() {
+entry:
+ %s = load volatile i32, ptr @seed, align 4
+ %a = call i32 @blend(i32 2, i32 9)
+ %b = call i32 @blend(i32 5, i32 12)
+ %c = call i32 @blend(i32 %s, i32 3)
+ %pair = add i32 %a, %b
+ %all = add i32 %pair, %c
+ %status = sub i32 %all, 115
+ ret i32 %status
+}`, 'compact-inline');
+  assert.match(result, /literal_result_calls_folded blend/);
+  assert.equal([...result.matchAll(/call i32 @blend/g)].length, 1);
+  const a = execute(file, 'control', true, 'thumb-constants');
+  const b = execute(file, 'candidate', true, 'thumb-constants');
+  assert(b.bytes < a.bytes && b.count < a.count);
+});
+
+test('private records promote across a join and fixed carriers load directly into ABI lanes', t => {
+  const file = files(t);
+  const result = optimize(file, `@seed = global i32 23
+declare void @llvm.memset.inline.p0.i32(ptr, i8, i32 immarg, i1 immarg)
+define i32 @combine([2 x i32] %pair) {
+entry:
+ %a = extractvalue [2 x i32] %pair, 0
+ %b = extractvalue [2 x i32] %pair, 1
+ %sum = add i32 %a, %b
+ ret i32 %sum
+}
+define i32 @main() {
+entry:
+ %slot = alloca [8 x i8], align 4
+ call void @llvm.memset.inline.p0.i32(ptr %slot, i8 0, i32 8, i1 false)
+ %s = load volatile i32, ptr @seed, align 4
+ store i32 %s, ptr %slot, align 4
+ %test = icmp ne i32 %s, 0
+ br i1 %test, label %write_field, label %done
+write_field:
+ %field = getelementptr i8, ptr %slot, i32 4
+ store i32 19, ptr %field, align 4
+ br label %done
+done:
+ %record = load [2 x i32], ptr %slot, align 4
+ %sum = call i32 @combine([2 x i32] %record)
+ %status = sub i32 %sum, 42
+ ret i32 %status
+}
+define i32 @volatile_record() {
+entry:
+ %kept = alloca [8 x i8], align 4
+ store volatile i32 42, ptr %kept, align 4
+ %x = load volatile i32, ptr %kept, align 4
+ ret i32 %x
+}`, 'small-aggregate');
+  assert.doesNotMatch(result, /%slot = alloca|call void @llvm\.memset/);
+  assert.match(result, /phi i32/);
+  assert.match(result, /store volatile i32 42, ptr %kept/);
+  execute(file, 'control', false, 'thumb-constants');
+  assert.match(fs.readFileSync(file('control.s'), 'utf8'), /@ record-argument: words forwarded 2/);
+  execute(file, 'candidate', false, 'thumb-constants');
+});
+
 test('straight-line inlining retains volatile order and caller ABI, charging removed helper', t => {
   const file = files(t);
   const result = optimize(file, `@sink = global i32 0

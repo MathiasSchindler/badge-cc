@@ -501,6 +501,22 @@ make nametag-preview
 NAMETAG_PREVIEW_PORT=8873 make nametag-preview
 ```
 
+For owned Cortex-M33 firmware builds, select the explicit `-Oz` app profile:
+
+```sh
+make -C badge-compiler
+out=build/nametag-owned
+make BUILD_DIR="$out" RP2350_APP_PROFILE=owned \
+  RP2350_CC="bash $PWD/badge-compiler/scripts/owned-cc.sh" \
+  "$out/universe26/uf2/badge-nametag.uf2" "$out/universe26/uf2/nametag_m2.uf2"
+```
+
+The owned build compiles the font metadata and assembles the pixel bytes
+from a binary asset, with one garbage-collectable section per font. The
+metadata and pixel bytes use the same raster data and carry the same font
+license as the native generated C. The stock LLVM and preview build paths
+continue to use the generated C.
+
 The preview builds both coverage formats and serves only on `127.0.0.1`.
 It shows three 320 x 240 canvases, profile edits, Mono/Code, natural/crisp
 coverage, 8-/4-bit storage, pause/seek and fade-boundary controls. Inspect at

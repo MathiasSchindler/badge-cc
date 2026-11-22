@@ -381,8 +381,40 @@ static char *reduced_arguments(cross *p, unsigned line, const char *callee,
   ir_emit(p->c, "\n");
   return ir_copy(p->c, p->c->output, p->c->size);
 }
+static const char *literal_helper_return(ir_context *c) {
+  ir_module module = {0};
+  ir_parse(c, &module, c->output, c->size);
+  ir_analysis a;
+  ir_analyze(c, &module, &a);
+  for (unsigned f = 0; f < a.function_count; f++) {
+    const ir_function *fn = &a.functions[f];
+    if (fn->declaration)
+      continue;
+    unsigned block = fn->first_block;
+    for (unsigned steps = 0; steps < fn->block_count; steps++) {
+      const ir_block *b = &a.blocks[block];
+      if (b->instruction_count != 1)
+        break;
+      const ir_instruction *in = &a.instructions[b->first_instruction];
+      if (in->opcode == IR_OP_BR && b->successor_count == 1 && in->operand_count == 1) {
+        block = a.successors[b->first_successor];
+        continue;
+      }
+      if (in->opcode == IR_OP_RET && in->operand_count == 1) {
+        const ir_operand *op = &a.operands[in->first_operand];
+        const char *value = ir_text(&module, op->token);
+        uint64_t bits;
+        if (op->kind == IR_OPERAND_LITERAL &&
+            (ir_integer(value, &bits) || !strcmp(value, "true") || !strcmp(value, "false")))
+          return value;
+      }
+      break;
+    }
+  }
+  return NULL;
+}
 static char *cleanup_helper(cross *p, unsigned f, const char **values,
-                            const char *clone) {
+                            const char *clone, const char **folded) {
   ir_module *m = p->m;
   const ir_function *fn = &p->a.functions[f];
   unsigned begin = fn->line - 1, end = end_line(p, f);
@@ -452,6 +484,11 @@ static char *cleanup_helper(cross *p, unsigned f, const char **values,
     if (!finish)
       ir_error(child, "cross-function missing optimized helper");
     result = ir_copy(p->c, start, (size_t)(finish + 3 - start));
+    if (folded) {
+      const char *value = literal_helper_return(child);
+      if (value)
+        *folded = ir_copy(p->c, value, strlen(value));
+    }
     ok = 1;
   }
   ir_destroy(child);
@@ -462,6 +499,83 @@ static char *cleanup_helper(cross *p, unsigned f, const char **values,
              ir_format(p->c, "cross-function helper optimization failed for %s",
                        fn->name));
   return result;
+}
+static int fold_constant_calls(cross *p, unsigned f, const unsigned *calls,
+                               unsigned count, module_cost *baseline,
+                               char **best, uint32_t *best_bytes) {
+  enum { LIMIT = 16 };
+  const ir_function *fn = &p->a.functions[f];
+  const ir_type *result = &p->a.types[fn->return_type];
+  if (result->kind != IR_INT || result->bits > 32 || count > LIMIT)
+    return 0;
+  for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++)
+    for (unsigned i = p->a.blocks[b].first_instruction;
+         i < p->a.blocks[b].first_instruction + p->a.blocks[b].instruction_count; i++)
+      if (p->a.instructions[i].effects & ~IR_EFFECT_CONTROL)
+        return 0;
+  const char *literals[LIMIT] = {0};
+  unsigned folded = 0;
+  for (unsigned n = 0; n < count; n++) {
+    const ir_instruction *call = &p->a.instructions[calls[n]];
+    if (call->definition == IR_NONE)
+      continue;
+    const char *values[CROSS_PARAMETERS] = {0};
+    int constant = 1;
+    for (unsigned k = 0; k < fn->parameter_count; k++) {
+      const ir_operand *op = &p->a.operands[call->first_operand + 1 + k];
+      const char *value = ir_text(p->m, op->token);
+      uint64_t bits;
+      if (op->kind != IR_OPERAND_LITERAL ||
+          (!ir_integer(value, &bits) && strcmp(value, "true") && strcmp(value, "false"))) {
+        constant = 0;
+        break;
+      }
+      values[k] = value;
+    }
+    if (!constant)
+      continue;
+    int cached = 0;
+    for (unsigned prev = 0; prev < n && !cached; prev++) {
+      if (!literals[prev])
+        continue;
+      const ir_instruction *prior = &p->a.instructions[calls[prev]];
+      unsigned k = 0;
+      while (k < fn->parameter_count &&
+             !strcmp(values[k], ir_text(p->m, p->a.operands[prior->first_operand + 1 + k].token)))
+        k++;
+      if (k == fn->parameter_count) {
+        literals[n] = literals[prev];
+        cached = 1;
+      }
+    }
+    if (!cached)
+      (void)cleanup_helper(p, f, values, NULL, &literals[n]);
+    folded += literals[n] != NULL;
+  }
+  if (!folded)
+    return 0;
+  for (unsigned n = 0; n < count; n++) {
+    if (!literals[n])
+      continue;
+    const ir_instruction *call = &p->a.instructions[calls[n]];
+    for (unsigned u = p->a.definitions[call->definition].first_use; u != IR_NONE;
+         u = p->a.operands[u].next_use)
+      p->m->tokens[p->a.operands[u].token].replacement = literals[n];
+    p->m->lines[call->line - 1].replacement = "";
+  }
+  if (folded == count)
+    remove_function(p, f);
+  size_t size;
+  char *candidate = write_module(p, &size);
+  module_cost cost = measure(p, candidate, size);
+  ir_note(p->c, "candidate", "literal_result_calls", folded);
+  int accepted = admit(p, baseline, &cost, f, NULL) && cost.bytes < *best_bytes;
+  if (accepted) {
+    *best = candidate;
+    *best_bytes = cost.bytes;
+  }
+  reset(p);
+  return accepted;
 }
 static int specialize(cross *p, unsigned f, const unsigned *calls,
                       unsigned count, module_cost *baseline, char **best,
@@ -513,7 +627,7 @@ static int specialize(cross *p, unsigned f, const unsigned *calls,
     matches += selected[i];
   }
   const char *clone = matches == count ? NULL : ir_fresh(p->c, p->m, '@');
-  char *helper = cleanup_helper(p, f, values, clone);
+  char *helper = cleanup_helper(p, f, values, clone, NULL);
   if (clone) {
     p->m->suffix = helper;
   } else {
@@ -844,6 +958,9 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
     if (policy == CROSS_SIZE && specialize(&p, chosen, calls, count, &before, &best, &best_bytes,
                    &clone))
       kind = "constant_specialization";
+    if (compact_inline && fold_constant_calls(&p, chosen, calls, count, &before,
+                                               &best, &best_bytes))
+      kind = "literal_result_calls_folded";
     int forwarding = 0;
     if (inline_calls(&p, chosen, calls, count, &before, &best, &best_bytes,
                      &forwarding, policy)) {

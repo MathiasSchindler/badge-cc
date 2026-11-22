@@ -98,11 +98,13 @@ flash behavior and software-delayed peripheral waits remain promotion gates.
 
 ## Opt-in `compact-inline`
 
-`compact-inline` tries inlining at the end of an owned optimization pipeline
-without requiring profile metadata. It accepts the same bounded straight-line
-body, optionally behind a single unconditional entry jump. It does not
-specialize, share, or inline bodies containing nested calls. It retains the
-existing ABI, reference, recursion, and `noinline` checks.
+`compact-inline` tries inlining in an owned optimization pipeline without
+requiring profile metadata. It accepts the same bounded straight-line body,
+optionally behind a single unconditional entry jump. For effect-free integer
+helpers it can also replace up to 16 constant-argument call sites with proven
+literal results, keeping the original helper for dynamic calls. It does not
+clone or share helpers or inline bodies containing nested calls. It retains
+the existing ABI, reference, recursion, and `noinline` checks.
 
 The pass measures both complete modules with
 `direct/global-compact/thumb-constants/word`. The candidate must shrink the

@@ -20,6 +20,17 @@ RP2350_OBJCOPY ?= llvm-objcopy
 RP2350_NM ?= llvm-nm
 RP2350_SIZE ?= llvm-size
 
+RP2350_APP_PROFILE ?= llvm
+ifeq ($(RP2350_APP_PROFILE),owned)
+RP2350_APP_OPT := -Oz
+RP2350_APP_STACK :=
+else ifeq ($(RP2350_APP_PROFILE),llvm)
+RP2350_APP_OPT := -O2
+RP2350_APP_STACK := -fstack-usage
+else
+$(error RP2350_APP_PROFILE must be llvm or owned)
+endif
+
 FLASH_BASE := 0x10000000
 RP2350_FAMILY_ID := 0xe48bff59
 
@@ -341,22 +352,31 @@ FONTRENDER_SOURCES := $(addprefix $(FONTRENDER_DIR)/,fr_platform.c fr_ttf.c fr_r
 FONTRENDER_HEADERS := $(wildcard $(FONTRENDER_DIR)/*.h $(FONTRENDER_DIR)/fontrender/*.h)
 NAMETAG_FONT_FILES := $(addprefix vendor/cascadia-code/,CascadiaMono-Regular.ttf CascadiaMono-Bold.ttf CascadiaCode-Regular.ttf CascadiaCode-Bold.ttf)
 NAMETAG_SOURCES := $(SHARED_DIR)/bitmap_font.c $(SHARED_DIR)/nametag.c $(PLATFORM_DIR)/graphics.c
-NAMETAG_RENDER_FLAGS := $(RP2350_CFLAGS) -O2
+NAMETAG_RENDER_FLAGS := $(RP2350_CFLAGS) $(RP2350_APP_OPT) $(RP2350_APP_STACK)
 NAMETAG_HEADERS := $(SHARED_DIR)/bitmap_font.h $(SHARED_DIR)/nametag.h $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h
 NAMETAG_FRAME_C := $(SHARED_DIR)/frame_diff.c
 NAMETAG_FRAME_H := $(SHARED_DIR)/frame_diff.h
 NAMETAG_ASSET_DIR := $(BUILD_DIR)/nametag/assets-$(NAMETAG_COVERAGE)
 NAMETAG_FONT_C := $(NAMETAG_ASSET_DIR)/nametag_fonts.c
 NAMETAG_FONT_H := $(NAMETAG_ASSET_DIR)/nametag_fonts.h
+NAMETAG_FONT_META := $(NAMETAG_ASSET_DIR)/nametag_font_meta.c
+NAMETAG_FONT_ASM := $(NAMETAG_ASSET_DIR)/nametag_font_pixels.S
+NAMETAG_FONT_BIN := $(NAMETAG_ASSET_DIR)/nametag_font_pixels.bin
+NAMETAG_FW_FONT_C := $(NAMETAG_FONT_C)
+ifeq ($(RP2350_APP_PROFILE),owned)
+NAMETAG_FW_FONT_C := $(NAMETAG_FONT_META)
+NAMETAG_FW_FONT_EXTRA := nametag_font_pixels
+endif
 NAMETAG_FONT_STAMP := $(NAMETAG_ASSET_DIR)/generated.stamp
 NAMETAG_PREVIEW := $(HOST_TOOLS_DIR)/nametag_preview-$(NAMETAG_COVERAGE)
 NAMETAG_TEST := $(HOST_TOOLS_DIR)/nametag_test-$(NAMETAG_COVERAGE)
 NAMETAG_HOST_FLAGS := -std=c11 -Wall -Wextra -Werror -O2 -iquote $(SHARED_DIR)
 NAMETAG_TARGET_DIR := $(BUILD_DIR)/nametag/target-$(NAMETAG_COVERAGE)
 NAMETAG_TARGET_OBJS := $(addprefix $(NAMETAG_TARGET_DIR)/,bitmap_font.o nametag.o frame_diff.o graphics.o nametag_fonts.o nametag_target.o)
+NAMETAG_TARGET_OBJS += $(addprefix $(NAMETAG_TARGET_DIR)/,$(addsuffix .o,$(NAMETAG_FW_FONT_EXTRA)))
 NAMETAG_M2_DIR := $(BUILD_DIR)/nametag/m2-$(NAMETAG_COVERAGE)
 NAMETAG_M2_NAMES := start picobin display graphics diagnostics_logic bootrom_reboot nametag_clock \
-	bitmap_font nametag frame_diff nametag_fonts nametag_measure usb_report live_usb_control live_usb_hw wifi_trace nametag_m2
+	bitmap_font nametag frame_diff nametag_fonts $(NAMETAG_FW_FONT_EXTRA) nametag_measure usb_report live_usb_control live_usb_hw wifi_trace nametag_m2
 NAMETAG_M2_OBJS := $(addprefix $(NAMETAG_M2_DIR)/,$(addsuffix .o,$(NAMETAG_M2_NAMES)))
 NAMETAG_M2_INPUTS := $(TOOLS_DIR)/nametag_m2.c $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/nametag_measure.h \
 	$(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h $(USB_LIVE_BUILD_INPUTS) $(NAMETAG_SOURCES) \
@@ -364,7 +384,7 @@ NAMETAG_M2_INPUTS := $(TOOLS_DIR)/nametag_m2.c $(SHARED_DIR)/nametag_measure.c $
 	$(HOST_TOOLS_SRC_DIR)/usb_live_transport.h
 BADGE_NAMETAG_DIR := $(BUILD_DIR)/nametag/app-$(NAMETAG_COVERAGE)
 BADGE_NAMETAG_OBJS := $(addprefix $(NAMETAG_M2_DIR)/,picobin.o display.o graphics.o \
-	bootrom_reboot.o nametag_clock.o bitmap_font.o nametag.o frame_diff.o nametag_fonts.o diagnostics_logic.o) \
+	bootrom_reboot.o nametag_clock.o bitmap_font.o nametag.o frame_diff.o nametag_fonts.o $(addsuffix .o,$(NAMETAG_FW_FONT_EXTRA)) diagnostics_logic.o) \
 	$(addprefix $(BADGE_NAMETAG_DIR)/,start.o home.o badge-nametag.o)
 
 .PHONY: badge-nametag
@@ -378,13 +398,13 @@ $(BADGE_NAMETAG_DIR)/start.o: $(ARCH_DIR)/start.c | $(BADGE_NAMETAG_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -DBARE_GPIO_WAKE_IRQ -c $< -o $@
 
 $(BADGE_NAMETAG_DIR)/home.o: $(PLATFORM_DIR)/home.c $(PLATFORM_DIR)/home.h | $(BADGE_NAMETAG_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_STACK) -c $< -o $@
 
 $(BADGE_NAMETAG_DIR)/badge-nametag.o: $(TOOLS_DIR)/badge-nametag.c $(NAMETAG_HEADERS) \
 	$(NAMETAG_FRAME_H) $(NAMETAG_FONT_H) $(PLATFORM_DIR)/display.h \
 	$(PLATFORM_DIR)/home.h $(TOOLS_DIR)/diagnostics_logic.h \
 	$(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(BADGE_NAMETAG_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -I$(PLATFORM_DIR) -I$(NAMETAG_ASSET_DIR) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) -I$(PLATFORM_DIR) -I$(NAMETAG_ASSET_DIR) $(RP2350_APP_STACK) -c $< -o $@
 
 $(BADGE_NAMETAG_DIR)/badge-nametag.elf: $(BADGE_NAMETAG_OBJS) $(ARCH_DIR)/memmap_flash.ld
 	$(RP2350_CC) $(RP2350_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
@@ -419,17 +439,17 @@ $(BOAT_DIR)/boat.o: $(TOOLS_DIR)/boat.c $(SHARED_DIR)/boat_physics.h $(SHARED_DI
 	$(PLATFORM_DIR)/display.h $(PLATFORM_DIR)/graphics.h $(PLATFORM_DIR)/home.h \
 	$(PLATFORM_DIR)/i2c_bitbang.h $(PLATFORM_DIR)/lsm6ds3.h $(TOOLS_DIR)/diagnostics_logic.h \
 	$(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(BOAT_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -I$(PLATFORM_DIR) -O2 -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) -I$(PLATFORM_DIR) $(RP2350_APP_OPT) $(RP2350_APP_STACK) -c $< -o $@
 
 $(BOAT_DIR)/boat_physics.o: $(SHARED_DIR)/boat_physics.c $(SHARED_DIR)/boat_physics.h | $(BOAT_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_OPT) $(RP2350_APP_STACK) -c $< -o $@
 
 $(BOAT_DIR)/boat_input.o: $(SHARED_DIR)/boat_input.c $(SHARED_DIR)/boat_input.h \
 	$(PLATFORM_DIR)/lsm6ds3.h $(TOOLS_DIR)/diagnostics_logic.h $(SHARED_DIR)/bytes.h | $(BOAT_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_OPT) $(RP2350_APP_STACK) -c $< -o $@
 
 $(BOAT_DIR)/frame_diff.o: $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h | $(BOAT_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_OPT) $(RP2350_APP_STACK) -c $< -o $@
 
 $(BOAT_DIR)/home.o: $(PLATFORM_DIR)/home.c $(PLATFORM_DIR)/home.h | $(BOAT_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
@@ -505,11 +525,11 @@ $(BOAT_BREAKING_DIR)/boat-breaking.o: $(TOOLS_DIR)/boat-breaking.c $(TOOLS_DIR)/
 	$(PLATFORM_DIR)/display.h $(PLATFORM_DIR)/home.h $(PLATFORM_DIR)/lsm6ds3.h \
 	$(PLATFORM_DIR)/i2c_bitbang.h $(TOOLS_DIR)/diagnostics_logic.h \
 	$(ARCH_DIR)/nametag_clock.h $(ARCH_DIR)/bootrom_reboot.h | $(BOAT_BREAKING_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -I$(PLATFORM_DIR) -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_OPT) $(RP2350_APP_STACK) -I$(PLATFORM_DIR) -c $< -o $@
 $(BOAT_BREAKING_DIR)/boat_fluid.o: $(SHARED_DIR)/boat_fluid.c $(SHARED_DIR)/boat_fluid.h \
 	$(SHARED_DIR)/boat_physics.h $(SHARED_DIR)/bytes.h $(TOOLS_DIR)/diagnostics_logic.h \
 	$(PLATFORM_DIR)/graphics.h | $(BOAT_BREAKING_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_OPT) $(RP2350_APP_STACK) -c $< -o $@
 $(BOAT_BREAKING_DIR)/boat-breaking.elf: $(BOAT_BREAKING_OBJS) $(ARCH_DIR)/memmap_flash.ld
 	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_LDFLAGS) $(BOAT_BREAKING_OBJS) \
 		-Wl,-Map=$(BOAT_BREAKING_DIR)/boat-breaking.map -o $@
@@ -565,10 +585,10 @@ $(BOAT_PROFILE_DIR)/boat_profile_build.h: $(BOAT_PROFILE_INPUTS) Makefile | $(BO
 	@id=$$(shasum -a 256 $(BOAT_PROFILE_INPUTS) Makefile | shasum -a 256 | cut -c1-8); \
 	printf '#define USB_REPORT_BUILD_ID 0x%su\n' "$$id" > $@
 $(BOAT_PROFILE_DIR)/boat_profile.o: $(BOAT_PROFILE_INPUTS) $(BOAT_PROFILE_DIR)/boat_profile_build.h | $(BOAT_PROFILE_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -fstack-usage -DBOAT_PROFILE -DLIVE_USB_NAMETAG_M2 \
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_OPT) $(RP2350_APP_STACK) -DBOAT_PROFILE -DLIVE_USB_NAMETAG_M2 \
 		-I$(PLATFORM_DIR) -I$(BOAT_PROFILE_DIR) -c $(TOOLS_DIR)/boat_profile.c -o $@
 $(BOAT_PROFILE_DIR)/boat_measure.o: $(SHARED_DIR)/boat_measure.c $(SHARED_DIR)/boat_measure.h | $(BOAT_PROFILE_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -O2 -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_APP_OPT) -c $< -o $@
 $(BOAT_PROFILE_DIR)/live_usb_control.o: src/usb/live_usb_control.c src/usb/live_usb.h $(SHARED_DIR)/nametag_measure.h | $(BOAT_PROFILE_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -c $< -o $@
 $(BOAT_PROFILE_DIR)/live_usb_hw.o: src/usb/live_usb_hw.c src/usb/live_usb_hw.h src/usb/live_usb.h | $(BOAT_PROFILE_DIR)
@@ -625,13 +645,16 @@ $(NAMETAG_M2_DIR)/bootrom_reboot.o: $(ARCH_DIR)/bootrom_reboot.c $(ARCH_DIR)/boo
 $(NAMETAG_M2_DIR)/nametag_clock.o: $(ARCH_DIR)/nametag_clock.c $(ARCH_DIR)/nametag_clock.h | $(NAMETAG_M2_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
 $(NAMETAG_M2_DIR)/bitmap_font.o: $(SHARED_DIR)/bitmap_font.c $(NAMETAG_HEADERS) | $(NAMETAG_M2_DIR)
-	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -c $< -o $@
 $(NAMETAG_M2_DIR)/nametag.o: $(SHARED_DIR)/nametag.c $(NAMETAG_HEADERS) | $(NAMETAG_M2_DIR)
-	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -c $< -o $@
 $(NAMETAG_M2_DIR)/frame_diff.o: $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h | $(NAMETAG_M2_DIR)
-	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
-$(NAMETAG_M2_DIR)/nametag_fonts.o: $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) | $(NAMETAG_M2_DIR)
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -c $< -o $@
+$(NAMETAG_M2_DIR)/nametag_fonts.o: $(NAMETAG_FW_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) | $(NAMETAG_M2_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -I$(NAMETAG_ASSET_DIR) -c $< -o $@
+$(NAMETAG_M2_DIR)/nametag_font_pixels.o $(NAMETAG_TARGET_DIR)/nametag_font_pixels.o: $(NAMETAG_FONT_ASM) $(NAMETAG_FONT_BIN)
+	mkdir -p $(@D)
+	$(RP2350_CC) $(RP2350_ASFLAGS) -c $< -o $@
 $(NAMETAG_M2_DIR)/nametag_measure.o: $(SHARED_DIR)/nametag_measure.c $(SHARED_DIR)/nametag_measure.h $(SHARED_DIR)/usb_report.h $(SHARED_DIR)/bytes.h | $(NAMETAG_M2_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
 $(NAMETAG_M2_DIR)/usb_report.o: $(SHARED_DIR)/usb_report.c $(SHARED_DIR)/usb_report.h $(SHARED_DIR)/bytes.h | $(NAMETAG_M2_DIR)
@@ -643,7 +666,7 @@ $(NAMETAG_M2_DIR)/live_usb_control.o: src/usb/live_usb_control.c src/usb/live_us
 $(NAMETAG_M2_DIR)/live_usb_hw.o: src/usb/live_usb_hw.c src/usb/live_usb_hw.h src/usb/live_usb.h $(SHARED_DIR)/nametag_measure.h | $(NAMETAG_M2_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -c $< -o $@
 $(NAMETAG_M2_DIR)/nametag_m2.o: $(TOOLS_DIR)/nametag_m2.c $(NAMETAG_M2_INPUTS) $(NAMETAG_M2_DIR)/nametag_m2_build.h | $(NAMETAG_M2_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -I$(PLATFORM_DIR) -I$(NAMETAG_ASSET_DIR) -I$(NAMETAG_M2_DIR) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(RP2350_CFLAGS) -DLIVE_USB_NAMETAG_M2 -I$(PLATFORM_DIR) -I$(NAMETAG_ASSET_DIR) -I$(NAMETAG_M2_DIR) $(RP2350_APP_STACK) -c $< -o $@
 
 $(NAMETAG_M2_DIR)/nametag_m2.elf: $(NAMETAG_M2_OBJS) $(ARCH_DIR)/memmap_report.ld
 	$(RP2350_CC) $(RP2350_CFLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
@@ -728,10 +751,11 @@ $(HOST_TOOLS_DIR)/font_core_test: src/host/tests/font_core_test.c $(HOST_TOOLS_S
 
 $(NAMETAG_FONT_STAMP): $(HOST_TOOLS_DIR)/nametag_font_compile $(NAMETAG_FONT_FILES) vendor/cascadia-code/LICENSE $(NAMETAG_HEADERS)
 	mkdir -p $(NAMETAG_ASSET_DIR)
-	$(HOST_TOOLS_DIR)/nametag_font_compile $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_FONT_FILES) $(NAMETAG_COVERAGE) vendor/cascadia-code/LICENSE
+	$(HOST_TOOLS_DIR)/nametag_font_compile $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_FONT_FILES) $(NAMETAG_COVERAGE) vendor/cascadia-code/LICENSE \
+		$(NAMETAG_FONT_META) $(NAMETAG_FONT_ASM) "$(abspath $(NAMETAG_FONT_BIN))"
 	touch $@
 
-$(NAMETAG_FONT_C) $(NAMETAG_FONT_H): $(NAMETAG_FONT_STAMP)
+$(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_FONT_META) $(NAMETAG_FONT_ASM) $(NAMETAG_FONT_BIN): $(NAMETAG_FONT_STAMP)
 	@test -f $@ || { echo "Missing generated font output; remove $(NAMETAG_FONT_STAMP) and rebuild"; exit 1; }
 
 $(NAMETAG_PREVIEW): $(HOST_TOOLS_SRC_DIR)/nametag_preview.c $(NAMETAG_SOURCES) $(NAMETAG_HEADERS) $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) | $(HOST_TOOLS_DIR)
@@ -773,17 +797,17 @@ $(NAMETAG_TARGET_DIR):
 	mkdir -p $@
 
 $(NAMETAG_TARGET_DIR)/bitmap_font.o: $(SHARED_DIR)/bitmap_font.c $(NAMETAG_HEADERS) | $(NAMETAG_TARGET_DIR)
-	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -c $< -o $@
 
 $(NAMETAG_TARGET_DIR)/nametag.o: $(SHARED_DIR)/nametag.c $(NAMETAG_HEADERS) | $(NAMETAG_TARGET_DIR)
-	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -c $< -o $@
 $(NAMETAG_TARGET_DIR)/frame_diff.o: $(NAMETAG_FRAME_C) $(NAMETAG_FRAME_H) $(SHARED_DIR)/bytes.h $(PLATFORM_DIR)/graphics.h | $(NAMETAG_TARGET_DIR)
-	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -fstack-usage -c $< -o $@
+	$(RP2350_CC) $(NAMETAG_RENDER_FLAGS) -c $< -o $@
 
 $(NAMETAG_TARGET_DIR)/graphics.o: $(PLATFORM_DIR)/graphics.c $(PLATFORM_DIR)/graphics.h | $(NAMETAG_TARGET_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
 
-$(NAMETAG_TARGET_DIR)/nametag_fonts.o: $(NAMETAG_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) | $(NAMETAG_TARGET_DIR)
+$(NAMETAG_TARGET_DIR)/nametag_fonts.o: $(NAMETAG_FW_FONT_C) $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) | $(NAMETAG_TARGET_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -I$(NAMETAG_ASSET_DIR) -c $< -o $@
 
 $(NAMETAG_TARGET_DIR)/nametag_target.o: src/host/tests/nametag_target.c $(NAMETAG_FONT_H) $(NAMETAG_HEADERS) $(NAMETAG_FRAME_H) | $(NAMETAG_TARGET_DIR)

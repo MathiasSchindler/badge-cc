@@ -339,6 +339,62 @@ entry:
     '-kernel', file('count.elf')]);
 });
 
+test('fixed halfword fills keep invariants in registers and use bounded writeback', t => {
+  const file = files(t);
+  const loop = (name, trips, qualifier) => `define void @${name}(i16 %color) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [0, %entry], [%next, %latch]
+  %go = icmp ult i32 %i, ${trips}
+  br i1 %go, label %body, label %done
+body:
+  %offset = mul i32 %i, 2
+  %dst = getelementptr i8, ptr @pixels, i32 %offset
+  store ${qualifier}i16 %color, ptr %dst, align 2
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+done:
+  ret void
+}`;
+  fs.writeFileSync(file('fill.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@pixels = internal global [10 x i16] zeroinitializer, align 2
+${loop('fill', 9, '')}
+${loop('zero_fill', 0, '')}
+${loop('volatile_fill', 9, 'volatile ')}
+define i32 @main() {
+entry:
+  call void @fill(i16 4660)
+  call void @zero_fill(i16 0)
+  %low = load i16, ptr @pixels, align 2
+  %tail = getelementptr i8, ptr @pixels, i32 16
+  %high = load i16, ptr %tail, align 2
+  %end = getelementptr i8, ptr @pixels, i32 18
+  %guard = load i16, ptr %end, align 2
+  %a = xor i16 %low, 4660
+  %b = xor i16 %high, 4660
+  %c = or i16 %a, %b
+  %d = or i16 %c, %guard
+  %status = zext i16 %d to i32
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('fill.ll'), '-o', file('fill.s')]);
+  const assembly = fs.readFileSync(file('fill.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.match(body('fill'), /strh\.w r2, \[r1\], #2\nsubs\.n r0, #1\nbne\.n/);
+  assert.doesNotMatch(body('zero_fill') + body('volatile_fill'), /@ fixed-halfword-fill:/);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('fill.s'), '-o', file('fill.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('fill.o'), '-o', file('fill.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('fill.elf')]);
+});
+
 test('bounded loops hoist immutable literals but retain loads across calls or clobbers', t => {
   const file = files(t);
   const loop = (name, update, result) => `define i32 @${name}(i32 %n) {

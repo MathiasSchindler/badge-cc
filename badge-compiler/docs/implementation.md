@@ -2055,6 +2055,24 @@ offsets. This bounded case applies even in the default byte memory policy;
 larger copies, nonzero fills and unproven accesses still follow the memory
 policy above.
 
+`thumb-constants` also recognizes a closed, positive fixed-trip loop that
+stores an invariant halfword into a global at successive two-byte offsets.
+It loads the destination, color and count once and selects a Thumb writeback
+store and countdown. Volatile stores, observable induction values, additional
+entries/exits and unrecognized loop shapes keep the regular lowering.
+
+The optional `small-aggregate` IR pass splits aligned 8-, 12- and 16-byte
+private records into 32-bit fields and uses `mem2reg` to promote those fields
+across joins. It declines escaping addresses, unsupported accesses and
+volatile storage. Separately, `thumb-constants` can forward single-use aligned
+two-word loads from fixed frame objects into their final argument registers
+when no intervening write or call can change the source. The ABI is unchanged.
+
+The larger-firmware comparison uses `thumb-constants` and appends
+`global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions`
+to the default IR passes. `dead-instructions` removes producers left unused
+after constant propagation; the default optimizer pipeline is unchanged.
+
 Per-function `@ memory-selection:` comments report word-copy/fill sites and
 selected word/tail byte totals. These count **static intrinsic lengths**,
 not dynamic traffic or the number of emitted loop instructions. Copy totals

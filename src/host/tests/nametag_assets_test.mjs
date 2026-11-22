@@ -13,13 +13,16 @@ const fonts = ['CascadiaMono-Regular.ttf', 'CascadiaMono-Bold.ttf', 'CascadiaCod
 const license = path.join(root, 'vendor/cascadia-code/LICENSE');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
-function generate(directory, bits, files = fonts, notice = license) {
+function generate(directory, bits, files = fonts, notice = license, assets = false) {
   fs.mkdirSync(directory);
   const output = path.join(directory, 'nametag_fonts.c'), header = path.join(directory, 'nametag_fonts.h');
-  const result = spawnSync(generator, [output, header, ...files, String(bits), notice],
+  const meta = path.join(directory, 'meta.c'), assembly = path.join(directory, 'pixels.S');
+  const blob = path.join(directory, 'pixels.bin');
+  const result = spawnSync(generator, [output, header, ...files, String(bits), notice,
+    ...(assets ? [meta, assembly, blob] : [])],
     { cwd: root, encoding: 'utf8', timeout: 120000, maxBuffer: 1000000 });
   assert.ifError(result.error);
-  return { result, output, header };
+  return { result, output, header, meta, assembly, blob };
 }
 
 function tables(text, font) {
@@ -43,7 +46,7 @@ test('pinned font provenance, deterministic generator, loss-bounded 4-bit packin
   assert.equal(hash(license), '51882cd3cdba4e16f220f44ddb08a635c38c44ea6e0975db2574f4be6f958238');
   const base = fs.mkdtempSync(path.join(root, 'build/host-tools/nametag-assets-test-'));
   try {
-    const first = generate(path.join(base, 'first'), 8);
+    const first = generate(path.join(base, 'first'), 8, fonts, license, true);
     const second = generate(path.join(base, 'second'), 8);
     const packed = generate(path.join(base, 'packed'), 4);
     for (const run of [first, second, packed]) {
@@ -54,8 +57,15 @@ test('pinned font provenance, deterministic generator, loss-bounded 4-bit packin
     assert.equal(hash(first.header), hash(second.header));
     const eight = fs.readFileSync(first.output, 'utf8'), four = fs.readFileSync(packed.output, 'utf8');
     assert.match(eight, /SIL OPEN FONT LICENSE Version 1\.1/);
+    const blob = fs.readFileSync(first.blob), assembly = fs.readFileSync(first.assembly, 'utf8');
+    const slices = [...assembly.matchAll(/\.section \.rodata\.pixels_(\d+),[^\n]+[\s\S]*?\.incbin "[^"]+", (\d+), (\d+)/g)];
+    assert.equal(slices.length, 20);
+    let offset = 0;
     for (let font = 0; font < 20; ++font) {
       const a = tables(eight, font), b = tables(four, font);
+      assert.deepEqual(slices[font].slice(1).map(Number), [font, offset, a.pixels.length]);
+      assert.deepEqual(blob.subarray(offset, offset + a.pixels.length), Buffer.from(a.pixels));
+      offset += a.pixels.length;
       assert.equal(a.glyphs.length, 206);
       for (let i = 0; i < 206; ++i) {
         const ga = a.glyphs[i], gb = b.glyphs[i];
@@ -67,6 +77,10 @@ test('pinned font provenance, deterministic generator, loss-bounded 4-bit packin
         }
       }
     }
+    assert.equal(offset, blob.length);
+    assert.equal(fs.readFileSync(first.meta, 'utf8'), eight.replace(
+      /static const uint8_t pixels_(\d+)\[\] = \{([^}]+)\};/g,
+      (_, number, values) => `extern const uint8_t pixels_${number}[${values.match(/\d+/g).length}];`));
     const malformed = path.join(base, 'malformed.ttf');
     fs.writeFileSync(malformed, 'not a font');
     const invalid = generate(path.join(base, 'invalid'), 8, [malformed, ...fonts.slice(1)]);

@@ -2,6 +2,7 @@
 
 void ir_constant_fold(ir_context *, ir_module *);
 void ir_aggregate_memory(ir_context *, ir_module *);
+void ir_small_aggregate(ir_context *, ir_module *);
 void ir_sret_forward(ir_context *, ir_module *);
 void ir_wide_division(ir_context *, ir_module *);
 void ir_dead_instructions(ir_context *, ir_module *);
@@ -51,6 +52,9 @@ const ir_pass badge_ir_passes[] = {
     {"sret-forward",
      "Forward copied internal aggregate results directly into private byte buffers",
      ir_sret_forward, IR_PASS_OPTIMIZATION},
+    {"small-aggregate",
+     "Promote private two-to-four-word records using existing SSA construction",
+     ir_small_aggregate, IR_PASS_OPTIMIZATION},
     {"wide-division",
      "Lower general i64 division/remainder to owned restoring-division IR",
      ir_wide_division, IR_PASS_LEGALIZATION},

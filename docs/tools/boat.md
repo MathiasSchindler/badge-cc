@@ -156,6 +156,19 @@ not yet physically qualified.
 
 ### Verification record
 
+For a build-only owned-compiler comparison, use a separate output directory
+and select `RP2350_APP_PROFILE=owned`. This uses the owned `-Oz` pipeline;
+it does not emit Clang `.su` reports or replace the stock LLVM `-O2` profile.
+
+```sh
+make -C badge-compiler
+out=build/boat-owned
+make BUILD_DIR="$out" RP2350_APP_PROFILE=owned \
+  RP2350_CC="bash $PWD/badge-compiler/scripts/owned-cc.sh" \
+  "$out/universe26/uf2/boat.uf2" "$out/universe26/uf2/boat-breaking.uf2" \
+  "$out/universe26/uf2/boat_profile.uf2"
+```
+
 `make boat test-boat` builds the no-libc ARM image and runs four host suites
 with address/undefined-behavior sanitizers:
 
