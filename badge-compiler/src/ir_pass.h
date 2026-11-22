@@ -83,6 +83,7 @@ void ir_append(ir_context *c, const char *bytes, size_t size);
 void ir_emit(ir_context *c, const char *format, ...);
 void ir_parse(ir_context *c, ir_module *m, const char *source, size_t size);
 void ir_write(ir_context *c, const ir_module *m);
+void ir_write_line(ir_context *c, const ir_module *m, const ir_line *line);
 const char *ir_text(const ir_module *m, unsigned index);
 int ir_integer(const char *text, uint64_t *value);
 unsigned ir_bits(const char *text);

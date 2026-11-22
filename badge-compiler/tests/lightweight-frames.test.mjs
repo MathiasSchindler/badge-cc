@@ -30,6 +30,86 @@ function execute(file, objects, name) {
   run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
     '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file(`${name}.elf`)]);
 }
+test('entry guards bypass saves on void returns and restore unchanged arguments on fallthrough', t => {
+  const file = files(t);
+  const source = `@value = global i32 0, align 4
+@result = global i32 0, align 4
+define void @record(i32 %a, i32 %b, i32 %c, i32 %d) {
+entry:
+  %x = mul i32 %a, 3
+  %y = mul i32 %b, 5
+  %z = mul i32 %c, 7
+  %w = mul i32 %d, 11
+  %lo = add i32 %x, %y
+  %hi = add i32 %z, %w
+  %v = add i32 %lo, %hi
+  store volatile i32 %v, ptr @result, align 4
+  ret void
+}
+define void @frame_user(ptr %area) {
+entry:
+  store volatile i32 9, ptr %area, align 4
+  ret void
+}
+define void @check(i32 %a, i32 %b, i32 %c, i32 %d) {
+entry:
+  %lo = sub i32 %b, 8
+  %v = load i32, ptr @value, align 4
+  %low = icmp sle i32 %v, %lo
+  br i1 %low, label %return, label %upper
+upper:
+  %end = add i32 %b, %d
+  %hi = add i32 %end, 8
+  %v2 = load i32, ptr @value, align 4
+  %inside = icmp slt i32 %v2, %hi
+  br i1 %inside, label %work, label %return
+work:
+  %area = alloca [32 x i8], align 4
+  call void @frame_user(ptr %area)
+  call void @record(i32 %a, i32 %b, i32 %c, i32 %d)
+  br label %return
+return:
+  ret void
+}
+define i32 @main() {
+entry:
+  store i32 12, ptr @value, align 4
+  call void @check(i32 3, i32 20, i32 7, i32 4)
+  %low = load volatile i32, ptr @result, align 4
+  store i32 32, ptr @value, align 4
+  call void @check(i32 3, i32 20, i32 7, i32 4)
+  %high = load volatile i32, ptr @result, align 4
+  store i32 31, ptr @value, align 4
+  call void @check(i32 3, i32 20, i32 7, i32 4)
+  %inside = load volatile i32, ptr @result, align 4
+  %good = xor i32 %inside, 202
+  %both = or i32 %low, %high
+  %status = or i32 %both, %good
+  ret i32 %status
+}`;
+  const control = compile(file, source, 'thumb-widths');
+  const selected = compile(file, source, 'thumb-constants');
+  const prefix = text => text.match(/^check:\n[^]*?^push\./m)[0];
+  assert.doesNotMatch(prefix(control), /entry-guard/);
+  assert.match(prefix(selected), /entry-guard: stack bypass checks 2[^]*bx lr/);
+  const baselineFrame = parseAssembly(control, 'control').get('check');
+  const selectedFrame = parseAssembly(selected, 'candidate').get('check');
+  assert(selectedFrame.frame_bytes <= baselineFrame.frame_bytes);
+  assert(selectedFrame.saves_bytes <= baselineFrame.saves_bytes);
+  const width = compile(file, source.replace('load i32, ptr @value', 'load volatile i32, ptr @value'),
+    'thumb-constants');
+  assert.doesNotMatch(prefix(width), /entry-guard/);
+  const effect = compile(file, source.replace('%lo = sub i32 %b, 8',
+    'store volatile i32 9, ptr @result, align 4\n  %lo = sub i32 %b, 8'), 'thumb-constants');
+  assert.doesNotMatch(prefix(effect), /entry-guard/);
+  fs.writeFileSync(file('thumb-constants.s'), selected);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const policy of ['thumb-widths', 'thumb-constants']) {
+    run(tool('badge-asm'), [file(`${policy}.s`), '-o', file(`${policy}.o`)]);
+    execute(file, [file(`${policy}.o`)], policy);
+  }
+});
+
 test('stack-free scalar leaves have no save/frame work; finalized metadata matches emission', t => {
   const file = files(t);
   const source = `define i32 @identity(i32 %x) {\nentry:\nret i32 %x\n}

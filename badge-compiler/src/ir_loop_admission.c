@@ -63,6 +63,27 @@ static char *function_text(ir_context *c, ir_module *m, const ir_analysis *a, un
   *size = c->size;
   return ir_copy(c, c->output, c->size);
 }
+static int needs_sibling_local(const ir_analysis *a, unsigned function) {
+  const ir_function *fn = &a->functions[function];
+  for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++) {
+    const ir_block *block = &a->blocks[b];
+    for (unsigned i = block->first_instruction; i < block->first_instruction + block->instruction_count; i++) {
+      const ir_instruction *in = &a->instructions[i];
+      for (unsigned k = in->first_operand; k < in->first_operand + in->operand_count; k++) {
+        const ir_operand *op = &a->operands[k];
+        if (op->kind != IR_OPERAND_GLOBAL)
+          continue;
+        const ir_global *g = &a->globals[op->definition];
+        const char *name = g->name + 1;
+        if (*name == '"')
+          name++;
+        if (*name == '.' && g->function != IR_NONE && g->function != function)
+          return 1;
+      }
+    }
+  }
+  return 0;
+}
 void ir_function_admission(ir_context *c, ir_module *m, const ir_analysis *a,
                            badge_scalar_selection selection) {
   uint64_t work = IR_LOOP_ADMISSION_WORK_LIMIT;
@@ -77,6 +98,12 @@ void ir_function_admission(ir_context *c, ir_module *m, const ir_analysis *a,
     }
     if (end == m->line_count) ir_error(c, "loop-scalar admission cannot delimit function");
     if (!changed) continue;
+    // The isolated assembler cannot resolve a sibling's assembler-local symbol.
+    if (needs_sibling_local(a, f)) {
+      for (unsigned line = begin; line <= end; line++) m->lines[line].replacement = NULL;
+      ir_note(c, "skipped", "isolated_sibling_local_symbol", 1);
+      continue;
+    }
     size_t before_size, after_size;
     char *before = function_text(c, m, a, begin, end, 0, &before_size);
     char *after = function_text(c, m, a, begin, end, 1, &after_size);

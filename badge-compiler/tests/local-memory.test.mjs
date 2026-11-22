@@ -155,6 +155,68 @@ entry:
   run(tool('badge-opt'), ['--passes=local-memory', f('input.ll'), '-o', f('input.ll')], false);
   assert.deepEqual(fs.readFileSync(f('input.ll')), before);
 });
+
+test('indexed global reuse across a guard keeps writes, volatile reads, and other indices distinct', t => {
+  const f = files(t);
+  const guard = (name, intervening = '', index = '%i', qualifier = '') => `
+define i32 @${name}(i32 %i, i32 %j) {
+entry:
+  %offset = mul i32 %i, 4
+  %first_ptr = getelementptr i8, ptr @table, i32 %offset
+  %first = load i32, ptr %first_ptr, align 4
+  %yes = icmp eq i32 %first, 1
+  br i1 %yes, label %hit, label %next
+hit:
+  ret i32 10
+next:
+  ${intervening}
+  %again_offset = mul i32 ${index}, 4
+  %again_ptr = getelementptr i8, ptr @table, i32 %again_offset
+  %again = load ${qualifier}i32, ptr %again_ptr, align 4
+  %second = icmp eq i32 %again, 2
+  %answer = select i1 %second, i32 20, i32 30
+  ret i32 %answer
+}`;
+  const text = lower(f, `@table = global [3 x i32] [i32 0, i32 1, i32 2], align 4
+${guard('probe')}
+${guard('written', 'store i32 2, ptr %first_ptr, align 4')}
+${guard('other_index', '', '%j')}
+${guard('ordered', '', '%i', 'volatile ')}
+define internal void @".helper"() {
+entry:
+  ret void
+}
+${guard('uses_local_helper').replace('ret i32 %answer', 'call void @".helper"()\n  ret i32 %answer')}
+define i32 @main() {
+entry:
+  %a = call i32 @probe(i32 0, i32 1)
+  %b = call i32 @probe(i32 1, i32 0)
+  %c = call i32 @probe(i32 2, i32 0)
+  %d = call i32 @written(i32 0, i32 1)
+  %e = call i32 @other_index(i32 2, i32 1)
+  %ab = add i32 %a, %b
+  %cd = add i32 %c, %d
+  %total = add i32 %ab, %cd
+  %all = add i32 %total, %e
+  %status = sub i32 %all, 110
+  ret i32 %status
+}`, 'global-memory');
+  const body = name => text.match(new RegExp(`define i32 @${name}[^]*?\\n}`))[0];
+  assert.doesNotMatch(body('probe'), /%again(_offset|_ptr)? =/);
+  assert.match(body('probe'), /icmp eq i32 %first, 2/);
+  for (const name of ['written', 'other_index', 'ordered', 'uses_local_helper'])
+    assert.match(body(name), /%again = load/);
+  if (oracle) {
+    run(tool('badge-codegen'), ['--scalar-selection=thumb-constants', f('badge-opt.ll'), '-o', f('output.s')]);
+    run(tool('badge-asm'), [f('output.s'), '-o', f('output.o')]);
+    run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', f('start.o')]);
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+      f('start.o'), f('output.o'), '-o', f('output.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', f('output.elf')]);
+  }
+});
 test('aliasing writes, calls, volatile, metadata, wide accesses and long/cross-block uses stay conservative', t => {
   const f = files(t);
   for (const barrier of ['store i8 7, ptr %q, align 1', 'call void @touch(ptr %p)',

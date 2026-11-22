@@ -113,7 +113,44 @@ repeated to correct accounting.
 
 ## Usage and reproduction
 
-For a firmware experiment, append the pass to the promoted pipeline and select
+### Private global loop bounds
+
+`loop-bounds` is a separate opt-in pass for a header that tests an induction
+PHI against one private i32 global load, or the unflagged product of two such
+loads. It moves that exact sequence into an existing unique preheader. The
+header is always reached from the preheader, including for a zero-trip loop.
+
+The pass checks the loop and its bounded nonrecursive chain of direct internal
+calls for writes to either global. It follows actual pointer arguments and
+simple byte addresses back to distinct private objects or fixed stack
+objects. An unknown pointer, an indirect or external call, a recursive call,
+volatile/atomic memory, or an opaque effect blocks hoisting. Inline constant
+memory intrinsics are considered only when nonvolatile and their destination
+is proven disjoint.
+
+Admission compares the isolated function under `thumb-constants` and rejects
+growth in encoded bytes, frame, saves, or spills. This pass is not part of the
+default pipeline. To test it **after** a full sixteen-pass profile, apply it as
+a standalone pass to the saved optimized IR:
+
+```sh
+badge-compiler/build/badge-opt --passes=loop-bounds input.ll -o bound-candidate.ll
+badge-compiler/build/badge-codegen --scalar-selection=thumb-constants \
+  bound-candidate.ll -o bound-candidate.s
+make -C badge-compiler test-loop-scalar
+```
+
+The focused product fixture falls from 76 to 46 reached QEMU instructions.
+In Maze, the hazard bound is legal but the current allocator grows its
+spill count from 5 to 13, so it is rejected. The wall loop cannot prove the
+effects of its external square-root call. An explicit stack-cache probe
+was slower than unrestricted register hoisting and did not reduce the
+hazard spill count. The admitted pass left the final Maze IR and all 123
+replayed firmware modules unchanged; no hardware timing is implied.
+
+### Pure scalar loop motion
+
+For the historical pure scalar loop experiment, select `loop-scalar` with
 the qualified backend:
 
 ```sh

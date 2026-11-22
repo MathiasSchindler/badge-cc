@@ -166,6 +166,249 @@ static void summarize_registers(cg_context *c, cg_function *f, size_t start) {
   f->machine_registers_known = known;
   cg_emit(c, "@ finalized-register-mentions: known %d mask %u\n", known, mask);
 }
+enum { GUARD_VALUES = 40, GUARD_BLOCKS = 16 };
+typedef struct {
+  const char *name, *alias;
+  const cg_inst *definition;
+} guard_value;
+typedef struct {
+  cg_block *block, *predecessor;
+  cg_block *seen[GUARD_BLOCKS];
+  guard_value values[GUARD_VALUES];
+  unsigned count, visited;
+} guard_path;
+typedef struct {
+  const char *symbol, *condition;
+  unsigned arguments;
+  int offset, swapped;
+} entry_guard;
+
+static const char *guard_token(cg_context *c, const cg_inst *i, unsigned k) {
+  return c->tokens[i->begin + k].text;
+}
+static cg_block *guard_block(cg_context *c, const char *label) {
+  const char *name = cg_name(c, label);
+  for (cg_block *b = c->fn->blocks; b; b = b->next) {
+    cg_register_work(c);
+    if (!strcmp(b->name, name))
+      return b;
+  }
+  return NULL;
+}
+static const cg_inst *guard_resolve(const guard_path *path, const char **name) {
+  for (unsigned i = path->count; i-- > 0;) {
+    const guard_value *v = &path->values[i];
+    if (!strcmp(*name, v->name)) {
+      if (v->definition)
+        return v->definition;
+      *name = v->alias;
+    }
+  }
+  return NULL;
+}
+static const char *guard_phi(cg_context *c, const cg_inst *i, const cg_block *pred) {
+  unsigned count = i->end - i->begin;
+  if (!pred || count < 9 || strcmp(guard_token(c, i, 3), "i1"))
+    return NULL;
+  for (unsigned k = 4; k + 4 < count; k += 6) {
+    if (strcmp(guard_token(c, i, k), "[") || strcmp(guard_token(c, i, k + 2), ",") ||
+        strcmp(guard_token(c, i, k + 4), "]"))
+      return NULL;
+    if (!strcmp(cg_name(c, guard_token(c, i, k + 3)), pred->name))
+      return guard_token(c, i, k + 1);
+    if (k + 5 < count && strcmp(guard_token(c, i, k + 5), ","))
+      return NULL;
+  }
+  return NULL;
+}
+static int guard_load(cg_context *c, const cg_inst *i) {
+  return i->end - i->begin == 10 && !strcmp(guard_token(c, i, 2), "load") &&
+         !strcmp(guard_token(c, i, 3), "i32") && !strcmp(guard_token(c, i, 5), "ptr") &&
+         *guard_token(c, i, 6) == '@' && !strcmp(guard_token(c, i, 8), "align") &&
+         (!strcmp(guard_token(c, i, 9), "4") || !strcmp(guard_token(c, i, 9), "8"));
+}
+
+// Follow a bounded entry path. On a proposed return edge, allow only control and PHIs.
+static int guard_walk(cg_context *c, guard_path *path, int return_only,
+                      const cg_inst **branch, const char **condition) {
+  while (path->block && path->visited < GUARD_BLOCKS) {
+    cg_block *here = path->block;
+    for (unsigned n = 0; n < path->visited; n++)
+      if (path->seen[n] == here)
+        return 0;
+    path->seen[path->visited++] = here;
+    path->block = NULL;
+    for (cg_inst *i = here->first; i; i = i->next) {
+      cg_register_work(c);
+      unsigned n = i->end - i->begin;
+      const char *op = guard_token(c, i, i->result ? 2 : 0);
+      if (!i->result && !i->next && !strcmp(op, "ret"))
+        return n == 2 && !strcmp(guard_token(c, i, 1), "void");
+      if (!i->result && !i->next && !strcmp(op, "br")) {
+        unsigned target = 2;
+        if (n == 9 && !strcmp(guard_token(c, i, 1), "i1")) {
+          const char *flag = guard_token(c, i, 2);
+          (void)guard_resolve(path, &flag);
+          if (!strcmp(flag, "true") || !strcmp(flag, "1")) target = 5;
+          else if (!strcmp(flag, "false") || !strcmp(flag, "0")) target = 8;
+          else {
+            if (!return_only) {
+              path->block = here;
+              *branch = i;
+              *condition = flag;
+            }
+            return 0;
+          }
+        } else if (n != 3 || strcmp(guard_token(c, i, 1), "label"))
+          return 0;
+        path->predecessor = here;
+        path->block = guard_block(c, guard_token(c, i, target));
+        break;
+      }
+      if (!i->result || path->count == GUARD_VALUES)
+        return 0;
+      if (!strcmp(op, "phi")) {
+        const char *alias = guard_phi(c, i, path->predecessor);
+        if (!alias)
+          return 0;
+        path->values[path->count++] = (guard_value){i->result->name, alias, NULL};
+      } else {
+        int arithmetic = n == 7 && (!strcmp(op, "add") || !strcmp(op, "sub")) &&
+                         !strcmp(guard_token(c, i, 3), "i32");
+        int compare = n == 8 && !strcmp(op, "icmp") && !strcmp(guard_token(c, i, 4), "i32");
+        if (return_only || (!arithmetic && !compare && !guard_load(c, i)))
+          return 0;
+        path->values[path->count++] = (guard_value){i->result->name, NULL, i};
+      }
+    }
+  }
+  return 0;
+}
+static int guard_bound(cg_context *c, const guard_path *path, const char *term,
+                       unsigned depth, unsigned *args, int *offset) {
+  *args = 0;
+  *offset = 0;
+  for (unsigned k = 0; k < c->fn->argc; k++)
+    if (!strcmp(c->fn->args[k]->name, term)) {
+      *args = 1u << k;
+      return 1;
+    }
+  if (isdigit((unsigned char)*term) || *term == '-') {
+    char *end;
+    int64_t n = strtoll(term, &end, 10);
+    if (*end || n < -4095 || n > 4095)
+      return 0;
+    *offset = (int)n;
+    return 1;
+  }
+  if (depth == 3)
+    return 0;
+  const cg_inst *in = guard_resolve(path, &term);
+  if (!in || in->end - in->begin != 7)
+    return 0;
+  const char *op = guard_token(c, in, 2);
+  if (strcmp(op, "add") && strcmp(op, "sub"))
+    return 0;
+  unsigned right;
+  int delta;
+  if (!guard_bound(c, path, guard_token(c, in, 4), depth + 1, args, offset) ||
+      !guard_bound(c, path, guard_token(c, in, 6), depth + 1, &right, &delta) ||
+      (*args & right) || (!strcmp(op, "sub") && right))
+    return 0;
+  *args |= right;
+  *offset += !strcmp(op, "sub") ? -delta : delta;
+  return *offset >= -4095 && *offset <= 4095;
+}
+static int plan_entry_guard(cg_context *c, guard_path *path, entry_guard *guard) {
+  const cg_inst *branch = NULL;
+  const char *flag = NULL;
+  if (guard_walk(c, path, 0, &branch, &flag) || !branch || path->count == GUARD_VALUES)
+    return 0;
+  const cg_inst *cmp = guard_resolve(path, &flag);
+  if (!cmp || cmp->end - cmp->begin != 8 || strcmp(guard_token(c, cmp, 2), "icmp"))
+    return 0;
+  const char *condition = cg_comparison_condition(guard_token(c, cmp, 3));
+  if (!condition)
+    return 0;
+  const char *lhs = guard_token(c, cmp, 5), *rhs = guard_token(c, cmp, 7);
+  const cg_inst *load = guard_resolve(path, &lhs);
+  int swapped = !load || !guard_load(c, load);
+  if (swapped)
+    load = guard_resolve(path, &rhs);
+  if (!load || !guard_load(c, load) ||
+      !guard_bound(c, path, swapped ? lhs : rhs, 0, &guard->arguments, &guard->offset) ||
+      !guard->arguments || __builtin_popcount(guard->arguments) > 2)
+    return 0;
+  guard_path edges[2] = {*path, *path};
+  int returns[2];
+  for (unsigned n = 0; n < 2; n++) {
+    edges[n].predecessor = path->block;
+    edges[n].block = guard_block(c, guard_token(c, branch, n ? 8 : 5));
+    edges[n].values[edges[n].count++] = (guard_value){flag, n ? "false" : "true", NULL};
+    guard_path probe = edges[n];
+    returns[n] = guard_walk(c, &probe, 1, NULL, NULL);
+  }
+  if (returns[0] == returns[1])
+    return 0;
+  *path = edges[returns[0] ? 1 : 0];
+  guard->symbol = guard_token(c, load, 6);
+  guard->condition = returns[0] ? condition : cg_inverse_condition(condition);
+  guard->swapped = swapped;
+  return 1;
+}
+static void guard_adjust(cg_context *c, unsigned argument, unsigned remove,
+                         unsigned add, int delta) {
+  if (remove)
+    cg_emit(c, "sub.w r%u, r%u, r%u\n", argument, argument, (unsigned)__builtin_ctz(remove));
+  if (add)
+    cg_emit(c, "add.w r%u, r%u, r%u\n", argument, argument, (unsigned)__builtin_ctz(add));
+  if (delta)
+    cg_emit(c, "%s r%u, r%u, #%u\n", delta < 0 ? "subw" : "addw",
+            argument, argument, (unsigned)abs(delta));
+}
+static void emit_entry_guards(cg_context *c, unsigned stack_bytes, int calls, int opaque) {
+  cg_function *f = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS || !cg_global_residency(c) ||
+      !calls || opaque || stack_bytes < 24 || f->ret->size || f->section || f->argc > 4)
+    return;
+  for (unsigned k = 0; k < f->argc; k++)
+    if (f->byval[k] || f->args[k]->type->bits != 32)
+      return;
+  guard_path path = {.block = f->blocks};
+  entry_guard guards[2];
+  if (!plan_entry_guard(c, &path, &guards[0]))
+    return;
+  unsigned count = 1, common = guards[0].arguments;
+  if (plan_entry_guard(c, &path, &guards[1]) &&
+      !strcmp(guards[0].symbol, guards[1].symbol) &&
+      (common & guards[1].arguments) && abs(guards[1].offset - guards[0].offset) <= 4095) {
+    count = 2;
+    common &= guards[1].arguments;
+  }
+  unsigned arg = (unsigned)__builtin_ctz(common), other = 0, id = f->id;
+  int offset = 0;
+  cg_emit(c, "@ entry-guard: stack bypass checks %u\n", count);
+  cg_symbol(c, 12, cg_name(c, guards[0].symbol), 0);
+  cg_emit(c, "ldr.w r12, [r12]\n");
+  for (unsigned n = 0; n < count; n++) {
+    const entry_guard *test = &guards[n];
+    unsigned next_other = test->arguments & ~(1u << arg);
+    guard_adjust(c, arg, other & ~next_other, next_other & ~other, test->offset - offset);
+    cg_emit(c, "cmp r%u, r%u\n", test->swapped ? arg : 12, test->swapped ? 12 : arg);
+    if (n + 1 == count)
+      cg_emit(c, "b%s.n .Lcg_entry_frame%u\n",
+              cg_inverse_condition(test->condition), id);
+    else
+      cg_emit(c, "b%s.n .Lcg_entry_reject%u\n", test->condition, id);
+    other = next_other;
+    offset = test->offset;
+  }
+  if (count > 1)
+    cg_emit(c, ".Lcg_entry_reject%u:\n", id);
+  cg_emit(c, "bx lr\n.Lcg_entry_frame%u:\n", id);
+  guard_adjust(c, arg, other, 0, -offset);
+}
+
 static void finalize_frame(cg_context *c, size_t header, size_t start) {
   cg_function *f = c->fn;
   char *body = cg_alloc(c, c->size - start + 1);
@@ -207,6 +450,7 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   c->out[header] = 0;
   function_header(c, f);
   cg_emit(c, "@ lightweight-frame: mask %u base %s calls %d\n", mask, based ? "r7" : "sp", calls);
+  emit_entry_guards(c, f->frame + c->register_saved_bytes, calls, opaque);
   if (mask) register_list(c, mask, 0);
   if (f->frame) {
     cg_immediate(c, 12, f->frame);

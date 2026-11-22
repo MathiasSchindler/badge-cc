@@ -22,13 +22,15 @@ typedef struct {
   unsigned moves;
   int cost_gated;
   int scalar_gated;
+  int bounds_gated;
   char **extra, **phis;
   unsigned char *removed;
 } loops;
 
 static void spend(loops *p, uint64_t n) {
   if (n > p->work)
-    ir_error(p->c, p->scalar_gated ? "loop-scalar work limit exceeded" :
+    ir_error(p->c, p->bounds_gated ? "loop-bounds work limit exceeded" :
+                   p->scalar_gated ? "loop-scalar work limit exceeded" :
                    p->cost_gated ? "loop-cost work limit exceeded"
                               : "loop-invariant work limit exceeded");
   p->work -= n;
@@ -207,7 +209,7 @@ static void move(loops *p, unsigned i, unsigned preheader) {
     ir_note(p->c, "skipped", "operand_not_available_in_preheader", 1);
     return;
   }
-  ir_note(p->c, p->scalar_gated ? "proposed" :
+  ir_note(p->c, p->scalar_gated || p->bounds_gated ? "proposed" :
           p->location[i] == in->block ? "transformed" : "propagated",
           p->location[i] == in->block ? "invariant_hoisted" : "nested_motion",
           1);
@@ -219,6 +221,182 @@ static void move(loops *p, unsigned i, unsigned preheader) {
     p->first[preheader] = q;
   p->last[preheader] = q;
   p->location[i] = preheader;
+  p->moves++;
+}
+
+typedef struct write_call {
+  const struct write_call *parent;
+  const ir_instruction *site;
+  unsigned function, depth;
+} write_call;
+
+static int private_storage(loops *p, unsigned global) {
+  const ir_global *g = &p->a.globals[global];
+  const ir_line *line = &p->a.text->lines[g->line - 1];
+  return g->function == IR_NONE && line->count >= 6 &&
+         (!strcmp(ir_text(p->a.text, line->first + 2), "internal") ||
+          !strcmp(ir_text(p->a.text, line->first + 2), "private")) &&
+         !strcmp(ir_text(p->a.text, line->first + 3), "global");
+}
+static int disjoint_pointer(loops *p, const ir_operand *op, unsigned global,
+                            const write_call *call) {
+  ir_analysis *a = &p->a;
+  for (unsigned steps = 0; steps < 16; steps++) {
+    spend(p, 1);
+    if (op->kind == IR_OPERAND_GLOBAL)
+      return op->definition != global && private_storage(p, op->definition);
+    if (op->kind != IR_OPERAND_LOCAL)
+      return 0;
+    const ir_definition *d = &a->definitions[op->definition];
+    if (d->instruction == IR_NONE) {
+      if (!call)
+        return 0;
+      const ir_function *f = &a->functions[call->function];
+      unsigned index = op->definition - f->first_definition;
+      if (index >= f->parameter_count)
+        return 0;
+      op = &a->operands[call->site->first_operand + 1 + index];
+      call = call->parent;
+      continue;
+    }
+    const ir_instruction *in = &a->instructions[d->instruction];
+    if (in->opcode == IR_OP_ALLOCA)
+      return 1;
+    if (in->opcode != IR_OP_GEP)
+      return 0;
+    op = &a->operands[in->first_operand];
+  }
+  return 0;
+}
+
+static int no_bound_write(loops *p, const ir_instruction *in, unsigned global,
+                          const write_call *caller) {
+  ir_analysis *a = &p->a;
+  spend(p, 1);
+  if (in->effects & (IR_EFFECT_OPAQUE | IR_EFFECT_VOLATILE))
+    return 0;
+  if (in->opcode == IR_OP_LOAD || in->opcode == IR_OP_STORE) {
+    const ir_line *line = &a->text->lines[in->line - 1];
+    for (unsigned k = line->op + 1; k < line->first + line->count; k++) {
+      spend(p, 1);
+      if (!strcmp(ir_text(a->text, k), "atomic"))
+        return 0;
+    }
+  }
+  if (!(in->effects & (IR_EFFECT_WRITE | IR_EFFECT_CALL)))
+    return 1;
+  if (in->opcode == IR_OP_STORE)
+    return disjoint_pointer(p, &a->operands[in->first_operand + 1], global, caller);
+  if (in->opcode != IR_OP_CALL || in->callee == IR_NONE ||
+      a->operands[in->callee].kind != IR_OPERAND_GLOBAL)
+    return 0;
+  const ir_global *callee = &a->globals[a->operands[in->callee].definition];
+  if ((!strcmp(callee->name, "@llvm.memcpy.inline.p0.p0.i32") ||
+       !strcmp(callee->name, "@llvm.memset.inline.p0.i32")) &&
+      in->operand_count == 5)
+    return !strcmp(ir_text(a->text, a->operands[in->first_operand + 4].token), "false") &&
+           disjoint_pointer(p, &a->operands[in->first_operand + 1], global, caller);
+  unsigned target = callee->function;
+  if (target == IR_NONE || a->functions[target].declaration ||
+      (caller && caller->depth == 6))
+    return 0;
+  const ir_function *fn = &a->functions[target];
+  const ir_line *line = &a->text->lines[fn->line - 1];
+  if (strcmp(ir_text(a->text, line->first + 1), "internal") &&
+      strcmp(ir_text(a->text, line->first + 1), "private"))
+    return 0;
+  for (const write_call *c = caller; c; c = c->parent)
+    if (target == c->function)
+      return 0;
+  write_call call = {caller, in, target, caller ? caller->depth + 1 : 1};
+  for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++) {
+    const ir_block *block = &a->blocks[b];
+    for (unsigned k = block->first_instruction; k < block->first_instruction + block->instruction_count; k++)
+      if (!no_bound_write(p, &a->instructions[k], global, &call))
+        return 0;
+  }
+  return 1;
+}
+
+static unsigned bound_global(loops *p, const ir_instruction *in) {
+  ir_analysis *a = &p->a;
+  if (in->opcode != IR_OP_LOAD || in->effects != (IR_EFFECT_READ | IR_EFFECT_TRAP) ||
+      in->line != in->end_line || a->types[in->type].kind != IR_INT || a->types[in->type].bits != 32)
+    return IR_NONE;
+  const ir_line *line = &a->text->lines[in->line - 1];
+  const ir_operand *op = &a->operands[in->first_operand];
+  if (op->kind != IR_OPERAND_GLOBAL || line->count != 10 ||
+      strcmp(ir_text(a->text, op->token + 2), "align") ||
+      strcmp(ir_text(a->text, op->token + 3), "4"))
+    return IR_NONE;
+  if (!private_storage(p, op->definition))
+    return IR_NONE;
+  return op->definition;
+}
+
+static void bound_loop(loops *p, const ir_function *f, unsigned header, unsigned preheader) {
+  ir_analysis *a = &p->a;
+  const ir_block *h = &a->blocks[header];
+  unsigned first = h->first_instruction, end = first + h->instruction_count;
+  if (h->successor_count != 2 || h->instruction_count < 4 ||
+      p->member[a->successors[h->first_successor]] ==
+          p->member[a->successors[h->first_successor + 1]])
+    return;
+  while (first < end && a->instructions[first].opcode == IR_OP_PHI)
+    first++;
+  unsigned loads = end - first == 3 ? 1 : end - first == 5 ? 2 : 0;
+  if (!loads)
+    return;
+  const ir_instruction *cmp = &a->instructions[end - 2], *term = cmp + 1;
+  if (cmp->opcode != IR_OP_COMPARE || cmp->operand_count != 2 ||
+      term->opcode != IR_OP_BR || term->operand_count != 3 ||
+      a->operands[term->first_operand].kind != IR_OPERAND_LOCAL ||
+      a->operands[term->first_operand].definition != cmp->definition)
+    return;
+  const ir_operand *induction = &a->operands[cmp->first_operand], *bound = induction + 1;
+  const ir_instruction *product = loads == 2 ? &a->instructions[first + 2] : NULL;
+  if (induction->kind != IR_OPERAND_LOCAL || bound->kind != IR_OPERAND_LOCAL ||
+      a->definitions[induction->definition].instruction == IR_NONE ||
+      a->instructions[a->definitions[induction->definition].instruction].opcode != IR_OP_PHI ||
+      a->definitions[induction->definition].block != header ||
+      !ir_type_equal(a, induction->type, a->instructions[first].type) ||
+      bound->definition != (product ? product : &a->instructions[first])->definition)
+    return;
+  if (product) {
+    const ir_operand *x = &a->operands[product->first_operand], *y = x + 1;
+    if (product->opcode != IR_OP_BINARY || strcmp(product->operation, "mul") ||
+        !eligible(p, product) || x->kind != IR_OPERAND_LOCAL || y->kind != IR_OPERAND_LOCAL ||
+        x->definition != a->instructions[first].definition ||
+        y->definition != a->instructions[first + 1].definition)
+      return;
+  }
+  for (unsigned k = 0; k < loads; k++) {
+    unsigned global = bound_global(p, &a->instructions[first + k]);
+    if (global == IR_NONE)
+      return;
+    for (unsigned b = f->first_block; b < f->first_block + f->block_count; b++) {
+      spend(p, 1);
+      if (!p->member[b])
+        continue;
+      const ir_block *block = &a->blocks[b];
+      for (unsigned i = block->first_instruction; i < block->first_instruction + block->instruction_count; i++)
+        if (!no_bound_write(p, &a->instructions[i], global, NULL)) {
+          ir_note(p->c, "skipped", "loop_bound_write_not_excluded", 1);
+          return;
+        }
+    }
+  }
+  for (unsigned i = first; i < end - 2; i++) {
+    motion *q = ir_allocate(p->c, sizeof(*q));
+    q->instruction = i;
+    if (p->last[preheader])
+      p->last[preheader]->next = q;
+    else
+      p->first[preheader] = q;
+    p->last[preheader] = q;
+    p->location[i] = preheader;
+  }
+  ir_note(p->c, "proposed", "private_global_loop_bound", 1);
   p->moves++;
 }
 static unsigned pressure(loops *p, const ir_function *f, int *calls) {
@@ -444,6 +622,10 @@ static void loop(loops *p, unsigned header) {
     }
   }
   ir_note(p->c, "candidate", "natural_loop_with_preheader", 1);
+  if (p->bounds_gated) {
+    bound_loop(p, f, header, preheader);
+    return;
+  }
   if (p->scalar_gated) {
     scalar_loop(p, f, header, preheader);
     return;
@@ -476,7 +658,7 @@ static void loop(loops *p, unsigned header) {
 static void run(ir_context *c, ir_module *m, int cost_gated) {
   ir_allocation *mark = c->allocations;
   loops p = {.c = c, .work = IR_LOOP_WORK_LIMIT, .cost_gated = cost_gated == 1,
-             .scalar_gated = cost_gated == 2};
+             .scalar_gated = cost_gated == 2, .bounds_gated = cost_gated == 3};
   ir_analyze(c, m, &p.a);
   ir_analysis *a = &p.a;
   p.order = ir_allocate(c, a->block_count * sizeof(*p.order));
@@ -541,8 +723,10 @@ static void run(ir_context *c, ir_module *m, int cost_gated) {
       line->replacement = ir_format(c, "%s%s", p.phis[b], original);
     }
   if (p.scalar_gated) ir_loop_admission(c, m, a);
+  if (p.bounds_gated) ir_function_admission(c, m, a, BADGE_SELECTION_THUMB_CONSTANTS);
   ir_reparse(c, m, mark);
 }
 void ir_loop_invariant(ir_context *c, ir_module *m) { run(c, m, 0); }
 void ir_loop_cost(ir_context *c, ir_module *m) { run(c, m, 1); }
 void ir_loop_scalar(ir_context *c, ir_module *m) { run(c, m, 2); }
+void ir_loop_bounds(ir_context *c, ir_module *m) { run(c, m, 3); }

@@ -229,6 +229,27 @@ correctness, strict budgets, and a resolved reached-workload benefit without
 resolved regressions. Defaults remain unchanged. PO09 retains promotion
 responsibility and the independently open physical/scratch-stack gates.
 
+## Opt-in global reuse across guard blocks
+
+`global-memory` also looks back through up to three forward edges into blocks
+with one predecessor, within the existing twelve-step bound. It reuses
+ordinary scalar loads of the same direct global or byte GEP from a global.
+Indexed forms require the same i32 index, or identical unflagged multiply or
+shift expressions with a literal scale. The pass leaves intervening stores,
+calls, volatile operations, opaque effects, joins, and backedges alone. A
+removed load can also remove its single-use GEP and scale.
+
+Admission measures the encoded `thumb-constants` function before and after
+and rejects code, frame, save or spill growth. If the isolated function
+needs an assembler-local sibling label, no candidate is admitted. This is
+an opt-in change; the default `local-memory` pass is still same-block only.
+
+In the four-level Maze physics probe, the two hazard-type comparisons reuse
+one table read instead of recomputing the address and loading it again.
+`touches_hazard` fell from 3,043,145 to 2,656,868 reached instructions in
+the isolated post-pass comparison, with matching Maze state digests.
+These are Cortex-M33 QEMU instruction counts, not badge timing.
+
 ## Reproduction
 
 With LLVM and QEMU available, from the project root:

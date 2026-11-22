@@ -8,7 +8,7 @@ dir=build/tilt-maze-oracle
 mkdir -p "$dir"
 target=(--target=arm-none-eabi -mcpu=cortex-m33 -mthumb -ffreestanding -fno-builtin
     -I../src/shared -I../src/platform/badger -I../src/tools)
-sources=(tests/fixtures/tilt_maze_fixture.c ../src/platform/badger/graphics.c
+sources=(tests/fixtures/tilt_maze_fixture.c tests/fixtures/maze_collision_fixture.c ../src/platform/badger/graphics.c
     ../src/tools/diagnostics_logic.c)
 ./build/badge-asm tests/fixtures/codegen_start.S -o "$dir/start.o"
 for compiler in owned llvm; do
@@ -25,8 +25,11 @@ for compiler in owned llvm; do
         objects+=("$object")
     done
     "$lld" --gc-sections -T tests/fixtures/tilt_maze_fixture.ld \
-        "$dir/start.o" "${objects[@]}" -o "$dir/maze-$compiler.elf"
-    python3 - "$qemu" "$dir/maze-$compiler.elf" <<'PY'
+        "$dir/start.o" "${objects[0]}" "${objects[2]}" "${objects[3]}" -o "$dir/maze-$compiler.elf"
+    "$lld" --gc-sections -T tests/fixtures/tilt_maze_fixture.ld \
+        "$dir/start.o" "${objects[1]}" "${objects[3]}" -o "$dir/collision-$compiler.elf"
+    for image in maze collision; do
+        python3 - "$qemu" "$dir/$image-$compiler.elf" <<'PY'
 import subprocess
 import sys
 
@@ -39,5 +42,6 @@ if result.returncode:
     sys.stderr.buffer.write(result.stdout + result.stderr)
     raise SystemExit(f"Maze target execution failed: {sys.argv[2]} (exit {result.returncode})")
 PY
-    printf 'PASS: %s maze fingerprint, calibration, rendering, hazards and progression\n' "$compiler"
+    done
+    printf 'PASS: %s maze fingerprint, calibration, rendering, hazards, progression and focused wall collisions\n' "$compiler"
 done

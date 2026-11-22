@@ -1,4 +1,5 @@
 #include "ir_analysis.h"
+#include "ir_loop_admission.h"
 #include <string.h>
 
 #ifndef IR_LOCAL_MEMORY_WORK_LIMIT
@@ -130,5 +131,165 @@ static void run_memory(ir_context *c, ir_module *m, unsigned global_only) {
   }
   ir_reparse(c, m, mark);
 }
+
+static const ir_instruction *simple_definition(memory *p, const ir_operand *value,
+                                               ir_opcode opcode, unsigned tokens) {
+  if (value->kind != IR_OPERAND_LOCAL)
+    return NULL;
+  unsigned definition = p->a.definitions[value->definition].instruction;
+  if (definition == IR_NONE)
+    return NULL;
+  const ir_instruction *in = &p->a.instructions[definition];
+  const ir_line *line = &p->a.text->lines[in->line - 1];
+  return in->opcode == opcode && in->line == in->end_line && line->count == tokens &&
+                 line->op == line->first + 2
+             ? in : NULL;
+}
+static const ir_instruction *indexed_global(memory *p, const ir_operand *address) {
+  const ir_instruction *gep = simple_definition(p, address, IR_OP_GEP, 10);
+  if (!gep)
+    return NULL;
+  const ir_line *line = &p->a.text->lines[gep->line - 1];
+  const ir_operand *base = &p->a.operands[gep->first_operand];
+  if (gep->operand_count != 2 || base->kind != IR_OPERAND_GLOBAL ||
+      strcmp(ir_text(p->a.text, line->op + 1), "i8") ||
+      p->a.types[base[1].type].bits != 32)
+    return NULL;
+  return gep;
+}
+static int same_operand(memory *p, const ir_operand *a, const ir_operand *b) {
+  if (a->kind != b->kind)
+    return 0;
+  if (a->kind == IR_OPERAND_LOCAL || a->kind == IR_OPERAND_GLOBAL)
+    return a->definition == b->definition;
+  uint64_t x, y;
+  return a->kind == IR_OPERAND_LITERAL &&
+         ir_integer(ir_text(p->a.text, a->token), &x) &&
+         ir_integer(ir_text(p->a.text, b->token), &y) && x == y;
+}
+static int same_index(memory *p, const ir_operand *left, const ir_operand *right) {
+  if (same_operand(p, left, right))
+    return 1;
+  const ir_instruction *a = simple_definition(p, left, IR_OP_BINARY, 7);
+  const ir_instruction *b = simple_definition(p, right, IR_OP_BINARY, 7);
+  if (!a || !b || strcmp(a->operation, b->operation) ||
+      (strcmp(a->operation, "mul") && strcmp(a->operation, "shl")) ||
+      p->a.types[a->type].bits != 32 || p->a.types[b->type].bits != 32)
+    return 0;
+  const ir_operand *x = &p->a.operands[a->first_operand], *y = &p->a.operands[b->first_operand];
+  return x[1].kind == IR_OPERAND_LITERAL && same_operand(p, x, y) && same_operand(p, x + 1, y + 1);
+}
+static int same_global_address(memory *p, const ir_operand *a, const ir_operand *b) {
+  if (a->kind == IR_OPERAND_GLOBAL)
+    return b->kind == IR_OPERAND_GLOBAL && a->definition == b->definition;
+  const ir_instruction *left = indexed_global(p, a), *right = indexed_global(p, b);
+  if (!left || !right)
+    return 0;
+  const ir_operand *x = &p->a.operands[left->first_operand], *y = &p->a.operands[right->first_operand];
+  return same_operand(p, x, y) && same_index(p, x + 1, y + 1);
+}
+static void drop_dead_address(memory *p, const ir_operand *address) {
+  const ir_instruction *gep = indexed_global(p, address);
+  if (!gep || p->a.definitions[gep->definition].use_count != 1)
+    return;
+  p->a.text->lines[gep->line - 1].replacement = "";
+  const ir_instruction *index = simple_definition(p, &p->a.operands[gep->first_operand + 1],
+                                                  IR_OP_BINARY, 7);
+  if (index && (!strcmp(index->operation, "mul") || !strcmp(index->operation, "shl")) &&
+      p->a.definitions[index->definition].use_count == 1)
+    p->a.text->lines[index->line - 1].replacement = "";
+}
+static unsigned predecessor_load(memory *p, unsigned load) {
+  const ir_instruction *in = &p->a.instructions[load];
+  const ir_operand *wanted = &p->a.operands[in->first_operand];
+  if (wanted->kind != IR_OPERAND_GLOBAL && !indexed_global(p, wanted))
+    return IR_NONE;
+  unsigned current = in->block, i = load, edges = 0;
+  for (unsigned work = 0; work < GLOBAL_WINDOW; work++) {
+    spend(p);
+    const ir_block *block = &p->a.blocks[current];
+    if (i == block->first_instruction) {
+      if (edges == 3 || block->predecessor_count != 1)
+        break;
+      unsigned previous = p->a.predecessors[block->first_predecessor];
+      const ir_block *pred = &p->a.blocks[previous];
+      if (pred->first_instruction >= block->first_instruction ||
+          !ir_dominates(&p->a, previous, current) || !pred->instruction_count)
+        break;
+      unsigned last = pred->first_instruction + pred->instruction_count - 1;
+      if (p->a.instructions[last].opcode != IR_OP_BR)
+        break;
+      current = previous;
+      i = last;
+      edges++;
+      continue;
+    }
+    const ir_instruction *next = &p->a.instructions[--i];
+    if (next->effects & (IR_EFFECT_WRITE | IR_EFFECT_CALL | IR_EFFECT_VOLATILE |
+                         IR_EFFECT_OPAQUE | IR_EFFECT_CONTROL))
+      break;
+    if (next->opcode != IR_OP_LOAD)
+      continue;
+    if (!plain(p, next))
+      break;
+    const ir_operand *pointer = &p->a.operands[next->first_operand];
+    if (same_global_address(p, wanted, pointer) && ir_type_equal(&p->a, in->type, next->type))
+      return edges ? next->definition : IR_NONE;
+  }
+  return IR_NONE;
+}
+static void run_global_chains(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  memory p = {.c = c, .work = IR_LOCAL_MEMORY_WORK_LIMIT, .global_only = 1};
+  ir_analyze(c, m, &p.a);
+  p.values = ir_allocate(c, p.a.definition_count * sizeof(*p.values));
+  unsigned changed = 0;
+  for (unsigned i = 0; i < p.a.instruction_count; i++) {
+    spend(&p);
+    const ir_instruction *in = &p.a.instructions[i];
+    if (in->opcode != IR_OP_LOAD || !plain(&p, in) || !bounded_users(&p, i))
+      continue;
+    unsigned previous = predecessor_load(&p, i);
+    if (previous == IR_NONE)
+      continue;
+    p.values[in->definition] = p.values[previous] ? p.values[previous] : p.a.definitions[previous].name;
+    m->lines[in->line - 1].replacement = "";
+    drop_dead_address(&p, &p.a.operands[in->first_operand]);
+    changed++;
+  }
+  if (!changed) {
+    ir_release_to(c, mark);
+    return;
+  }
+  ir_note(c, "candidate", "load_across_single_predecessor", changed);
+  for (unsigned i = 0; i < p.a.operand_count; i++) {
+    spend(&p);
+    const ir_operand *op = &p.a.operands[i];
+    if (op->kind == IR_OPERAND_LOCAL && p.values[op->definition])
+      m->tokens[op->token].replacement = p.values[op->definition];
+  }
+  for (unsigned n = 0; n < m->line_count; n++) {
+    ir_line *line = &m->lines[n];
+    int rewritten = 0;
+    for (unsigned k = line->first; k < line->first + line->count; k++) {
+      spend(&p);
+      rewritten |= m->tokens[k].replacement != NULL;
+    }
+    if (rewritten) {
+      size_t start = c->size;
+      ir_write_line(c, m, line);
+      line->replacement = ir_copy(c, c->output + start, c->size - start);
+      c->size = start;
+      for (unsigned k = line->first; k < line->first + line->count; k++)
+        m->tokens[k].replacement = NULL;
+    }
+  }
+  ir_function_admission(c, m, &p.a, BADGE_SELECTION_THUMB_CONSTANTS);
+  c->size = 0;
+  ir_reparse(c, m, mark);
+}
 void ir_local_memory(ir_context *c, ir_module *m) { run_memory(c, m, 0); }
-void ir_global_memory(ir_context *c, ir_module *m) { run_memory(c, m, 1); }
+void ir_global_memory(ir_context *c, ir_module *m) {
+  run_memory(c, m, 1);
+  run_global_chains(c, m);
+}

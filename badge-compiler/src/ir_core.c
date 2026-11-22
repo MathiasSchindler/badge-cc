@@ -349,24 +349,25 @@ void ir_parse(ir_context *c, ir_module *m, const char *source, size_t size) {
   if (!target || !layout)
     ir_error(c, "missing target triple/data layout");
 }
-void ir_write(ir_context *c, const ir_module *m) {
-  for (unsigned n = 0; n < m->line_count; n++) {
-    const ir_line *line = &m->lines[n];
-    if (line->replacement) {
-      ir_append(c, line->replacement, strlen(line->replacement));
-      continue;
-    }
-    size_t at = line->begin;
-    for (unsigned j = line->first; j < line->first + line->count; j++) {
-      const ir_token *t = &m->tokens[j];
-      if (!t->replacement)
-        continue;
-      ir_append(c, m->source + at, t->begin - at);
-      ir_append(c, t->replacement, strlen(t->replacement));
-      at = t->end;
-    }
-    ir_append(c, m->source + at, line->end - at);
+void ir_write_line(ir_context *c, const ir_module *m, const ir_line *line) {
+  if (line->replacement) {
+    ir_append(c, line->replacement, strlen(line->replacement));
+    return;
   }
+  size_t at = line->begin;
+  for (unsigned j = line->first; j < line->first + line->count; j++) {
+    const ir_token *t = &m->tokens[j];
+    if (!t->replacement)
+      continue;
+    ir_append(c, m->source + at, t->begin - at);
+    ir_append(c, t->replacement, strlen(t->replacement));
+    at = t->end;
+  }
+  ir_append(c, m->source + at, line->end - at);
+}
+void ir_write(ir_context *c, const ir_module *m) {
+  for (unsigned n = 0; n < m->line_count; n++)
+    ir_write_line(c, m, &m->lines[n]);
   if (m->suffix) {
     ir_append(c, "\n", 1);
     ir_append(c, m->suffix, strlen(m->suffix));

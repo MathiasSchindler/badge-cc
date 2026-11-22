@@ -48,6 +48,31 @@ This bounded extension avoids a speculative full scratch-register allocator.
 General interval splitting and rematerialization are not implemented; they
 are not necessary for the qualified one-register extension.
 
+## Opt-in frameless entry returns
+
+`thumb-constants` can duplicate one or two cheap entry checks before saving
+registers in a void function with a substantial frame and up to four i32
+register arguments. The selector follows a bounded, acyclic IR path through
+branches and boolean PHIs to prove that rejection reaches `ret void` without
+executing any other operations. It accepts ordinary aligned global i32 loads
+compared with unflagged sums of incoming arguments and small offsets. Two
+checks can share the load when both use the same global and have a common
+argument.
+
+The precheck only uses caller-saved registers. It returns directly on
+rejection and restores the adjusted incoming argument before the original
+entry on fallthrough. It is deliberately not whole-function shrink wrapping:
+it duplicates the checks and does not remove or reorder the existing body.
+Volatile or opaque work on the proposed guard path prevents selection; ABI
+with stack, narrow or aggregate arguments and custom function sections are
+excluded. Frame metadata still describes the worst-case framed path.
+
+In the four-level Cortex-M33 Maze probe this cut the wall helper from
+3,974,181 to 1,630,594 reached instructions and from 2,961,066 to 232,847
+stack accesses. It added 36 function bytes and 40 loaded bytes to the Maze
+image; the other 26 tested firmware targets were unchanged. This is an
+opt-in speed/size tradeoff, not a badge timing or promotion result.
+
 ## Qualification
 
 [The persisted production report](../build/po12-lightweight-frames/results.json)

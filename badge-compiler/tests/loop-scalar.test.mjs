@@ -18,18 +18,18 @@ function files(t) {
   t.after(() => fs.rmSync(dir, { recursive: true }));
   return name => path.join(dir, name);
 }
-function optimize(file, source) {
+function optimize(file, source, pass = 'loop-scalar') {
   fs.writeFileSync(file('input.ll'), 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
     'target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n' + source);
-  run(tool('badge-opt-sanitize'), ['--passes=loop-scalar', file('input.ll'), '-o', file('candidate.ll')]);
+  run(tool('badge-opt-sanitize'), [`--passes=${pass}`, file('input.ll'), '-o', file('candidate.ll')]);
   run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
   const result = fs.readFileSync(file('candidate.ll'), 'utf8');
-  run(tool('badge-opt-sanitize'), ['--passes=loop-scalar', file('candidate.ll'), '-o', file('twice.ll')]);
+  run(tool('badge-opt-sanitize'), [`--passes=${pass}`, file('candidate.ll'), '-o', file('twice.ll')]);
   assert.equal(fs.readFileSync(file('twice.ll'), 'utf8'), result, 'candidate must be idempotent');
   return result;
 }
-function execute(file, ir, role, trace = false) {
-  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-operands', ir, '-o', file(`${role}.s`)]);
+function execute(file, ir, role, trace = false, selection = 'thumb-operands') {
+  run(tool('badge-codegen-sanitize'), [`--scalar-selection=${selection}`, ir, '-o', file(`${role}.s`)]);
   const assembly = fs.readFileSync(file(`${role}.s`), 'utf8');
   const frames = parseAssembly(assembly, role);
   run(tool('badge-asm'), [file(`${role}.s`), '-o', file(`${role}.o`)]);
@@ -55,6 +55,111 @@ function execute(file, ir, role, trace = false) {
   }
   return { frames, count };
 }
+test('loop bounds distinguish proven internal writes from aliases, volatility and external calls', t => {
+  const file = files(t);
+  const check = (name, call, qualifier = '') => `
+define i32 @${name}() {
+entry:
+  %scratch = alloca i32, align 4
+  br label %header
+header:
+  %i = phi i32 [0, %entry], [%next, %body]
+  %bound = load ${qualifier}i32, ptr @count, align 4
+  %go = icmp ult i32 %i, %bound
+  br i1 %go, label %body, label %done
+body:
+  ${call}
+  %next = add i32 %i, 1
+  br label %header
+done:
+  ret i32 %i
+}`;
+  const result = optimize(file, `@count = internal global i32 0, align 4
+declare void @unknown()
+define internal void @write(ptr %dst, i32 %x) {
+entry:
+  %p = getelementptr i8, ptr %dst, i32 0
+  store i32 %x, ptr %p, align 4
+  ret void
+}
+define internal void @forward(ptr %dst, i32 %x) {
+entry:
+  call void @write(ptr %dst, i32 %x)
+  ret void
+}
+${check('safe', 'call void @forward(ptr %scratch, i32 %i)')}
+${check('plain', 'store i32 %i, ptr %scratch, align 4')}
+${check('alias', 'call void @forward(ptr @count, i32 1)')}
+${check('external', 'call void @unknown()')}
+${check('ordered', 'call void @forward(ptr %scratch, i32 %i)', 'volatile ')}
+define i32 @main() {
+entry:
+  %empty = call i32 @plain()
+  store i32 64, ptr @count, align 4
+  %many = call i32 @safe()
+  %plain = call i32 @plain()
+  %changed = call i32 @alias()
+  %ordered = call i32 @ordered()
+  %a = xor i32 %many, 64
+  %b = xor i32 %changed, 1
+  %c = xor i32 %ordered, 1
+  %d = or i32 %empty, %a
+  %e = or i32 %b, %c
+  %f = xor i32 %plain, 64
+  %g = or i32 %d, %e
+  %status = or i32 %f, %g
+  ret i32 %status
+}`, 'loop-bounds');
+  const body = name => result.match(new RegExp(`define i32 @${name}[^]*?\\n}`))[0];
+  assert.match(body('plain'), /%bound = load[^]*?header:/);
+  for (const name of ['alias', 'external', 'ordered'])
+    assert.match(body(name), /header:[^]*?%bound = load/);
+  run(tool('badge-ir-metrics'), ['--passes=loop-bounds', file('input.ll'), '-o', file('metrics.json')]);
+  const events = JSON.parse(fs.readFileSync(file('metrics.json'), 'utf8')).events;
+  assert.equal(events.find(event => event.reason === 'private_global_loop_bound').count, 2);
+  assert.equal(events.find(event => event.reason === 'loop_bound_write_not_excluded').count, 2);
+  // The blocked call remains in the module; give the linker a definition without changing its IR.
+  fs.writeFileSync(file('stub.s'), '.syntax unified\n.thumb\n.global unknown\n.thumb_func\nunknown:\nbx lr\n');
+  run(tool('badge-asm'), [file('stub.s'), '-o', file('stub.o')]);
+  for (const [variant, name] of [['input', 'baseline'], ['candidate', 'hoisted']]) {
+    run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+      file(`${variant}.ll`), '-o', file(`${name}.s`)]);
+    run(tool('badge-asm'), [file(`${name}.s`), '-o', file(`${name}.o`)]);
+    run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file('stub.o'), file(`${name}.o`), '-o', file(`${name}.elf`)]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file(`${name}.elf`)]);
+  }
+});
+test('two private dimensions and their wrapping product move as one bound', t => {
+  const file = files(t);
+  const text = optimize(file, `@width = internal global i32 2, align 4
+@height = internal global i32 3, align 4
+define i32 @main() {
+entry:
+  br label %header
+header:
+  %i = phi i32 [0, %entry], [%next, %body]
+  %x = load i32, ptr @width, align 4
+  %y = load i32, ptr @height, align 4
+  %bound = mul i32 %x, %y
+  %go = icmp ult i32 %i, %bound
+  br i1 %go, label %body, label %exit
+body:
+  %next = add i32 %i, 1
+  br label %header
+exit:
+  %status = sub i32 %i, 6
+  ret i32 %status
+}`, 'loop-bounds');
+  assert.match(text, /entry:\n[^]*?%x = load[^]*?%y = load[^]*?%bound = mul[^]*?header:/);
+  const b = execute(file, file('input.ll'), 'before', true, 'thumb-constants');
+  const a = execute(file, file('candidate.ll'), 'after', true, 'thumb-constants');
+  assert(a.count < b.count);
+  console.log(`loop-bounds product oracle instructions: ${b.count} -> ${a.count}`);
+});
 const loop = expression => `@sink = global i32 0
 define i32 @f(i32 %x, i32 %n) {
 entry:
