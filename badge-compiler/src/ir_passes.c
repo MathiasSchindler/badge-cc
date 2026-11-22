@@ -2,6 +2,7 @@
 
 void ir_constant_fold(ir_context *, ir_module *);
 void ir_aggregate_memory(ir_context *, ir_module *);
+void ir_copy_chains(ir_context *, ir_module *);
 void ir_small_aggregate(ir_context *, ir_module *);
 void ir_sret_forward(ir_context *, ir_module *);
 void ir_wide_division(ir_context *, ir_module *);
@@ -22,6 +23,7 @@ void ir_cross_function(ir_context *, ir_module *);
 void ir_hot_inline(ir_context *, ir_module *);
 void ir_compact_inline(ir_context *, ir_module *);
 void ir_target_strength_reduce(ir_context *, ir_module *);
+void ir_exact_pow2(ir_context *, ir_module *);
 void ir_divrem_pairs(ir_context *, ir_module *);
 void ir_local_memory(ir_context *, ir_module *);
 void ir_global_memory(ir_context *, ir_module *);
@@ -55,8 +57,11 @@ const ir_pass badge_ir_passes[] = {
      "Legalize wide array-carrier loads/stores into scalar memory operations",
      ir_aggregate_memory, IR_PASS_LEGALIZATION},
     {"sret-forward",
-     "Forward copied internal aggregate results directly into private byte buffers",
+     "Forward private aggregate results and remove adjacent private copy chains",
      ir_sret_forward, IR_PASS_OPTIMIZATION},
+    {"copy-chains",
+     "Remove adjacent exact-size copies through single-use private aggregate buffers",
+     ir_copy_chains, IR_PASS_OPTIMIZATION},
     {"small-aggregate",
      "Promote private two-to-four-word records using existing SSA construction",
      ir_small_aggregate, IR_PASS_OPTIMIZATION},
@@ -107,8 +112,11 @@ const ir_pass badge_ir_passes[] = {
      "Reduce unflagged i32 unsigned power-of-two div/rem with bounded "
      "target costs and quotient-sharing accounting",
      ir_target_strength_reduce, IR_PASS_OPTIMIZATION},
+    {"exact-pow2",
+     "Rewrite signed divisions of proven exact power-of-two multiples",
+     ir_exact_pow2, IR_PASS_OPTIMIZATION},
     {"divrem-pairs",
-     "Bring bounded same-block unsigned quotient/remainder pairs together for Thumb selection",
+     "Share bounded unsigned quotient/remainder pairs and lower proven exact signed divisions",
      ir_divrem_pairs, IR_PASS_OPTIMIZATION},
 };
 const unsigned badge_ir_pass_count =

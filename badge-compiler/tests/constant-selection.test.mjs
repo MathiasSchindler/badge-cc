@@ -149,6 +149,75 @@ entry:
   }
 });
 
+test('signed offset folds and stack-free wrapping absolute-value leaves preserve sign boundaries', t => {
+  const file = files(t);
+  const abs = (name, extra) => `
+define i32 @${name}(i32 %x) {
+entry:
+  %negative = icmp slt i32 %x, 0
+  br i1 %negative, label %neg, label %pos
+neg:
+  ${extra}
+  %flip = sub i32 0, %x
+  br label %join
+pos:
+  br label %join
+join:
+  %answer = phi i32 [%flip, %neg], [%x, %pos]
+  ret i32 %answer
+}`;
+  fs.writeFileSync(file('shape.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@points = global [2 x i32] [i32 0, i32 65534], align 4
+@sink = global i32 0, align 4
+${abs('magnitude', '')}
+${abs('observable', 'store volatile i32 %x, ptr @sink, align 4')}
+define i32 @read_signed(ptr %p, i32 %a, i32 %b) {
+entry:
+  %first = load i16, ptr %p, align 2
+  %offset = getelementptr i8, ptr %p, i32 4
+  %second = load i16, ptr %offset, align 2
+  %wide = sext i16 %second to i32
+  %head = zext i16 %first to i32
+  %x = add i32 %wide, %head
+  %y = add i32 %a, %b
+  %answer = add i32 %x, %y
+  ret i32 %answer
+}
+define i32 @main() {
+entry:
+  %a = call i32 @read_signed(ptr @points, i32 0, i32 0)
+  %b = call i32 @magnitude(i32 %a)
+  %c = call i32 @magnitude(i32 -2147483648)
+  %d = call i32 @magnitude(i32 32767)
+  %e = call i32 @observable(i32 -7)
+  %written = load volatile i32, ptr @sink, align 4
+  %f = xor i32 %b, 2
+  %g = xor i32 %c, -2147483648
+  %h = xor i32 %d, 32767
+  %i = xor i32 %e, 7
+  %j = xor i32 %written, -7
+  %k = or i32 %f, %g
+  %m = or i32 %h, %i
+  %l = or i32 %k, %m
+  %status = or i32 %l, %j
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants', file('shape.ll'), '-o', file('shape.s')]);
+  const text = fs.readFileSync(file('shape.s'), 'utf8');
+  const body = name => text.slice(text.indexOf(`\n${name}:`), text.indexOf(`.size ${name},`));
+  assert.match(body('magnitude'), /scalar-abs-leaf/);
+  assert.doesNotMatch(body('magnitude'), /\bpush\b/);
+  assert.doesNotMatch(body('observable'), /scalar-abs-leaf/);
+  assert.match(body('read_signed'), /ldrsh\.w r\d+, \[r\d+, #4\]/);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('shape.s'), '-o', file('shape.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('shape.o'), '-o', file('shape.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('shape.elf')]);
+});
+
 test('loop allocation weights PHI edges but ignores irreducible and unreachable cycles', t => {
   const file = files(t);
   fs.writeFileSync(file('loops.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"

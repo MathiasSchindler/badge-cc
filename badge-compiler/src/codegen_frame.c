@@ -206,9 +206,11 @@ static const cg_inst *guard_resolve(const guard_path *path, const char **name) {
   }
   return NULL;
 }
-static const char *guard_phi(cg_context *c, const cg_inst *i, const cg_block *pred) {
+static const char *guard_phi(cg_context *c, const cg_inst *i, const cg_block *pred,
+                             int scalar_return) {
   unsigned count = i->end - i->begin;
-  if (!pred || count < 9 || strcmp(guard_token(c, i, 3), "i1"))
+  if (!pred || count < 9 || (strcmp(guard_token(c, i, 3), "i1") &&
+      (!scalar_return || strcmp(guard_token(c, i, 3), "i32"))))
     return NULL;
   for (unsigned k = 4; k + 4 < count; k += 6) {
     if (strcmp(guard_token(c, i, k), "[") || strcmp(guard_token(c, i, k + 2), ",") ||
@@ -230,7 +232,8 @@ static int guard_load(cg_context *c, const cg_inst *i) {
 
 // Follow a bounded entry path. On a proposed return edge, allow only control and PHIs.
 static int guard_walk(cg_context *c, guard_path *path, int return_only,
-                      const cg_inst **branch, const char **condition) {
+                      const cg_inst **branch, const char **condition,
+                      const char **returned) {
   while (path->block && path->visited < GUARD_BLOCKS) {
     cg_block *here = path->block;
     for (unsigned n = 0; n < path->visited; n++)
@@ -242,8 +245,13 @@ static int guard_walk(cg_context *c, guard_path *path, int return_only,
       cg_register_work(c);
       unsigned n = i->end - i->begin;
       const char *op = guard_token(c, i, i->result ? 2 : 0);
-      if (!i->result && !i->next && !strcmp(op, "ret"))
+      if (!i->result && !i->next && !strcmp(op, "ret")) {
+        if (returned && n == 3 && !strcmp(guard_token(c, i, 1), "i32")) {
+          *returned = guard_token(c, i, 2);
+          return 1;
+        }
         return n == 2 && !strcmp(guard_token(c, i, 1), "void");
+      }
       if (!i->result && !i->next && !strcmp(op, "br")) {
         unsigned target = 2;
         if (n == 9 && !strcmp(guard_token(c, i, 1), "i1")) {
@@ -268,7 +276,7 @@ static int guard_walk(cg_context *c, guard_path *path, int return_only,
       if (!i->result || path->count == GUARD_VALUES)
         return 0;
       if (!strcmp(op, "phi")) {
-        const char *alias = guard_phi(c, i, path->predecessor);
+        const char *alias = guard_phi(c, i, path->predecessor, returned != NULL);
         if (!alias)
           return 0;
         path->values[path->count++] = (guard_value){i->result->name, alias, NULL};
@@ -322,7 +330,7 @@ static int guard_bound(cg_context *c, const guard_path *path, const char *term,
 static int plan_entry_guard(cg_context *c, guard_path *path, entry_guard *guard) {
   const cg_inst *branch = NULL;
   const char *flag = NULL;
-  if (guard_walk(c, path, 0, &branch, &flag) || !branch || path->count == GUARD_VALUES)
+  if (guard_walk(c, path, 0, &branch, &flag, NULL) || !branch || path->count == GUARD_VALUES)
     return 0;
   const cg_inst *cmp = guard_resolve(path, &flag);
   if (!cmp || cmp->end - cmp->begin != 8 || strcmp(guard_token(c, cmp, 2), "icmp"))
@@ -346,7 +354,7 @@ static int plan_entry_guard(cg_context *c, guard_path *path, entry_guard *guard)
     edges[n].block = guard_block(c, guard_token(c, branch, n ? 8 : 5));
     edges[n].values[edges[n].count++] = (guard_value){flag, n ? "false" : "true", NULL};
     guard_path probe = edges[n];
-    returns[n] = guard_walk(c, &probe, 1, NULL, NULL);
+    returns[n] = guard_walk(c, &probe, 1, NULL, NULL, NULL);
   }
   if (returns[0] == returns[1])
     return 0;
@@ -407,6 +415,53 @@ static void emit_entry_guards(cg_context *c, unsigned stack_bytes, int calls, in
     cg_emit(c, ".Lcg_entry_reject%u:\n", id);
   cg_emit(c, "bx lr\n.Lcg_entry_frame%u:\n", id);
   guard_adjust(c, arg, other, 0, -offset);
+}
+
+static int emit_abs_leaf(cg_context *c) {
+  cg_function *f = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS || f->section ||
+      f->argc != 1 || f->byval[0] || f->args[0]->type->bits != 32 || f->ret->bits != 32)
+    return 0;
+  const char *arg = f->args[0]->name;
+  guard_path path = {.block = f->blocks};
+  const cg_inst *branch = NULL;
+  const char *flag = NULL;
+  if (guard_walk(c, &path, 0, &branch, &flag, NULL) || !branch || path.count != 1)
+    return 0;
+  const cg_inst *cmp = guard_resolve(&path, &flag);
+  if (!cmp || cmp->end - cmp->begin != 8 || strcmp(guard_token(c, cmp, 2), "icmp") ||
+      strcmp(guard_token(c, cmp, 5), arg) || strcmp(guard_token(c, cmp, 7), "0"))
+    return 0;
+  const char *predicate = guard_token(c, cmp, 3);
+  if (strcmp(predicate, "slt") && strcmp(predicate, "sge"))
+    return 0;
+  for (unsigned n = 0; n < 2; n++) {
+    const int negate = (n == 0) == !strcmp(predicate, "slt");
+    guard_path edge = path;
+    edge.predecessor = path.block;
+    edge.block = guard_block(c, guard_token(c, branch, n ? 8 : 5));
+    const char *value = NULL;
+    const cg_inst *again = NULL;
+    const char *other = NULL;
+    if (!guard_walk(c, &edge, 0, &again, &other, &value) || !value)
+      return 0;
+    unsigned definitions = 0;
+    for (unsigned k = path.count; k < edge.count; k++)
+      definitions += edge.values[k].definition != NULL;
+    const cg_inst *result = guard_resolve(&edge, &value);
+    if (negate) {
+      if (definitions != 1 || !result || result->end - result->begin != 7 ||
+          strcmp(guard_token(c, result, 2), "sub") ||
+          strcmp(guard_token(c, result, 4), "0") ||
+          strcmp(guard_token(c, result, 6), arg))
+        return 0;
+    } else if (definitions || result || strcmp(value, arg))
+      return 0;
+  }
+  f->frame = 0;
+  cg_emit(c, "@ scalar-abs-leaf: wrapping i32 negation\n"
+             "cmp r0, #0\nbge.n .Lcg_return%u\nrsb.w r0, r0, #0\n", f->id);
+  return 1;
 }
 
 static void finalize_frame(cg_context *c, size_t header, size_t start) {
@@ -749,7 +804,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   size_t header = c->size;
   function_header(c, f);
   size_t body_start = c->size;
-  if (cg_emit_counted_leaf(c)) {
+  if (cg_emit_counted_leaf(c) || emit_abs_leaf(c)) {
     finish_function(c, header, body_start);
     return;
   }

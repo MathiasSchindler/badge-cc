@@ -48,6 +48,75 @@ static const char *eligible(strength *p, unsigned i, uint32_t *divisor) {
   return NULL;
 }
 
+static unsigned trailing_bits(strength *p, const ir_operand *value, unsigned depth) {
+  const ir_analysis *a = &p->a;
+  uint64_t bits;
+  spend(p);
+  if (value->kind == IR_OPERAND_LITERAL && ir_integer(ir_text(a->text, value->token), &bits))
+    return (uint32_t)bits ? (unsigned)__builtin_ctz((uint32_t)bits) : 32;
+  if (value->kind != IR_OPERAND_LOCAL || depth == 3)
+    return 0;
+  unsigned def = a->definitions[value->definition].instruction;
+  if (def == IR_NONE) return 0;
+  const ir_instruction *in = &a->instructions[def];
+  if (in->opcode == IR_OP_BINARY && in->operand_count == 2 &&
+      a->types[in->type].kind == IR_INT && a->types[in->type].bits == 32) {
+    const ir_operand *x = &a->operands[in->first_operand], *y = x + 1;
+    if (!strcmp(in->operation, "mul")) {
+      unsigned sum = trailing_bits(p, x, depth + 1) + trailing_bits(p, y, depth + 1);
+      return sum > 32 ? 32 : sum;
+    }
+    if (!strcmp(in->operation, "shl") && y->kind == IR_OPERAND_LITERAL &&
+        ir_integer(ir_text(a->text, y->token), &bits) && bits < 32)
+      return (unsigned)bits;
+  }
+  if (in->opcode != IR_OP_CALL || in->callee == IR_NONE ||
+      a->operands[in->callee].kind != IR_OPERAND_GLOBAL)
+    return 0;
+  unsigned target = a->globals[a->operands[in->callee].definition].function;
+  if (target == IR_NONE || a->functions[target].declaration)
+    return 0;
+  const ir_function *fn = &a->functions[target];
+  const ir_line *line = &a->text->lines[fn->line - 1];
+  if (fn->block_count > 4 ||
+      (strcmp(ir_text(a->text, line->first + 1), "internal") &&
+       strcmp(ir_text(a->text, line->first + 1), "private")))
+    return 0;
+  unsigned minimum = 32, returns = 0;
+  for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++) {
+    spend(p);
+    const ir_block *block = &a->blocks[b];
+    if (!block->instruction_count) return 0;
+    const ir_instruction *ret = &a->instructions[block->first_instruction + block->instruction_count - 1];
+    if (ret->opcode != IR_OP_RET || ret->operand_count != 1)
+      continue;
+    unsigned width = trailing_bits(p, &a->operands[ret->first_operand], depth + 1);
+    if (width < minimum) minimum = width;
+    returns++;
+  }
+  return returns ? minimum : 0;
+}
+
+void ir_exact_pow2(ir_context *c, ir_module *m) {
+  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
+  ir_analyze(c, m, &p.a);
+  for (unsigned i = 0; i < p.a.instruction_count; i++) {
+    const ir_instruction *in = &p.a.instructions[i];
+    spend(&p);
+    if (in->opcode != IR_OP_BINARY || strcmp(in->operation, "sdiv"))
+      continue;
+    uint32_t divisor;
+    if (eligible(&p, i, &divisor) || divisor < 2 || divisor > INT32_MAX)
+      continue;
+    unsigned shift = (unsigned)__builtin_ctz(divisor);
+    if (trailing_bits(&p, &p.a.operands[in->first_operand], 0) < shift)
+      continue;
+    m->tokens[m->lines[in->line - 1].op].replacement = "ashr";
+    m->tokens[p.a.operands[in->first_operand + 1].token].replacement = ir_format(c, "%u", shift);
+    ir_note(c, "transformed", "signed_dividend_known_multiple", 1);
+  }
+}
+
 void ir_divrem_pairs(ir_context *c, ir_module *m) {
   enum { LOOKAHEAD = 6 };
   ir_allocation *mark = c->allocations;
@@ -90,6 +159,7 @@ void ir_divrem_pairs(ir_context *c, ir_module *m) {
   ir_function_admission(c, m, &p.a, BADGE_SELECTION_THUMB_CONSTANTS);
   c->size = 0;
   ir_reparse(c, m, mark);
+  ir_exact_pow2(c, m);
 }
 static badge_cost_estimate cost(badge_cost_kind kind) {
   return badge_target_cost((badge_cost_request){

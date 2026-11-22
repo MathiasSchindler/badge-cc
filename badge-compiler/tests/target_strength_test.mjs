@@ -81,6 +81,55 @@ test('target strength reduction is deterministic, LLVM-valid and preserves work-
   assert.equal(fs.readFileSync(file('preserved.ll'), 'utf8'), 'preserved\n');
 });
 
+test('exact signed power-of-two division follows local and internal-return multiples only', t => {
+  const file = fixture(t);
+  fs.writeFileSync(file('input.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
+define internal i32 @scale(i32 %x) {
+entry:
+  %n = shl i32 %x, 8
+  ret i32 %n
+}
+define i32 @exact(i32 %x) {
+entry:
+  %n = call i32 @scale(i32 %x)
+  %q = sdiv i32 %n, 256
+  ret i32 %q
+}
+define i32 @round(i32 %x) {
+entry:
+  %q = sdiv i32 %x, 256
+  ret i32 %q
+}
+define i32 @main() {
+entry:
+  %negative = call i32 @exact(i32 -32767)
+  %minimum = call i32 @exact(i32 8388608)
+  %small = call i32 @round(i32 -255)
+  %a = xor i32 %negative, -32767
+  %b = xor i32 %minimum, -8388608
+  %c = or i32 %a, %b
+  %status = or i32 %c, %small
+  ret i32 %status
+}`);
+  invoke(tool('badge-opt-sanitize'), ['--passes=exact-pow2', file('input.ll'), '-o', file('out.ll')]);
+  const result = fs.readFileSync(file('out.ll'), 'utf8');
+  assert.match(result, /ashr i32 %n, 8/);
+  assert.match(result, /sdiv i32 %x, 256/);
+  if (oracle) {
+    invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('out.ll')]);
+    invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
+    for (const name of ['input', 'out']) {
+      invoke(tool('badge-codegen'), ['--scalar-selection=thumb-constants', file(`${name}.ll`), '-o', file(`${name}.s`)]);
+      invoke(tool('badge-asm'), [file(`${name}.s`), '-o', file(`${name}.o`)]);
+      invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+        file('start.o'), file(`${name}.o`), '-o', file(`${name}.elf`)]);
+      invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
+        '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file(`${name}.elf`)]);
+    }
+  }
+});
+
 test('power-of-two matrix removes divider work and executes across all residency policies', t => {
   const file = fixture(t), { ir, caller } = matrix();
   fs.writeFileSync(file('input.ll'), ir);

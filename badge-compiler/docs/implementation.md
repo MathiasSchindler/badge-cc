@@ -2095,6 +2095,25 @@ can then emit one divider operation and `MLS`. Admission compares encoded
 bytes, frame size, saves and spills under `thumb-constants`; it rejects
 growth. Neither pass selection nor scalar defaults change.
 
+The opt-in Maze lowering also folds a disposable address add into a wide
+signed byte/halfword load, including in-place address adds when the old
+address value is dead at the next overwrite. It keeps the load width,
+signedness and memory order. Pure i32 sign diamonds whose two returns are
+the input and its wrapping negation can emit a stack-free `absolute` leaf.
+The matcher checks both paths, excludes side effects and preserves the
+`INT32_MIN` bit pattern.
+
+`sret-forward` additionally runs `copy-chains`: for adjacent nonvolatile
+copies of the same constant size between private stack objects and a
+separate stack or hidden return destination, it can remove an unobserved
+intermediate. It does not reinterpret alignment annotations or remove
+observed/volatile copies. `divrem-pairs` additionally runs `exact-pow2`,
+which uses low-bit facts from literal multiplication/shift or all returns
+of a small internal helper to replace signed division by a positive power
+of two only when the dividend is an exact multiple. Negative values that
+would require rounding toward zero still use division. The two subpasses
+can also be selected independently on saved IR for diagnosis.
+
 Per-function `@ memory-selection:` comments report word-copy/fill sites and
 selected word/tail byte totals. These count **static intrinsic lengths**,
 not dynamic traffic or the number of emitted loop instructions. Copy totals

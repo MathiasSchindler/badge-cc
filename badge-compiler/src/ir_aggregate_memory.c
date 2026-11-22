@@ -32,6 +32,71 @@ static unsigned byte_buffer(const ir_analysis *a, const ir_definition *def) {
              : 0;
 }
 
+static const ir_operand *plain_copy(const ir_analysis *a, const ir_instruction *in,
+                                     uint64_t *bytes) {
+  if (in->opcode != IR_OP_CALL || in->callee == IR_NONE || in->operand_count != 5 ||
+      in->line != in->end_line ||
+      strcmp(ir_text(a->text, a->operands[in->callee].token), "@llvm.memcpy.inline.p0.p0.i32"))
+    return NULL;
+  const ir_operand *dest = &a->operands[in->first_operand + 1];
+  const ir_line *line = &a->text->lines[in->line - 1];
+  // Replacing the source cannot carry over align/dereferenceable metadata.
+  if (line->count != 16 || dest[2].kind != IR_OPERAND_LITERAL ||
+      !ir_integer(ir_text(a->text, dest[2].token), bytes) || !*bytes ||
+      strcmp(ir_text(a->text, dest[3].token), "false"))
+    return NULL;
+  return dest;
+}
+
+void ir_copy_chains(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  ir_analysis a;
+  ir_analyze(c, m, &a);
+  for (unsigned i = 1; i < a.instruction_count; i++) {
+    const ir_instruction *first = &a.instructions[i - 1], *second = &a.instructions[i];
+    if (first->block != second->block || m->lines[first->line - 1].replacement ||
+        m->lines[second->line - 1].replacement)
+      continue;
+    uint64_t bytes0, bytes1;
+    const ir_operand *a0 = plain_copy(&a, first, &bytes0);
+    const ir_operand *a1 = plain_copy(&a, second, &bytes1);
+    if (!a0 || !a1 || bytes0 != bytes1 || a0->kind != IR_OPERAND_LOCAL ||
+        a0[1].kind != IR_OPERAND_LOCAL || a1[1].kind != IR_OPERAND_LOCAL ||
+        a0->definition != a1[1].definition || a0->definition == a0[1].definition ||
+        m->tokens[a0[1].token].replacement || m->tokens[a1[1].token].replacement)
+      continue;
+    const ir_definition *temporary = &a.definitions[a0->definition];
+    const ir_definition *source = &a.definitions[a0[1].definition];
+    // Both originals must be distinct addressable stack objects. The copy-out
+    // destination must be another allocation or the caller's result pointer.
+    if (a1->kind != IR_OPERAND_LOCAL || a1->definition == a0->definition ||
+        a1->definition == a0[1].definition ||
+        temporary->use_count != 2 || byte_buffer(&a, temporary) != bytes0 ||
+        byte_buffer(&a, source) != bytes0)
+      continue;
+    const ir_definition *out = &a.definitions[a1->definition];
+    if (!byte_buffer(&a, out)) {
+      unsigned function = a.blocks[second->block].function;
+      const ir_function *fn = &a.functions[function];
+      const ir_line *header = &m->lines[fn->line - 1];
+      int sret = 0;
+      if (out->instruction != IR_NONE || a1->definition != fn->first_definition)
+        continue;
+      for (unsigned k = header->first; k < header->first + header->count; k++) {
+        const char *s = ir_text(m, k);
+        if (!strcmp(s, "sret")) sret = 1;
+        if (*s == '%') break;
+      }
+      if (!sret) continue;
+    }
+    m->lines[a.instructions[temporary->instruction].line - 1].replacement = "";
+    m->lines[first->line - 1].replacement = "";
+    m->tokens[a1[1].token].replacement = source->name;
+    ir_note(c, "transformed", "private_copy_chain", 1);
+  }
+  ir_reparse(c, m, mark);
+}
+
 typedef struct {
   const ir_operand *pointer;
   unsigned lane, words;
@@ -314,6 +379,7 @@ void ir_sret_forward(ir_context *c, ir_module *m) {
     ir_note(c, "transformed", "sret_destination_forwarded", 1);
   }
   ir_reparse(c, m, mark);
+  ir_copy_chains(c, m);
 }
 
 void ir_aggregate_memory(ir_context *c, ir_module *m) {

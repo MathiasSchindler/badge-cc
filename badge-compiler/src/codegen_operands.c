@@ -437,6 +437,9 @@ static unsigned scalar_transfer(const char *op, int *narrow) {
   if (strncmp(op, "ldr", 3) && strncmp(op, "str", 3))
     return 0;
   const char *suffix = op + 3;
+  int sign = *suffix == 's' && !strncmp(op, "ldr", 3);
+  if (sign)
+    suffix++;
   unsigned bytes = 4;
   if (*suffix == 'b' || *suffix == 'h')
     bytes = *suffix++ == 'b' ? 1 : 2;
@@ -473,7 +476,7 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
                             &dst, &base, &offset, &consumed) == 3) &&
                     p + consumed == end && offset <= 4095;
     }
-    if ((indexed || immediate) && dst <= 12 && base <= 12 && dst != base &&
+    if ((indexed || immediate) && dst <= 12 && base <= 12 && (!indexed || dst != base) &&
         (!indexed || (index <= 12 && shift <= 3 && dst != index))) {
       const char *memory = end + 1;
       for (unsigned n = 0; n < 16 && *memory; n++) {
@@ -488,8 +491,10 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
         if (sscanf(instruction, "%23s r%u, [r%u]%n", op, &value, &address, &used) == 3 &&
             used && !instruction[used] && address == dst && value <= 12 &&
             (bytes = scalar_transfer(op, &narrow)) &&
+            (dst != base || !strncmp(op, "ldrs", 4)) &&
             (value == dst ? op[0] == 'l' : overwritten_before_use(c, finish + 1, dst))) {
-          int short_form = base < 8 && value < 8 &&
+          int signed_load = !strncmp(op, "ldrs", 4);
+          int short_form = !signed_load && base < 8 && value < 8 &&
               (indexed ? index < 8 && !shift : offset < bytes * 32 && offset % bytes == 0);
           int mnemonic = (int)(strchr(op, '.') - op);
           cg_emit(c, "%.*s", (int)(memory - end - 1), end + 1);

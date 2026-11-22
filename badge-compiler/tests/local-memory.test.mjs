@@ -30,6 +30,31 @@ function lower(file, body, pass = 'local-memory') {
   assert.deepEqual(fs.readFileSync(file('badge-opt.ll')), fs.readFileSync(file('badge-opt-sanitize.ll')));
   return fs.readFileSync(file('badge-opt.ll'), 'utf8');
 }
+  test('private copy chains remove only an unobserved exact-size temporary', t => {
+    const f = files(t);
+    const copies = (name, middle = '', volatile = 'false') => `
+  define void @${name}(ptr sret([8 x i8]) align 4 %result, i32 %x) {
+  entry:
+    %source = alloca [8 x i8], align 4
+    %middle = alloca [8 x i8], align 4
+    store i32 %x, ptr %source, align 4
+    %tail = getelementptr i8, ptr %source, i32 4
+    store i32 91, ptr %tail, align 4
+    call void @llvm.memcpy.inline.p0.p0.i32(ptr %middle, ptr %source, i32 8, i1 false)
+    ${middle}
+    call void @llvm.memcpy.inline.p0.p0.i32(ptr %result, ptr %middle, i32 8, i1 ${volatile})
+    ret void
+  }`;
+    const result = lower(f, `declare void @llvm.memcpy.inline.p0.p0.i32(ptr, ptr, i32, i1)
+  ${copies('forward')}
+  ${copies('observed', '%value = load volatile i32, ptr %middle, align 4')}
+  ${copies('ordered', '', 'true')}`, 'copy-chains');
+    const body = name => result.match(new RegExp(`define void @${name}[^]*?\\n\\s*}`))[0];
+    assert.doesNotMatch(body('forward'), /%middle/);
+    assert.match(body('forward'), /ptr %result, ptr %source, i32 8, i1 false/);
+    assert.match(body('observed'), /ptr %result, ptr %middle/);
+    assert.match(body('ordered'), /ptr %result, ptr %middle/);
+  });
   test('global reuse keeps multiple addresses but never crosses stores or calls', t => {
     const f = files(t);
     const text = lower(f, `@x = global i32 0
