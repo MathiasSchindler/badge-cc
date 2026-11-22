@@ -37,6 +37,7 @@ int main(void) {
   for (unsigned j = 0; j < sizeof(out); j++) {
     unsigned char expected = j < 1 || j >= 97   ? 187
                              : j >= 5 && j < 23 ? 51
+                             : j >= 81 && j < 93 ? 0
                                                 : 165;
     if (out[j] != expected)
       return 3;

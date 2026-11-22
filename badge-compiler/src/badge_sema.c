@@ -45,7 +45,7 @@ struct sema {
     switch_context_t *switches;
 };
 typedef struct {
-    int is_typedef, is_extern, is_static, is_auto, is_register, noreturn, used;
+    int is_typedef, is_extern, is_static, is_auto, is_register, is_inline, noreturn, used;
     uint32_t alignment;
     const char *section;
     const char *section_name;
@@ -309,6 +309,7 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
                 if (sem_kind(member, "static_assert")) { sem_statement(s, member, 0); continue; }
                 declaration_flags_t flags = {0};
                 c_type_t *base = sem_specifiers(s, member->first, &flags);
+                if (flags.is_inline) sem_error(s, member, "inline requires a function declaration");
                 if (member->first->next == NULL) sem_error(s, member, "anonymous record members are unsupported");
                 for (node_t *item = member->first->next; item != NULL; item = item->next) {
                     node_t *d = item->first;
@@ -371,7 +372,7 @@ static c_type_t *sem_specifiers(sema_t *s, node_t *n, declaration_flags_t *f) {
             else sem_error(s, c, "thread-local storage is unsupported");
         } else if (sem_kind(c, "function_specifier")) {
             if (strcmp(c->text, "_Noreturn") == 0) f->noreturn = 1;
-            else sem_error(s, c, "inline linkage semantics are unsupported");
+            else f->is_inline = 1;
         } else if (sem_kind(c, "attributes")) sem_attributes(s, c, f);
         else if (sem_kind(c, "alignment")) sem_alignment(s, c, f);
         else if (sem_kind(c, "typedef_name")) {
@@ -471,7 +472,7 @@ static c_type_t *sem_declarator(sema_t *s, node_t *n, c_type_t *base, int parame
             const char *name = NULL;
             for (node_t *d = p->first->next; d != NULL; d = d->first)
                 if (sem_kind(d, "name")) { name = d->text; break; }
-            if (f.is_typedef || f.is_static || f.is_extern || f.is_auto || f.noreturn || f.used || f.section || f.alignment)
+            if (f.is_typedef || f.is_static || f.is_extern || f.is_auto || f.is_inline || f.noreturn || f.used || f.section || f.alignment)
                 sem_error(s, p, "invalid parameter specifiers");
             if (pt->kind == T_VOID) {
                 if (pt->qualifiers || name != NULL || count != 1) sem_error(s, p, "void must be the sole unnamed parameter");
@@ -1065,6 +1066,7 @@ static void sem_declaration(sema_t *s, node_t *n) {
     int file = s->scope == s->file_scope;
     if (file && (flags.is_auto || flags.is_register)) sem_error(s, n, "invalid file-scope storage class");
     if (n->first->next == NULL) {
+        if (flags.is_inline) sem_error(s, n, "inline requires a function declaration");
         int tag_declaration = 0;
         for (node_t *c = n->first->first; c != NULL; c = c->next)
             if (sem_kind(c, "struct") || sem_kind(c, "union") || sem_kind(c, "enum")) tag_declaration = 1;
@@ -1087,6 +1089,7 @@ static void sem_declaration(sema_t *s, node_t *n) {
         symbol_kind_t kind = f.is_typedef ? S_TYPEDEF : type->kind == T_FUNCTION ? S_FUNCTION : S_OBJECT;
         int function_definition = sem_kind(n, "function_definition");
         if (f.noreturn && (kind != S_FUNCTION)) sem_error(s, d, "noreturn requires a function declaration");
+        if (f.is_inline && kind != S_FUNCTION) sem_error(s, d, "inline requires a function declaration");
         if (((f.is_auto || f.is_register) && kind == S_FUNCTION) || (!file && f.is_static && kind == S_FUNCTION))
             sem_error(s, d, "invalid function storage class");
         if (f.is_register && f.alignment) sem_error(s, d, "register object cannot request alignment");
@@ -1120,6 +1123,8 @@ static void sem_declaration(sema_t *s, node_t *n) {
             v->static_storage = linkage != 0 || f.is_static; v->register_storage = f.is_register;
             sem_bind(s, v);
         }
+        if (f.is_inline && (!file || v->linkage != 1))
+            sem_error(s, d, "external or block-scope inline linkage is unsupported");
         v->noreturn |= f.noreturn;
         if ((f.section != NULL || f.used) && (kind == S_TYPEDEF || (kind == S_OBJECT && !v->static_storage)))
             sem_error(s, d, "section/used attributes require a function or static-storage object");

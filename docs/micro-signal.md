@@ -17,6 +17,21 @@ indefinitely-running messenger or a complete 802.11 implementation.
 
 ## Build and install
 
+The default firmware build uses Clang LTO. To test the owned RP2350
+compiler, build the host sources as separate objects and continue using
+Clang for the Cortex-M3 controller. Use a separate build directory:
+
+```sh
+make -C badge-compiler
+make BUILD_DIR=build/micro-signal-owned \
+  RP2350_CC="bash $PWD/badge-compiler/scripts/owned-cc.sh" \
+  MICRO_SIGNAL_CONTROLLER_CC=clang MICRO_SIGNAL_LTO=0 \
+  build/micro-signal-owned/universe26/uf2/micro-signal.uf2 \
+  build/micro-signal-owned/universe26/uf2/micro-signal-self-test.uf2
+```
+
+This build path does not qualify on-badge radio behavior.
+
 ### 802.11g legacy OFDM
 
 The source-built controller now supports raw **6, 9, 12, 18, 24, 36, 48 and

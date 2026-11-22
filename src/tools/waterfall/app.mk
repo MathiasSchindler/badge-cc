@@ -1,6 +1,7 @@
 ROOT := ../../..
 BUILD ?= $(ROOT)/build/waterfall/activity
 CC := clang
+CONTROLLER_CC ?= $(CC)
 FLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb -std=c11 -Wall -Wextra -Werror \
 	-Oz -ffreestanding -nostdinc -fno-builtin -fno-stack-protector \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections \
@@ -36,13 +37,13 @@ CONTROLLER_INPUTS := $(wildcard $(ROOT)/clean-rx/src/*.h $(ROOT)/clean-rx/src/ru
 $(BUILD)/controller:
 	mkdir -p $@
 $(BUILD)/controller/activity_controller.o: activity_controller.c $(ROOT)/clean-rx/src/main.c $(CONTROLLER_INPUTS) | $(BUILD)/controller
-	$(CC) $(CONTROLLER_FLAGS) -c $< -o $@
+	$(CONTROLLER_CC) $(CONTROLLER_FLAGS) -c $< -o $@
 $(BUILD)/controller/%.o: $(ROOT)/clean-rx/src/%.c $(CONTROLLER_INPUTS) | $(BUILD)/controller
-	$(CC) $(CONTROLLER_FLAGS) -c $< -o $@
+	$(CONTROLLER_CC) $(CONTROLLER_FLAGS) -c $< -o $@
 $(BUILD)/controller/startup.o: $(ROOT)/clean-rx/src/startup.S | $(BUILD)/controller
-	$(CC) $(CONTROLLER_FLAGS) -c $< -o $@
+	$(CONTROLLER_CC) $(CONTROLLER_FLAGS) -c $< -o $@
 $(BUILD)/controller/cyw43_rx_fw.elf: $(CONTROLLER_OBJECTS) $(ROOT)/clean-rx/src/cyw43.ld
-	$(CC) $(CONTROLLER_FLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
+	$(CONTROLLER_CC) $(CONTROLLER_FLAGS) -nostdlib -fuse-ld=lld -Wl,--gc-sections -Wl,--fatal-warnings \
 		-T$(ROOT)/clean-rx/src/cyw43.ld $(CONTROLLER_OBJECTS) -o $@
 	@test -z "$$(llvm-nm -u $@)"
 $(BUILD)/controller/cyw43_rx_fw.bin: $(BUILD)/controller/cyw43_rx_fw.elf

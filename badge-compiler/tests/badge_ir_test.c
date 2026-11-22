@@ -136,6 +136,7 @@ int main(void) {
         {"struct S{int x,y;};int f(void){return ((struct S){.y=2,.x=1}).y;}","getelementptr i8"},
         {"int f(void){static int x;return ++x;}","internal global"},
         {"static int f(void){return 0;}","define internal i32 @\"f\""},
+        {"static inline int f(void){return 0;} int (*p)(void)=f;","define internal i32 @\"f\""},
         {"__attribute__((section(\".vectors\"),used)) int x=2;","section \".vectors\""},
         {"__attribute__((section(\".\\x74\"))) int f(void){return 0;}","section \".t\""},
         {"int f(int x){return _Generic(x,int:x+2,default:0);}","add i32"},
@@ -152,6 +153,12 @@ int main(void) {
         {"extern int f(int,...); int g(void){return f(2,3);}","call i32 (i32"},
         {"int f(int (*g)(int),int x){return g(x);}","call i32 %"},
     };
+    fixture("extern inline int f(void){return 1;}",NULL,0,path);
+    fixture("inline int f(void){return 1;}",NULL,0,path);
+    fixture_checked("struct V{int x,y,z;}; int use(struct V); int f(const struct V *v){return use(*v);}",
+            "load [3 x i32], ptr","call void @llvm.mem",1,path);
+    fixture_checked("struct V{int x,y;}; int use(struct V); int f(volatile struct V *v){return use(*v);}",
+            "i32 8, i1 true",NULL,1,path);
     global_storage_tests(path);
     for(size_t k=0;k<sizeof(positive)/sizeof(*positive);++k) fixture(positive[k].source,positive[k].fragment,1,path);
     const char *negative[]={

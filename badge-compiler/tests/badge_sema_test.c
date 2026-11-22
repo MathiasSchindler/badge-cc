@@ -152,6 +152,8 @@ int main(void) {
         "void f(int *p){__asm__(\"\" : \"+r\"(*p) : \"r\"(*p) : \"memory\");}",
         "void f(void){__asm__ goto(\"\" : : : : done);done:;}",
         "static void f(void) __attribute__((noreturn)); static void f(void){for(;;){}}",
+        "static inline int f(int); static inline int f(int x){return x+1;} int (*p)(int)=f;",
+        "static int f(int); inline int f(int x){return x+1;} int g(void){return f(1);}",
         "__attribute__((used,section(\".data\"))) static int a=1;",
         "void f(void){extern int x; x=1;} int x;",
         "int f(int a[static const 2]){return a[0];}",
@@ -201,6 +203,7 @@ int main(void) {
         "void f(unsigned x){switch(x){case -1:;case 0xffffffffu:;}}",
         "void f(int x){switch(x){default:;default:;}}",
         "void f(void){static void g(void);}", "extern int x; static int x;",
+        "static inline int x;", "void f(void){static inline int g(void);}",
         "void f(register int x){int*p=&x;}",
         "_Alignas(2) int x;", "_Alignas(3) int x;",
         "void f(int a[const 2]){a++;}",
@@ -236,7 +239,7 @@ int main(void) {
         "double x=1.0;", "struct S{unsigned x:2;};", "_Atomic(int) x;",
         "void f(int n){int a[n];}", "struct __attribute__((packed)) S{char a;int b;};",
         "unsigned x=0; char c=L'x';", "int c='ab';", "void f(void*p){p++;}",
-        "int f(){return 0;}", "static inline int f(void){return 0;}",
+        "int f(){return 0;}", "extern inline int f(void){return 0;}",
         "extern int x __asm__(\"renamed\");"
     };
     for (size_t k=0;k<sizeof(unsupported)/sizeof(unsupported[0]);++k) {

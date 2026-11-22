@@ -584,7 +584,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
                "unfilled %u opaque-barriers %u work %u\n",
             c->schedule_windows, c->schedule_hazards, c->schedule_moves,
             c->schedule_unfilled, c->schedule_barriers, c->schedule_work);
-  if (c->memory_selection == BADGE_MEMORY_WORD)
+  if (c->memory_selection == BADGE_MEMORY_WORD || c->word_bytes)
     cg_emit(c,
             "@ memory-selection: word-copies %u word-fills %u "
             "word-bytes %" PRIu64 " tail-bytes %" PRIu64 "\n",

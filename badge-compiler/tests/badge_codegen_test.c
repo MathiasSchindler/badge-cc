@@ -62,7 +62,18 @@ static void fixture(const char *source, const char *fragment, int accepted,
                        (badge_memory_selection)memory);
   }
 }
+static void short_memory_test(const char *path) {
+  fixture_mode(TARGET "define void @short_memory() {\nentry:\n"
+               "%a = alloca [16 x i8], align 4\n%b = alloca [16 x i8], align 4\n"
+               "call void @llvm.memset.inline.p0.i32(ptr %a, i8 0, i32 12, i1 false)\n"
+               "call void @llvm.memcpy.inline.p0.p0.i32(ptr %b, ptr %a, i32 12, i1 false)\n"
+               "ret void\n}\n",
+               "word-copies 1 word-fills 1 word-bytes 24 tail-bytes 0", 1, path,
+               BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL,
+               BADGE_SELECTION_THUMB_CONSTANTS, BADGE_MEMORY_BYTE);
+}
 static void memory_tests(const char *path) {
+  short_memory_test(path);
   const unsigned lengths[] = {0, 1,  2,  3,  4,  5,  7, 8,
                               9, 15, 16, 17, 63, 64, 65};
   for (unsigned n = 0; n < sizeof(lengths) / sizeof(*lengths); n++)
@@ -872,9 +883,9 @@ static void host_tests(void) {
   free(c);
 }
 int main(int argc, char **argv) {
-  if (argc > 2 || (argc == 2 && strcmp(argv[1], "--layout") &&
+  if (argc > 2 || (argc == 2 && strcmp(argv[1], "--layout") && strcmp(argv[1], "--memory") &&
                   strcmp(argv[1], "--api") && strcmp(argv[1], "--host"))) {
-    fprintf(stderr, "Usage: badge_codegen_test [--layout|--api|--host]\n");
+    fprintf(stderr, "Usage: badge_codegen_test [--layout|--memory|--api|--host]\n");
     return 2;
   }
   if (argc == 1 || !strcmp(argv[1], "--host"))
@@ -892,6 +903,8 @@ int main(int argc, char **argv) {
   if (argc == 2) {
     if (!strcmp(argv[1], "--layout"))
       layout_tests(path);
+    else if (!strcmp(argv[1], "--memory"))
+      short_memory_test(path);
     else {
       api_tests(input, path);
       selection_cli_tests(input, path);

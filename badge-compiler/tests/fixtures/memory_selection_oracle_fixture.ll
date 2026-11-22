@@ -167,10 +167,12 @@ entry:
   %aligned_src = getelementptr [96 x i8], ptr %b, i32 0, i32 4
   %dst = getelementptr [96 x i8], ptr %a, i32 0, i32 5
   %src = getelementptr [96 x i8], ptr %b, i32 0, i32 5
+  %tail = getelementptr [96 x i8], ptr %a, i32 0, i32 80
   call void @llvm.memset.inline.p0.i32(ptr %a, i8 -91, i32 96, i1 false)
   call void @llvm.memset.inline.p0.i32(ptr %b, i8 51, i32 96, i1 false)
-  call void @llvm.memcpy.inline.p0.p0.i32(ptr %aligned_dst, ptr %aligned_src, i32 7, i1 true)
+  call void @llvm.memcpy.inline.p0.p0.i32(ptr %aligned_dst, ptr %aligned_src, i32 8, i1 true)
   call void @llvm.memcpy.inline.p0.p0.i32(ptr %dst, ptr %src, i32 17, i1 false)
+  call void @llvm.memset.inline.p0.i32(ptr %tail, i8 0, i32 12, i1 false)
   call void @llvm.memcpy.inline.p0.p0.i32(ptr %out, ptr %a, i32 96, i1 false)
   ret void
 }

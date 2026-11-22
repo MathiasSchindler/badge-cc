@@ -172,6 +172,8 @@ clean-rx-badge:
 
 MICRO_SIGNAL_DIR := $(BUILD_DIR)/micro-signal
 MICRO_SIGNAL_CONTROLLER := $(BUILD_DIR)/clean-rx/cyw43_rx_fw.bin
+MICRO_SIGNAL_CONTROLLER_CC ?= $(RP2350_CC)
+MICRO_SIGNAL_LTO ?= 1
 MICRO_SIGNAL_SOURCES := $(TOOLS_DIR)/micro-signal.c $(TOOLS_DIR)/diagnostics_logic.c \
 	clean-rx/badge/loader.c clean-rx/badge/assets.S \
 	$(ARCH_DIR)/start.c $(ARCH_DIR)/picobin.S $(ARCH_DIR)/bootrom_reboot.c \
@@ -185,6 +187,24 @@ MICRO_SIGNAL_HEADERS := $(TOOLS_DIR)/micro-signal.h $(TOOLS_DIR)/micro-signal-mt
 	$(wildcard $(ARCH_DIR)/*.h $(SHARED_DIR)/*.h $(PLATFORM_DIR)/*.h $(RADIO_DIR)/*.h)
 MICRO_SIGNAL_TEST_USB := src/usb/live_usb_control.c src/usb/live_usb_hw.c \
 	$(SHARED_DIR)/usb_report.c $(RADIO_DIR)/wifi_usb_report.c $(RADIO_DIR)/wifi_trace.c
+
+ifeq ($(MICRO_SIGNAL_LTO),1)
+micro_signal_build = $(RP2350_CC) $(RP2350_CFLAGS) -flto $(1) \
+	$(RP2350_LDFLAGS) $(2) -Wl,-Map=$(@:.elf=.map) -o $@
+else ifeq ($(MICRO_SIGNAL_LTO),0)
+define micro_signal_build
+set -e; mkdir -p "$(@:.elf=)/obj"; set --; \
+	for source in $(2); do \
+		object="$(@:.elf=)/obj/$$source.o"; \
+		mkdir -p "$${object%/*}"; \
+		$(RP2350_CC) $(RP2350_CFLAGS) $(1) -c "$$source" -o "$$object"; \
+		set -- "$$@" "$$object"; \
+	done; \
+	$(RP2350_CC) $(RP2350_CFLAGS) $(RP2350_LDFLAGS) "$$@" -Wl,-Map=$(@:.elf=.map) -o $@
+endef
+else
+$(error MICRO_SIGNAL_LTO must be 0 or 1)
+endif
 
 .PHONY: micro-signal micro-signal-self-test test-micro-signal
 micro-signal: $(UF2_DIR)/micro-signal.uf2
@@ -202,23 +222,23 @@ micro-signal-transport-window32-test: $(UF2_DIR)/micro-signal-transport-window32
 micro-signal-transport-credit-test: $(UF2_DIR)/micro-signal-transport-credit-test.uf2 $(MICRO_SIGNAL_DIR)/collect
 
 $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin: force
-	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-test \
+	$(MAKE) -C clean-rx/src "CC=$(MICRO_SIGNAL_CONTROLLER_CC)" "BUILD=$(abspath $(@D))" \
 		PROFILE=sdio-test SELECTION=sdio-transport
 
 $(BUILD_DIR)/clean-rx-sdio-paced-test/cyw43_rx_fw.bin: force
-	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-paced-test \
+	$(MAKE) -C clean-rx/src "CC=$(MICRO_SIGNAL_CONTROLLER_CC)" "BUILD=$(abspath $(@D))" \
 		PROFILE=sdio-test SELECTION=sdio-paced
 
 $(BUILD_DIR)/clean-rx-sdio-window-test/cyw43_rx_fw.bin: force
-	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window-test \
+	$(MAKE) -C clean-rx/src "CC=$(MICRO_SIGNAL_CONTROLLER_CC)" "BUILD=$(abspath $(@D))" \
 		PROFILE=sdio-test SELECTION=sdio-window
 
 $(BUILD_DIR)/clean-rx-sdio-window32-test/cyw43_rx_fw.bin: force
-	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-window32-test \
+	$(MAKE) -C clean-rx/src "CC=$(MICRO_SIGNAL_CONTROLLER_CC)" "BUILD=$(abspath $(@D))" \
 		PROFILE=sdio-test SELECTION=sdio-window32
 
 $(BUILD_DIR)/clean-rx-sdio-credit-test/cyw43_rx_fw.bin: force
-	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx-sdio-credit-test \
+	$(MAKE) -C clean-rx/src "CC=$(MICRO_SIGNAL_CONTROLLER_CC)" "BUILD=$(abspath $(@D))" \
 		PROFILE=sdio-test SELECTION=sdio-credit
 
 $(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf: MICRO_SIGNAL_TRANSPORT_CONTROLLER = $(BUILD_DIR)/clean-rx-sdio-test/cyw43_rx_fw.bin
@@ -237,17 +257,15 @@ $(MICRO_SIGNAL_DIR)/micro-signal-transport-test.elf $(MICRO_SIGNAL_DIR)/micro-si
 		$(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_HEADERS) \
 		$(MICRO_SIGNAL_TEST_USB) \
 		src/usb/live_usb.h src/usb/live_usb_hw.h $(ARCH_DIR)/memmap_flash.ld Makefile | $(MICRO_SIGNAL_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -flto -DMICRO_SIGNAL_SELF_TEST -DMICRO_SIGNAL_TRANSPORT_TEST \
-		-DCLEAN_RX_STRICT_TEST \
-		-DWIFI_TRACE_SIZE=4096u \
-		-DCLEAN_CONTROLLER_PATH='"$(abspath $(MICRO_SIGNAL_TRANSPORT_CONTROLLER))"' \
-		$(RP2350_LDFLAGS) $(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_TEST_USB) \
-		-Wl,-Map=$(@:.elf=.map) -o $@
+	$(call micro_signal_build,-DMICRO_SIGNAL_SELF_TEST -DMICRO_SIGNAL_TRANSPORT_TEST \
+		-DCLEAN_RX_STRICT_TEST -DWIFI_TRACE_SIZE=4096u \
+		-DCLEAN_CONTROLLER_PATH='"$(abspath $(MICRO_SIGNAL_TRANSPORT_CONTROLLER))"',\
+		$(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_TEST_USB))
 	@test -z "$$($(RP2350_NM) -u $@)"
 	$(RP2350_SIZE) $@
 
 $(MICRO_SIGNAL_CONTROLLER): force
-	$(MAKE) -C clean-rx/src CC=$(RP2350_CC) BUILD=../../$(BUILD_DIR)/clean-rx
+	$(MAKE) -C clean-rx/src "CC=$(MICRO_SIGNAL_CONTROLLER_CC)" "BUILD=$(abspath $(@D))"
 
 $(MICRO_SIGNAL_DIR):
 	mkdir -p $@
@@ -270,10 +288,9 @@ $(MICRO_SIGNAL_DIR)/micro-signal.elf $(MICRO_SIGNAL_DIR)/micro-signal-self-test.
 		$(MICRO_SIGNAL_DIR)/micro-signal-g.elf $(MICRO_SIGNAL_DIR)/micro-signal-g-test.elf: \
 		$(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_HEADERS) $(MICRO_SIGNAL_CONTROLLER) \
 		$(ARCH_DIR)/memmap_flash.ld Makefile | $(MICRO_SIGNAL_DIR)
-	$(RP2350_CC) $(RP2350_CFLAGS) -flto $(MICRO_SIGNAL_FLAGS) \
-		-DCLEAN_CONTROLLER_PATH='"$(abspath $(MICRO_SIGNAL_CONTROLLER))"' \
-		$(RP2350_LDFLAGS) $(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_EXTRA_SOURCES) \
-		-Wl,-Map=$(@:.elf=.map) -o $@
+	$(call micro_signal_build,$(MICRO_SIGNAL_FLAGS) \
+		-DCLEAN_CONTROLLER_PATH='"$(abspath $(MICRO_SIGNAL_CONTROLLER))"',\
+		$(MICRO_SIGNAL_SOURCES) $(MICRO_SIGNAL_EXTRA_SOURCES))
 	@test -z "$$($(RP2350_NM) -u $@)"
 	$(RP2350_SIZE) $@
 

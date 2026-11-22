@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
         -T*) link+=(-T "${1#-T}") ;;
         -Wl,-Map=*) link+=(-Map "${1#-Wl,-Map=}") ;;
         -Wl,--gc-sections|-Wl,--fatal-warnings|-nostdlib|-fuse-ld=lld) ;;
-        -std=c11|-Wall|-Wextra|-Werror|-Oz|-ffreestanding|-fno-builtin|-fno-stack-protector|\
+        -std=c11|-Wall|-Wextra|-Werror|-Oz|-ffreestanding|-nostdinc|-fno-builtin|-fno-stack-protector|\
         -fno-unwind-tables|-fno-asynchronous-unwind-tables|-ffunction-sections|-fdata-sections|\
         --target=arm-none-eabi|-mcpu=cortex-m33|-mthumb) ;;
         *) printf 'owned-cc: unsupported argument: %s\n' "$1" >&2; exit 2 ;;

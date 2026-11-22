@@ -291,10 +291,39 @@ static ir_value ir_binary(ir_context *c,const char *op,ir_value left,ir_value ri
     ir_emit(c,"  %s = %s %s %s, %s\n",r,instruction,ir_type(c,type),left.text,right.text);
     return ir_cast(c,(ir_value){type,r},result);
 }
+static const char *ir_load_carrier(ir_context *c,ir_value value,const char *carrier,unsigned size) {
+    c_type_t *t=value.type;
+    const char *place=value.text;
+    int vol=(t->qualifiers&Q_VOLATILE)!=0;
+    if(t->size!=size || vol) {
+        place=ir_temp(c,t,size);
+        if(t->size!=size) ir_zero(c,place,size,0);
+        ir_copy(c,place,value.text,t->size,vol);
+    }
+    const char *r=ir_reg(c); ir_emit(c,"  %s = load %s, ptr %s, align %u\n",r,carrier,place,t->alignment); return r;
+}
 static const char *ir_pack(ir_context *c,ir_value value) {
-    c_type_t *t=value.type; unsigned word=ir_carrier_size(t),size=(t->size+word-1)/word*word;
-    const char *place=ir_temp(c,t,size); ir_zero(c,place,size,0); ir_copy(c,place,value.text,t->size,(t->qualifiers&Q_VOLATILE)!=0);
-    const char *r=ir_reg(c); ir_emit(c,"  %s = load %s, ptr %s, align %u\n",r,ir_carrier(c,t),place,t->alignment); return r;
+    c_type_t *t=value.type; unsigned word=ir_carrier_size(t);
+    return ir_load_carrier(c,value,ir_carrier(c,t),(t->size+word-1)/word*word);
+}
+static ir_value ir_argument(ir_context *c,node_t *n) {
+    sem_info_t *i=ir_info(n);
+    c_type_t *t=i->conversion?i->conversion:i->type;
+    if(i->lvalue && ir_record(t) && !ir_byval(t) &&
+        !(i->type->qualifiers&Q_VOLATILE) && t->size%ir_carrier_size(t)==0) {
+        // Snapshot the value before evaluating later arguments that may change it.
+        const char *place=ir_lvalue(c,n);
+        return (ir_value){t,ir_pack(c,(ir_value){i->type,place})};
+    }
+    ir_value value=ir_expression(c,n);
+    if(ir_record(value.type)) {
+        if(ir_byval(value.type)) {
+            c_type_t type=*value.type; type.alignment=ir_byval_alignment(&type);
+            const char *copy=ir_temp(c,&type,0);
+            ir_copy(c,copy,value.text,type.size,0); value.text=copy;
+        } else value.text=ir_pack(c,value);
+    }
+    return value;
 }
 static void ir_signature(ir_context *c,c_type_t *fn,int names) {
     int comma=0;
@@ -314,18 +343,11 @@ static ir_value ir_call(ir_context *c,node_t *n) {
     node_t *a=n->first; ir_value callee=ir_expression(c,a); c_type_t *fn=callee.type->base;
     size_t count=0; for(node_t *arg=a->next;arg;arg=arg->next) ++count;
     ir_value *values=ir_allocate(c,(count+1)*sizeof(*values)); size_t k=0;
-    for(node_t *arg=a->next;arg;arg=arg->next) values[k++]=ir_expression(c,arg);
+    for(node_t *arg=a->next;arg;arg=arg->next) values[k++]=ir_argument(c,arg);
     const char *result=NULL,*place=NULL;
     int record=ir_record(fn->base),sret=record && fn->base->size>4;
     if(sret) place=ir_temp(c,fn->base,0);
     if(fn->base->kind!=T_VOID && !sret) result=ir_reg(c);
-    for(k=0;k<count;++k) if(ir_record(values[k].type)) {
-        if(ir_byval(values[k].type)) {
-            c_type_t type=*values[k].type; type.alignment=ir_byval_alignment(&type);
-            const char *copy=ir_temp(c,&type,0);
-            ir_copy(c,copy,values[k].text,type.size,0); values[k].text=copy;
-        } else values[k].text=ir_pack(c,values[k]);
-    }
     ir_text(c,"  "); if(result) ir_emit(c,"%s = ",result);
     ir_emit(c,"call %s%s ",record?"":ir_extension(fn->base),ir_return_type(c,fn));
     if(fn->variadic || !fn->prototype) { ir_text(c,"("); ir_signature(c,fn,0); ir_text(c,") "); }
@@ -713,9 +735,9 @@ static void ir_statement(ir_context *c,node_t *n) {
             if(ir_record(t)) {
                 if(t->size>4) { ir_copy(c,"%result",value.text,t->size,(value.type->qualifiers&Q_VOLATILE)!=0); ir_text(c,"  ret void\n"); }
                 else {
-                    unsigned size=t->size==1?1:t->size==2?2:4; const char *place=ir_temp(c,t,size);
-                    ir_zero(c,place,size,0); ir_copy(c,place,value.text,t->size,0);
-                    const char *r=ir_reg(c); ir_emit(c,"  %s = load %s, ptr %s, align %u\n  ret %s %s\n",r,ir_small_return(t),place,t->alignment,ir_small_return(t),r);
+                    unsigned size=t->size==1?1:t->size==2?2:4;
+                    const char *carrier=ir_small_return(t),*r=ir_load_carrier(c,value,carrier,size);
+                    ir_emit(c,"  ret %s %s\n",carrier,r);
                 }
             } else if(t->kind==T_VOID) ir_text(c,"  ret void\n");
             else { value=ir_cast(c,value,t); ir_emit(c,"  ret %s %s\n",ir_type(c,t),value.text); }

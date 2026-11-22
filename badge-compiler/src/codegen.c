@@ -797,10 +797,8 @@ static void cg_function_parse(cg_context *c) {
         i->result->object = cg_slot(c, object->size, align);
         i->result->object_size = object->size;
         i->result->object_align = align;
-        if (c->memory_selection == BADGE_MEMORY_WORD) {
-          i->result->memory_align = align;
-          i->result->memory_size = object->size;
-        }
+        i->result->memory_align = align;
+        i->result->memory_size = object->size;
         c->pos = saved;
       }
     }
@@ -1181,18 +1179,63 @@ static int cg_direct_gep(cg_context *c, cg_inst *i, unsigned stride,
     cg_save_normalized(c, i->result, dst);
   return 1;
 }
-static int cg_memory_pointer(cg_context *c, cg_arg *arg, unsigned length) {
+static cg_value *cg_memory_pointer(cg_context *c, cg_arg *arg, unsigned length) {
   const char *s = c->tokens[arg->start].text;
   if (*s != '%')
-    return 0;
+    return NULL;
   cg_value *v = cg_find(c, s);
-  return v->memory_align >= 4 && length <= v->memory_size;
+  return v->memory_align >= 4 && length <= v->memory_size ? v : NULL;
+}
+static int cg_nonvolatile_memory(cg_context *c, cg_arg *args) {
+  const char *flag = c->tokens[args[3].start].text;
+  return !strcmp(flag, "false") || !strcmp(flag, "0");
+}
+static int cg_short_memory(cg_context *c, cg_arg *args, int copy,
+                           unsigned length) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      length < 4 || length > 16 || length % 4 ||
+      !cg_nonvolatile_memory(c, args) ||
+      (!copy && strcmp(c->tokens[args[1].start].text, "0")))
+    return 0;
+  cg_value *dst = cg_memory_pointer(c, &args[0], length);
+  cg_value *src = copy ? cg_memory_pointer(c, &args[1], length) : NULL;
+  if (!dst || (copy && !src))
+    return 0;
+  int direct_dst = c->frame_addressing == BADGE_FRAME_DIRECT &&
+                   dst->object_size && dst->object <= 4096 - length;
+  int direct_src = src && c->frame_addressing == BADGE_FRAME_DIRECT &&
+                   src->object_size && src->object <= 4096 - length;
+  if (!direct_dst) {
+    c->pos = args[0].start;
+    cg_value_read(c, args[0].type, 4, 0);
+  }
+  if (copy && !direct_src) {
+    c->pos = args[1].start;
+    cg_value_read(c, args[1].type, 5, 0);
+  } else if (!copy) {
+    cg_immediate(c, 0, 0);
+  }
+  for (unsigned k = 0; k < length; k += 4) {
+    if (direct_src)
+      cg_stack(c, 0, 0, src->object + k);
+    else if (copy)
+      cg_emit(c, "ldr.n r0, [r5, #%u]\n", k);
+    if (direct_dst)
+      cg_stack(c, 1, 0, dst->object + k);
+    else
+      cg_emit(c, "str.n r0, [r4, #%u]\n", k);
+  }
+  if (copy)
+    c->word_copies++;
+  else
+    c->word_fills++;
+  c->word_bytes += length;
+  return 1;
 }
 static int cg_word_memory(cg_context *c, cg_arg *args, int copy,
                           unsigned length) {
   if (c->memory_selection != BADGE_MEMORY_WORD || length < 4 ||
-      (strcmp(c->tokens[args[3].start].text, "false") &&
-       strcmp(c->tokens[args[3].start].text, "0")) ||
+      !cg_nonvolatile_memory(c, args) ||
       !cg_memory_pointer(c, &args[0], length) ||
       (copy && !cg_memory_pointer(c, &args[1], length)))
     return 0;
@@ -1299,10 +1342,6 @@ static void cg_call(cg_context *c, cg_inst *i) {
     if (!strncmp(callee, "@llvm.mem", 9)) {
       if (count != 4)
         cg_error(c, "invalid memory intrinsic");
-      c->pos = args[0].start;
-      cg_value_read(c, args[0].type, 4, 0);
-      c->pos = args[1].start;
-      cg_value_read(c, args[1].type, 5, 0);
       c->pos = args[2].start;
       uint64_t length = cg_number(c, cg_take(c));
       if (length > 16u * 1024u * 1024u)
@@ -1310,6 +1349,14 @@ static void cg_call(cg_context *c, cg_inst *i) {
       int copy = !strncmp(callee, "@llvm.memcpy", 12);
       if (!copy && strncmp(callee, "@llvm.memset", 12))
         cg_error(c, "unsupported memory intrinsic");
+      if (cg_short_memory(c, args, copy, (unsigned)length)) {
+        c->pos = after;
+        return;
+      }
+      c->pos = args[0].start;
+      cg_value_read(c, args[0].type, 4, 0);
+      c->pos = args[1].start;
+      cg_value_read(c, args[1].type, 5, 0);
       if (cg_word_memory(c, args, copy, (unsigned)length)) {
         c->pos = after;
         return;
@@ -1850,8 +1897,7 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_expect(c, ",");
     (void)cg_type_parse(c, 0);
     cg_value proof = {0};
-    if (c->memory_selection == BADGE_MEMORY_WORD &&
-        c->tokens[c->pos].text[0] == '%') {
+    if (c->tokens[c->pos].text[0] == '%') {
       cg_value *base = cg_find(c, c->tokens[c->pos].text);
       proof.memory_align = base->memory_align;
       proof.memory_size = base->memory_size;

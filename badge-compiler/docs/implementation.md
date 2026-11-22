@@ -924,6 +924,8 @@ The checker implements:
 - `section`, `used` and `noreturn` attributes; assembly operand types/lvalues
   and `asm goto` labels. Instruction/register constraints remain a backend
   responsibility.
+- File-scope `inline` on internal-linkage functions (including `static
+  inline`). It preserves ordinary internal linkage, not a requirement to inline.
 
 Value-conversion annotations preserve the source lvalue's qualified type,
 including discarded volatile reads. A constant lvalue address is distinguished
@@ -934,7 +936,7 @@ The explicit exclusions are floating literals/constant folding, bit-fields,
 atomics, TLS, complex/imaginary types, VLAs, wide literals and
 multibyte/multicharacter character constants, anonymous record members,
 empty records, general initializer
-brace elision, inline linkage semantics, non-prototype function definitions,
+brace elision, external and block-scope inline, non-prototype function definitions,
 declaration assembly labels, GNU void/function-pointer arithmetic and
 unrecognized semantic attributes such as `packed`/`aligned`. Floating types
 and variable arithmetic are supported without floating constant evaluation.
@@ -1394,6 +1396,9 @@ opt -passes=verify -disable-output badge-compiler/build/screen-owned.ll
 - Narrow scalar `signext`/`zeroext`; records up to 64 bytes use word carriers
   (`i32`, or `i64` for alignment >=8), larger arguments use aligned `byval`.
   Returns up to four bytes use integer carriers; larger records use `sret`.
+  Exact-size carriers can load directly from a record. Argument loads from
+  nonvolatile lvalues capture the value before later arguments are evaluated;
+  padded carriers still use a bounded, zero-padded temporary.
   Direct/indirect calls, prototypes, varargs and parameter adjustment share
   the same lowering.
 - If/loops, break/continue, switch/fallthrough, labels/goto, short-circuit,
@@ -2042,6 +2047,13 @@ the original byte lowering. There is no read/write beyond the intrinsic's
 length, no speculative alignment probe and no memory-access reordering across
 intrinsics. Original SSA homes, allocation, call barriers, save masks and
 frame/ABI planning remain unchanged.
+
+The opt-in `thumb-constants` scalar profile also emits straight-line transfers
+for nonvolatile, proven aligned local copies and zero fills of 4, 8, 12 or 16
+bytes. It can use frame offsets directly for fixed allocas with encodable
+offsets. This bounded case applies even in the default byte memory policy;
+larger copies, nonzero fills and unproven accesses still follow the memory
+policy above.
 
 Per-function `@ memory-selection:` comments report word-copy/fill sites and
 selected word/tail byte totals. These count **static intrinsic lengths**,

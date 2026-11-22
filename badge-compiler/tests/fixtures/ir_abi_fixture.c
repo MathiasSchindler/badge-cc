@@ -2,12 +2,14 @@ struct one { signed char x; };
 struct two { unsigned short x; };
 struct three { unsigned char x[3]; };
 struct pair { int x,y; };
+struct triple { int x,y,z; };
 struct wide { long long x; int y; };
 struct big { int x[20]; };
 struct one abi_one(struct one x);
 struct two abi_two(struct two x);
 struct three abi_three(struct three x);
 struct pair abi_pair(int prefix,struct pair x,int suffix);
+int abi_triple(int prefix,struct triple x,int suffix);
 struct wide abi_wide(struct wide x);
 struct big abi_big(struct big x);
 signed char abi_signed(signed char x);
@@ -16,6 +18,7 @@ _Bool abi_bool(_Bool x);
 unsigned abi_zero_from_signed(signed char x);
 unsigned char abi_reinterpret8(signed char x);
 #ifdef CALLER
+static volatile int triple_seed = 37;
 int main(void) {
     if(abi_one((struct one){-7}).x!=-5) return 1;
     if(abi_two((struct two){65530}).x!=65532) return 2;
@@ -23,6 +26,8 @@ int main(void) {
     if(t.x[0]!=1 || t.x[1]!=4 || t.x[2]!=3) return 3;
     struct pair p=abi_pair(3,(struct pair){5,7},11);
     if(p.x!=8 || p.y!=18) return 4;
+    struct triple v={triple_seed,-5,11};
+    if(abi_triple(7,v,13)!=37-10+33+7-13) return 10;
     struct wide w=abi_wide((struct wide){0x1122334455667788LL,9});
     if(w.x!=0x112233445566778aLL || w.y!=12) return 5;
     struct big b=abi_big((struct big){{1,2,3}});
@@ -36,6 +41,7 @@ struct one abi_one(struct one x) { x.x+=2; return x; }
 struct two abi_two(struct two x) { x.x+=2; return x; }
 struct three abi_three(struct three x) { x.x[1]+=2; return x; }
 struct pair abi_pair(int prefix,struct pair x,int suffix) { x.x+=prefix;x.y+=suffix;return x; }
+int abi_triple(int prefix,struct triple x,int suffix) { return x.x+2*x.y+3*x.z+prefix-suffix; }
 struct wide abi_wide(struct wide x) { x.x+=2;x.y+=3;return x; }
 struct big abi_big(struct big x) { x.x[0]+=2;x.x[19]=7;return x; }
 signed char abi_signed(signed char x) { return x+2; }

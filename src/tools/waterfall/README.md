@@ -10,6 +10,17 @@ It runs independently of a laptop or USB collector.
 make -C src/tools/waterfall -f app.mk all test
 ```
 
+For a build-only comparison of the activity firmware, the owned compiler
+can build the RP2350 objects while Clang still builds the Cortex-M3 controller:
+
+```sh
+make -C badge-compiler
+out="$PWD/build/waterfall/activity-owned"
+make -C src/tools/waterfall -f app.mk BUILD="$out" \
+  CC="bash $PWD/badge-compiler/scripts/owned-cc.sh" CONTROLLER_CC=clang \
+  "$out/waterfall.uf2"
+```
+
 Badge-only image: `build/waterfall/activity/waterfall.uf2`.
 Do not install this display application on a Pico.
 
