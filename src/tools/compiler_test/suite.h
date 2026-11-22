@@ -5,7 +5,11 @@
 #include "../../shared/usb_report.h"
 #include "../../platform/badger/graphics.h"
 
-#ifdef COMPILER_TEST_APPLICATION
+#if defined(COMPILER_TEST_IMU)
+#define COMPILER_SUITE_ID 0x494d5530u
+#define COMPILER_TIMING_VERSION 5u
+#define COMPILER_TIMING_KERNELS 0u
+#elif defined(COMPILER_TEST_APPLICATION)
 #define COMPILER_SUITE_ID 0x41505030u
 #define COMPILER_TIMING_VERSION 4u
 #define COMPILER_TIMING_KERNELS 0u

@@ -92,7 +92,7 @@ test('Cortex-M33 validates nested effects, promotions, pointer/record layout and
     run(clang,[...target,'-O0','-c','-x','ir',file(`${mode}.ll`),'-o',file('raw.o')]);
     execute(file('raw.o'));
     for(const optimizer of ['llvm','owned']){
-      if(optimizer==='llvm') run(opt,['-S','-passes=default<Oz>',file(`${mode}.ll`),'-o',file('optimized.ll')]);
+      if(optimizer==='llvm') run(clang,[...target,'-Oz','-x','ir','-S','-emit-llvm',file(`${mode}.ll`),'-o',file('optimized.ll')]);
       else run(tool('badge-opt'),[file(`${mode}.ll`),'-o',file('optimized.ll')]);
       run(opt,['-passes=verify','-disable-output',file('optimized.ll')]);
       run(clang,[...target,'-Oz','-c','-x','ir',file('optimized.ll'),'-o',file('llvm.o')]);

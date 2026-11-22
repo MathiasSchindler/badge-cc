@@ -1772,13 +1772,17 @@ cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
       !cg_fill_label(FILL_TOKEN(latch->last, 2), head->name) ||
       (exit->first && exit->first->result && !strcmp(FILL_TOKEN(exit->first, 2), "phi")))
     return NULL;
-  cg_inst *scale = body->first, *gep = scale ? scale->next : NULL;
+  int byte = FILL_MATCH(body->first, NULL, "=", "getelementptr", "i8", ",",
+                       "ptr", NULL, ",", "i32", FILL_TOKEN(phi, 0));
+  cg_inst *scale = byte ? NULL : body->first;
+  cg_inst *gep = byte ? body->first : scale ? scale->next : NULL;
   cg_inst *store = gep ? gep->next : NULL;
-  if (!FILL_MATCH(scale, NULL, "=", "mul", "i32", FILL_TOKEN(phi, 0), ",", "2") ||
-      !FILL_MATCH(gep, NULL, "=", "getelementptr", "i8", ",", "ptr", NULL, ",", "i32",
-                  FILL_TOKEN(scale, 0)) || *FILL_TOKEN(gep, 6) != '@' ||
-      !FILL_MATCH(store, "store", "i16", NULL, ",", "ptr", FILL_TOKEN(gep, 0), ",",
-                  "align", "2") ||
+  if ((!byte && (!FILL_MATCH(scale, NULL, "=", "mul", "i32", FILL_TOKEN(phi, 0), ",", "2") ||
+        !FILL_MATCH(gep, NULL, "=", "getelementptr", "i8", ",", "ptr", NULL, ",", "i32",
+                    FILL_TOKEN(scale, 0)) || *FILL_TOKEN(gep, 6) != '@')) ||
+      (byte && *FILL_TOKEN(gep, 6) != '%' && *FILL_TOKEN(gep, 6) != '@') ||
+      !FILL_MATCH(store, "store", byte ? "i8" : "i16", NULL, ",", "ptr", FILL_TOKEN(gep, 0), ",",
+                  "align", byte ? "1" : "2") ||
       store->next != body->last || !FILL_MATCH(body->last, "br", "label", NULL) ||
       !cg_fill_label(FILL_TOKEN(body->last, 2), latch->name))
     return NULL;
@@ -1786,13 +1790,13 @@ cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
   if (!isdigit((unsigned char)*lit))
     return NULL;
   uint64_t trips = cg_number(c, lit);
-  if (trips < 4 || trips > INT32_MAX / 2)
+  if (trips < 4 || trips > (byte ? 8 : INT32_MAX / 2))
     return NULL;
   const char *color = FILL_TOKEN(store, 2);
-  const char *removed[] = {FILL_TOKEN(phi, 0), FILL_TOKEN(cmp, 0), FILL_TOKEN(scale, 0),
-                           FILL_TOKEN(gep, 0), FILL_TOKEN(step, 0)};
+  const char *removed[] = {FILL_TOKEN(phi, 0), FILL_TOKEN(cmp, 0), FILL_TOKEN(gep, 0),
+                           FILL_TOKEN(step, 0), scale ? FILL_TOKEN(scale, 0) : NULL};
   for (unsigned k = 0; k < sizeof(removed) / sizeof(*removed); k++)
-    if (!strcmp(color, removed[k]))
+    if (removed[k] && (!strcmp(color, removed[k]) || !strcmp(FILL_TOKEN(gep, 6), removed[k])))
       return NULL;
   // This replaces a closed CFG region, with no observable loop-local SSA values.
   for (cg_block *b = c->fn->blocks; b; b = b->next) {
@@ -1809,7 +1813,7 @@ cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
             cg_fill_label(s, latch->name))
           return NULL;
         for (unsigned j = 0; j < sizeof(removed) / sizeof(*removed); j++)
-          if (!strcmp(s, removed[j]))
+          if (removed[j] && !strcmp(s, removed[j]))
             return NULL;
       }
     }
@@ -1821,12 +1825,19 @@ cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
   c->pos = store->begin + 1;
   cg_type *type = cg_type_parse(c, 0);
   cg_value_read(c, type, 2, 0);
-  cg_symbol(c, 1, cg_name(c, FILL_TOKEN(gep, 6)), 0);
-  cg_immediate(c, 0, (uint32_t)trips);
-  unsigned id = ++c->unique;
-  cg_emit(c, "@ fixed-halfword-fill: hoisted pointer and value\n.Lcg_fill%u:\n"
-             "strh.w r2, [r1], #2\nsubs.n r0, #1\nbne.n .Lcg_fill%u\n",
-          id, id);
+  c->pos = gep->begin + 6;
+  cg_value_read(c, NULL, 1, 0);
+  if (byte) {
+    cg_emit(c, "@ fixed-byte-fill: straight-line byte stores\n");
+    for (unsigned k = 0; k < trips; k++)
+      cg_emit(c, "strb.n r2, [r1, #%u]\n", k);
+  } else {
+    cg_immediate(c, 0, (uint32_t)trips);
+    unsigned id = ++c->unique;
+    cg_emit(c, "@ fixed-halfword-fill: hoisted pointer and value\n.Lcg_fill%u:\n"
+               "strh.w r2, [r1], #2\nsubs.n r0, #1\nbne.n .Lcg_fill%u\n",
+            id, id);
+  }
   cg_register_after_instruction(c);
   return exit;
 #undef FILL_TOKEN

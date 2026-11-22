@@ -1,5 +1,6 @@
 #include "ir_analysis.h"
 #include "ir_integer.h"
+#include "ir_loop_admission.h"
 #include "target_cost.h"
 #include "thumb_immediate.h"
 #include <inttypes.h>
@@ -19,7 +20,7 @@ static void spend(strength *p) {
   if (!p->work--)
     ir_error(p->c, "target-strength-reduce work limit exceeded");
 }
-static const char *eligible(strength *p, unsigned i, uint32_t *divisor) {
+static const char *plain_divrem(strength *p, unsigned i, uint32_t *divisor) {
   spend(p);
   const ir_instruction *in = &p->a.instructions[i];
   const ir_line *line = &p->a.text->lines[in->line - 1];
@@ -36,9 +37,59 @@ static const char *eligible(strength *p, unsigned i, uint32_t *divisor) {
       !ir_integer(ir_text(p->a.text, right->token), &n))
     return "requires_local_dividend_and_literal_divisor";
   *divisor = (uint32_t)n;
+  return NULL;
+}
+static const char *eligible(strength *p, unsigned i, uint32_t *divisor) {
+  const char *reason = plain_divrem(p, i, divisor);
+  if (reason)
+    return reason;
   if (!*divisor || (*divisor & (*divisor - 1)))
     return "not_nonzero_power_of_two";
   return NULL;
+}
+
+void ir_divrem_pairs(ir_context *c, ir_module *m) {
+  enum { LOOKAHEAD = 6 };
+  ir_allocation *mark = c->allocations;
+  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
+  ir_analyze(c, m, &p.a);
+  for (unsigned i = 0; i < p.a.instruction_count; i++) {
+    spend(&p);
+    const ir_instruction *rem = &p.a.instructions[i];
+    if (rem->opcode != IR_OP_BINARY || strcmp(rem->operation, "urem"))
+      continue;
+    c->line = rem->line;
+    uint32_t divisor;
+    if (plain_divrem(&p, i, &divisor) || !divisor)
+      continue;
+    ir_line *first = &m->lines[rem->line - 1];
+    if (first->replacement)
+      continue;
+    for (unsigned j = i + 1; j <= i + LOOKAHEAD && j < p.a.instruction_count; j++) {
+      spend(&p);
+      const ir_instruction *div = &p.a.instructions[j];
+      if (div->block != rem->block ||
+          (div->effects & (IR_EFFECT_CONTROL | IR_EFFECT_CALL | IR_EFFECT_OPAQUE | IR_EFFECT_VOLATILE)))
+        break;
+      if (div->opcode != IR_OP_BINARY || strcmp(div->operation, "udiv"))
+        continue;
+      uint32_t other;
+      ir_line *second = &m->lines[div->line - 1];
+      if (plain_divrem(&p, j, &other) || other != divisor || second->replacement ||
+          p.a.operands[rem->first_operand].definition != p.a.operands[div->first_operand].definition)
+        continue;
+      if (j != i + 1) {
+        first->replacement = ir_format(c, "%.*s%.*s", (int)(first->end - first->begin),
+            m->source + first->begin, (int)(second->end - second->begin), m->source + second->begin);
+        second->replacement = "";
+        ir_note(c, "candidate", "adjacent_unsigned_divrem", 1);
+      }
+      break;
+    }
+  }
+  ir_function_admission(c, m, &p.a, BADGE_SELECTION_THUMB_CONSTANTS);
+  c->size = 0;
+  ir_reparse(c, m, mark);
 }
 static badge_cost_estimate cost(badge_cost_kind kind) {
   return badge_target_cost((badge_cost_request){

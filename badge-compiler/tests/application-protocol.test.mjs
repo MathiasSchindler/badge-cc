@@ -8,21 +8,21 @@ import { preserveFlash, verifyApplicationCampaign } from '../tools/application-b
 import { compareTimingReports } from '../tools/compiler-timing-compare.mjs';
 import { assessTiming } from '../tools/qualify-datasheet.mjs';
 import { applications, applicationSuiteId, crc32, request, decodeApplication,
-  decodeTiming, compare, compareTiming } from '../tools/compiler-test-protocol.mjs';
+  decodeImu, imuApplications, imuSuiteId, decodeTiming, compare, compareTiming } from '../tools/compiler-test-protocol.mjs';
 
 const build = 0x12345678;
 const nonce = Buffer.from('0102030405060708090a0b0c0d0e0f10', 'hex');
-function wire() {
+function wire(definitions = applications, id = applicationSuiteId, version = 4) {
   const data = Buffer.alloc(16 * 64);
   for (let page = 0; page < 16; ++page) {
     const record = data.subarray(page * 64, (page + 1) * 64);
     record.writeUInt32LE(0x31544342);
     record[4] = 1; record[6] = 64;
     record.writeUInt32LE(build, 8);
-    record.writeUInt32LE(applicationSuiteId + page, 12);
+    record.writeUInt32LE(id + page, 12);
     nonce.copy(record, 16);
-    const values = page === 0 ? [1, 6, 0, nonce.readUInt32LE(0), 7, 64, 4] :
-      page <= 6 ? [applications[page - 1].cases, 123, 200, 1, 1, 1, 1] :
+    const values = page === 0 ? [1, 6, 0, nonce.readUInt32LE(0), 7, 64, version] :
+      page <= 6 ? [definitions[page - 1].cases, 123, 200, 1, 1, 1, 1] :
       page === 7 ? [0, 65536, 0, 65536, 3, 24, 0] :
       page === 8 ? [0, 0, 0, 0, 0, 0, 1] :
       page === 9 ? [1, 1, 1, 1, 1, 1, 1] : [1000, 1001, 999, 1002, 998, 1003, 997];
@@ -37,6 +37,16 @@ function mutate(data, page, offset, value) {
   record.writeUInt32LE(crc32(record.subarray(0, 60)), 60);
   return data;
 }
+test('IMU timing identifies renderer, generation and transfer as distinct guarded phases', () => {
+  const data = wire(imuApplications, imuSuiteId, 5);
+  assert.equal(request(build, nonce, imuSuiteId).readUInt32LE(12), imuSuiteId);
+  assert.throws(() => decodeApplication(data, build, nonce), /order/);
+  const result = decodeImu(data, build, nonce);
+  assert.deepEqual(result.modules.map(x => [x.module, x.timing.repetitions]),
+    imuApplications.map(x => [x.name, x.cases]));
+  assert.throws(() => decodeImu(mutate(data, 6, 32, 3779), build, nonce), /incomplete/);
+  assert.throws(() => decodeImu(mutate(data, 0, 56, 4), build, nonce), /version/);
+});
 test('application suite is isolated and keeps raw samples and actual batch sizes', () => {
   assert.equal(request(build, nonce, applicationSuiteId).readUInt32LE(12), applicationSuiteId);
   const decoded = decodeApplication(wire(), build, nonce);

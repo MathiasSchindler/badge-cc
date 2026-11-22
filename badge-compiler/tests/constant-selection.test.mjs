@@ -453,6 +453,87 @@ entry:
     '-kernel', file('pair.elf')]);
 });
 
+test('tiny byte fills preserve byte accesses and in-block div/rem shares one divide', t => {
+  const file = files(t);
+  const fill = (name, trips, qualifier) => `define void @${name}(ptr %p, i8 %color) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [0, %entry], [%next, %latch]
+  %go = icmp ult i32 %i, ${trips}
+  br i1 %go, label %body, label %done
+body:
+  %dst = getelementptr i8, ptr %p, i32 %i
+  store ${qualifier}i8 %color, ptr %dst, align 1
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %head
+done:
+  ret void
+}`;
+  fs.writeFileSync(file('shape.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
+@data = internal global [8 x i8] zeroinitializer, align 1
+@sink = internal global i32 0, align 4
+${fill('fill', 6, '')}
+${fill('ordered', 6, 'volatile ')}
+${fill('too_many', 9, '')}
+define i32 @digits(i32 %n) {
+entry:
+  %r = urem i32 %n, 10
+  %ascii = add i32 %r, 48
+  %q = udiv i32 %n, 10
+  %sum = add i32 %ascii, %q
+  ret i32 %sum
+}
+define i32 @separated(i32 %n) {
+entry:
+  %r = urem i32 %n, 10
+  store volatile i32 %r, ptr @sink, align 4
+  %q = udiv i32 %n, 10
+  ret i32 %q
+}
+define i32 @main() {
+entry:
+  call void @fill(ptr @data, i8 32)
+  %a = load i8, ptr @data, align 1
+  %last = getelementptr i8, ptr @data, i32 5
+  %b = load i8, ptr %last, align 1
+  %after = getelementptr i8, ptr @data, i32 6
+  %guard = load i8, ptr %after, align 1
+  %quot = call i32 @digits(i32 12345)
+  %ac = icmp eq i8 %a, 32
+  %bc = icmp eq i8 %b, 32
+  %gc = icmp eq i8 %guard, 0
+  %qc = icmp eq i32 %quot, 1287
+  %ab = and i1 %ac, %bc
+  %gq = and i1 %gc, %qc
+  %good = and i1 %ab, %gq
+  %bad = xor i1 %good, true
+  %status = zext i1 %bad to i32
+  ret i32 %status
+}`);
+  run(tool('badge-opt-sanitize'), ['--passes=divrem-pairs', file('shape.ll'), '-o', file('paired.ll')]);
+  run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('paired.ll')]);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('paired.ll'), '-o', file('shape.s')]);
+  const asm = fs.readFileSync(file('shape.s'), 'utf8');
+  const body = name => asm.slice(asm.indexOf(`\n${name}:`), asm.indexOf(`.size ${name},`));
+  assert.match(body('fill'), /@ fixed-byte-fill:/);
+  assert.equal([...body('fill').matchAll(/^strb\.n /gm)].length, 6);
+  assert.doesNotMatch(body('ordered') + body('too_many'), /@ fixed-byte-fill:/);
+  assert.equal([...body('digits').matchAll(/^udiv /gm)].length, 1);
+  assert.equal([...body('separated').matchAll(/^udiv /gm)].length, 2);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('shape.s'), '-o', file('shape.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('shape.o'), '-o', file('shape.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('shape.elf')]);
+});
+
 test('bounded loops hoist immutable literals but retain loads across calls or clobbers', t => {
   const file = files(t);
   const loop = (name, update, result) => `define i32 @${name}(i32 %n) {

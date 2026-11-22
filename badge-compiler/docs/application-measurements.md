@@ -69,6 +69,47 @@ Instrumented benchmark firmware linked text is **13,468 bytes LLVM** versus
 **70,812 bytes owned**; both have 8 bytes data and 167,800 bytes BSS.
 These include the harness/transport, not ordinary maze image sizes.
 
+## Single-badge IMU timing
+
+The [IMU benchmark driver](../tools/imu-benchmark.mjs) links the existing
+application machine code into the compiler test firmware. Its harness and
+SIO display driver are the same across images. The separate phases cover
+eight scripted renders, live/error/dirty pixel generation into RAM, and
+full/dirty panel transfer from prepared pixels. The build verifies UF2 and
+checks all six workload digests in Cortex-M33 QEMU with a mock display.
+
+```sh
+node badge-compiler/tools/imu-benchmark.mjs build \
+  build/imu-timing LLVM.o OWNED.o LITERAL.o FLASH_THUNK.o SRAM_THUNK.o
+node badge-compiler/tools/imu-benchmark.mjs measure \
+  build/imu-timing build/imu-capture SERIAL
+```
+
+The offline-owned variants are produced by
+[the placement pilot](datasheet/memory-placement.md#offline-imu-placement-pilot).
+Use a fresh ignored capture directory, explicitly authorize the named
+badge, and keep the full-flash backup local. Warm cases run seven samples
+each; images run in forward and reverse order on one badge. The runner
+checks clocks, CRC, nonce, data guards and result digests, restores all 16
+MiB and verifies an independent full readback. It does not measure live
+IMU acquisition, true cold-entry app latency, or electrical panel timing.
+
+For follow-up qualification, `build-pair` builds the two IMU inputs while
+`measure-followup` also accepts a build directory containing `llvm` and
+`owned` ordinary `COMPILER_TEST_APPLICATION=1` Maze suites. Each suite uses
+an ABBA order and its own protocol identifier. These single-device
+comparisons do not substitute for the role-swapped promotion gate.
+
+In the November 22 single-badge run, all 18 image boots matched their
+suite's digests. The final owned IMU candidate took 1,208,966 ticks for
+full-screen pixel generation versus 1,329,938--1,329,939 for the preceding
+owned profile and 704,182 for LLVM. Full-screen transfer using the same
+SIO driver took 22,403 ticks for both toolchains. Neither the literal nor
+SRAM application variant gave a meaningful warm-time gain. The repeated
+Maze comparison still favors LLVM on every reported phase, including
+generation and physics. Full flash was restored and reread after both
+campaigns; GPIOC and compiler defaults are unchanged.
+
 ## What actually runs, and what timing includes
 
 The [application harness](../../src/tools/compiler_test/application.c) includes

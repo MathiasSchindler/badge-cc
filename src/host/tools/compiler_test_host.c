@@ -23,11 +23,15 @@ static int save_records(const char *path, const uint8_t records[COMPILER_SUITE_B
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6 || strlen(argv[1]) != 16u || strlen(argv[2]) != 16u ||
-        strcmp(argv[1], argv[2]) == 0) {
-        fputs("Usage: compiler_test_host LLVM_SERIAL OWNED_SERIAL REQUEST.bin LLVM.bin OWNED.bin\n", stderr);
+    int single = argc == 5 && strcmp(argv[1], "--single") == 0;
+    if ((!single && argc != 6) || strlen(argv[2]) != 16u ||
+        (!single && (strlen(argv[1]) != 16u || strcmp(argv[1], argv[2]) == 0))) {
+        fputs("Usage: compiler_test_host LLVM_SERIAL OWNED_SERIAL REQUEST.bin LLVM.bin OWNED.bin\n"
+              "       compiler_test_host --single SERIAL REQUEST.bin OUTPUT.bin\n", stderr);
         return 2;
     }
+    unsigned roles = single ? 1u : 2u;
+    char **serials = argv + (single ? 2u : 1u);
     uint8_t request[64];
     FILE *file = fopen(argv[3], "rb");
     if (file == NULL) { perror(argv[3]); return 1; }
@@ -46,13 +50,13 @@ int main(int argc, char **argv) {
     int claimed[2] = {0, 0}, ok = 0;
     libusb_device *rebooting[2] = {NULL, NULL};
     uint8_t records[2][COMPILER_SUITE_BYTES];
-    for (unsigned attempt = 0u; attempt < 100u && (!devices[0] || !devices[1]); ++attempt) {
-        for (unsigned role = 0u; role < 2u; ++role)
-            if (!devices[role]) devices[role] = find_badge(context, argv[role + 1u]);
-        if (!devices[0] || !devices[1]) usleep(100000u);
+    for (unsigned attempt = 0u; attempt < 100u && (!devices[0] || (roles == 2u && !devices[1])); ++attempt) {
+        for (unsigned role = 0u; role < roles; ++role)
+            if (!devices[role]) devices[role] = find_badge(context, serials[role]);
+        if (!devices[0] || (roles == 2u && !devices[1])) usleep(100000u);
     }
-    for (unsigned role = 0u; role < 2u; ++role) {
-        if (!devices[role]) { fprintf(stderr, "No live interface for %s\n", argv[role + 1u]); goto cleanup; }
+    for (unsigned role = 0u; role < roles; ++role) {
+        if (!devices[role]) { fprintf(stderr, "No live interface for %s\n", serials[role]); goto cleanup; }
         int configuration = 0;
         status = libusb_get_configuration(devices[role], &configuration);
         if (status == 0 && configuration != 1) status = libusb_set_configuration(devices[role], 1);
@@ -74,13 +78,13 @@ int main(int argc, char **argv) {
                                          0u, 0u, corrupt, 64u, 1000u);
         if (status != LIBUSB_ERROR_PIPE) { fputs("Unavailable results not rejected\n", stderr); goto cleanup; }
     }
-    for (unsigned role = 0u; role < 2u; ++role) {
-        fprintf(stderr, "%s: submitting suite\n", argv[role + 1u]);
+    for (unsigned role = 0u; role < roles; ++role) {
+        fprintf(stderr, "%s: submitting suite\n", serials[role]);
         if (!transfer(devices[role], 0x40u, LIVE_USB_COMPILER_SUBMIT, request, 64u)) goto cleanup;
     }
-    for (unsigned role = 0u; role < 2u; ++role) {
+    for (unsigned role = 0u; role < roles; ++role) {
         int ready = 0;
-        fprintf(stderr, "%s: waiting for suite summary\n", argv[role + 1u]);
+        fprintf(stderr, "%s: waiting for suite summary\n", serials[role]);
         for (unsigned attempt = 0u; attempt < 1000u; ++attempt) {
 #ifdef COMPILER_TEST_TIMING
             unsigned timeout = 5000u;
@@ -90,12 +94,12 @@ int main(int argc, char **argv) {
             status = libusb_control_transfer(devices[role], 0xc0u, LIVE_USB_COMPILER_PAGE,
                                              0u, 0u, records[role], 64u, timeout);
             if (status == 64) {
-                fprintf(stderr, "%s: suite summary available after %u polls\n", argv[role + 1u], attempt + 1u);
+                fprintf(stderr, "%s: suite summary available after %u polls\n", serials[role], attempt + 1u);
                 ready = 1; break;
             }
             if (status != LIBUSB_ERROR_PIPE) {
                 fprintf(stderr, "%s: suite summary read after %u polls: %d (%s)\n",
-                        argv[role + 1u], attempt + 1u, status,
+                        serials[role], attempt + 1u, status,
                         status < 0 ? libusb_error_name(status) : "short transfer");
                 goto cleanup;
             }
@@ -111,24 +115,24 @@ int main(int argc, char **argv) {
     }
     ok = 1;
 cleanup:
-    for (unsigned role = 0u; role < 2u; ++role) {
+    for (unsigned role = 0u; role < roles; ++role) {
         if (devices[role] == NULL) continue;
         if (claimed[role]) {
             rebooting[role] = libusb_ref_device(libusb_get_device(devices[role]));
-            fprintf(stderr, "%s: requesting BOOTSEL\n", argv[role + 1u]);
+            fprintf(stderr, "%s: requesting BOOTSEL\n", serials[role]);
             int requested = transfer(devices[role], 0x40u, LIVE_USB_BOOTSEL, NULL, 0u);
             if (!requested) ok = 0;
-            fprintf(stderr, "%s: releasing interface\n", argv[role + 1u]);
+            fprintf(stderr, "%s: releasing interface\n", serials[role]);
             status = libusb_release_interface(devices[role], 0);
             if (status == LIBUSB_ERROR_NO_DEVICE && requested) {
-                fprintf(stderr, "%s: disconnected before interface release; observing requested detach\n", argv[role + 1u]);
+                fprintf(stderr, "%s: disconnected before interface release; observing requested detach\n", serials[role]);
             } else if (status != 0) {
                 fprintf(stderr, "USB release: %s\n", libusb_error_name(status)); ok = 0;
             }
         }
-        fprintf(stderr, "%s: closing handle\n", argv[role + 1u]);
+        fprintf(stderr, "%s: closing handle\n", serials[role]);
         libusb_close(devices[role]);
-        fprintf(stderr, "%s: handle closed\n", argv[role + 1u]);
+        fprintf(stderr, "%s: handle closed\n", serials[role]);
     }
     /* Finish hotplug removal while the event context is still alive. Destroying
        it concurrently with the requested disconnect can stall libusb_exit. */

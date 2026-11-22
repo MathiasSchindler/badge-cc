@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 
 export const suiteId = 0x434f4d50;
 export const applicationSuiteId = 0x41505030;
+export const imuSuiteId = 0x494d5530;
+export const imuApplications = [
+  { name: 'imu-render', cases: 8 },
+  { name: 'imu-pixels-full', cases: 76800 },
+  { name: 'imu-pixels-error', cases: 76800 },
+  { name: 'imu-pixels-dirty', cases: 3780 },
+  { name: 'imu-panel-full', cases: 76800 },
+  { name: 'imu-panel-dirty', cases: 3780 },
+];
 export const applications = [
   { name: 'maze-generation', cases: 16 },
   { name: 'maze-physics-input', cases: 64 },
@@ -44,7 +53,7 @@ export function request(build, nonce, id = suiteId) {
   wire[4] = 1;
   wire[6] = 64;
   wire.writeUInt32LE(build, 8);
-  assert(id === suiteId || id === applicationSuiteId, 'unknown request suite');
+  assert(id === suiteId || id === applicationSuiteId || id === imuSuiteId, 'unknown request suite');
   wire.writeUInt32LE(id, 12);
   nonce.copy(wire, 16);
   wire.writeUInt32LE(crc32(wire.subarray(0, 60)), 60);
@@ -85,15 +94,20 @@ export function decodeApplication(bytes, build, nonce) {
   return decodeTiming(bytes, build, nonce, true);
 }
 
+export function decodeImu(bytes, build, nonce) {
+  return decodeTiming(bytes, build, nonce, 'imu');
+}
+
 export function decodeTiming(bytes, build, nonce, application = false) {
-  const definitions = application ? applications : modules;
-  const id = application ? applicationSuiteId : suiteId;
+  const imu = application === 'imu';
+  const definitions = imu ? imuApplications : application ? applications : modules;
+  const id = imu ? imuSuiteId : application ? applicationSuiteId : suiteId;
   assert(bytes.length >= 16 * 64, 'truncated timing result data');
   const summary = records(bytes.subarray(0, 64), build, nonce, 1, id)[0];
   assert.equal(summary[0], 1, `device timing failure, detail ${summary[2]} ` +
     '(1-6: module correctness/timing bounds; 7: clock change; 8-13: kernel correctness/timing bounds)');
   const version = summary[6];
-  assert(application ? version === 4 : version === 1 || version === 2 || version === 3,
+  assert(imu ? version === 5 : application ? version === 4 : version === 1 || version === 2 || version === 3,
     'unknown timing workload version');
   const count = version === 3 ? timingReportBytes / 64 : 16;
   assert.equal(bytes.length, count * 64, 'truncated or excess result data');
@@ -109,7 +123,8 @@ export function decodeTiming(bytes, build, nonce, application = false) {
     const samples = data[10 + i];
     if (application) assert.equal(results[i].values[4], 1, `${definitions[i].name}: damaged memory guards`);
     results[i].timing = checkedTiming(definitions[i].name, samples, overhead,
-      application ? definitions[i].cases : i === 5 ? 1 : timingRepeats);
+      application ? definitions[i].cases : i === 5 ? 1 : timingRepeats,
+      imu ? 4000000 : 1000000);
   }
   const kernelResults = version === 3 ?
     moduleResults(kernels.map((_, i) => data[16 + 2 * i]), kernels) : [];
@@ -134,9 +149,9 @@ export function validateTimingClock(clock) {
     assert((clock[4] & 1) !== 0 && clock[5] > 0, 'disabled timer tick source');
 }
 
-function checkedTiming(name, samples, overhead, repetitions) {
+function checkedTiming(name, samples, overhead, repetitions, maxTicks = 1000000) {
   const statistics = timingStatistics(samples);
-  assert(samples.every(x => x >= 100 && x <= 1000000),
+  assert(samples.every(x => x >= 100 && x <= maxTicks),
     `${name}: under-resolved or overlong timing sample`);
   assert(Math.min(...samples) >= 100 * Math.max(...overhead),
     `${name}: timer overhead exceeds 1%`);
@@ -152,7 +167,8 @@ export function timingStatistics(samples) {
 }
 
 export function compareTiming(llvm, owned) {
-  return compareTimings(llvm, owned, llvm.version === 4 ? applications : modules, 'modules');
+  return compareTimings(llvm, owned, llvm.version === 5 ? imuApplications :
+    llvm.version === 4 ? applications : modules, 'modules');
 }
 
 export function compareKernelTiming(llvm, owned) {

@@ -14,12 +14,13 @@ typedef struct {
   uint32_t bytes;
   unsigned frame, saves, spills;
 } loop_cost;
-static loop_cost measure(ir_context *c, const char *source, size_t size) {
+static loop_cost measure(ir_context *c, const char *source, size_t size,
+                         badge_scalar_selection selection) {
   char *assembly = NULL;
   size_t length = 0;
   if (!badge_codegen_compile_with_selections(source, size, c->file,
       (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL_COMPACT},
-      BADGE_SELECTION_THUMB_OPERANDS, BADGE_MEMORY_WORD, &assembly, &length))
+      selection, BADGE_MEMORY_WORD, &assembly, &length))
     ir_error(c, "loop-scalar backend admission failed");
   loop_cost cost = {0};
   const char *frame = strstr(assembly, "@ stack-frame:");
@@ -62,7 +63,8 @@ static char *function_text(ir_context *c, ir_module *m, const ir_analysis *a, un
   *size = c->size;
   return ir_copy(c, c->output, c->size);
 }
-void ir_loop_admission(ir_context *c, ir_module *m, const ir_analysis *a) {
+void ir_function_admission(ir_context *c, ir_module *m, const ir_analysis *a,
+                           badge_scalar_selection selection) {
   uint64_t work = IR_LOOP_ADMISSION_WORK_LIMIT;
   for (unsigned f = 0; f < a->function_count; f++) {
     const ir_function *fn = &a->functions[f];
@@ -81,8 +83,8 @@ void ir_loop_admission(ir_context *c, ir_module *m, const ir_analysis *a) {
     if (before_size > work || after_size > work - before_size)
       ir_error(c, "loop-scalar backend admission work limit exceeded");
     work -= before_size + after_size;
-    loop_cost original = measure(c, before, before_size);
-    loop_cost proposed = measure(c, after, after_size);
+    loop_cost original = measure(c, before, before_size, selection);
+    loop_cost proposed = measure(c, after, after_size, selection);
     const char *reason = proposed.frame > original.frame ? "final_frame_growth" :
                          proposed.saves > original.saves ? "final_save_growth" :
                          proposed.spills > original.spills ? "final_spill_growth" :
@@ -95,4 +97,7 @@ void ir_loop_admission(ir_context *c, ir_module *m, const ir_analysis *a) {
       ir_note(c, "transformed", "final_code_bytes_saved", original.bytes - proposed.bytes);
     }
   }
+}
+void ir_loop_admission(ir_context *c, ir_module *m, const ir_analysis *a) {
+  ir_function_admission(c, m, a, BADGE_SELECTION_THUMB_OPERANDS);
 }

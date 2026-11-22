@@ -28,7 +28,7 @@ optimize() {
         fi
         "$opt" -passes=verify -disable-output "$2"
     else
-        "$opt" '-passes=default<Oz>' -S "$1" -o "$2"
+        "$clang" "${target[@]}" -Oz -x ir -S -emit-llvm "$1" -o "$2"
     fi
 }
 ./build/badge-asm tests/fixtures/codegen_start.S -o "$dir/start.o"

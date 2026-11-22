@@ -21,6 +21,7 @@ void ir_cross_function(ir_context *, ir_module *);
 void ir_hot_inline(ir_context *, ir_module *);
 void ir_compact_inline(ir_context *, ir_module *);
 void ir_target_strength_reduce(ir_context *, ir_module *);
+void ir_divrem_pairs(ir_context *, ir_module *);
 void ir_local_memory(ir_context *, ir_module *);
 void ir_global_memory(ir_context *, ir_module *);
 
@@ -102,6 +103,9 @@ const ir_pass badge_ir_passes[] = {
      "Reduce unflagged i32 unsigned power-of-two div/rem with bounded "
      "target costs and quotient-sharing accounting",
      ir_target_strength_reduce, IR_PASS_OPTIMIZATION},
+    {"divrem-pairs",
+     "Bring bounded same-block unsigned quotient/remainder pairs together for Thumb selection",
+     ir_divrem_pairs, IR_PASS_OPTIMIZATION},
 };
 const unsigned badge_ir_pass_count =
     sizeof(badge_ir_passes) / sizeof(*badge_ir_passes);

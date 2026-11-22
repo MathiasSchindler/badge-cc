@@ -75,7 +75,9 @@ int main(void) {
                 if (seeds[seed_index] % 4u != 0u) check(result.values[2] >= 1u);
             }
             if (module == 3u || module == 4u)
-                check(full_regions > 0u && hud_regions > 0u && small_regions > 0u);
+                check(regions > 0u && full_regions > 0u && hud_regions > 0u && small_regions > 0u);
+            else
+                check(regions == 0u);
 #ifndef __arm__
             printf("%u %u %08x %08x\n", seeds[seed_index], module,
                    result.values[0], first_transfer);

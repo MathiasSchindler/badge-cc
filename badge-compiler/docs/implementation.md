@@ -43,6 +43,11 @@ diagnostics; that unrelated assertion is not modified or reported as passing.
 See [RF01 validation and baseline-failure evidence](../build/rf01-backend/validation.json)
 and the [exact comparison report](../build/rf01-backend/results.json).
 
+The later IMU qualification updates the local-residency check to require
+the current balanced SP-relative leaf frame and a preserved live-out
+store/reload. Tests for the historical fixed-frame global allocator select
+that backend explicitly rather than depending on the current default.
+
 Typed helper-selection plans, shared generated-assembly interpretation,
 policy metadata consolidation and cost-interface changes remain separate
 future rounds. They are not mixed into this mechanical extraction.
@@ -2080,6 +2085,15 @@ The larger-firmware comparison uses `thumb-constants` and appends
 `global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions`
 to the default IR passes. `dead-instructions` removes producers left unused
 after constant propagation; the default optimizer pipeline is unchanged.
+
+For the IMU pixel path, `thumb-constants` can unroll closed fixed-size loops
+of four to eight nonvolatile byte stores without changing width or order.
+The optional `divrem-pairs` pass moves an identical, nonzero-literal `udiv`
+next to its `urem` within six instructions in the same block, without
+crossing calls, opaque instructions or volatile accesses. Thumb selection
+can then emit one divider operation and `MLS`. Admission compares encoded
+bytes, frame size, saves and spills under `thumb-constants`; it rejects
+growth. Neither pass selection nor scalar defaults change.
 
 Per-function `@ memory-selection:` comments report word-copy/fill sites and
 selected word/tail byte totals. These count **static intrinsic lengths**,

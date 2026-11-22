@@ -139,6 +139,7 @@ RP2350_ASFLAGS := --target=arm-none-eabi -mcpu=cortex-m33 -mthumb
 COMPILER_TEST_MODULES := suite arithmetic strings memory control abi abi_helpers graphics kernels kernel_timing
 COMPILER_TEST_TIMING ?= 0
 COMPILER_TEST_APPLICATION ?= 0
+COMPILER_TEST_IMU_OBJECT ?=
 ifneq ($(filter $(COMPILER_TEST_APPLICATION),0 1),$(COMPILER_TEST_APPLICATION))
 $(error COMPILER_TEST_APPLICATION must be 0 or 1)
 endif
@@ -146,16 +147,23 @@ ifeq ($(COMPILER_TEST_APPLICATION),1)
 COMPILER_TEST_TIMING := 1
 COMPILER_TEST_MODULES := suite application
 endif
+ifneq ($(COMPILER_TEST_IMU_OBJECT),)
+COMPILER_TEST_APPLICATION := 1
+COMPILER_TEST_TIMING := 1
+COMPILER_TEST_MODULES := suite imu_application
+endif
 ifneq ($(COMPILER_TEST_TIMING),0)
 ifneq ($(COMPILER_TEST_TIMING),1)
 $(error COMPILER_TEST_TIMING must be 0 or 1)
 endif
 endif
 COMPILER_TEST_FLAGS := $(if $(filter 1,$(COMPILER_TEST_TIMING)),-DCOMPILER_TEST_TIMING) \
-	$(if $(filter 1,$(COMPILER_TEST_APPLICATION)),-DCOMPILER_TEST_APPLICATION -I$(PLATFORM_DIR) -I$(TOOLS_DIR))
+	$(if $(filter 1,$(COMPILER_TEST_APPLICATION)),-DCOMPILER_TEST_APPLICATION -I$(PLATFORM_DIR) -I$(TOOLS_DIR)) \
+	$(if $(COMPILER_TEST_IMU_OBJECT),-DCOMPILER_TEST_IMU)
 COMPILER_TEST_SOURCES := $(addprefix $(COMPILER_TEST_DIR)/,$(addsuffix .c,$(COMPILER_TEST_MODULES)))
 COMPILER_TEST_OBJS := $(addprefix $(FIRMWARE_DIR)/compiler_,$(addsuffix .o,$(COMPILER_TEST_MODULES))) \
-	$(addprefix $(FIRMWARE_DIR)/,compiler_badge.o compiler_usb_control.o live_usb_hw.o display.o graphics.o diagnostics_logic.o usb_report.o bootrom_reboot.o)
+	$(addprefix $(FIRMWARE_DIR)/,compiler_badge.o compiler_usb_control.o live_usb_hw.o display.o graphics.o diagnostics_logic.o usb_report.o bootrom_reboot.o) \
+	$(COMPILER_TEST_IMU_OBJECT)
 COMPILER_TEST_LINKER := badge-compiler/scripts/memmap_compiler_test.ld
 COMPILER_TEST_BUILD_H := $(FIRMWARE_DIR)/compiler_test_build.h
 COMPILER_TEST_INPUTS := $(COMPILER_TEST_SOURCES) $(COMPILER_TEST_DIR)/badge.c $(COMPILER_TEST_DIR)/suite.h $(COMPILER_TEST_DIR)/kernels.h \
@@ -166,7 +174,8 @@ COMPILER_TEST_INPUTS := $(COMPILER_TEST_SOURCES) $(COMPILER_TEST_DIR)/badge.c $(
 	$(COMPILER_TEST_LINKER) src/usb/live_usb.h src/usb/live_usb_control.c \
 	src/usb/live_usb_hw.c src/usb/live_usb_hw.h Makefile
 ifeq ($(COMPILER_TEST_APPLICATION),1)
-COMPILER_TEST_INPUTS += $(COMPILER_TEST_DIR)/application.h $(TOOLS_DIR)/tilt_maze.c \
+COMPILER_TEST_INPUTS += $(COMPILER_TEST_DIR)/application.h \
+	$(if $(COMPILER_TEST_IMU_OBJECT),$(TOOLS_DIR)/imu_demo.c,$(TOOLS_DIR)/tilt_maze.c) \
 	$(PLATFORM_DIR)/lsm6ds3.h $(PLATFORM_DIR)/diagnostic_hw.h $(PLATFORM_DIR)/i2c_bitbang.h
 endif
 RP2350_LDFLAGS := \

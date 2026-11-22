@@ -333,20 +333,20 @@ static void global_tests(void) {
              "%b = phi i32 [2, %entry], [%c, %loop]\n"
              "%c = phi i32 [3, %entry], [%a, %loop]\n"
              "br label %loop\n}\n";
-  assert(badge_codegen_compile_with_options(
+  assert(badge_codegen_compile_with_selections(
       all_phi, sizeof(all_phi) - 1, "all-phi.ll",
-      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL}, &out,
-      &size));
+      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL},
+      BADGE_SELECTION_THUMB, BADGE_MEMORY_WORD, &out, &size));
   assert(strstr(out, "ldr.w r8, [r7,") && strstr(out, "ldr.w r10, [r7,") &&
          strstr(out, "ldr.w r11, [r7,") && strstr(out, "mov r6, r"));
   assert(strstr(out, "avoided-loads 3 avoided-stores 6 phi-register-copies 3"));
   free(out);
   for (unsigned mode = 0; mode < 2; mode++) {
-    assert(badge_codegen_compile_with_options(
+    assert(badge_codegen_compile_with_selections(
         cycle, sizeof(cycle) - 1, "cycle.ll",
         (badge_codegen_options){(badge_frame_addressing)mode,
                                 BADGE_RESIDENCY_GLOBAL},
-        &out, &size));
+        BADGE_SELECTION_THUMB, BADGE_MEMORY_WORD, &out, &size));
     assert(strstr(out, "mov r6, r") && strstr(out, "phi-register-copies 3"));
     assert(strstr(out, "push.w {r4-r8, r10, r11, lr}"));
     assert(strstr(out, "pop.w {r4-r8, r10, r11, pc}"));
@@ -355,10 +355,10 @@ static void global_tests(void) {
     const char indirect[] =
         TARGET "define i32 @f(ptr %fp) {\nentry:\n%r = call i32 %fp()\n"
                "ret i32 %r\n}\n";
-    assert(badge_codegen_compile_with_options(
+    assert(badge_codegen_compile_with_selections(
         indirect, sizeof(indirect) - 1, "global-indirect.ll",
         (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL},
-        &out, &size));
+        BADGE_SELECTION_THUMB, BADGE_MEMORY_WORD, &out, &size));
     assert(strstr(out, "mov r12, r8\nblx r12"));
     free(out);
   }
@@ -368,10 +368,10 @@ static void global_tests(void) {
              "%ab = add i32 %a, %b\n%cd = add i32 %c, %d\n"
              "%abcd = add i32 %ab, %cd\n%all = add i32 %abcd, %e\n"
              "ret i32 %all\n}\n";
-  assert(badge_codegen_compile_with_options(
+  assert(badge_codegen_compile_with_selections(
       pressure, sizeof(pressure) - 1, "pressure.ll",
-      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL}, &out,
-      &size));
+      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL},
+      BADGE_SELECTION_THUMB, BADGE_MEMORY_WORD, &out, &size));
   const char *allocation = strstr(out, "@ global-allocation:");
   unsigned allocated = 0, spilled = 0;
   assert(allocation && sscanf(allocation,
@@ -394,7 +394,9 @@ static void residency_tests(void) {
       &size));
   assert(strstr(out, "mov r2, r0\n") && !strstr(out, "mov r8, r0\n"));
   assert(strstr(out, "avoided-loads 3 avoided-stores 2"));
-  assert(strstr(out, "push.w {r4-r8, lr}") && !strstr(out, "r9"));
+  assert(strstr(out, "base sp calls 0") &&
+         strstr(out, "push.n {r3, r5}") && strstr(out, "pop.n {r3, r5}\nbx lr") &&
+         !strstr(out, "r9"));
   free(out);
   const char live_out[] =
       TARGET "define i32 @f(i32 %x) {\nentry:\n%a = add i32 %x, 1\n"
@@ -404,7 +406,8 @@ static void residency_tests(void) {
       live_out, sizeof(live_out) - 1, "live-out.ll",
       (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_LOCAL}, &out,
       &size));
-  assert(strstr(out, "str.w r0, [r7, #4]\nmov r2, r0\nmul"));
+  assert(strstr(out, "str.n r0, [sp, #4]\nmov r2, r0\nmul") &&
+         strstr(out, ".Lcg_1_exit:\nldr.n r0, [sp, #4]"));
   free(out);
   assert(!badge_codegen_compile_with_options(
       chain, sizeof(chain) - 1, "bad-residency.ll",
@@ -884,14 +887,21 @@ static void host_tests(void) {
 }
 int main(int argc, char **argv) {
   if (argc > 2 || (argc == 2 && strcmp(argv[1], "--layout") && strcmp(argv[1], "--memory") &&
+                  strcmp(argv[1], "--residency") &&
                   strcmp(argv[1], "--api") && strcmp(argv[1], "--host"))) {
-    fprintf(stderr, "Usage: badge_codegen_test [--layout|--memory|--api|--host]\n");
+    fprintf(stderr, "Usage: badge_codegen_test [--layout|--memory|--residency|--api|--host]\n");
     return 2;
   }
   if (argc == 1 || !strcmp(argv[1], "--host"))
     host_tests();
   if (argc == 2 && !strcmp(argv[1], "--host")) {
     puts("badge-codegen: indexed lookups, buffered formatting and resource limits PASS");
+    return 0;
+  }
+  if (argc == 2 && !strcmp(argv[1], "--residency")) {
+    residency_tests();
+    global_tests();
+    puts("badge-codegen: explicit current and legacy residency checks PASS");
     return 0;
   }
   char dir[] = "build/codegen-test-XXXXXX";

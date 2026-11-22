@@ -143,8 +143,15 @@ pop.w {r3-r11, pc}
       for (const name of ['known', 'transitive', 'small', 'large']) {
         const text = functions.get(name);
         assert.match(text, /r2 retained through proven internal call/);
-        assert.equal((text.match(/^mov(?:w|t|s)?(?:\.w|\.n)? r2,/gm) ?? []).length, name === 'large' ? 2 : 1);
-        assert.equal((text.match(/^str\.n r2, \[r4,/gm) ?? []).length, 2);
+        const transfer = text.search(/^bl /m);
+        assert(transfer >= 0, name);
+        const materializations = /^((?:mov(?:w|t|s)?|ldr)(?:\.w|\.n)?) r2,/gm;
+        const definitions = [...text.slice(0, transfer).matchAll(materializations)].map(m => m[1]);
+        assert(name === 'large' ?
+          definitions.join(',') === 'movw,movt' || definitions.length === 1 && definitions[0].startsWith('ldr') :
+          definitions.length === 1, `${name}: ${text}`);
+        assert.doesNotMatch(text.slice(transfer), materializations);
+        assert.equal((text.match(/^str\.n r2, \[r4,/gm) ?? []).length, 2, `${name}: ${text}`);
         assert.match(text, /push\.n \{r4, lr\}/);
       }
       for (const name of ['public_target', 'hidden_scratch', 'opaque', 'recursion', 'forward'])
