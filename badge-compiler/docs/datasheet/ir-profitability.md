@@ -1,11 +1,17 @@
 # D07: target-informed IR profitability
 
-Status: **implemented and offline-qualified**, with opt-in
-`target-strength-reduce`. This is one bounded opportunity, not a new general
-optimizer or a default promotion. D09's subsequent
+The standalone `target-strength-reduce` pass remains selectable for isolation.
+The current default runs the same typed unsigned rewrite in `divrem-pairs`,
+after existing quotient/remainder pairing and exact signed division
+lowering. It also checks final encoded bytes, local frame size,
+saved-register bytes and spills under `thumb-constants`, rejecting a
+function's unsigned rewrites if any of those metrics grows. See the
+[default qualification](../current-promotion.md#unsigned-power-of-two-follow-up).
+
+The original experiment below was offline-qualified. D09's subsequent
 [independent repeated suite qualification](qualification.md#completed-outcomes)
-finds no resolved speed benefit or regression. The pass remains opt-in;
-instruction reduction does not establish speed-default eligibility.
+found no resolved speed benefit or regression. Instruction reduction alone
+does not establish a physical speedup.
 
 ## Selected opportunity and usage
 
@@ -26,7 +32,7 @@ From the workspace root:
 badge-compiler/build/badge-opt --passes=target-strength-reduce \
   INPUT.ll -o OUTPUT.ll
 
-# Recommended candidate pipeline; force/fresh-build policy rules still apply.
+# Reproduce the historical candidate pipeline.
 BADGE_OPT_PASSES=mem2reg,scalar-cleanup,constant-fold,target-strength-reduce,aggregate-memory,wide-division \
   bash badge-compiler/scripts/build-owned.sh
 
@@ -37,7 +43,7 @@ make -C badge-compiler test-target-strength
 `BADGE_TEST_MODE=owned` runs the native/owned tests without LLVM or QEMU.
 The registry, callable pipeline, CLI, metrics, capture and firmware drivers
 share the same independently selectable pass. Driver provenance includes
-the new implementation and shared model. The default C06 pipeline remains
+the implementation and shared model. The C06 default at the time was
 `mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division`, with
 `direct/global-compact/thumb-layout/word` backend policies.
 

@@ -116,7 +116,7 @@ const ir_pass badge_ir_passes[] = {
      "Rewrite signed divisions of proven exact power-of-two multiples",
      ir_exact_pow2, IR_PASS_OPTIMIZATION},
     {"divrem-pairs",
-     "Share bounded unsigned quotient/remainder pairs and lower proven exact signed divisions",
+     "Share bounded quotient/remainder pairs, lower proven exact signed divisions, and strength-reduce profitable unsigned powers of two",
      ir_divrem_pairs, IR_PASS_OPTIMIZATION},
 };
 const unsigned badge_ir_pass_count =

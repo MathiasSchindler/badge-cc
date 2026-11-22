@@ -137,6 +137,11 @@ test('power-of-two matrix removes divider work and executes across all residency
   fs.writeFileSync(file('size.ld'), fs.readFileSync(path.join(root, 'tests/fixtures/link_oracle_fixture.ld'),
     'utf8').replace('ENTRY(entry)', 'ENTRY(q0)'));
   invoke(tool('badge-opt'), ['--passes=target-strength-reduce', file('input.ll'), '-o', file('candidate.ll')]);
+  invoke(tool('badge-opt-sanitize'), [file('input.ll'), '-o', file('default.ll')]);
+  const defaults = fs.readFileSync(file('default.ll'), 'utf8');
+  assert.match(defaults, /define i32 @q31\b[^}]*lshr i32 %x, 31/);
+  assert.match(defaults, /define i32 @r3\b[^}]*and i32 %x, 7/);
+  assert.match(defaults, /define i32 @b3\b[^}]*and i32 %x, 7[^}]*lshr i32 %x, 3/);
   if (oracle) {
     invoke(clang, [...target, '-ffreestanding', '-fno-builtin', '-Oz', '-c', file('caller.c'), '-o', file('caller.o')]);
     invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
@@ -168,6 +173,14 @@ test('power-of-two matrix removes divider work and executes across all residency
     }
   }
   if (oracle) {
+    invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('default.ll')]);
+    invoke(tool('badge-codegen'), [file('default.ll'), '-o', file('default.s')]);
+    invoke(tool('badge-asm'), [file('default.s'), '-o', file('default.o')]);
+    invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+      file('start.o'), file('caller.o'), file('default.o'), '-o', file('default.elf')]);
+    invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('default.elf')], true, 120000);
     invoke(clang, [...target, '-Oz', '-c', '-x', 'ir', file('candidate.ll'), '-o', file('llvm.o')]);
     invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
       file('start.o'), file('caller.o'), file('llvm.o'), '-o', file('llvm.elf')]);

@@ -97,25 +97,36 @@ static unsigned trailing_bits(strength *p, const ir_operand *value, unsigned dep
   return returns ? minimum : 0;
 }
 
-void ir_exact_pow2(ir_context *c, ir_module *m) {
-  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
-  ir_analyze(c, m, &p.a);
-  for (unsigned i = 0; i < p.a.instruction_count; i++) {
-    const ir_instruction *in = &p.a.instructions[i];
-    spend(&p);
+static int exact_pow2(strength *p) {
+  ir_module *m = p->a.text;
+  int changed = 0;
+  for (unsigned i = 0; i < p->a.instruction_count; i++) {
+    const ir_instruction *in = &p->a.instructions[i];
+    spend(p);
     if (in->opcode != IR_OP_BINARY || strcmp(in->operation, "sdiv"))
       continue;
     uint32_t divisor;
-    if (eligible(&p, i, &divisor) || divisor < 2 || divisor > INT32_MAX)
+    if (eligible(p, i, &divisor) || divisor < 2 || divisor > INT32_MAX)
       continue;
     unsigned shift = (unsigned)__builtin_ctz(divisor);
-    if (trailing_bits(&p, &p.a.operands[in->first_operand], 0) < shift)
+    if (trailing_bits(p, &p->a.operands[in->first_operand], 0) < shift)
       continue;
     m->tokens[m->lines[in->line - 1].op].replacement = "ashr";
-    m->tokens[p.a.operands[in->first_operand + 1].token].replacement = ir_format(c, "%u", shift);
-    ir_note(c, "transformed", "signed_dividend_known_multiple", 1);
+    m->tokens[p->a.operands[in->first_operand + 1].token].replacement =
+        ir_format(p->c, "%u", shift);
+    ir_note(p->c, "transformed", "signed_dividend_known_multiple", 1);
+    changed = 1;
   }
+  return changed;
 }
+
+void ir_exact_pow2(ir_context *c, ir_module *m) {
+  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
+  ir_analyze(c, m, &p.a);
+  exact_pow2(&p);
+}
+
+static void reduce_unsigned(strength *p, int gated);
 
 void ir_divrem_pairs(ir_context *c, ir_module *m) {
   enum { LOOKAHEAD = 6 };
@@ -157,9 +168,16 @@ void ir_divrem_pairs(ir_context *c, ir_module *m) {
     }
   }
   ir_function_admission(c, m, &p.a, BADGE_SELECTION_THUMB_CONSTANTS);
-  c->size = 0;
   ir_reparse(c, m, mark);
-  ir_exact_pow2(c, m);
+  ir_analyze(c, m, &p.a);
+  /* Compare the unsigned rewrites against the already-optimized signed form. */
+  if (exact_pow2(&p)) {
+    ir_reparse(c, m, mark);
+    ir_analyze(c, m, &p.a);
+  }
+  reduce_unsigned(&p, 1);
+  ir_function_admission(c, m, &p.a, BADGE_SELECTION_THUMB_CONSTANTS);
+  c->size = 0;
 }
 static badge_cost_estimate cost(badge_cost_kind kind) {
   return badge_target_cost((badge_cost_request){
@@ -212,7 +230,7 @@ static int unsigned_division(const ir_instruction *in) {
   return in->opcode == IR_OP_BINARY &&
          (!strcmp(in->operation, "udiv") || !strcmp(in->operation, "urem"));
 }
-static void replace(strength *p, unsigned i, uint32_t divisor) {
+static void replace(strength *p, unsigned i, uint32_t divisor, int gated) {
   const ir_instruction *in = &p->a.instructions[i];
   ir_line *line = &p->a.text->lines[in->line - 1];
   int rem = !strcmp(in->operation, "urem");
@@ -222,50 +240,63 @@ static void replace(strength *p, unsigned i, uint32_t divisor) {
       spend(p);
       shift++;
     }
-  p->a.text->tokens[line->op].replacement = rem ? "and" : "lshr";
-  unsigned token = p->a.operands[in->first_operand + 1].token;
-  p->a.text->tokens[token].replacement =
+  ir_token *op = &p->a.text->tokens[line->op];
+  ir_token *value = &p->a.text->tokens[p->a.operands[in->first_operand + 1].token];
+  op->replacement = rem ? "and" : "lshr";
+  value->replacement =
       ir_format(p->c, "%" PRIu32, rem ? divisor - 1 : shift);
-  ir_note(p->c, "transformed",
+  if (gated) {
+    ir_write_line(p->c, p->a.text, line);
+    line->replacement = ir_copy(p->c, p->c->output, p->c->size);
+    p->c->size = 0;
+    op->replacement = value->replacement = NULL;
+  }
+  ir_note(p->c, gated ? "candidate" : "transformed",
           rem ? "unsigned_power_of_two_remainder"
               : "unsigned_power_of_two_division",
           1);
 }
-void ir_target_strength_reduce(ir_context *c, ir_module *m) {
-  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
-  ir_analyze(c, m, &p.a);
-  for (unsigned i = 0; i < p.a.instruction_count; i++) {
-    spend(&p);
-    const ir_instruction *in = &p.a.instructions[i];
-    c->line = in->line;
+static void reduce_unsigned(strength *p, int gated) {
+  ir_context *c = p->c;
+  const ir_analysis *a = &p->a;
+  for (unsigned i = 0; i < a->instruction_count; i++) {
+    spend(p);
+    const ir_instruction *in = &a->instructions[i];
     if (!unsigned_division(in))
       continue;
+    c->line = in->line;
     ir_note(c, "candidate", "unsigned_division_or_remainder", 1);
     uint32_t divisor;
-    const char *reason = eligible(&p, i, &divisor);
+    const char *reason = eligible(p, i, &divisor);
     if (reason) {
       ir_note(c, "skipped", reason, 1);
       continue;
     }
     int paired = 0;
-    if (i + 1 < p.a.instruction_count) {
-      const ir_instruction *next = &p.a.instructions[i + 1];
+    if (i + 1 < a->instruction_count) {
+      const ir_instruction *next = &a->instructions[i + 1];
       uint32_t other;
       if (next->block == in->block && unsigned_division(next) &&
           strcmp(next->operation, in->operation) &&
-          !eligible(&p, i + 1, &other) && other == divisor &&
-          p.a.operands[next->first_operand].definition ==
-              p.a.operands[in->first_operand].definition)
+          !eligible(p, i + 1, &other) && other == divisor &&
+          a->operands[next->first_operand].definition ==
+              a->operands[in->first_operand].definition)
         paired = 1;
     }
-    if (!profitable(&p, divisor, !strcmp(in->operation, "urem"), paired)) {
+    if (!profitable(p, divisor, !strcmp(in->operation, "urem"), paired)) {
       ir_note(c, "skipped", "lowered_cost_not_profitable", 1);
       continue;
     }
-    replace(&p, i, divisor);
+    replace(p, i, divisor, gated);
     if (paired) {
       ir_note(c, "candidate", "unsigned_division_or_remainder", 1);
-      replace(&p, ++i, divisor);
+      replace(p, ++i, divisor, gated);
     }
   }
+}
+
+void ir_target_strength_reduce(ir_context *c, ir_module *m) {
+  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
+  ir_analyze(c, m, &p.a);
+  reduce_unsigned(&p, 0);
 }

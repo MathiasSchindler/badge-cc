@@ -159,10 +159,11 @@ The owned CLI/API defaults are `ssa` and
 profile appends `global-memory`, `sret-forward`, `compact-inline`, `low-bits`,
 `linear-bias`, `small-aggregate`, `dead-instructions`, and `divrem-pairs`
 to the preceding eight passes. Query the exact list with
-`badge-opt --default-passes`. The
-[repeated single-badge timing and UF2 replay](docs/current-promotion.md#november-default-update)
-describe the new combination and its limits. The earlier `thumb-widths`/eight-pass profile
-remains explicitly selectable. Target-costed optimizer defaults require the
+`badge-opt --default-passes`. `divrem-pairs` also replaces profitable
+unsigned power-of-two divisions and remainders with shifts and masks.
+See the [qualification results](docs/current-promotion.md#november-default-update).
+The earlier `thumb-widths`/eight-pass profile remains explicitly selectable.
+Target-costed optimizer defaults require the
 badge backend's supported IR contract; the earlier explicit six-pass
 pipeline remains available for broader standalone optimizer use.
 The previous `instruction-combine` profile remains an explicit Z03 control.
@@ -222,12 +223,13 @@ enable shared pools or blanket alignment. D09 rejects speed promotion after
 resolved suite regressions.
 See [final-width layout and qualification](docs/datasheet/final-layout.md).
 
-D07 adds opt-in C06 `target-strength-reduce`, using the shared model to
+D07 introduced standalone C06 `target-strength-reduce`, using the shared model to
 replace unflagged unsigned i32 power-of-two div/rem with shifts/masks while
 accounting for materialization, pressure and lost quotient sharing.
-Select it after `constant-fold` in `BADGE_OPT_PASSES`; the default pipeline
-is unchanged. Fresh qualification removes 35 UDIV and 17 MLS instructions,
-with no image or frame growth. D09 finds no resolved suite speed benefit. See
+The standalone pass remains selectable for isolation. The original
+qualification removed 35 UDIV and 17 MLS instructions, with no image or
+frame growth. D09 found no resolved suite speed benefit. The default now
+also checks finalized Thumb code and allocation before accepting a rewrite. See
 [IR profitability, usage and qualification](docs/datasheet/ir-profitability.md).
 
 D08 records [six independent memory/DSP/FPU/DCP/GPIOC/RCP decisions](docs/datasheet/README.md#d08-independent-decisions).

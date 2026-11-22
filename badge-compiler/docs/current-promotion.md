@@ -64,6 +64,28 @@ BADGE_CODEGEN_SCALAR_SELECTION=thumb-widths \
   bash badge-compiler/scripts/build-owned.sh
 ```
 
+### Unsigned power-of-two follow-up
+
+`divrem-pairs` now also strength-reduces unflagged unsigned i32 division and
+remainder by literal powers of two, without adding a pipeline entry. The
+candidate accounts for already-shared quotient/remainder work. It is
+rejected for a function if final code bytes, frame, register saves, or
+spills increase. The standalone `target-strength-reduce` pass is still
+available for isolation.
+
+Against the previous sixteen-pass default, 17 of 33 verified images shrank,
+saving 780 loaded flash bytes total. The other 16 stayed the same size;
+no image grew. Of 129 matched modules, 23 shrank in executable size (548
+bytes total). Maze shrank from 16,104 to 16,092 bytes. The QEMU arithmetic
+oracle passed all 32 power-of-two divisors; the production four-level Maze
+probe matched all digests and reached 12 fewer instructions
+(21,196,879 to 21,196,867). These results do not establish a physical speedup.
+
+In the standalone replay, SCCP did not grow executable code, but its earlier
+string-timing caveat still needs a physical retest. Local CSE and broader
+loop hoisting grew some modules; `loop-bounds` and profile-free `hot-inline`
+did not improve this corpus. They are not promoted by this update.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.
