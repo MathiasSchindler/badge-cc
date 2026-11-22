@@ -395,6 +395,64 @@ entry:
     '-kernel', file('fill.elf')]);
 });
 
+test('paired transfers require suitable stack RAM and preserve word order and guard bytes', t => {
+  const file = files(t);
+  const source = `target triple = "thumbv8m.main-unknown-none-eabi"
+declare void @llvm.memcpy.inline.p0.p0.i32(ptr, ptr, i32, i1)
+declare void @llvm.memset.inline.p0.i32(ptr, i8, i32, i1)
+define i64 @unknown(ptr %p) {
+entry:
+  %v = load i64, ptr %p, align 4
+  ret i64 %v
+}
+define i64 @ordered() {
+entry:
+  %s = alloca i64, align 8
+  store volatile i64 1234605616436508552, ptr %s, align 8
+  %v = load volatile i64, ptr %s, align 8
+  ret i64 %v
+}
+define i32 @main() {
+entry:
+  %a = alloca [32 x i8], align 4
+  %b = alloca [32 x i8], align 4
+  call void @llvm.memset.inline.p0.i32(ptr %a, i8 0, i32 32, i1 false)
+  store i64 1234605616436508552, ptr %a, align 4
+  call void @llvm.memset.inline.p0.i32(ptr %b, i8 0, i32 32, i1 false)
+  %guard = getelementptr i8, ptr %b, i32 24
+  store i32 79, ptr %guard, align 4
+  call void @llvm.memcpy.inline.p0.p0.i32(ptr %b, ptr %a, i32 24, i1 false)
+  %q = load i64, ptr %b, align 4
+  %g = load i32, ptr %guard, align 4
+  %good0 = icmp eq i64 %q, 1234605616436508552
+  %good1 = icmp eq i32 %g, 79
+  %ok = and i1 %good0, %good1
+  %bad = xor i1 %ok, true
+  %status = zext i1 %bad to i32
+  ret i32 %status
+}`;
+  fs.writeFileSync(file('pair.ll'), source);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    '--memory-selection=word', file('pair.ll'), '-o', file('pair.s')]);
+  const assembly = fs.readFileSync(file('pair.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.match(body('main'), /strd r0, r1, \[(?:r7|sp), #/);
+  assert.match(body('main'), /ldrd r0, r1, \[(?:r7|sp), #/);
+  assert.match(body('main'), /ldm r5!, \{r0, r1\}\nstm r4!, \{r0, r1\}/);
+  assert.doesNotMatch(body('unknown') + body('ordered'), /\b(?:ldrd|strd|ldm|stm)\b/);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-asm'), [file('pair.s'), '-o', file('pair.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang', ['--target=arm-none-eabi', '-mcpu=cortex-m33',
+    '-mthumb', '-c', file('pair.s'), '-o', file('pair-clang.o')]);
+  const section = name => decodeElf(fs.readFileSync(file(name))).sections.find(s => s.name === '.text.main').data;
+  assert.deepEqual(section('pair.o'), section('pair-clang.o'));
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('pair.o'), '-o', file('pair.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('pair.elf')]);
+});
+
 test('bounded loops hoist immutable literals but retain loads across calls or clobbers', t => {
   const file = files(t);
   const loop = (name, update, result) => `define i32 @${name}(i32 %n) {

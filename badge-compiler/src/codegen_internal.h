@@ -267,6 +267,8 @@ int cg_compact_binary(cg_context *c, const char *op, unsigned dst,
                       unsigned left, unsigned right);
 void cg_address(cg_context *c, unsigned r, unsigned offset);
 void cg_stack(cg_context *c, int store, unsigned r, unsigned offset);
+int cg_stack_pair(cg_context *c, int store, unsigned low, unsigned high,
+                  unsigned offset);
 void cg_symbol(cg_context *c, unsigned r, const char *name, int64_t addend);
 void cg_normalize(cg_context *c, cg_type *t, unsigned r);
 void cg_save(cg_context *c, cg_value *v, unsigned r, unsigned word);

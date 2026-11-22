@@ -2068,6 +2068,14 @@ volatile storage. Separately, `thumb-constants` can forward single-use aligned
 two-word loads from fixed frame objects into their final argument registers
 when no intervening write or call can change the source. The ABI is unchanged.
 
+`thumb-constants` also uses `LDRD`/`STRD` for bounded, proven word-aligned
+stack RAM, including eligible small copies, zero fills and two-word argument
+loads. It keeps scalar accesses for out-of-range frame offsets, volatile
+accesses and unproven pointers. With word memory selection enabled, aligned
+local copies of at least 24 bytes and an exact multiple of eight can use
+16-bit `LDM`/`STM` writeback in the counted loop. These are selection changes,
+not evidence of faster XIP, peripheral or contended RAM access.
+
 The larger-firmware comparison uses `thumb-constants` and appends
 `global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions`
 to the default IR passes. `dead-instructions` removes producers left unused

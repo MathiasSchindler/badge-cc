@@ -80,3 +80,34 @@ addresses imply independent banks. Qualify actual corpus results, stack
 uncertainties and recovery under D09. Only a reached improvement beyond the
 D02 noise envelope without unexplained regressions can justify promotion.
 No SRAM speed benefit or safe whole-program stack bound is claimed by D08.
+
+## Offline IMU placement pilot
+
+Use [the placement tool](../../tools/imu-placement.mjs) to relink a fresh
+owned IMU Demo build. Keep its `*.o` files, `imu_demo.o.owned/assembly.s`, and
+the matching `imu_demo.bin`.
+
+```sh
+make -C badge-compiler
+out=build/imu-owned
+passes=$(badge-compiler/build/badge-opt --default-passes)
+BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants \
+  BADGE_OPT_PASSES="$passes,global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions" \
+  make BUILD_DIR="$out" RP2350_CC="bash $PWD/badge-compiler/scripts/owned-cc.sh" \
+  "$out/universe26/uf2/imu_demo.uf2"
+make build/host-tools/bin2uf2
+node badge-compiler/tools/imu-placement.mjs \
+  "$out/universe26/firmware" build/imu-placement-ab
+```
+
+The XIP pair changes only repeated sensor-sample address materializations
+inside `screen_pixel`: shared literal versus `MOVW`/`MOVT`. A separate pair
+uses the same Thumb tail thunk and identical relocation-free `integer_sqrt`
+body; only its placement changes. The SRAM variant pays for the copied body
+and alignment in `.data`, up to 64 additional bytes, without changing the
+stack region. It does not enable blanket or automatic relocation. The tool
+checks loaded bytes, UF2 payloads, and the exact Thumb thunk destination;
+an offline Cortex-M33 reset-and-copy test executes both placements. This
+does not establish badge execution permissions, on-device timing or a
+production stack bound. For warm/cold XIP calibration and safe paired
+physical capture, use the [D02 harness](hardware-calibration.md).

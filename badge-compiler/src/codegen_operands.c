@@ -92,6 +92,14 @@ static void effects(const char *text, cg_constant facts[13]) {
     facts[dst] = facts[src];
     return;
   }
+  if ((!strcmp(op, "ldrd") || !strcmp(op, "strd")) &&
+      !strstr(text, "],") &&
+      sscanf(text + strlen(op), " r%u, r%u, [", &dst, &src) == 2 &&
+      dst <= 12 && src <= 12) {
+    if (op[0] == 'l')
+      facts[dst].known = facts[src].known = 0;
+    return;
+  }
   if (!strcmp(op, "str") || !strcmp(op, "str.w") || !strcmp(op, "str.n") ||
       !strcmp(op, "strb") || !strcmp(op, "strb.w") || !strcmp(op, "strb.n") ||
       !strcmp(op, "strh") || !strcmp(op, "strh.w") || !strcmp(op, "strh.n") ||

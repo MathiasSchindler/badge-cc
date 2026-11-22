@@ -8,9 +8,10 @@ import { root, sha, request, decode, reportBytes, requestAddress, responseAddres
 
 const sleep = milliseconds => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 
-export function capture(buildDirectory, output, serials) {
-  assert.equal(serials.length, 2, 'two badges required');
-  assert(serials.every(x => /^[0-9A-F]{16}$/.test(x)) && new Set(serials).size === 2, 'distinct serials');
+export function capture(buildDirectory, output, serials, singleBadge = false) {
+  const required = singleBadge ? 1 : 2;
+  assert.equal(serials.length, required, singleBadge ? 'one badge required for pilot' : 'two badges required');
+  assert(serials.every(x => /^[0-9A-F]{16}$/.test(x)) && new Set(serials).size === required, 'distinct serials');
   buildDirectory = path.resolve(buildDirectory); output = path.resolve(output);
   const manifest = JSON.parse(fs.readFileSync(path.join(buildDirectory, 'manifest.json')));
   assert.equal(manifest.schema, 1);
@@ -23,7 +24,7 @@ export function capture(buildDirectory, output, serials) {
     assert.equal(sha(fs.readFileSync(path.join(buildDirectory, image.audit))), image.audit_sha256, 'audit drift');
     assert.equal(image.qemu_correctness, 'passed', 'missing correctness oracle');
   }
-  fs.mkdirSync(output);
+  fs.mkdirSync(output, { mode: 0o700 });
   const picotool = process.env.PICOTOOL || path.join(root, 'build/picotool-usb/picotool');
   let commandIndex = 0;
   const command = (args, label, timeout = 180000) => {
@@ -60,7 +61,11 @@ export function capture(buildDirectory, output, serials) {
       assert.equal(fs.statSync(file).size, bytes, 'incomplete flash snapshot');
       backups.push({ serial, bytes, file, sha256: sha(fs.readFileSync(file)) });
     }
-    const plan = [
+    const plan = singleBadge ? [
+      ['control', ['llvm']], ['control', ['llvm']],
+      ['pilot', ['owned']], ['pilot', ['llvm']],
+      ['pilot', ['owned']], ['pilot', ['llvm']],
+    ] : [
       ['control', ['llvm', 'llvm']], ['control', ['llvm', 'llvm']],
       ['comparison-1', ['llvm', 'owned']], ['comparison-1', ['llvm', 'owned']],
       ['comparison-2', ['llvm', 'owned']], ['comparison-2', ['llvm', 'owned']],
@@ -68,7 +73,7 @@ export function capture(buildDirectory, output, serials) {
     for (const [roundIndex, [kind, compilers]] of plan.entries()) {
       const assignments = compilers.map((compiler, i) => ({
         ...manifest.images.find(x => x.compiler === compiler),
-        serial: serials[roundIndex % 2 === 0 ? i : 1 - i],
+        serial: serials[singleBadge || roundIndex % 2 === 0 ? i : 1 - i],
       }));
       const nonce = crypto.randomBytes(16), prefix = `round-${roundIndex}`;
       const requestFile = path.join(output, `${prefix}-request.bin`);
@@ -119,20 +124,25 @@ export function capture(buildDirectory, output, serials) {
       }
     }
   }
-  const result = { schema: 1, status: failure ? 'failed' : 'captured', manifest_file: path.join(buildDirectory, 'manifest.json'),
+  const result = { schema: 1, status: failure ? 'failed' : 'captured', ...(singleBadge ? { scope: 'single-badge-pilot' } : {}),
+    manifest_file: path.join(buildDirectory, 'manifest.json'),
     manifest_sha256: sha(fs.readFileSync(path.join(buildDirectory, 'manifest.json'))), build: manifest.build,
     picotool_sha256: sha(fs.readFileSync(picotool)), serials, backups, restoration, rounds,
     ...(failure ? { error: failure } : {}) };
   fs.writeFileSync(path.join(output, 'capture.json'), JSON.stringify(result, null, 2)+'\n');
   if (failure) throw new Error(`${failure}\nCapture retained at ${output}`);
-  assert.equal(restoration.length, 2, 'both restorations required');
+  assert.equal(restoration.length, required, 'every touched badge must be restored');
   return { status: result.status, rounds: rounds.length, capture: path.join(output, 'capture.json'), restoration };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    assert.equal(process.argv.length, 6, 'usage: capture-datasheet.mjs BUILD_DIRECTORY NEW_DIRECTORY SERIAL SERIAL');
-    console.log(JSON.stringify(capture(process.argv[2], process.argv[3], process.argv.slice(4)), null, 2));
+    assert.equal(process.argv.length, 6,
+      'usage: capture-datasheet.mjs BUILD_DIRECTORY NEW_DIRECTORY SERIAL SERIAL | --single-badge SERIAL');
+    const args = process.argv.slice(4);
+    const singleBadge = args[0] === '--single-badge';
+    console.log(JSON.stringify(capture(process.argv[2], process.argv[3], singleBadge ? args.slice(1) : args,
+      singleBadge), null, 2));
   } catch (error) {
     console.error(`datasheet capture: ${error.message}`); process.exitCode = 1;
   }

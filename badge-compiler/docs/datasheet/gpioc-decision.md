@@ -74,3 +74,9 @@ build selection and whole-loop code size. Measure complete transfers/frame
 time, not one MCR. Include relevant display/graphics corpus builds and D09
 hardware recovery/noise gates. No waveform validation, timing gain or panel
 safety claim is made by this decision.
+
+The offline SIO control can be checked with `make -C badge-compiler
+test-fast-io` and `make test-display-timing`. The current assembly helper is
+68 bytes in both assemblers, including the eight 16-bit SIO stores and ten
+NOPs in the pixel body. These checks do not establish CP0 permission, panel
+setup/hold or pulse width. Keep GPIOC disabled until those live gates pass.

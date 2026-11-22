@@ -115,8 +115,9 @@ static void summarize_registers(cg_context *c, cg_function *f, size_t start) {
     "lsl", "lsls", "lsr", "lsrs", "asr", "asrs", "ror", "rors",
     "mul", "muls", "mla", "mls", "sdiv", "udiv", "cmp", "cmn",
     "tst", "teq", "clz", "uxtb", "uxth", "sxtb", "sxth",
-    "rev", "rev16", "revsh", "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh",
-    "str", "strb", "strh", "push", "pop", "nop", "it", "cbz", "cbnz"
+    "rev", "rev16", "revsh", "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrd",
+    "str", "strb", "strh", "strd", "ldm", "stm", "push", "pop", "nop", "it",
+    "cbz", "cbnz"
   };
   unsigned mask = 0;
   int known = 1;

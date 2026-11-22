@@ -27,6 +27,21 @@ hardware evidence. Image generation performs independent LLVM and owned
 QEMU semantic checks and final-linked byte/operand/width/target/literal audits.
 Both harnesses link the same assembly object. QEMU provides no timing evidence.
 
+For an explicitly authorized **one-badge pilot**, use the same checked images
+and flash preservation path, but select the badge by serial:
+
+```sh
+node badge-compiler/tools/capture-datasheet.mjs \
+  build/d02-new-images build/d02-single-pilot --single-badge SERIAL
+```
+
+The six sequential boots are LLVM, LLVM, owned, LLVM, owned, LLVM. The
+result has `scope: "single-badge-pilot"` and is deliberately rejected by the
+two-badge qualification analyzer. Raw reports and recovery evidence are
+retained locally. This is calibration
+of the explicit instruction sequences, not a qualification of IMU Demo,
+the display driver, or default compiler promotion.
+
 ## Transport and safety
 
 Each badge's complete flash is snapshotted and hashed before any write.

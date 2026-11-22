@@ -1282,6 +1282,19 @@ static int cg_short_memory(cg_context *c, cg_arg *args, int copy,
     cg_immediate(c, 0, 0);
   }
   for (unsigned k = 0; k < length; k += 4) {
+    if (k + 8 <= length && (!direct_src || src->object + k <= 1020) &&
+        (!direct_dst || dst->object + k <= 1020)) {
+      if (direct_src)
+        cg_stack_pair(c, 0, 0, 1, src->object + k);
+      else if (copy)
+        cg_emit(c, "ldrd r0, r1, [r5, #%u]\n", k);
+      if (direct_dst)
+        cg_stack_pair(c, 1, 0, copy ? 1 : 0, dst->object + k);
+      else
+        cg_emit(c, "strd r0, r%u, [r4, #%u]\n", copy ? 1u : 0u, k);
+      k += 4;
+      continue;
+    }
     if (direct_src)
       cg_stack(c, 0, 0, src->object + k);
     else if (copy)
@@ -1306,6 +1319,15 @@ static int cg_word_memory(cg_context *c, cg_arg *args, int copy,
       (copy && !cg_memory_pointer(c, &args[1], length)))
     return 0;
   unsigned words = length / 4, tail = length % 4, id = ++c->unique;
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      copy && length >= 24 && length % 8 == 0) {
+    cg_immediate(c, 6, length / 8);
+    cg_emit(c, ".Lcg_wordmem%u:\nldm r5!, {r0, r1}\n"
+               "stm r4!, {r0, r1}\nsubs.n r6, #1\nbne.n .Lcg_wordmem%u\n", id, id);
+    c->word_copies++;
+    c->word_bytes += length;
+    return 1;
+  }
   if (!copy)
     cg_emit(c, "uxtb r0, r5\norr.w r0, r0, r0, lsl #8\n"
                "orr.w r0, r0, r0, lsl #16\n");
@@ -1313,6 +1335,7 @@ static int cg_word_memory(cg_context *c, cg_arg *args, int copy,
     cg_immediate(c, 6, words);
     cg_emit(c, ".Lcg_wordmem%u:\n", id);
   }
+
   if (copy)
     cg_emit(c, "ldr.w r0, [r5], #4\n");
   cg_emit(c, "str.w r0, [r4], #4\n");
@@ -1329,6 +1352,32 @@ static int cg_word_memory(cg_context *c, cg_arg *args, int copy,
     c->word_fills++;
   c->word_bytes += words * 4;
   c->tail_bytes += tail;
+  return 1;
+}
+static int cg_direct_record_memory(cg_context *c, cg_inst *i, int store,
+                                   cg_type *type, unsigned pointer,
+                                   unsigned value) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->frame_addressing != BADGE_FRAME_DIRECT || type->size != 8 ||
+      c->tokens[pointer].text[0] != '%')
+    return 0;
+  cg_value *ram = cg_find(c, c->tokens[pointer].text);
+  if (ram->object_size < 8 || ram->object_align < 4 || ram->object > 1020)
+    return 0;
+  if (store) {
+    const char *name = c->tokens[value].text;
+    cg_value *source = *name == '%' ? cg_find(c, name) : NULL;
+    if (!source || source->type->size != 8 ||
+        !cg_stack_pair(c, 0, 0, 1, source->slot))
+      for (unsigned w = 0; w < 2; w++) {
+        c->pos = value;
+        cg_value_read(c, type, w, w);
+      }
+  }
+  cg_stack_pair(c, store, 0, 1, ram->object);
+  if (!store && !cg_stack_pair(c, 1, 0, 1, i->result->slot))
+    for (unsigned w = 0; w < 2; w++)
+      cg_save(c, i->result, w, w);
   return 1;
 }
 static void cg_call(cg_context *c, cg_inst *i) {
@@ -1486,8 +1535,9 @@ static void cg_call(cg_context *c, cg_inst *i) {
     if (!args[k].byval && words == 2 && positions[k] <= 2 && *name == '%') {
       const cg_value *record = cg_find(c, name)->argument_record;
       if (record) {
-        for (unsigned w = 0; w < words; w++)
-          cg_stack(c, 0, positions[k] + w, record->object + 4 * w);
+        if (!cg_stack_pair(c, 0, positions[k], positions[k] + 1, record->object))
+          for (unsigned w = 0; w < words; w++)
+            cg_stack(c, 0, positions[k] + w, record->object + 4 * w);
         cg_emit(c, "@ record-argument: words forwarded 2\n");
         continue;
       }
@@ -1976,6 +2026,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       cg_expect(c, ",");
     (void)cg_type_parse(c, 0);
     unsigned pointer = c->pos;
+    if (!is_volatile && cg_direct_record_memory(c, i, store, t, pointer, value))
+      return;
     if (i->indexed_address) {
       unsigned at = i->indexed_address->begin;
       unsigned base = cg_global_register(c, c->tokens[at + 6].text);
@@ -2062,7 +2114,15 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
         c->pos = value;
         cg_value_read(c, t, w, w);
       }
-    cg_memory(c, store, t, align);
+    const char *address = c->tokens[pointer].text;
+    cg_value *ram = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+                            !is_volatile && t->size == 8 && align >= 4 &&
+                            *address == '%'
+                        ? cg_find(c, address) : NULL;
+    if (ram && ram->memory_align >= 4 && ram->memory_size >= 8)
+      cg_emit(c, "%s r0, r1, [r4]\n", store ? "strd" : "ldrd");
+    else
+      cg_memory(c, store, t, align);
     if (!store)
       for (unsigned w = 0; w < cg_round(t->size, 4) / 4; w++)
         cg_save(c, i->result, w, w);

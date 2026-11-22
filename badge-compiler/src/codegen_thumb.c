@@ -80,6 +80,16 @@ void cg_stack(cg_context *c, int store, unsigned r, unsigned offset) {
   cg_address(c, 12, offset);
   cg_emit(c, "%s.w r%u, [r12]\n", store ? "str" : "ldr", r);
 }
+int cg_stack_pair(cg_context *c, int store, unsigned low, unsigned high,
+                  unsigned offset) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->frame_addressing != BADGE_FRAME_DIRECT || offset > 1020 || offset % 4 ||
+      low >= 13 || high >= 13 || (!store && low == high))
+    return 0;
+  cg_emit(c, "%s r%u, r%u, [%s, #%u]\n", store ? "strd" : "ldrd",
+          low, high, c->frame_sp_relative ? "sp" : "r7", offset);
+  return 1;
+}
 void cg_symbol(cg_context *c, unsigned r, const char *name, int64_t addend) {
   if (cg_relax_selection(c) || cg_operand_selection(c)) {
     if (addend >= -32768 && addend <= 32767) {
