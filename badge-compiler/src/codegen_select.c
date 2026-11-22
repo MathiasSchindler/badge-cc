@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL };
+enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP, SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE, SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST, SELECT_SIGNED_PRODUCT };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -357,6 +357,50 @@ static void absolute_wrapper(cg_context *c) {
 int cg_selection_forward_argument(cg_context *c) {
   return c->selection && c->selection->wrapper;
 }
+static void signed_products(cg_context *c) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS)
+    return;
+  for (cg_block *b = c->fn->blocks; b; b = b->next) {
+    cg_inst *recent[8] = {0};
+    unsigned cursor = 0;
+    for (cg_inst *i = b->first; i; i = i->next) {
+      cg_register_work(c);
+      if (i->result && i->end - i->begin == 7 && !pair(c, i)->instruction &&
+          !strcmp(c->tokens[i->begin + 2].text, "mul") &&
+          !strcmp(c->tokens[i->begin + 5].text, ",")) {
+        const char *to = c->tokens[i->begin + 3].text;
+        const char *from = !strcmp(to, "i64") ? "i32" :
+                           !strcmp(to, "i32") ? "i16" : NULL;
+        cg_inst *cast[2] = {0};
+        if (from)
+          for (unsigned k = 0; k < 8; k++) {
+            cg_register_work(c);
+            cg_inst *p = recent[k];
+            if (!p || !p->result || p->end - p->begin != 7 ||
+                pair(c, p)->instruction ||
+                strcmp(c->tokens[p->begin + 2].text, "sext") ||
+                strcmp(c->tokens[p->begin + 3].text, from) ||
+                strcmp(c->tokens[p->begin + 5].text, "to") ||
+                strcmp(c->tokens[p->begin + 6].text, to))
+              continue;
+            for (unsigned n = 0; n < 2; n++)
+              if (!strcmp(p->result->name, c->tokens[i->begin + 4 + 2 * n].text))
+                cast[n] = p;
+          }
+        if (cast[0] && cast[1]) {
+          *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SIGNED_PRODUCT};
+          for (unsigned n = 0; n < 2; n++) {
+            cg_inst *p = cast[n];
+            if (cg_register_lookup(c, p->result->name)->selection_uses ==
+                (cast[0] == cast[1] ? 2u : 1u))
+              *pair(c, p) = (cg_selected_pair){.instruction = p, .kind = SELECT_PRODUCT_CAST};
+          }
+        }
+      }
+      recent[cursor++ % 8] = i;
+    }
+  }
+}
 void cg_selection_prepare(cg_context *c) {
   c->selection = NULL;
   if (c->scalar_selection == BADGE_SELECTION_LEGACY)
@@ -471,6 +515,7 @@ void cg_selection_prepare(cg_context *c) {
                          c->tokens[next->begin + 6].text))
         *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i, .kind=SELECT_DIVISION};
     }
+  signed_products(c);
 }
 cg_inst *cg_selection_branch_compare(cg_context *c, cg_inst *i) {
   if (!c->selection) return NULL;
@@ -669,6 +714,27 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (!c->selection)
     return 0;
   cg_selected_pair *selected = pair(c, i);
+  if (selected->kind == SELECT_PRODUCT_CAST) {
+    c->pos = i->begin + 4;
+    cg_value_read(c, NULL, 0, 0);
+    cg_save_normalized(c, i->result, 0);
+    return 1;
+  }
+  if (selected->kind == SELECT_SIGNED_PRODUCT) {
+    if (i->result->type->bits == 64) {
+      read(c, i, 4, 0);
+      read(c, i, 6, 2);
+      cg_emit(c, "smull r0, r1, r0, r2\n");
+      cg_save(c, i->result, 0, 0);
+      cg_save(c, i->result, 1, 1);
+    } else {
+      unsigned a = operand(c, i, 4, 0), b = operand(c, i, 6, 2);
+      unsigned dst = destination(c, i);
+      cg_emit(c, "smulbb r%u, r%u, r%u\n", dst, a, b);
+      cg_save_normalized(c, i->result, dst);
+    }
+    return 1;
+  }
   if (selected->kind == SELECT_WRAPPER_CALL) {
     cg_emit(c, "bl %s\n@ ordered-wrapper: incoming r0 forwarded\n",
             cg_name(c, c->tokens[i->begin + 2].text));
@@ -816,13 +882,17 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   c->selection->immediates++;
   return 1;
 }
+void cg_add_offset(cg_context *c, unsigned dst, unsigned base, uint32_t offset) {
+  if (!immediate(c, "add", offset, dst, base)) {
+    unsigned scratch = base == 0 ? 1 : 0;
+    cg_immediate(c, scratch, offset);
+    cg_emit(c, "add.w r%u, r%u, r%u\n", dst, base, scratch);
+  }
+}
 int cg_selection_offset(cg_context *c, uint32_t offset) {
   if (!c->selection)
     return 0;
-  if (!immediate(c, "add", offset, 0, 0)) {
-    cg_immediate(c, 1, offset);
-    cg_emit(c, "add.w r0, r0, r1\n");
-  }
+  cg_add_offset(c, 0, 0, offset);
   c->selection->constant_addresses++;
   return 1;
 }

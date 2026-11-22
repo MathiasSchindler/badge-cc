@@ -417,6 +417,16 @@ static int overwritten_before_use(cg_context *c, const char *text, unsigned reg)
   }
   return 0;
 }
+static unsigned scalar_transfer(const char *op, int *narrow) {
+  if (strncmp(op, "ldr", 3) && strncmp(op, "str", 3))
+    return 0;
+  const char *suffix = op + 3;
+  unsigned bytes = 4;
+  if (*suffix == 'b' || *suffix == 'h')
+    bytes = *suffix++ == 'b' ? 1 : 2;
+  *narrow = !strcmp(suffix, ".n");
+  return *narrow || !strcmp(suffix, ".w") ? bytes : 0;
+}
 void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
@@ -427,15 +437,28 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
     cg_register_work(c);
     const char *end = strchr(p, '\n');
     if (!end) cg_error(c, "unterminated memory address instruction");
-    unsigned dst, base, index, shift;
+    unsigned dst, base, index = 0, shift = 0, offset = 0;
     int consumed = 0;
+    int indexed = 0, immediate = 0;
     if (assembly_lines) assembly_lines--;
     else if (!strncmp(p, "@ constant-assembly-lines:", 26))
       sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
-    else if (sscanf(p, "add.w r%u, r%u, r%u, lsl #%u%n",
-                    &dst, &base, &index, &shift, &consumed) == 4 &&
-             p + consumed == end && dst <= 12 && base <= 12 && index <= 12 &&
-             shift <= 3 && dst != base && dst != index) {
+    else {
+      indexed = (sscanf(p, "add.w r%u, r%u, r%u, lsl #%u%n",
+                        &dst, &base, &index, &shift, &consumed) == 4 &&
+                 p + consumed == end) ||
+                (sscanf(p, "add.w r%u, r%u, r%u%n",
+                        &dst, &base, &index, &consumed) == 3 &&
+                 p + consumed == end);
+      if (!indexed)
+        immediate = (sscanf(p, "addw r%u, r%u, #%u%n",
+                            &dst, &base, &offset, &consumed) == 3 ||
+                     sscanf(p, "add.w r%u, r%u, #%u%n",
+                            &dst, &base, &offset, &consumed) == 3) &&
+                    p + consumed == end && offset <= 4095;
+    }
+    if ((indexed || immediate) && dst <= 12 && base <= 12 && dst != base &&
+        (!indexed || (index <= 12 && shift <= 3 && dst != index))) {
       const char *memory = end + 1;
       for (unsigned n = 0; n < 16 && *memory; n++) {
         const char *finish = strchr(memory, '\n');
@@ -444,24 +467,34 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
         memcpy(instruction, memory, (size_t)(finish - memory));
         instruction[finish - memory] = 0;
         unsigned value, address;
-        int used = 0;
+        int used = 0, narrow;
+        unsigned bytes;
         if (sscanf(instruction, "%23s r%u, [r%u]%n", op, &value, &address, &used) == 3 &&
-            !instruction[used] && address == dst && value <= 12 && value != dst &&
-            (!strcmp(op, "str.n") || !strcmp(op, "str.w") ||
-             !strcmp(op, "ldr.n") || !strcmp(op, "ldr.w")) &&
-            overwritten_before_use(c, finish + 1, dst)) {
+            used && !instruction[used] && address == dst && value <= 12 &&
+            (bytes = scalar_transfer(op, &narrow)) &&
+            (value == dst ? op[0] == 'l' : overwritten_before_use(c, finish + 1, dst))) {
+          int short_form = base < 8 && value < 8 &&
+              (indexed ? index < 8 && !shift : offset < bytes * 32 && offset % bytes == 0);
+          int mnemonic = (int)(strchr(op, '.') - op);
           cg_emit(c, "%.*s", (int)(memory - end - 1), end + 1);
-          cg_emit(c, "%s.w r%u, [r%u, r%u, lsl #%u]\n@ memory-address-fold: saved %u\n",
-                  op[0] == 's' ? "str" : "ldr", value, base, index, shift,
-                  !strcmp(op + 3, ".n") ? 2u : 4u);
+          cg_emit(c, "%.*s.%c r%u, [r%u", mnemonic, op, short_form ? 'n' : 'w', value, base);
+          if (indexed)
+            cg_emit(c, ", r%u", index);
+          if (indexed ? shift : offset)
+            cg_emit(c, indexed ? ", lsl #%u" : ", #%u", indexed ? shift : offset);
+          cg_emit(c, "]\n@ memory-address-fold: saved %u\n",
+                  4u + (narrow ? 2u : 4u) - (short_form ? 2u : 4u));
           p = finish + 1;
           break;
         }
         if (*instruction != '@' && *instruction) {
           cg_constant facts[13] = {{0}};
-          facts[base].known = facts[index].known = 1;
+          facts[base].known = 1;
+          if (indexed)
+            facts[index].known = 1;
           effects(instruction, facts);
-          if (mentions(instruction, dst) || !facts[base].known || !facts[index].known)
+          if (mentions(instruction, dst) || !facts[base].known ||
+              (indexed && !facts[index].known))
             break;
         } else if (!strncmp(instruction, "@ assembly-effects:", 19) ||
                    !strncmp(instruction, "@ constant-assembly-lines:", 26) ||
@@ -474,12 +507,30 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
     p = end + 1;
   }
 }
+static int label_character(unsigned char ch) {
+  return isalnum(ch) || ch == '_' || ch == '.' || ch == '$';
+}
+
+static int sole_label_entry(cg_context *c, const char *body, const char *name,
+                            const char *label, const char *jump) {
+  size_t length = strlen(name);
+  for (const char *p = body; (p = strstr(p, name)); p += length) {
+    cg_register_work(c);
+    if (p != label && p != jump && (p == body || !label_character(p[-1])) &&
+        !label_character(p[length]))
+      return 0;
+  }
+  return 1;
+}
+
 void cg_reuse_constants(cg_context *c, size_t body_start) {
   int synthesis = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
+  int cfg = synthesis && c->size - body_start <= 32768;
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i; i = i->next) {
       cg_assembly *a = cg_instruction_assembly(c, i);
       if (!synthesis && a && !a->known) return;
+      if (a) cfg = 0;
     }
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
@@ -489,7 +540,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
   c->size = body_start;
   cg_constant facts[13] = {{0}};
   unsigned assembly_lines = 0;
-  char *current = body;
+  char *current = body, *carried_label = NULL;
   while (current < body + length) {
     cg_register_work(c);
     char *next_line = line(current);
@@ -513,6 +564,37 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
       cg_emit(c, "%s\n", current);
       current = next_line;
       continue;
+    }
+    if (cfg && !assembly_lines) {
+      char name[128];
+      int consumed = 0, operand = 0;
+      if (current == carried_label) {
+        cg_emit(c, "%s\n", current);
+        carried_label = NULL;
+        current = next_line;
+        continue;
+      }
+      if (sscanf(current, "%127[.a-zA-Z0-9_]:%n", name, &consumed) == 1 &&
+          consumed && !current[consumed] && !strncmp(name, ".Lcg_", 5) &&
+          sole_label_entry(c, original, name, original + (current - body), NULL)) {
+        cg_emit(c, "%s\n", current);
+        current = next_line;
+        continue;
+      }
+      consumed = 0;
+      if (sscanf(current, "b %n%127s%n", &operand, name, &consumed) == 1 &&
+          consumed && !current[consumed] && !strncmp(name, ".Lcg_", 5)) {
+        size_t n = strlen(name);
+        if (!strncmp(next_line, name, n) && next_line[n] == ':' &&
+            next_line[n + 1] == '\n' &&
+            sole_label_entry(c, original, name, original + (next_line - body),
+                             original + (current - body) + operand)) {
+          carried_label = next_line;
+          cg_emit(c, "%s\n", current);
+          current = next_line;
+          continue;
+        }
+      }
     }
     if (synthesis) {
       char opcode[12];
@@ -678,4 +760,70 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
     current = after;
   }
   if (assembly_lines) cg_error(c, "truncated constant selection assembly boundary");
+}
+
+void cg_pool_symbol_addresses(cg_context *c, size_t start) {
+  enum { MAX_LINES = 920, MAX_SYMBOLS = 32 };
+  const char *source = c->out + start;
+  if (strstr(source, "@ constant-assembly-lines:") || strstr(source, "\nit"))
+    return;
+  char *body = cg_alloc(c, c->size - start + 1);
+  memcpy(body, source, c->size - start);
+  char *lines[MAX_LINES];
+  unsigned count = 0;
+  for (char *p = body; *p;) {
+    cg_register_work(c);
+    if (count == MAX_LINES)
+      return;
+    lines[count++] = p;
+    p = line(p);
+  }
+  struct { const char *expression; unsigned uses; } entries[MAX_SYMBOLS] = {{0}};
+  unsigned entry_count = 0;
+  unsigned site[MAX_LINES] = {0}, regs[MAX_LINES];
+  for (unsigned i = 0; i + 1 < count; i++) {
+    const char *p = lines[i];
+    if (*p == '.' && strncmp(p, ".type ", 6) && strncmp(p, ".global ", 8) &&
+        strcmp(p, ".thumb_func") && (i || strncmp(p, ".balign ", 8)) &&
+        p[strlen(p) - 1] != ':')
+      return;
+    unsigned lower, upper;
+    const char *expr = symbol(p, "movw", &lower);
+    const char *high = expr ? symbol(lines[i + 1], "movt", &upper) : NULL;
+    if (!high || lower != upper || strcmp(expr, high))
+      continue;
+    unsigned k = 0;
+    while (k < entry_count && strcmp(expr, entries[k].expression))
+      k++;
+    if (k == entry_count) {
+      if (k == MAX_SYMBOLS)
+        continue;
+      entries[k].expression = expr;
+      entry_count++;
+    }
+    entries[k].uses++;
+    site[i] = k + 1;
+    regs[i++] = lower;
+  }
+  unsigned pooled = 0;
+  for (unsigned k = 0; k < entry_count; k++)
+    pooled += entries[k].uses > 1;
+  if (!pooled)
+    return;
+  c->size = start;
+  for (unsigned i = 0; i < count; i++) {
+    unsigned k = site[i];
+    if (k && entries[k - 1].uses > 1) {
+      cg_emit(c, "ldr.w r%u, .Lcg_shared_%u_%u\n", regs[i], c->fn->id, k);
+      i++;
+    } else
+      cg_emit(c, "%s\n", lines[i]);
+  }
+  cg_emit(c, ".p2align 2\n");
+  for (unsigned k = 0; k < entry_count; k++)
+    if (entries[k].uses > 1) {
+      const char *expr = entries[k].expression;
+      cg_emit(c, ".Lcg_shared_%u_%u:\n.word %.*s\n", c->fn->id, k + 1,
+              (int)strlen(expr) - 1, expr);
+    }
 }

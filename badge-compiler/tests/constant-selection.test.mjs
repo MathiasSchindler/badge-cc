@@ -94,6 +94,303 @@ int main(void) {
     '-kernel', file('llvm.elf')]);
 });
 
+test('direct scaled and frame addresses preserve indexed volatile accesses', t => {
+  const file = files(t);
+  fs.writeFileSync(file('address.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@words = global [4 x i32] [i32 11, i32 20, i32 31, i32 47], align 4
+define internal i32 @indexed(ptr %base, i32 %index) {
+entry:
+  %p = getelementptr i32, ptr %base, i32 %index
+  %value = load volatile i32, ptr %p, align 4
+  ret i32 %value
+}
+define internal i32 @frame(i32 %index) {
+entry:
+  %prefix = alloca [1024 x i8], align 4
+  %buffer = alloca [16 x i32], align 4
+  store volatile i32 7, ptr %prefix, align 4
+  %p = getelementptr i32, ptr %buffer, i32 %index
+  store volatile i32 1234, ptr %p, align 4
+  %a = load volatile i32, ptr %p, align 4
+  %b = load volatile i32, ptr %prefix, align 4
+  %sum = add i32 %a, %b
+  ret i32 %sum
+}
+define i32 @main() {
+entry:
+  %base = getelementptr i32, ptr @words, i32 2
+  %far = getelementptr i32, ptr %base, i32 65537
+  %back = getelementptr i32, ptr %far, i32 -65537
+  %a = call i32 @indexed(ptr %back, i32 -1)
+  %b = call i32 @frame(i32 3)
+  %x = xor i32 %a, 20
+  %y = xor i32 %b, 1241
+  %status = or i32 %x, %y
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('address.ll'), '-o', file('address.s')]);
+  const assembly = fs.readFileSync(file('address.s'), 'utf8');
+  const indexed = assembly.slice(assembly.indexOf('\nindexed:'), assembly.indexOf('.size indexed'));
+  assert.match(indexed, /add\.w r\d+, r(?:[3-6]|8|10|11), r\d+, lsl #2/);
+  assert.match(assembly, /addw r\d+, (?:r7|sp), #1024\b/);
+  run(tool('badge-asm'), [file('address.s'), '-o', file('owned.o')]);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(clang, [...target, '-c', file('address.s'), '-o', file('reassembled.o')]);
+  run(clang, [...target, '-Oz', '-c', file('address.ll'), '-o', file('llvm.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const name of ['owned', 'reassembled', 'llvm']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file(`${name}.o`), '-o', file('address.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('address.elf')]);
+  }
+});
+
+test('loop allocation weights PHI edges but ignores irreducible and unreachable cycles', t => {
+  const file = files(t);
+  fs.writeFileSync(file('loops.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define i32 @nested(i32 %limit) {
+entry:
+  br label %outer
+outer:
+  %i = phi i32 [0, %entry], [%next, %latch]
+  %done = icmp uge i32 %i, %limit
+  br i1 %done, label %exit, label %inner
+inner:
+  %j = phi i32 [0, %outer], [%step, %inner]
+  %step = add i32 %j, 1
+  %again = icmp ult i32 %step, 4
+  br i1 %again, label %inner, label %latch
+latch:
+  %next = add i32 %i, %step
+  br label %outer
+dead:
+  br label %dead
+exit:
+  ret i32 %i
+}
+define i32 @irreducible(i1 %choose, i1 %leave) {
+entry:
+  br i1 %choose, label %left, label %right
+left:
+  br i1 %leave, label %exit, label %right
+right:
+  br i1 %leave, label %exit, label %left
+exit:
+  ret i32 0
+}
+define i32 @main() {
+entry:
+  %a = call i32 @nested(i32 9)
+  %b = call i32 @nested(i32 0)
+  %c = call i32 @irreducible(i1 false, i1 true)
+  %x = xor i32 %a, 12
+  %y = or i32 %b, %c
+  %status = or i32 %x, %y
+  ret i32 %status
+}`);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const policy of ['thumb-widths', 'thumb-constants']) {
+    run(tool('badge-codegen-sanitize'), [`--scalar-selection=${policy}`,
+      file('loops.ll'), '-o', file('loops.s')]);
+    const assembly = fs.readFileSync(file('loops.s'), 'utf8');
+    assert.deepEqual(assembly.match(/@ loop-allocation:.*$/gm) ?? [],
+      policy === 'thumb-constants' ? ['@ loop-allocation: weighted headers 2'] : []);
+    run(tool('badge-asm'), [file('loops.s'), '-o', file('loops.o')]);
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file('loops.o'), '-o', file('loops.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('loops.elf')]);
+  }
+});
+
+test('adjacent store forwarding keeps different widths, addresses and volatile accesses', t => {
+  const file = files(t);
+  fs.writeFileSync(file('forward.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@a = global i32 0, align 4
+@b = global i32 23, align 4
+define i32 @work(ptr %p, ptr %q, i32 %value) {
+entry:
+  store i32 %value, ptr %p, align 4
+  %a = load i32, ptr %p, align 4
+  store volatile i32 7, ptr %p, align 4
+  %b = load i32, ptr %p, align 4
+  store i32 8, ptr %p, align 4
+  %c = load volatile i32, ptr %p, align 4
+  store i32 9, ptr %p, align 4
+  %d = load i32, ptr %q, align 4
+  store i32 255, ptr %p, align 4
+  %byte = load i8, ptr %p, align 1
+  %e = zext i8 %byte to i32
+  %f = add i32 %a, %b
+  %g = add i32 %c, %d
+  %h = add i32 %f, %g
+  %sum = add i32 %h, %e
+  ret i32 %sum
+}
+define i32 @main() {
+entry:
+  %r = call i32 @work(ptr @a, ptr @b, i32 1024)
+  %status = xor i32 %r, 1317
+  ret i32 %status
+}`);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const policy of ['thumb-widths', 'thumb-constants']) {
+    run(tool('badge-codegen-sanitize'), [`--scalar-selection=${policy}`,
+      file('forward.ll'), '-o', file('forward.s')]);
+    const assembly = fs.readFileSync(file('forward.s'), 'utf8');
+    assert.equal((assembly.match(/@ store-load-forward:/g) ?? []).length,
+      policy === 'thumb-constants' ? 1 : 0);
+    run(tool('badge-asm'), [file('forward.s'), '-o', file('forward.o')]);
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file('forward.o'), '-o', file('forward.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('forward.elf')]);
+  }
+});
+
+test('rematerialized frame addresses survive outgoing call stack adjustments', t => {
+  const file = files(t);
+  const cells = Array.from({ length: 9 }, (_, i) => `%p${i}`);
+  const params = cells.map(p => `ptr ${p}`);
+  const lines = cells.map((p, i) => `  %v${i} = load volatile i32, ptr ${p}, align 4`);
+  for (let i = 1; i < cells.length; i++)
+    lines.push(`  %s${i} = add i32 %${i === 1 ? 'v0' : `s${i - 1}`}, %v${i}`);
+  fs.writeFileSync(file('frame.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define i32 @read_cells(${params.join(', ')}) {
+entry:
+${lines.join('\n')}
+  ret i32 %s8
+}
+define i32 @main() {
+entry:
+${cells.map(p => `  ${p} = alloca i32, align 4`).join('\n')}
+${cells.map((p, i) => `  store volatile i32 ${i + 1}, ptr ${p}, align 4`).join('\n')}
+  %sum = call i32 @read_cells(${params.join(', ')})
+  %status = xor i32 %sum, 45
+  ret i32 %status
+}`);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('frame.ll'), '-o', file('frame.s')]);
+  assert.match(fs.readFileSync(file('frame.s'), 'utf8'), /@ frame-rematerialization: addresses [1-9]/);
+  run(tool('badge-asm'), [file('frame.s'), '-o', file('owned.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang', ['--target=arm-none-eabi', '-mcpu=cortex-m33',
+    '-mthumb', '-Oz', '-c', file('frame.ll'), '-o', file('llvm.o')]);
+  for (const name of ['owned', 'llvm']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file(`${name}.o`), '-o', file('frame.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('frame.elf')]);
+  }
+});
+
+test('repeated symbol addresses share one unreachable literal with both assemblers', t => {
+  const file = files(t);
+  fs.writeFileSync(file('pool.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@cell = global [2 x i32] zeroinitializer, align 4
+define internal void @set(ptr %p) {
+entry:
+  store volatile i32 47, ptr %p, align 4
+  ret void
+}
+define i32 @main() {
+entry:
+  %p = getelementptr i8, ptr @cell, i32 4
+  store volatile i32 13, ptr %p, align 4
+  call void @set(ptr %p)
+  %q = getelementptr i8, ptr @cell, i32 4
+  %v = load volatile i32, ptr %q, align 4
+  %status = xor i32 %v, 47
+  ret i32 %status
+}`);
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('pool.ll'), '-o', file('pool.s')]);
+  const assembly = fs.readFileSync(file('pool.s'), 'utf8');
+  assert.equal((assembly.match(/ldr\.w r\d+, \.Lcg_shared_/g) ?? []).length, 2);
+  assert.match(assembly, /pop\.[wn] \{[^\n]*pc\}\n(?:@ [^\n]*\n)*\.p2align 2\n\.Lcg_shared_/);
+  assert.equal((assembly.match(/\.word cell\+0/g) ?? []).length, 1);
+  run(tool('badge-asm'), [file('pool.s'), '-o', file('owned.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang', ['--target=arm-none-eabi', '-mcpu=cortex-m33',
+    '-mthumb', '-c', file('pool.s'), '-o', file('llvm.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const name of ['owned', 'llvm']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file(`${name}.o`), '-o', file('pool.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('pool.elf')]);
+  }
+});
+
+test('signed halfword and widening products agree with LLVM at signed boundaries', t => {
+  const file = files(t);
+  const pairs = [[-32768, -32768], [-32768, 32767], [-1, 32767], [0, -1], [1, 1]];
+  const tests = pairs.flatMap(([a, b]) => [[16, 32, a, b], [32, 64, a * 65536, b * 65536]]);
+  fs.writeFileSync(file('product.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define i32 @half(i16 signext %a, i16 signext %b) {
+entry:
+  %x = sext i16 %a to i32
+  %y = sext i16 %b to i32
+  %p = mul i32 %x, %y
+  ret i32 %p
+}
+define i64 @wide(i32 %a, i32 %b) {
+entry:
+  %x = sext i32 %a to i64
+  %y = sext i32 %b to i64
+  %p = mul i64 %x, %y
+  ret i64 %p
+}
+define i64 @kept(i32 %a, i32 %b, ptr %out) {
+entry:
+  %x = sext i32 %a to i64
+  %y = sext i32 %b to i64
+  %p = mul i64 %x, %y
+  store i64 %x, ptr %out, align 8
+  ret i64 %p
+}
+@wide_value = global i64 0, align 8
+define i32 @main() {
+entry:
+  %initial = call i64 @kept(i32 -1, i32 5, ptr @wide_value)
+  %sign = load volatile i64, ptr @wide_value, align 8
+  %failure0 = icmp ne i64 %sign, -1
+${tests.map(([input, output, a, b], i) => `  %result${i} = call i${output} @${input === 16 ? 'half' : 'wide'}(i${input} ${a}, i${input} ${b})
+  %bad${i} = icmp ne i${output} %result${i}, ${BigInt(a) * BigInt(b)}
+  %failure${i + 1} = or i1 %failure${i}, %bad${i}`).join('\n')}
+  %status = zext i1 %failure${tests.length} to i32
+  ret i32 %status
+}`);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const flags = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+    file('product.ll'), '-o', file('product.s')]);
+  const assembly = fs.readFileSync(file('product.s'), 'utf8');
+  assert.match(assembly, /^smulbb /m);
+  assert.equal((assembly.match(/^smull /gm) ?? []).length, 2);
+  run(tool('badge-asm'), [file('product.s'), '-o', file('owned.o')]);
+  run(clang, [...flags, '-c', file('product.s'), '-o', file('encoding.o')]);
+  run(clang, [...flags, '-Oz', '-c', file('product.ll'), '-o', file('llvm.o')]);
+  const halfText = name => decodeElf(fs.readFileSync(file(`${name}.o`))).sections
+    .find(s => s.name === '.text.half').data;
+  assert.deepEqual(halfText('owned'), halfText('encoding'));
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const name of ['owned', 'llvm']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file(`${name}.o`), '-o', file('product.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file('product.elf')]);
+  }
+});
+
 test('shifted multiply-adds and direct comparisons preserve arithmetic and all signed/unsigned predicates', t => {
   const file = files(t);
   let ir = 'target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n' +

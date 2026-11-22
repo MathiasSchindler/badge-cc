@@ -525,6 +525,91 @@ flashes are preserved, both maze images are flash-verified and started,
 the sanitized host maze tests pass, and the user confirmed both displays
 and tilt response.
 
+The opt-in `thumb-constants` profile now selects direct Thumb address forms
+for single-index pointer arithmetic and static frame addresses. It uses
+allocated base/index/result registers where available, folds power-of-two
+scaling into the add, and uses nonflagging stack-relative forms when the
+offset fits. It does not change allocation, memory access width or volatile
+ordering. Other pointer shapes retain the general lowering.
+
+Against the previous `thumb-constants` profile, a fixed-IR check across
+37 modules saved 3,504 executable bytes with no module-size or measured
+stack-resource growth. Fresh tilt-maze and diagnostics images saved 340 and
+352 loaded bytes respectively; red square was unchanged. The Cortex-M33
+maze oracle reached 4.05% fewer QEMU instructions, which is not an on-badge
+speed measurement. Default output remained identical across the fixed corpus.
+Run `make -C badge-compiler test-constant-selection` for the focused address
+and encoding checks, and set `BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants`
+when running `make -C badge-compiler test-tilt-maze` to exercise the candidate.
+
+The same opt-in profile also adds a bounded loop-hotness bonus to global
+compact allocation. It weights reachable natural loops (including PHI uses
+on their incoming edges), caps the nesting bonus at two levels, and leaves
+interference and ABI constraints unchanged. It does not split live ranges.
+The conservative bonus saved 10,479 of 51,463,554 reached maze-oracle
+instructions; direct frame traffic in the three profiled maze routines did
+not change. Across 37 fixed-IR modules, executable size fell by 40 bytes net
+with four small module increases and no measured stack-resource growth.
+A stronger weighting was rejected after a 1.51% instruction-count
+regression. Neither result is a physical speed qualification.
+
+Subsequent opt-in backend changes, measured one at a time from that control:
+
+| Change | Maze-oracle instructions saved | Fixed-corpus executable bytes saved |
+| --- | ---: | ---: |
+| Forward adjacent, same-width ordinary loads from the value just stored | 4,773 | 54 |
+| Fold byte/halfword transfers and eligible immediate offsets into memory operands | 765,999 | 2,880 |
+| Recompute eligible spilled static frame addresses instead of keeping pointer homes | 5,037 | 984 |
+
+Forwarding retains every store and does not apply to volatile accesses,
+different pointers or widths. Address folding keeps the original access and
+requires the temporary address to be dead or overwritten. Frame
+rematerialization retains the real objects; it removes only pointer homes
+for addresses that fit a single instruction. It cut reached direct frame
+loads/stores in `generate_maze` from 182,142 to 146,018. These are QEMU and
+fixed-IR results, not badge timer measurements; the production default has
+not changed.
+
+Further opt-in changes are independently measured:
+
+| Experiment | Host qualification |
+| --- | --- |
+| Reuse materialized addresses across safe single-entry labels | 16 fewer executable bytes across 37 modules; unchanged maze instruction count |
+| `hot-inline` using LLVM IR function entry counts | Hot-call oracle: 110 to 90 executable bytes and roughly 2,193 to 1,169 reached instructions |
+| Share repeated symbol addresses in a function-tail literal pool | Nine modules shrink by 710 executable bytes in total; maze oracle reaches 50,677,266 to 49,700,688 instructions |
+| Group selected hot flash sections after boot metadata | Same 18,644-byte maze image size and QEMU instruction count; owned and LLD produce identical bytes for the new order |
+| Select signed halfword and widening products | Five widening sites in production IMU/breakout IR save 184 executable bytes; reached breakout oracle: 1,754,927 to 1,753,007 instructions |
+
+Address reuse is bounded to unreferenced generated labels or an immediate
+sole jump to the label, with no inline assembly in the function. It does not
+reuse memory values or merge arbitrary CFG facts. Literal pools are size
+candidates for repeated symbol addresses, bounded by wide literal reach and
+placed after the return; QEMU does not price XIP memory stalls.
+
+Run `badge-opt --passes=hot-inline` to try the hottest internal straight-line
+helpers first. Attach `!prof !0` to a function and define
+`!0 = !{!"function_entry_count", i64 128}` for a measured count of 128.
+The pass uses supplied counts; it does not collect a profile. Unprofiled and
+zero-count helpers are skipped, and the existing whole-module code-size,
+frame, save and spill gates still apply.
+
+To relink existing function-section objects with a flash-only order, use
+the [hot layout tool](tools/hot-layout.mjs):
+
+```sh
+node badge-compiler/tools/hot-layout.mjs src/arch/rp2350/memmap_flash.ld \
+  build/maze-hot.ld generate_maze random_next draw_board collide_wall
+make -C badge-compiler test-hot-layout
+```
+
+Pass the generated script to the same linker in place of the original.
+Section garbage collection, memory regions and startup data placement remain
+unchanged. SRAM execution and on-badge XIP timing were not qualified.
+`SMULBB` uses the low signed halfword of each operand; no matching halfword
+pair was found in the production corpus. Its encoding and behavior are
+checked against LLVM at signed boundaries. Production gains above are from
+`SMULL`, not multi-lane packed DSP.
+
 The original backend policies remain available for controlled comparisons:
 
 ```sh

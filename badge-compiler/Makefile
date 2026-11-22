@@ -174,6 +174,12 @@ test-constant-selection: all build/badge-codegen-sanitize build/constant_selecti
 
 test: test-constant-selection
 
+.PHONY: test-hot-layout
+test-hot-layout: build/badge-asm
+	LLVM_LLD="$(LLVM_LLD)" LLVM_NM="$(LLVM_NM)" QEMU_ARM="$(QEMU_ARM)" node --test tests/hot-layout.test.mjs
+
+test: test-hot-layout
+
 .PHONY: test-byte-transport
 test-byte-transport: all build/badge-codegen-sanitize build/constant_selection_test
 	node --test tests/byte-transport.test.mjs tests/byte-transport-evidence.test.mjs tests/byte-transport-hardware.test.mjs tests/red-square.test.mjs

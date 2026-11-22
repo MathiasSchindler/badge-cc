@@ -8,7 +8,7 @@ typedef struct cg_successor {
 } cg_successor;
 typedef struct {
   cg_block *block;
-  unsigned first, count;
+  unsigned first, count, loop_depth;
   uint64_t *use, *def, *in, *out, *edge;
   cg_successor *successors;
 } cg_live_block;
@@ -64,8 +64,76 @@ static unsigned block_index(cg_context *c, const char *token) {
   }
   cg_error(c, "register allocation branch target does not exist");
 }
+enum { LOOP_BLOCK_LIMIT = 256, LOOP_DEPTH_LIMIT = 2 };
+
+static void reachable(cg_context *c, unsigned skip, unsigned char *seen) {
+  if (skip == 0)
+    return;
+  unsigned queue[LOOP_BLOCK_LIMIT] = {0};
+  unsigned end = 1;
+  seen[0] = 1;
+  for (unsigned i = 0; i < end; i++)
+    for (cg_successor *s = c->global->block[queue[i]].successors; s; s = s->next) {
+      cg_register_work(c);
+      if (s->block != skip && !seen[s->block]) {
+        seen[s->block] = 1;
+        queue[end++] = s->block;
+      }
+    }
+}
+
+static void weight_loops(cg_context *c) {
+  struct cg_global *g = c->global;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT ||
+      c->scalar_stream_selection || !g->blocks || g->blocks > LOOP_BLOCK_LIMIT)
+    return;
+  cg_successor *incoming[LOOP_BLOCK_LIMIT] = {0};
+  unsigned char live[LOOP_BLOCK_LIMIT] = {0};
+  reachable(c, g->blocks, live);
+  for (unsigned b = 0; b < g->blocks; b++)
+    if (live[b])
+      for (cg_successor *s = g->block[b].successors; s; s = s->next) {
+        cg_register_work(c);
+        cg_successor *p = cg_alloc(c, sizeof(*p));
+        *p = (cg_successor){b, incoming[s->block]};
+        incoming[s->block] = p;
+      }
+  unsigned loops = 0;
+  for (unsigned h = 0; h < g->blocks; h++) {
+    if (!incoming[h])
+      continue;
+    unsigned char bypass[LOOP_BLOCK_LIMIT] = {0}, member[LOOP_BLOCK_LIMIT] = {0};
+    unsigned queue[LOOP_BLOCK_LIMIT] = {h}, end = 1;
+    reachable(c, h, bypass);
+    member[h] = 1;
+    int has_latch = 0;
+    for (unsigned i = 0; i < end; i++)
+      for (cg_successor *p = incoming[queue[i]]; p; p = p->next) {
+        cg_register_work(c);
+        /* A reachable predecessor that cannot bypass the header is dominated. */
+        if (bypass[p->block])
+          continue;
+        if (!i)
+          has_latch = 1;
+        if (!member[p->block]) {
+          member[p->block] = 1;
+          queue[end++] = p->block;
+        }
+      }
+    if (has_latch) {
+      loops++;
+      for (unsigned i = 0; i < end; i++)
+        if (g->block[queue[i]].loop_depth < LOOP_DEPTH_LIMIT)
+          g->block[queue[i]].loop_depth++;
+    }
+  }
+  if (loops)
+    cg_emit(c, "@ loop-allocation: weighted headers %u\n", loops);
+}
+
 static void uses(cg_context *c, unsigned start, unsigned end, uint64_t *set,
-                 cg_block *block, unsigned bonus) {
+                 const cg_live_block *block, unsigned bonus, unsigned depth) {
   for (unsigned k = start; k < end; k++) {
     cg_register_work(c);
     if (c->tokens[k].text[0] != '%')
@@ -75,7 +143,8 @@ static void uses(cg_context *c, unsigned start, unsigned end, uint64_t *set,
       continue;
     add(set, v->index);
     v->uses++;
-    v->score += 1 + bonus + (v->definition != block ? 4 : 0);
+    unsigned score = 1 + bonus + (v->definition != block->block ? 4 : 0);
+    v->score += score + depth;
   }
 }
 static void affinity(cg_context *c, cg_register_value *a, const char *name,
@@ -93,7 +162,7 @@ static void affinity(cg_context *c, cg_register_value *a, const char *name,
   edge->next = c->global->affinities;
   c->global->affinities = edge;
 }
-static void phi_uses(cg_context *c, cg_inst *i, cg_block *block) {
+static void phi_uses(cg_context *c, cg_inst *i, cg_live_block *block) {
   for (unsigned k = i->begin + 3; k < i->end; k++) {
     cg_register_work(c);
     if (strcmp(c->tokens[k].text, "["))
@@ -114,8 +183,9 @@ static void phi_uses(cg_context *c, cg_inst *i, cg_block *block) {
     if (depth)
       cg_error(c, "unterminated PHI in register allocation");
     if (comma && comma + 2 < k && c->tokens[comma + 1].text[0] == '%') {
-      unsigned predecessor = block_index(c, c->tokens[comma + 1].text);
-      uses(c, start, comma, c->global->block[predecessor].edge, block, 8);
+      cg_live_block *predecessor =
+          &c->global->block[block_index(c, c->tokens[comma + 1].text)];
+      uses(c, start, comma, predecessor->edge, block, 8, predecessor->loop_depth);
       if (comma == start + 1 && i->result)
         affinity(c, cg_register_lookup(c, i->result->name),
                  c->tokens[start].text, 8);
@@ -225,12 +295,30 @@ static void compact_frame(cg_context *c, cg_register_value **order) {
   struct cg_global *g = c->global;
   uint64_t *occupied = bits(c);
   unsigned colors = 0, original = c->fn->frame, narrow = 0;
-  unsigned omitted = 0;
+  unsigned omitted = 0, rematerialized = 0;
+  /* Addressable objects are laid out before private, shareable scalar homes. */
+  c->fn->frame = 0;
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next) {
+      cg_register_work(c);
+      cg_value *v = i->result;
+      if (v && v->object_align)
+        v->object = cg_slot(c, v->object_size, v->object_align);
+    }
   for (unsigned n = 0; n < g->count; n++) {
     cg_register_value *v = order[n];
     if (!cg_register_eligible(c, v->value))
       continue;
     narrow += v->reg && v->value->type->bits < 32;
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+        c->frame_addressing == BADGE_FRAME_DIRECT && !v->reg && v->uses &&
+        v->value->object_align && v->value->object <= 4095 &&
+        (!v->value->object || v->uses <= 2 || c->fn->frame >= 128)) {
+      v->value->rematerialize_frame_address = 1;
+      v->value->slot = UINT32_MAX;
+      rematerialized++;
+      continue;
+    }
     if (cg_home_selection(c) && !v->assembly_home && (v->reg || !v->uses)) {
       v->value->slot = UINT32_MAX;
       omitted++;
@@ -259,15 +347,6 @@ static void compact_frame(cg_context *c, cg_register_value **order) {
       colors++;
     v->home_color = color + 1;
   }
-  /* Only non-addressable scalar homes share storage, never real objects. */
-  c->fn->frame = 0;
-  for (cg_block *b = c->fn->blocks; b; b = b->next)
-    for (cg_inst *i = b->first; i; i = i->next) {
-      cg_register_work(c);
-      cg_value *v = i->result;
-      if (v && v->object_align)
-        v->object = cg_slot(c, v->object_size, v->object_align);
-    }
   for (unsigned n = 0; n < g->count; n++) {
     cg_register_work(c);
     cg_register_value *v = g->values[n];
@@ -289,6 +368,8 @@ static void compact_frame(cg_context *c, cg_register_value **order) {
           original, c->fn->frame, colors, narrow);
   if (cg_home_selection(c))
     cg_emit(c, "@ scalar-homes: omitted %u retained-slots %u\n", omitted, colors);
+  if (rematerialized)
+    cg_emit(c, "@ frame-rematerialization: addresses %u\n", rematerialized);
 }
 void cg_global_prepare(cg_context *c) {
   struct cg_global *g = cg_alloc(c, sizeof(*g));
@@ -394,16 +475,36 @@ void cg_global_prepare(cg_context *c) {
   for (bn = 0; bn < g->blocks; bn++) {
     cg_live_block *b = &g->block[bn];
     for (in = b->first; in < b->first + b->count; in++) {
+      cg_inst *i = g->instruction[in].instruction;
+      unsigned op = i->begin + (i->result ? 2 : 0);
+      if (strcmp(c->tokens[op].text, "br") &&
+          strcmp(c->tokens[op].text, "switch"))
+        continue;
+      for (unsigned k = op + 1; k + 1 < i->end; k++) {
+        cg_register_work(c);
+        if (strcmp(c->tokens[k].text, "label"))
+          continue;
+        cg_successor *edge = cg_alloc(c, sizeof(*edge));
+        edge->block = block_index(c, c->tokens[k + 1].text);
+        edge->next = b->successors;
+        b->successors = edge;
+      }
+    }
+  }
+  weight_loops(c);
+  for (bn = 0; bn < g->blocks; bn++) {
+    cg_live_block *b = &g->block[bn];
+    for (in = b->first; in < b->first + b->count; in++) {
       cg_live_instruction *li = &g->instruction[in];
       cg_inst *i = li->instruction;
       unsigned op = i->begin + (i->result ? 2 : 0);
       int phi = !strcmp(c->tokens[op].text, "phi");
       if (phi) {
-        phi_uses(c, i, b->block);
+        phi_uses(c, i, b);
         if (li->result)
           li->result->score += 16;
       } else
-        uses(c, op + 1, i->end, li->use, b->block, 0);
+        uses(c, op + 1, i->end, li->use, b, 0, b->loop_depth);
       if (li->result && (!strcmp(c->tokens[op].text, "freeze") ||
                          !strcmp(c->tokens[op].text, "ptrtoint") ||
                          !strcmp(c->tokens[op].text, "inttoptr")) &&
@@ -423,18 +524,6 @@ void cg_global_prepare(cg_context *c) {
       }
       if (li->result)
         add(b->def, li->result->index);
-      if (!strcmp(c->tokens[op].text, "br") ||
-          !strcmp(c->tokens[op].text, "switch")) {
-        for (unsigned k = op + 1; k + 1 < i->end; k++) {
-          cg_register_work(c);
-          if (strcmp(c->tokens[k].text, "label"))
-            continue;
-          cg_successor *edge = cg_alloc(c, sizeof(*edge));
-          edge->block = block_index(c, c->tokens[k + 1].text);
-          edge->next = b->successors;
-          b->successors = edge;
-        }
-      }
     }
   }
   uint64_t *out = bits(c), *live = bits(c);

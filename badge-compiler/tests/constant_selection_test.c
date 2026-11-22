@@ -92,6 +92,16 @@ int main(int argc, char **argv) {
   expect("subs.w r5, r5, #1\nbne .Lcg_1_head\n", "subs.n r5, r5, #1", NULL);
   expect("add.w r8, r1, r5, lsl #2\nmovw r0, #33\nstr.w r0, [r8]\n"
          "movw r8, #7\n", "str.w r0, [r1, r5, lsl #2]", "add.w r8");
+  expect("add.w r2, r1, r5\nldrb.n r2, [r2]\n",
+         "ldrb.n r2, [r1, r5]", "add.w r2");
+  expect("addw r2, r1, #62\nstrh.n r0, [r2]\nmovw r2, #7\n",
+         "strh.n r0, [r1, #62]", "addw");
+  expect("addw r2, r1, #64\nldrh.n r2, [r2]\n",
+         "ldrh.w r2, [r1, #64]", "addw");
+  expect("addw r2, r1, #4096\nldrb.n r2, [r2]\n",
+         "addw r2", "memory-address-fold");
+  expect("addw r2, r1, #4\nstrb.n r2, [r2]\nmovw r2, #7\n",
+         "addw r2", "memory-address-fold");
   expect("add.w r8, r1, r5, lsl #3\nmovw r0, #5\nstr.w r0, [r8]\n"
          "mov r0, r8\n", "add.w r8", "memory-address-fold");
   expect("add.w r8, r1, r5, lsl #2\nmovw r1, #33\nstr.w r0, [r8]\n"
@@ -137,6 +147,17 @@ int main(int argc, char **argv) {
          "sub.w r2, r1, #65536", NULL);
   expect("movw r1, #32772\nmovt r1, #16386\nmovw r2, #32772\nmovt r2, #16387\n",
          "add.w r2, r1, #65536", NULL);
+  expect("movw r4, #:lower16:(global+0)\nmovt r4, #:upper16:(global+0)\n"
+         ".Lcg_1_next:\nmovw r5, #:lower16:(global+0)\nmovt r5, #:upper16:(global+0)\n",
+         "mov r5, r4", "movt r5");
+  expect("movw r4, #:lower16:(global+0)\nmovt r4, #:upper16:(global+0)\n"
+         "b .Lcg_1_next\n.Lcg_1_next:\n"
+         "movw r5, #:lower16:(global+0)\nmovt r5, #:upper16:(global+0)\n",
+         "mov r5, r4", "movt r5");
+  expect("bne .Lcg_1_next\n"
+         "movw r4, #:lower16:(global+0)\nmovt r4, #:upper16:(global+0)\n"
+         ".Lcg_1_next:\nmovw r5, #:lower16:(global+0)\nmovt r5, #:upper16:(global+0)\n",
+         "movt r5", "mov r5, r4");
   expect("movw r0, #32\nmovt r0, #53248\nmov r5, r0\n"
          "@ assembly-effects: known 0\n@ constant-assembly-lines: 2\n"
          "movw r5, #0\nmovt r5, #3072\nmovw r0, #36\nmovt r0, #53248\n",

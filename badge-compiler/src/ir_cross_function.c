@@ -1,6 +1,7 @@
 #include "assembly_cost.h"
 #include "codegen.h"
 #include "ir_analysis.h"
+#include "ir_integer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -710,7 +711,45 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
   reset(p);
   return accepted;
 }
-void ir_cross_function(ir_context *c, ir_module *m) {
+static uint64_t *entry_counts(cross *p) {
+  ir_map profiles = {0};
+  ir_map_init(p->c, &profiles, p->m->line_count);
+  for (unsigned l = 0; l < p->m->line_count; l++) {
+    spend(p, 1);
+    const ir_line *line = &p->m->lines[l];
+    unsigned k = line->first;
+    if (line->count != 10 || *ir_text(p->m, k) != '!' ||
+        strcmp(ir_text(p->m, k + 1), "=") ||
+        strcmp(ir_text(p->m, k + 2), "!") ||
+        strcmp(ir_text(p->m, k + 3), "{") ||
+        strcmp(ir_text(p->m, k + 4), "!") ||
+        strcmp(ir_text(p->m, k + 5), "\"function_entry_count\"") ||
+        strcmp(ir_text(p->m, k + 6), ",") ||
+        strcmp(ir_text(p->m, k + 7), "i64") ||
+        strcmp(ir_text(p->m, k + 9), "}"))
+      continue;
+    const char *count = ir_text(p->m, k + 8);
+    uint64_t number;
+    if (*count != '-' && ir_integer(count, &number))
+      ir_map_put(p->c, &profiles, ir_text(p->m, k), count);
+  }
+  uint64_t *counts = ir_allocate(p->c, p->a.function_count * sizeof(*counts));
+  for (unsigned f = 0; f < p->a.function_count; f++) {
+    const ir_line *line = &p->m->lines[p->a.functions[f].line - 1];
+    for (unsigned k = line->first; k + 1 < line->first + line->count; k++) {
+      spend(p, 1);
+      if (strcmp(ir_text(p->m, k), "!prof"))
+        continue;
+      const char *count = ir_map_get(&profiles, ir_text(p->m, k + 1));
+      if (count)
+        ir_integer(count, &counts[f]);
+      break;
+    }
+  }
+  return counts;
+}
+
+static void run_cross_function(ir_context *c, ir_module *m, int hot_inline) {
   cross p = {.c = c, .m = m, .work = IR_CROSS_FUNCTION_WORK_LIMIT};
   analyze(&p);
   for (unsigned k = 0; k < m->count; k++)
@@ -725,7 +764,9 @@ void ir_cross_function(ir_context *c, ir_module *m) {
     ir_note(c, "skipped", "untracked_assembly_symbol_references", 1);
     return;
   }
-  if (strstr(m->source, "; badge-cross-function: bounded selection complete")) {
+  const char *marker = hot_inline ? "; badge-hot-inline: bounded selection complete" :
+      "; badge-cross-function: bounded selection complete";
+  if (strstr(m->source, marker)) {
     ir_note(c, "skipped", "already_costed_module", 1);
     return;
   }
@@ -737,13 +778,24 @@ void ir_cross_function(ir_context *c, ir_module *m) {
     ir_map original_names = m->names;
     analyze(&p);
     unsigned *calls = ir_allocate(c, p.a.instruction_count * sizeof(*calls));
+    unsigned *other_calls = hot_inline ?
+        ir_allocate(c, p.a.instruction_count * sizeof(*other_calls)) : calls;
+    uint64_t *entries = hot_inline ? entry_counts(&p) : NULL;
     unsigned chosen = IR_NONE, count = 0;
+    uint64_t hottest = 0;
     for (unsigned f = 0; f < p.a.function_count; f++) {
       if (ir_map_get(&attempted, p.a.functions[f].name))
         continue;
-      if (eligible(&p, f, calls, &count)) {
+      if (entries && entries[f] <= hottest)
+        continue;
+      unsigned n;
+      if (eligible(&p, f, other_calls, &n)) {
         chosen = f;
-        break;
+        count = n;
+        if (!entries)
+          break;
+        hottest = entries[f];
+        memcpy(calls, other_calls, count * sizeof(*calls));
       }
     }
     if (chosen == IR_NONE) {
@@ -763,15 +815,16 @@ void ir_cross_function(ir_context *c, ir_module *m) {
     char *best = NULL;
     uint32_t best_bytes = before.bytes;
     const char *kind = "retained_shared_helper", *clone = NULL;
-    if (share_helper(&p, chosen, calls, count, &before, &best, &best_bytes))
+    if (!hot_inline && share_helper(&p, chosen, calls, count, &before, &best, &best_bytes))
       kind = "identical_helpers_shared";
-    if (specialize(&p, chosen, calls, count, &before, &best, &best_bytes,
+    if (!hot_inline && specialize(&p, chosen, calls, count, &before, &best, &best_bytes,
                    &clone))
       kind = "constant_specialization";
     int forwarding = 0;
     if (inline_calls(&p, chosen, calls, count, &before, &best, &best_bytes,
                      &forwarding)) {
-      kind = forwarding ? "tail_forwarder_inlined" : "straight_line_inlined";
+      kind = hot_inline ? "profiled_helper_inlined" :
+          forwarding ? "tail_forwarder_inlined" : "straight_line_inlined";
       clone = NULL;
     }
     if (best) {
@@ -798,8 +851,11 @@ void ir_cross_function(ir_context *c, ir_module *m) {
   if (attempts == CROSS_ATTEMPTS)
     ir_note(c, "skipped", "module_attempt_budget", 1);
   if (changes) {
-    m->suffix = "; badge-cross-function: bounded selection complete\n";
+    m->suffix = ir_format(c, "%s\n", marker);
     ir_reparse(c, m, c->allocations);
   }
   c->size = 0;
 }
+
+void ir_cross_function(ir_context *c, ir_module *m) { run_cross_function(c, m, 0); }
+void ir_hot_inline(ir_context *c, ir_module *m) { run_cross_function(c, m, 1); }

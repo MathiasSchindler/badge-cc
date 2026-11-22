@@ -22,6 +22,7 @@ typedef struct cg_value {
   unsigned slot, object;
   unsigned object_size, object_align;
   unsigned memory_align, memory_size;
+  int rematerialize_frame_address;
   struct cg_value *next;
 } cg_value;
 typedef struct cg_inst {
@@ -31,6 +32,7 @@ typedef struct cg_inst {
   struct cg_assembly *assembly;
   int assembly_checked;
   unsigned scalar_call_arguments_plus_one;
+  unsigned forwarded_store_register_plus_one;
 } cg_inst;
 typedef struct cg_assembly {
   char *text;
@@ -155,6 +157,7 @@ static inline int cg_operand_selection(const cg_context *c) {
          cg_width_selection(c);
 }
 void cg_reuse_constants(cg_context *c, size_t body_start);
+void cg_pool_symbol_addresses(cg_context *c, size_t start);
 void cg_reduce_branches(cg_context *c, size_t body_start);
 void cg_forward_byte_arguments(cg_context *c, size_t body_start);
 void cg_fold_zero_branches(cg_context *c, size_t body_start);
@@ -289,6 +292,7 @@ int cg_selection_barrier(cg_context *c, cg_inst *i);
 int cg_selection_instruction(cg_context *c, cg_inst *i);
 cg_inst *cg_selection_branch_compare(cg_context *c, cg_inst *i);
 int cg_selection_compare_operands(cg_context *c, cg_inst *i, cg_type *type);
+void cg_add_offset(cg_context *c, unsigned dst, unsigned base, uint32_t offset);
 const char *cg_comparison_condition(const char *predicate);
 int cg_selection_offset(cg_context *c, uint32_t offset);
 int cg_selection_index(cg_context *c, cg_type *type, unsigned stride);

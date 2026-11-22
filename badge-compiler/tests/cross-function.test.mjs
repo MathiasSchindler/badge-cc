@@ -34,7 +34,9 @@ function production(file, sources, main) {
     `#include "${path.resolve(root, '..', source)}"`).join('\n') + '\n' + main);
   run(tool('badge-cpp'), ['-I../src/shared', file('source.c'), '-o', file('source.i')]);
   run(tool('badge-ir'), ['--expression-lowering=ssa', file('source.i'), '-o', file('raw.ll')]);
-  run(tool('badge-opt'), [file('raw.ll'), '-o', file('input.ll')]);
+  const passes = run(tool('badge-opt'), ['--default-passes']).stdout.trim().split(',');
+  run(tool('badge-opt'), [`--passes=${passes.filter(pass => pass !== 'cross-function').join(',')}`,
+    file('raw.ll'), '-o', file('input.ll')]);
   run(tool('badge-opt-sanitize'), ['--passes=cross-function', file('input.ll'), '-o', file('candidate.ll')]);
   run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
 }
@@ -99,6 +101,50 @@ entry:
 yes:\nret i32 0\nno:\nret i32 1\n}`);
   assert(!result.includes('define internal i32 @emit'));
   execute(file, 'control'); execute(file, 'candidate');
+});
+test('profiled inlining only spends its budget on reached annotated helpers', t => {
+  const file = files(t);
+  fs.writeFileSync(file('input.ll'), target + `@sink = global i32 0
+define internal i32 @cold(i32 %x) !prof !1 {
+entry:
+ %y = xor i32 %x, 1
+ ret i32 %y
+}
+define internal i32 @hot(i32 %x) !prof !0 {
+entry:
+ store volatile i32 %x, ptr @sink
+ %y = add i32 %x, 1
+ ret i32 %y
+}
+define i32 @cold_path(i32 %x) {
+entry:
+ %r = call i32 @cold(i32 %x)
+ ret i32 %r
+}
+define i32 @main() {
+entry:
+ br label %loop
+loop:
+ %i = phi i32 [0, %entry], [%next, %loop]
+ %next = call i32 @hot(i32 %i)
+ %again = icmp ult i32 %next, 128
+ br i1 %again, label %loop, label %exit
+exit:
+ %r = load volatile i32, ptr @sink
+ %status = xor i32 %r, 127
+ ret i32 %status
+}
+!0 = !{!"function_entry_count", i64 128}
+!1 = !{!"function_entry_count", i64 0}
+`);
+  run(tool('badge-opt-sanitize'), ['--passes=hot-inline', file('input.ll'), '-o', file('candidate.ll')]);
+  const ir = fs.readFileSync(file('candidate.ll'), 'utf8');
+  assert.match(ir, /profiled_helper_inlined hot/);
+  assert.match(ir, /call i32 @cold/);
+  run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
+  const a = execute(file, 'control', true), b = execute(file, 'candidate', true);
+  assert(b.bytes < a.bytes && b.count < a.count);
+  console.log(`Profiled inlining: ${a.bytes} -> ${b.bytes} bytes; ${a.count} -> ${b.count} reached instructions`);
 });
 test('identical non-address-taken helpers share one body without changing call multiplicity', t => {
   const file = files(t);

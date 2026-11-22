@@ -347,7 +347,9 @@ static void cg_constant(cg_context *c, cg_type *t, unsigned r, unsigned word) {
     cg_value *v = cg_find(c, s);
     if (word * 4 >= cg_round(v->type->size, 4))
       cg_error(c, "SSA word outside value");
-    if (!cg_register_read(c, v, r, word)) {
+    if (v->rematerialize_frame_address)
+      cg_address(c, r, v->object);
+    else if (!cg_register_read(c, v, r, word)) {
       if (v->slot == UINT32_MAX)
         cg_error(c, "read requires an omitted scalar home");
       cg_stack(c, 0, r, v->slot + word * 4);
@@ -1101,6 +1103,81 @@ static void cg_memory_offset(cg_value *proof, uint64_t offset) {
   while (proof->memory_align && (offset & (proof->memory_align - 1)))
     proof->memory_align /= 2;
 }
+static void cg_forward_store(cg_context *c, cg_inst *store, cg_type *type,
+                             unsigned pointer, unsigned align, unsigned reg) {
+  cg_inst *load = store->next;
+  const char *address = c->tokens[pointer].text;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      !cg_global_residency(c) || !load || !load->result ||
+      (type->bits != 8 && type->bits != 16 && type->bits != 32) ||
+      (*address != '%' && *address != '@') ||
+      (store->end - pointer != 1 &&
+       (store->end - pointer != 4 ||
+        strcmp(c->tokens[pointer + 2].text, "align"))))
+    return;
+  unsigned n = load->end - load->begin;
+  cg_token *tokens = &c->tokens[load->begin];
+  const char *name = type->bits == 8 ? "i8" : type->bits == 16 ? "i16" : "i32";
+  if (strcmp(c->tokens[store->begin + 1].text, name) ||
+      (n != 7 && n != 10) || strcmp(tokens[2].text, "load") ||
+      strcmp(tokens[3].text, name) || strcmp(tokens[4].text, ",") ||
+      strcmp(tokens[5].text, "ptr") || strcmp(tokens[6].text, address))
+    return;
+  if (n == 10 && (strcmp(tokens[7].text, ",") ||
+                  strcmp(tokens[8].text, "align") ||
+                  cg_number(c, tokens[9].text) > align))
+    return;
+  load->forwarded_store_register_plus_one = reg + 1;
+}
+static int cg_direct_gep(cg_context *c, cg_inst *i, unsigned stride,
+                         cg_value *proof) {
+  unsigned at = c->pos;
+  const char *pointer = c->tokens[at].text;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      i->end - at != 4 || (*pointer != '%' && *pointer != '@') ||
+      strcmp(c->tokens[at + 1].text, ",") ||
+      strcmp(c->tokens[at + 2].text, "i32"))
+    return 0;
+  unsigned base = cg_global_register(c, pointer);
+  unsigned dst = cg_global_register(c, i->result->name);
+  if (!base && !dst)
+    return 0;
+  const char *index = c->tokens[at + 3].text;
+  unsigned index_reg = 0, index_scratch = 0;
+  uint32_t offset = 0;
+  if (isdigit((unsigned char)*index)) {
+    uint32_t n = (uint32_t)cg_number(c, index);
+    offset = n * stride;
+    if (n <= INT32_MAX)
+      cg_memory_offset(proof, (uint64_t)n * stride);
+    else
+      proof->memory_align = proof->memory_size = 0;
+  } else if (*index == '%' && stride && !(stride & (stride - 1))) {
+    index_reg = cg_global_register(c, index);
+    if (!index_reg)
+      index_reg = index_scratch = base == 1 ? 2 : 1;
+    proof->memory_align = proof->memory_size = 0;
+  } else
+    return 0;
+  if (!base)
+    cg_value_read(c, NULL, 0, 0);
+  if (index_reg) {
+    if (index_scratch) {
+      c->pos = at + 3;
+      cg_value_read(c, NULL, index_scratch, 0);
+    }
+    if (stride > 1)
+      cg_emit(c, "add.w r%u, r%u, r%u, lsl #%u\n", dst, base, index_reg,
+              (unsigned)__builtin_ctz(stride));
+    else if (!cg_compact_binary(c, "add", dst, base, index_reg))
+      cg_emit(c, "add.w r%u, r%u, r%u\n", dst, base, index_reg);
+  } else
+    cg_add_offset(c, dst, base, offset);
+  i->result->memory_align = proof->memory_align;
+  i->result->memory_size = proof->memory_size;
+  cg_save_normalized(c, i->result, dst);
+  return 1;
+}
 static int cg_memory_pointer(cg_context *c, cg_arg *arg, unsigned length) {
   const char *s = c->tokens[arg->start].text;
   if (*s != '%')
@@ -1341,7 +1418,9 @@ static void cg_call(cg_context *c, cg_inst *i) {
   else if (*callee == '%') {
     c->pos = after;
     cg_value *v = cg_find(c, callee);
-    if (!cg_register_read(c, v, 12, 0)) {
+    if (v->rematerialize_frame_address)
+      cg_address(c, 12, v->object);
+    else if (!cg_register_read(c, v, 12, 0)) {
       if (v->slot == UINT32_MAX)
         cg_error(c, "callee requires an omitted scalar home");
       cg_stack(c, 0, 12, v->slot);
@@ -1489,6 +1568,11 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
   cg_register_instruction(c, i, cg_selection_barrier(c, i) ? "call" : op);
   if (cg_selection_instruction(c, i))
     return;
+  if (i->forwarded_store_register_plus_one) {
+    cg_save_normalized(c, i->result, i->forwarded_store_register_plus_one - 1);
+    cg_emit(c, "@ store-load-forward: adjacent exact address\n");
+    return;
+  }
   if (!strcmp(op, "phi"))
     return;
   if (!strcmp(op, "call")) {
@@ -1496,6 +1580,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     return;
   }
   if (!strcmp(op, "alloca")) {
+    if (i->result->rematerialize_frame_address)
+      return;
     cg_address(c, 0, i->result->object);
     cg_save(c, i->result, 0, 0);
     return;
@@ -1665,7 +1751,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
         if (!t->bits || t->bits == 8 || t->bits == 16 || t->bits == 32)
           cg_save_normalized(c, i->result, reg);
         else cg_save(c, i->result, reg, 0);
-      }
+      } else if (!is_volatile)
+        cg_forward_store(c, i, t, pointer, align, reg);
       return;
     }
     if (direct_base) cg_move(c, 4, direct_base);
@@ -1693,35 +1780,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       proof.memory_align = base->memory_align;
       proof.memory_size = base->memory_size;
     }
-    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
-        t->size == 1 && c->pos + 4 == i->end &&
-        !strcmp(c->tokens[c->pos + 1].text, ",") &&
-        !strcmp(c->tokens[c->pos + 2].text, "i32")) {
-      unsigned base = cg_global_register(c, c->tokens[c->pos].text);
-      unsigned dst = cg_global_register(c, i->result->name);
-      const char *index_text = c->tokens[c->pos + 3].text;
-      unsigned index_reg = cg_global_register(c, index_text);
-      if (base && dst && (index_reg || isdigit((unsigned char)*index_text))) {
-        if (index_reg) {
-          cg_emit(c, "add.w r%u, r%u, r%u\n", dst, base, index_reg);
-          proof.memory_align = proof.memory_size = 0;
-        } else {
-          uint32_t offset = (uint32_t)cg_number(c, index_text);
-          cg_memory_offset(&proof, offset);
-          if (offset <= 4095)
-            cg_emit(c, "%s r%u, r%u, #%u\n",
-                    offset <= 255 ? "add.w" : "addw", dst, base, offset);
-          else {
-            cg_immediate(c, 0, offset);
-            cg_emit(c, "add.w r%u, r%u, r0\n", dst, base);
-          }
-        }
-        i->result->memory_align = proof.memory_align;
-        i->result->memory_size = proof.memory_size;
-        cg_save_normalized(c, i->result, dst);
-        return;
-      }
-    }
+    if (cg_direct_gep(c, i, t->size, &proof))
+      return;
     cg_value_read(c, NULL, 0, 0);
     unsigned index = 0;
     while (cg_accept(c, ",")) {

@@ -247,8 +247,10 @@ static void finish_function(cg_context *c, size_t header, size_t body_start) {
     cg_emit(c, c->register_saved_bytes == 32 ? "pop.w {r4-r8, r10, r11, pc}\n"
                                           : "pop.w {r4-r8, pc}\n");
   }
-  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS)
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS) {
     summarize_registers(c, f, header);
+    cg_pool_symbol_addresses(c, header);
+  }
   cg_emit(c, ".size %s, .-%s\n", f->name, f->name);
   c->fn = NULL;
 }

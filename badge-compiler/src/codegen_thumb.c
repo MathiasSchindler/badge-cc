@@ -51,6 +51,17 @@ void cg_immediate(cg_context *c, unsigned r, uint32_t n) {
     cg_machine(c, CG_M_MOVT, r, 0, 0, 0, n >> 16);
 }
 void cg_address(cg_context *c, unsigned r, unsigned offset) {
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      c->frame_addressing == BADGE_FRAME_DIRECT && offset <= 4095) {
+    if (!offset)
+      cg_move(c, r, c->frame_sp_relative ? 13 : 7);
+    else if (c->frame_sp_relative && r < 8 && offset <= 1020 && offset % 4 == 0)
+      cg_emit(c, "add.n r%u, sp, #%u\n", r, offset);
+    else
+      cg_emit(c, "addw r%u, %s, #%u\n", r,
+              c->frame_sp_relative ? "sp" : "r7", offset);
+    return;
+  }
   cg_immediate(c, r, offset);
   cg_emit(c, "add.w r%u, %s, r%u\n", r, c->frame_sp_relative ? "sp" : "r7", r);
 }
