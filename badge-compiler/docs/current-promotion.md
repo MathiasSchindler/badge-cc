@@ -1,4 +1,70 @@
-# PO18: cached qualification and default promotion
+# Owned compiler default promotions
+
+## November default update
+
+The owned compiler now defaults to `ssa` and
+`direct/global-compact/thumb-constants/word`. The IR pipeline adds
+`global-memory`, `sret-forward`, `compact-inline`, `low-bits`, `linear-bias`,
+`small-aggregate`, `dead-instructions`, and `divrem-pairs`, in that order,
+after the prior eight passes. This fills the 16-pass limit; use
+`badge-opt --default-passes` to query the full list. The top-level firmware
+build still defaults to Clang. `loop-bounds`, `loop-cost`, profile-guided
+`hot-inline`, SRAM placement, and GPIOC are not enabled by this update.
+
+The combined profile shrank **all 33 verified firmware images**
+(27 applications and six microbenchmarks), saving **282,608 loaded flash bytes**
+in aggregate. The IR-only profile grew `micro-calls` by 8 bytes, so it was not
+promoted on its own. The implicit and explicit combined profiles produced
+29 byte-identical images; the only differing bytes in the other four encoded
+regenerated build IDs.
+
+| Firmware | Previous default (bytes) | New default (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 23,804 | 16,104 |
+| IMU Demo | 18,692 | 12,240 |
+| Diagnostics | 41,560 | 30,056 |
+
+Every measured QEMU workload reached fewer instructions with matching
+functional results. The four-level Maze physics probe dropped from
+41.72 million to 21.20 million instructions, and live full-screen IMU
+pixel generation dropped from 157.66 million to 78.91 million. These are
+instruction counts, not physical elapsed times. Across 1,532 matched
+functions, the largest local frame plus register-save area fell from
+2,816 to 2,768 bytes; 56 functions grew individually, by at most 16 bytes.
+Local frames do not establish worst-case call-chain stack use.
+
+One RP2350 badge ran each of the application and general suites in
+old/new/new/old boot order. All **18 workloads** were faster: the slowest
+candidate sample was faster than the fastest control sample in every
+workload. Results and clock settings matched within each suite. The table
+shows the full observed warm-timer sample ranges across both boots of each
+profile, not just the medians.
+
+| Workload | Previous default (ticks) | New default (ticks) | Median time reduction |
+| --- | ---: | ---: | ---: |
+| Maze generation | 41,907-41,956 | 27,307-27,326 | 34.8% |
+| Maze physics and scripted input | 61,735-61,806 | 25,448-25,484 | 58.8% |
+| Maze RAM rendering | 101,536-101,566 | 64,226-64,244 | 36.8% |
+| Maze display transfer | 134,245-134,270 | 112,633-112,665 | 16.1% |
+| Reached Maze frame | 195,262-195,362 | 152,258-152,297 | 22.0% |
+| Production Diagnostics graphics | 142,589-142,636 | 96,628-96,643 | 32.2% |
+
+The twelve general workloads took 12.6-52.1% less time by median. These
+results are against the previous owned default, not LLVM or the older
+two-badge role-swapped gate. The campaign did not test radio, GPIOC, or
+cold-XIP timing. The badge's original 16 MiB flash was restored, verified
+against an independent full readback, and left in BOOTSEL.
+
+To reproduce the previous owned defaults, build in a fresh output directory
+with:
+
+```sh
+BADGE_OPT_PASSES=mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function \
+BADGE_CODEGEN_SCALAR_SELECTION=thumb-widths \
+  bash badge-compiler/scripts/build-owned.sh
+```
+
+## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.
 The root firmware Makefile still defaults to LLVM; this changes the owned
@@ -28,7 +94,7 @@ Backend/work-budget failures are errors, not silent profitability fallbacks.
 
 ## Physical evidence
 
-The [capture runner](../tools/current-promotion.mjs) declares the current
+The [capture runner](../tools/current-promotion.mjs) declares the PO18
 control and full candidate before capture. It runs two suites, two runtime
 seeds, two repetitions and both physical role assignments per campaign:
 **16 campaigns, 32 rounds and 64 raw reports**. No historical profile matrix

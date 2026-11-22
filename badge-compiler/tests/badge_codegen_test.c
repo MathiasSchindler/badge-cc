@@ -388,10 +388,10 @@ static void residency_tests(void) {
                                  "= xor i32 %b, 7\nret i32 %c");
   char *out = NULL;
   size_t size;
-  assert(badge_codegen_compile_with_options(
+  assert(badge_codegen_compile_with_selections(
       chain, sizeof(chain) - 1, "residency.ll",
-      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_LOCAL}, &out,
-      &size));
+      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_LOCAL},
+      BADGE_SELECTION_THUMB_WIDTHS, BADGE_MEMORY_WORD, &out, &size));
   assert(strstr(out, "mov r2, r0\n") && !strstr(out, "mov r8, r0\n"));
   assert(strstr(out, "avoided-loads 3 avoided-stores 2"));
   assert(strstr(out, "base sp calls 0") &&
@@ -402,10 +402,10 @@ static void residency_tests(void) {
       TARGET "define i32 @f(i32 %x) {\nentry:\n%a = add i32 %x, 1\n"
              "%b = mul i32 %a, %a\nbr label %exit\nexit:\n"
              "%c = add i32 %a, %b\nret i32 %c\n}\n";
-  assert(badge_codegen_compile_with_options(
+  assert(badge_codegen_compile_with_selections(
       live_out, sizeof(live_out) - 1, "live-out.ll",
-      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_LOCAL}, &out,
-      &size));
+      (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_LOCAL},
+      BADGE_SELECTION_THUMB_WIDTHS, BADGE_MEMORY_WORD, &out, &size));
   assert(strstr(out, "str.n r0, [sp, #4]\nmov r2, r0\nmul") &&
          strstr(out, ".Lcg_1_exit:\nldr.n r0, [sp, #4]"));
   free(out);
@@ -584,7 +584,8 @@ static void promoted_api_tests(void) {
   size_t expected_size = 0;
   assert(badge_codegen_compile_with_selections(
       source, sizeof(source) - 1, "default.ll", options,
-      BADGE_SELECTION_THUMB_WIDTHS, BADGE_MEMORY_WORD, &expected, &expected_size));
+      BADGE_SELECTION_THUMB_CONSTANTS, BADGE_MEMORY_WORD, &expected,
+      &expected_size));
   for (unsigned mode = 0; mode < 4; mode++) {
     char *actual = NULL;
     size_t size = 0;
@@ -602,7 +603,7 @@ static void promoted_api_tests(void) {
     else
       ok = badge_codegen_compile_with_scalar_selection(
           source, sizeof(source) - 1, "default.ll", options,
-          BADGE_SELECTION_THUMB_WIDTHS, &actual, &size);
+          BADGE_SELECTION_THUMB_CONSTANTS, &actual, &size);
     assert(ok && size == expected_size && !memcmp(actual, expected, size + 1));
     free(actual);
   }

@@ -6,7 +6,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const passes = 'mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function';
+const passes = 'mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function,' +
+  'global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions,divrem-pairs';
 function run(name, args) {
   const result = spawnSync(path.join(root, 'build', name), args,
     { cwd: root, encoding: 'utf8', timeout: 30000 });
@@ -17,7 +18,7 @@ function run(name, args) {
 test('default queries and emitted objects equal the explicitly qualified profile', () => {
   assert.equal(run('badge-ir', ['--default-expression-lowering']), 'ssa');
   assert.equal(run('badge-opt', ['--default-passes']), passes);
-  assert.equal(run('badge-codegen', ['--default-scalar-selection']), 'thumb-widths');
+  assert.equal(run('badge-codegen', ['--default-scalar-selection']), 'thumb-constants');
   const directory = fs.mkdtempSync(path.join(root, 'build/default-promotion-'));
   try {
     const file = name => path.join(directory, name);
@@ -37,7 +38,7 @@ int exercise(int *p, int a, int b) {
       run('badge-opt', [...(explicit ? [`--passes=${passes}`] : []),
         file(`${name}.ll`), '-o', file(`${name}.opt.ll`)]);
       run('badge-codegen', [...(explicit ? ['--frame-addressing=direct',
-        '--register-residency=global-compact', '--scalar-selection=thumb-widths',
+        '--register-residency=global-compact', '--scalar-selection=thumb-constants',
         '--memory-selection=word'] : []), file(`${name}.opt.ll`), '-o', file(`${name}.s`)]);
       run('badge-asm', [file(`${name}.s`), '-o', file(`${name}.o`)]);
     }

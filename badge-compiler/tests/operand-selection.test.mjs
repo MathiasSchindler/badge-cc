@@ -271,7 +271,7 @@ test('mixed LLVM/owned calls preserve narrow normalization, composites, recursio
 });
 test('bounded analysis and invalid policies preserve output; qualified selector is default', t => {
   const file = files(t);
-  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-widths');
+  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-constants');
   fs.writeFileSync(file('input.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"\ndefine i32 @f(i32 %x) {\nentry:\n` +
     Array.from({ length: 300 }, (_, n) => `%v${n} = add i32 %x, ${n}\n`).join('') + 'ret i32 %x\n}');
   fs.writeFileSync(file('preserved.s'), 'preserved');

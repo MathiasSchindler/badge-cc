@@ -124,6 +124,8 @@ const unsigned badge_ir_pass_count =
 
 const char *const badge_ir_default_pipeline[] = {
     "mem2reg", "scalar-cleanup", "constant-fold", "aggregate-memory",
-    "wide-division", "local-memory", "loop-scalar", "cross-function"};
+    "wide-division", "local-memory", "loop-scalar", "cross-function",
+    "global-memory", "sret-forward", "compact-inline", "low-bits",
+    "linear-bias", "small-aggregate", "dead-instructions", "divrem-pairs"};
 const unsigned badge_ir_default_pass_count =
     sizeof(badge_ir_default_pipeline) / sizeof(*badge_ir_default_pipeline);

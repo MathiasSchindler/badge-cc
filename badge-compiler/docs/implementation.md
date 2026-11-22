@@ -96,10 +96,12 @@ supported-subset verifier now runs at every IR pass boundary.
 
 ## Correctness first, quality over time
 
-**Current policy:** C05 defaults to `ssa`, C06 includes bounded `local-memory`,
-`loop-scalar` and `cross-function`, and C07 defaults to
-direct/global-compact/thumb-widths/word; see
-[PO18's cached promotion and timing qualification](current-promotion.md).
+**Current policy:** C05 defaults to `ssa`; C06 uses the sixteen-pass
+profile reported by `badge-opt --default-passes`; and C07 defaults to
+direct/global-compact/thumb-constants/word. See the
+[November default update](current-promotion.md#november-default-update).
+The following milestone discussions describe the defaults at the time of
+their measurements, not the current policy.
 The subsequent [maze-driven Z01 qualification](maze-optimization.md#z01-results)
 promotes allocated-register operand selection, and
 [Z02](maze-optimization.md#z02-candidate-contract) promotes scratch-aware
@@ -186,15 +188,17 @@ PO09 promoted the independently qualified PO06+PO07 profile, using `ssa`
 expression lowering, bounded `local-memory` reuse and `thumb-calls` selection,
 including its PO03/PO04 predecessors. See the
 [authorized promotion and byte-identical replay](pipeline-promotion.md#authorized-default-promotion).
-PO18 subsequently promotes the combined PO11-PO17 chain to `thumb-widths`
-with `loop-scalar,cross-function`; see [current defaults and timing contracts](current-promotion.md).
+PO18 subsequently promoted the combined PO11-PO17 chain to `thumb-widths`
+with `loop-scalar,cross-function`; see the
+[historical timing contracts](current-promotion.md#po18-historical-cached-qualification-and-default-promotion).
 Z02/Z03 promote `global-compact` residency through scratch-aware allocation
 and private home reuse; see the [follow-up plan and results](maze-optimization.md).
 CLI default queries, help and convenience API entry points
 use the same definitions. Partially explicit APIs inherit these defaults only
 for unspecified policies; the fully explicit selections API and driver
 environment variables still support materialized/stack/legacy/byte controls.
-C06 uses `mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function`.
+The [November update](current-promotion.md#november-default-update) added
+eight more C06 passes to that profile and selected `thumb-constants` for C07.
 P02 local residency and P06 loop-invariant
 motion remain explicit-only because their earlier results were mixed.
 

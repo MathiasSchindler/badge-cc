@@ -181,7 +181,7 @@ no:
 
 test('selection and budget failures preserve existing output; promoted selector is default', t => {
   const file = files(t);
-  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-widths');
+  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-constants');
   const source = predicates.map(predicate => predicateFunction(predicate)).join('');
   fs.writeFileSync(file('input.ll'), triple + source);
   fs.writeFileSync(file('preserved.s'), 'preserved');

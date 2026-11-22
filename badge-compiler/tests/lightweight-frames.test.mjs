@@ -253,7 +253,7 @@ no:
 });
 test('bounded analysis fails explicitly and preserves output; qualified selector is default', t => {
   const file = files(t);
-  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-widths');
+  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-constants');
   fs.writeFileSync(file('input.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"\ndefine i32 @f(i32 %x) {
 entry:\n${Array.from({ length: 300 }, (_, i) => `%v${i} = add i32 %x, ${i}`).join('\n')}\nret i32 %x\n}`);
   fs.writeFileSync(file('preserved.s'), 'preserved');

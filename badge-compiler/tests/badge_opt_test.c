@@ -29,7 +29,10 @@ static void policy_observe(void *context, unsigned step, const char *pass,
 static void default_policy(void) {
   const char *expected[] = {"mem2reg", "scalar-cleanup", "constant-fold",
                             "aggregate-memory", "wide-division", "local-memory",
-                            "loop-scalar", "cross-function"};
+                            "loop-scalar", "cross-function", "global-memory",
+                            "sret-forward", "compact-inline", "low-bits",
+                            "linear-bias", "small-aggregate", "dead-instructions",
+                            "divrem-pairs"};
   assert(badge_ir_default_pass_count == sizeof(expected) / sizeof(*expected));
   for (unsigned k = 0; k < badge_ir_default_pass_count; ++k)
     assert(!strcmp(expected[k], badge_ir_default_pipeline[k]));
@@ -63,7 +66,9 @@ static void default_policy(void) {
   c->observe = NULL;
   ir_pipeline(c, source, strlen(source),
               "mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-"
-              "division,local-memory,loop-scalar,cross-function");
+              "division,local-memory,loop-scalar,cross-function,global-memory,"
+              "sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,"
+              "dead-instructions,divrem-pairs");
   assert(!strcmp(result, c->output));
   ir_pipeline(c, source, strlen(source),
               "mem2reg,instruction-combine,constant-fold,aggregate-memory,wide-"

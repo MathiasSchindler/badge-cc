@@ -154,27 +154,27 @@ opt-in deterministic benchmark and physical drawing timings.
 
 ## Current code-generation defaults
 
-Z04's qualified `scalar-cleanup` pass forwards redundant boolean extension
-tests using the existing typed combiner. The shared CLI/API C06 default is
-`mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function`.
-PO18 promotes the independently qualified combined PO11-PO17 profile:
-C05 defaults to `ssa`, and C07 defaults to `thumb-widths`. The inherited
-PO03/PO04 and PO06/PO07 transformations remain included; these are not
-unrelated flags. See the [cached promotion, timing contracts and exact-output
-replay](docs/current-promotion.md). Target-costed optimizer defaults require
-the badge backend's supported IR contract; the previous explicit six-pass
+The owned CLI/API defaults are `ssa` and
+`direct/global-compact/thumb-constants/word`. The sixteen-pass optimizer
+profile appends `global-memory`, `sret-forward`, `compact-inline`, `low-bits`,
+`linear-bias`, `small-aggregate`, `dead-instructions`, and `divrem-pairs`
+to the preceding eight passes. Query the exact list with
+`badge-opt --default-passes`. The
+[repeated single-badge timing and UF2 replay](docs/current-promotion.md#november-default-update)
+describe the new combination and its limits. The earlier `thumb-widths`/eight-pass profile
+remains explicitly selectable. Target-costed optimizer defaults require the
+badge backend's supported IR contract; the earlier explicit six-pass
 pipeline remains available for broader standalone optimizer use.
 The previous `instruction-combine` profile remains an explicit Z03 control.
 The separate `loop-cost` experiment stays explicit-only
 after a small repeatable graphics regression.
 See the [contracts and qualification evidence](docs/maze-optimization.md#z04-candidate-contract).
 
-The CLI and callable backend share `direct` frame addressing, `global-compact`
-register residency, `thumb-widths` scalar selection and `word` memory selection.
-These combine the qualified P01/P03/P04/P05 and maze-driven Z01/Z02/Z03/Z05
-implementations; local residency and loop-invariant motion remain explicit-only. Word memory
-selection requires proved alignment and bounded nonvolatile ordinary memory;
-it does not widen arbitrary hardware accesses.
+The backend still incorporates the qualified P01/P03/P04/P05 and maze-driven
+Z01/Z02/Z03/Z05 implementations; local residency and costed loop-invariant
+motion remain explicit-only. Word memory selection requires proved alignment
+and bounded nonvolatile ordinary memory; it does not widen arbitrary hardware
+accesses.
 
 The [Z02 allocator](docs/maze-optimization.md#z02-candidate-contract) adds
 scratch-safe r4/r5 residency and copy/PHI affinities. Select
@@ -421,8 +421,8 @@ bytes (LLVM: 560). Reached production instruction counts are unchanged;
 physical flash/XIP speed and default promotion were subsequently qualified
 by [PO18](docs/current-promotion.md).
 
-RS01 adds the explicit `--scalar-selection=thumb-constants` /
-`BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants` candidate. It inherits
+RS01 introduced `--scalar-selection=thumb-constants` /
+`BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants` as a candidate. It inherits
 `thumb-widths` and adds flag-safe numeric synthesis, local address/constant
 reuse around fenced opaque assembly, proven dead-temporary copy folding,
 shifted power-of-two multiply/adds, direct i32 compare operands, branch-only
@@ -434,8 +434,8 @@ their overwrite-before-use and unchanged-base/index proofs succeed.
 The [RS01 progress and evidence](docs/red-square.md#rs01-implementation-and-qualification-progress)
 cover 37 fixed-IR modules and twelve smaller images without frame/save growth.
 The compact demo drops from 992 to 772 loaded bytes, but sequencing remains
-244 bytes versus LLVM's 184-byte target. RS01 is not complete or broadly
-hardware-qualified; owned defaults remain unchanged.
+244 bytes versus LLVM's 184-byte target. That measurement did not qualify
+RS01 for a default change; the later combined profile is documented above.
 
 RS02 extends that explicit candidate with bounded shared-base lowering for
 linear absolute-store leaves. It removes dead address temporaries and their
@@ -621,12 +621,12 @@ resources grew. The linked maze shrank from 18,644 to 18,184 bytes. The maze
 oracle reached 32,335 fewer instructions in QEMU (0.065%); no physical timing
 or default promotion is claimed.
 
-The profiled maze follow-up keeps the qualified default unchanged. Use
-`thumb-constants` with the optional IR passes `global-memory` and
-`sret-forward` appended to the default pass list:
+The historical profiled Maze follow-up used `thumb-constants` and added
+`global-memory` and `sret-forward` to the then-default eight-pass profile.
+To reproduce that exact experiment rather than the current default:
 
 ```sh
-passes=$(badge-compiler/build/badge-opt --default-passes)
+passes=mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function
 BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants \
   BADGE_OPT_PASSES="$passes,global-memory,sret-forward" \
   make -C badge-compiler test-tilt-maze
@@ -689,7 +689,7 @@ Also query `badge-ir --default-expression-lowering` and `badge-opt --default-pas
 
 [The staged plan](docs/maze-optimization.md) uses the actual maze and the broad
 corpus to guide general compiler improvements. Qualified allocated-register
-operand selection remains part of the `thumb-widths` default. The preceding
+operand selection is inherited by `thumb-constants`. The preceding
 Z04 selector without branch layout is explicitly selectable with
 `BADGE_CODEGEN_SCALAR_SELECTION=thumb-registers` or
 `badge-codegen --scalar-selection=thumb-registers`.

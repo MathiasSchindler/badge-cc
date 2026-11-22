@@ -232,7 +232,7 @@ test('both C frontend policies carry memory/cc clobbers into the owned optimizer
 
 test('invalid assembly and analysis-budget failures preserve output; existing default remains timing-qualified', t => {
   const file = fixture(t);
-  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-widths');
+  assert.equal(run(tool('badge-codegen'), ['--default-scalar-selection']).stdout.trim(), 'thumb-constants');
   const invalid = [keep('nop', '~{r8}'), keep('nop', '~{memory},'), keep('nop', '~{memory}x'),
     keep('nop\\00'), keep('nop\\0X'), keep('nop').replace('""()', '""(i32 %x)'),
     keep('nop').replace('call void asm', '%a = call i32 asm'),
