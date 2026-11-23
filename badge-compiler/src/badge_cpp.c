@@ -33,7 +33,8 @@ typedef struct {
     char *params[MAX_PARAMS];
     size_t param_count;
     tokens_t body;
-    int active, function, builtin;
+    uint32_t stringified;
+    int active, function, builtin, variadic;
 } macro_t;
 typedef struct {
     const char *path;
@@ -160,6 +161,12 @@ static int defined(cpp_t *c, const char *name) {
     return m != NULL && m->active;
 }
 
+static size_t parameter(const macro_t *m, const token_t *t) {
+    size_t i = 0;
+    while (i < m->param_count && strcmp(m->params[i], t->text) != 0) ++i;
+    return i;
+}
+
 static void define_macro(cpp_t *c, tokens_t definition) {
     if (definition.count == 0 || definition.items[0].kind != IDENT) fail(c, "expected macro name");
     macro_t candidate = {.name = definition.items[0].text, .active = 1};
@@ -169,9 +176,17 @@ static void define_macro(cpp_t *c, tokens_t definition) {
         ++i;
         if (i < definition.count && !is_token(&definition.items[i], ")")) {
             for (;;) {
-                if (i >= definition.count || definition.items[i].kind != IDENT)
-                    fail(c, "expected macro parameter; variadic macros are unsupported");
                 if (candidate.param_count == MAX_PARAMS) fail(c, "macro parameter limit exceeded");
+                if (i < definition.count && is_token(&definition.items[i], "...")) {
+                    candidate.variadic = 1;
+                    candidate.params[candidate.param_count++] = "__VA_ARGS__";
+                    ++i;
+                    break;
+                }
+                if (i >= definition.count || definition.items[i].kind != IDENT)
+                    fail(c, "expected macro parameter");
+                if (is_token(&definition.items[i], "__VA_ARGS__"))
+                    fail(c, "reserved macro parameter __VA_ARGS__");
                 for (size_t j = 0; j < candidate.param_count; ++j)
                     if (strcmp(candidate.params[j], definition.items[i].text) == 0)
                         fail(c, "duplicate macro parameter");
@@ -183,13 +198,22 @@ static void define_macro(cpp_t *c, tokens_t definition) {
         if (i == definition.count || !is_token(&definition.items[i++], ")")) fail(c, "unclosed macro parameters");
     }
     for (; i < definition.count; ++i) {
-        if (is_token(&definition.items[i], "#") || is_token(&definition.items[i], "##"))
-            fail(c, "macro stringification/token pasting is unsupported");
+        if (is_token(&definition.items[i], "##"))
+            fail(c, "macro token pasting is unsupported");
+        if (is_token(&definition.items[i], "#") && candidate.function) {
+            size_t p = i + 1 < definition.count
+                ? parameter(&candidate, &definition.items[i + 1]) : candidate.param_count;
+            if (p == candidate.param_count) fail(c, "macro '#' must precede a parameter");
+            candidate.stringified |= UINT32_C(1) << p;
+        }
+        if (!candidate.variadic && is_token(&definition.items[i], "__VA_ARGS__"))
+            fail(c, "__VA_ARGS__ requires a variadic macro");
         push(c, &candidate.body, definition.items[i]);
     }
     macro_t *existing = find_macro(c, candidate.name);
     if (existing != NULL && existing->active) {
         int same = existing->builtin == 0 && existing->function == candidate.function &&
+                   existing->variadic == candidate.variadic &&
                    existing->param_count == candidate.param_count && existing->body.count == candidate.body.count;
         for (size_t j = 0; same && j < candidate.param_count; ++j)
             same = strcmp(existing->params[j], candidate.params[j]) == 0;
@@ -223,6 +247,16 @@ static char *quoted(cpp_t *c, const char *s) {
     return result.data;
 }
 
+static char *stringify(cpp_t *c, const tokens_t *arg) {
+    string_t spelling = {0};
+    for (size_t i = 0; i < arg->count; ++i) {
+        const token_t *t = &arg->items[i];
+        if (i && t->space) append(c, &spelling, " ", 1);
+        append(c, &spelling, t->text, strlen(t->text));
+    }
+    return quoted(c, spelling.data ? spelling.data : "");
+}
+
 static void expand(cpp_t *c, tokens_t *v) {
     if (++c->expansion_depth > MAX_DEPTH) fail(c, "macro argument expansion depth exceeded");
     for (size_t i = 0; i < v->count;) {
@@ -252,6 +286,10 @@ static void expand(cpp_t *c, tokens_t *v) {
                 token_t t = v->items[end];
                 if (is_token(&t, ")") && nesting == 0) break;
                 if (is_token(&t, ",") && nesting == 0) {
+                    if (m->variadic && arg + 1 >= m->param_count) {
+                        push(c, &raw[arg], t);
+                        continue;
+                    }
                     if (++arg == MAX_PARAMS) fail(c, "macro argument limit exceeded");
                     continue;
                 }
@@ -284,16 +322,31 @@ static void expand(cpp_t *c, tokens_t *v) {
             push(c, &replacement, t);
         } else for (size_t j = 0; j < m->body.count; ++j) {
             token_t t = m->body.items[j];
-            size_t param = 0;
-            while (param < m->param_count && strcmp(m->params[param], t.text) != 0) ++param;
+            if (m->function && is_token(&t, "#")) {
+                t.text = stringify(c, &raw[parameter(m, &m->body.items[++j])]);
+                t.kind = LITERAL;
+                t.file = invocation.file;
+                t.line = invocation.line;
+                memcpy(t.hide, hide, sizeof(hide));
+                push(c, &replacement, t);
+                continue;
+            }
+            size_t param = parameter(m, &t);
             if (param < m->param_count) {
                 if (!ready[param]) {
-                    args[param] = raw[param];
+                    if (m->stringified & (UINT32_C(1) << param)) {
+                        reserve(c, &args[param], raw[param].count);
+                        if (raw[param].count)
+                            memcpy(args[param].items, raw[param].items, raw[param].count * sizeof(token_t));
+                        args[param].count = raw[param].count;
+                    } else
+                        args[param] = raw[param];
                     expand(c, &args[param]);
                     ready[param] = 1;
                 }
                 for (size_t k = 0; k < args[param].count; ++k) {
                     token_t a = args[param].items[k];
+                    if (k == 0) a.space = t.space;
                     for (size_t h = 0; h < MAX_MACROS / 64u; ++h) a.hide[h] |= hide[h];
                     push(c, &replacement, a);
                 }
@@ -305,10 +358,13 @@ static void expand(cpp_t *c, tokens_t *v) {
             }
         }
         size_t tail = v->count - end;
+        if (replacement.count) replacement.items[0].space = invocation.space;
         reserve(c, v, i + replacement.count + tail);
         memmove(v->items + i + replacement.count, v->items + end, tail * sizeof(token_t));
         if (replacement.count != 0)
             memcpy(v->items + i, replacement.items, replacement.count * sizeof(token_t));
+        else if (tail && invocation.space)
+            v->items[i].space = 1;
         v->count = i + replacement.count + tail;
     }
     --c->expansion_depth;

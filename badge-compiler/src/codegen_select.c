@@ -860,6 +860,34 @@ static void plan_immediate_load(cg_context *c, cg_inst *i) {
   i->folded_operand = 1;
 }
 
+static int plan_shifted_word_xor(cg_context *c, cg_inst *i) {
+  if (!scalar32(c, i, "lshr") || !single_use(c, i))
+    return 0;
+  cg_inst *previous = i;
+  unsigned distance = 0;
+  for (cg_inst *use = i->next; use && distance < 14; previous = use, use = use->next, distance++) {
+    cg_register_work(c);
+    if (!use->result)
+      break;
+    const char *op = c->tokens[use->begin + 2].text;
+    if (!strcmp(op, "call") || !strcmp(op, "tail") || !strcmp(op, "notail"))
+      break;
+    uint32_t amount;
+    unsigned source, other;
+    if (previous->indexed_source && previous->result->type->bits == 32 &&
+        !use->folded_operand && !use->shifted_producer && scalar32(c, use, "xor") &&
+        shifted_binary(c, i, use, &amount, &source, &other) &&
+        !strcmp(c->tokens[use->begin + other].text, previous->result->name)) {
+      i->folded_operand = 1;
+      use->shifted_producer = i;
+      use->shifted_source = i->begin + source;
+      use->shifted_other = use->begin + other;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 void cg_plan_operands(cg_context *c) {
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i; i = i->next)
@@ -887,6 +915,8 @@ void cg_plan_operands(cg_context *c) {
       if (i->folded_operand || i->shifted_producer ||
           !(scalar32(c, i, "shl") || scalar32(c, i, "lshr") ||
             scalar32(c, i, "ashr")) || !single_use(c, i))
+        continue;
+      if (plan_shifted_word_xor(c, i))
         continue;
       unsigned distance = 0;
       for (cg_inst *use = i->next; use && distance < 8; use = use->next, distance++) {

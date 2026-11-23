@@ -1587,6 +1587,17 @@ entry:
 test('shifted operands fold without changing multi-use or reversed subtraction', t => {
   const file = files(t);
   fs.writeFileSync(file('shift.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@words = private constant [4 x i32] [i32 0, i32 123, i32 456, i32 789], align 4
+define i32 @table_shift(i32 %x, i32 %i) {
+entry:
+  %hi = lshr i32 %x, 4
+  %idx = and i32 %i, 3
+  %off = mul i32 %idx, 4
+  %p = getelementptr i8, ptr @words, i32 %off
+  %w = load i32, ptr %p, align 4
+  %mix = xor i32 %hi, %w
+  ret i32 %mix
+}
 define i32 @case(i32 %a, i32 %b) {
 entry:
   %ls = shl i32 %a, 13
@@ -1616,7 +1627,10 @@ entry:
   %a = xor i32 %actual, 57340
   %shifted = call i32 @masked_shift(i32 305419896)
   %b = xor i32 %shifted, ${(((305419896 >>> 7) & 63519) ^ ~305419896) >>> 0}
-  %status = or i32 %a, %b
+  %table = call i32 @table_shift(i32 -1, i32 7)
+  %c = xor i32 %table, ${(0xffffffff >>> 4) ^ 789}
+  %ab = or i32 %a, %b
+  %status = or i32 %ab, %c
   ret i32 %status
 }`);
   run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
@@ -1628,6 +1642,7 @@ entry:
   assert.match(assembly, /^lsls?\.([wn]) .*#1$/m);
   assert.match(assembly, /^lsrs?\.([wn]) .*#17$/m);
   assert.match(assembly, /^and\.w .* lsr #7$/m);
+  assert.match(assembly, /^eor\.w .* lsr #4$/m);
   run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
   run(tool('badge-asm'), [file('shift.s'), '-o', file('shift.o')]);
   run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',

@@ -1785,6 +1785,9 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
   const char *op = c->tokens[at].text;
   if (i->immediate_address)
     return 0;
+  if (i->indexed_source && i->result && i->next && i->next->shifted_producer &&
+      i->result->type->bits == 32)
+    return 0;
   if (!strcmp(op, "call")) {
     if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && cg_abs_operand(c, i))
       return 0;

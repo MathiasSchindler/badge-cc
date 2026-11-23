@@ -57,6 +57,14 @@ int main(void) {
         {"#define ZERO() 0\nZERO()\n", "0\n"},
         {"#define EMPTY(x) x\nEMPTY()\n", ""},
         {"#define IGNORE(x) 4\n#define F(x) x\nIGNORE(F(1,2))\n", "4\n"},
+        {"#define N 42\n#define RAW(x) #x\n#define STR(x) RAW(x)\n"
+         "#define EMPTY\nRAW(N) STR(N) RAW(a/**/+\n b) RAW(\"a\\\\b\") RAW() STR(a EMPTY+b)\n",
+         "\"N\"\n\"42\"\n\"a + b\"\n\"\\\"a\\\\\\\\b\\\"\"\n\"\"\n\"a +b\"\n"},
+        {"#define N 42\n#define BOTH(x) x #x\n#define LIST(tag, ...) tag __VA_ARGS__ #__VA_ARGS__\n"
+         "BOTH(N) LIST(tag, N, (1, 2)) LIST(tag, )\n",
+         "42\n\"N\"\ntag\n42\n,\n(\n1\n,\n2\n)\n\"N, (1, 2)\"\ntag\n\"\"\n"},
+        {"#define S_(x) #x\n#define S(x) S_(x)\n#define FILE_NAME header.h\n#include S(FILE_NAME)\n",
+         "int\nheader\n;\n"},
         {"#define P (x)\nP\n", "(\nx\n)\n"},
         {"#define F(x) x\nF\n", "F\n"},
         {"#define N 2\n#undef N\n#define N 3\nN\n", "3\n"},
@@ -95,7 +103,7 @@ int main(void) {
         matches(normalized, valid[i].expected);
     }
     const char *invalid[] = {
-        "#define F(x) #x\n", "#define F(x,y) x##y\n", "#define F(...) 0\n",
+        "#define F(x) #other\n", "#define F(x,y) x##y\n", "#define F(..., x) 0\n",
         "#define F(x,x) x\n", "#define F(x x\n", "#define N 1\n#define N 2\n",
         "#define F(x) x\nF(1,2)\n", "#define F(x) x\nF(1\n",
         "#define F(x,y) x\nF()\n", "#if\n#endif\n", "#ifdef\n#endif\n",

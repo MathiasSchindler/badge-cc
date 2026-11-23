@@ -371,17 +371,19 @@ static void plan_wide_pairs(cg_context *c) {
     }
 }
 
-static int spare_neighborhood_register(cg_context *c) {
+static int spare_memory_register(cg_context *c) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT)
     return 0;
-  unsigned loads = 0;
+  unsigned loads = 0, table_mixes = 0;
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i; i = i->next) {
       cg_register_work(c);
       unsigned op = i->begin + (i->result ? 2 : 0);
       const char *name = c->tokens[op].text;
       loads += i->immediate_address != 0;
+      table_mixes += i->indexed_source && i->result && i->next &&
+                     i->next->shifted_producer && i->result->type->bits == 32;
       if ((!strcmp(name, "call") && !cg_abs_operand(c, i)) ||
           !strcmp(name, "tail") || !strcmp(name, "notail"))
         return 0;
@@ -393,7 +395,7 @@ static int spare_neighborhood_register(cg_context *c) {
             return 0;
         }
     }
-  return loads >= 3;
+  return loads >= 3 || table_mixes >= 2;
 }
 
 static void compact_frame(cg_context *c, cg_register_value **order) {
@@ -543,7 +545,7 @@ void cg_global_prepare(cg_context *c) {
       c->allocate_r6 = 1;
     } else c->scalar_stream_selection = 0;
   }
-  if (g->registers == 6 && spare_neighborhood_register(c)) {
+  if (g->registers == 6 && spare_memory_register(c)) {
     g->registers = 7;
     c->allocate_r6 = 1;
     c->neighbor_selection = 1;

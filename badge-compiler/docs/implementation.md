@@ -718,8 +718,9 @@ Implemented:
   and line-marker metadata.
 
 This is intentionally a **tested corpus subset**, not a claim of all C11
-preprocessing. Stringification (`#`), token pasting (`##`), variadic macros,
-trigraphs, digraphs, universal-character/extended identifiers, source `#line`,
+preprocessing. Function-like macros support stringification (`#`) and
+standard `...` / `__VA_ARGS__`. Token pasting (`##`), trigraphs, digraphs,
+universal-character/extended identifiers, source `#line`,
 other pragmas, character constants in `#if`, `_Pragma`, `__COUNTER__`,
 `__DATE__` and `__TIME__` are not implemented. Unsupported directives/macros
 fail explicitly in active processing; unsupported lexical forms fail before
