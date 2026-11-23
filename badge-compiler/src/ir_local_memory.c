@@ -199,11 +199,25 @@ static void drop_dead_address(memory *p, const ir_operand *address) {
       p->a.definitions[index->definition].use_count == 1)
     p->a.text->lines[index->line - 1].replacement = "";
 }
-static unsigned predecessor_load(memory *p, unsigned load) {
+static int private_global(memory *p, const ir_operand *address) {
+  if (address->kind != IR_OPERAND_GLOBAL)
+    return 0;
+  const ir_global *global = &p->a.globals[address->definition];
+  if (global->storage_type == IR_NONE || global->function != IR_NONE)
+    return 0;
+  const ir_line *row = &p->a.text->lines[global->line - 1];
+  if (row->count < 4)
+    return 0;
+  const char *linkage = ir_text(p->a.text, row->first + 2);
+  return (!strcmp(linkage, "internal") || !strcmp(linkage, "private")) &&
+         !strcmp(ir_text(p->a.text, row->first + 3), "global");
+}
+static unsigned preceding_value(memory *p, unsigned load, int *store_forwarded) {
   const ir_instruction *in = &p->a.instructions[load];
   const ir_operand *wanted = &p->a.operands[in->first_operand];
   if (wanted->kind != IR_OPERAND_GLOBAL && !indexed_global(p, wanted))
     return IR_NONE;
+  int may_forward = private_global(p, wanted);
   unsigned current = in->block, i = load, edges = 0;
   for (unsigned work = 0; work < GLOBAL_WINDOW; work++) {
     spend(p);
@@ -225,6 +239,18 @@ static unsigned predecessor_load(memory *p, unsigned load) {
       continue;
     }
     const ir_instruction *next = &p->a.instructions[--i];
+    if (may_forward && next->opcode == IR_OP_STORE &&
+        next->effects == (IR_EFFECT_WRITE | IR_EFFECT_TRAP) &&
+        next->line == next->end_line) {
+      const ir_operand *stored = &p->a.operands[next->first_operand];
+      const ir_line *row = &p->a.text->lines[next->line - 1];
+      if (row->count == 9 && stored->kind == IR_OPERAND_LOCAL &&
+          same_operand(p, wanted, stored + 1) &&
+          ir_type_equal(&p->a, in->type, stored->type)) {
+        *store_forwarded = 1;
+        return stored->definition;
+      }
+    }
     if (next->effects & (IR_EFFECT_WRITE | IR_EFFECT_CALL | IR_EFFECT_VOLATILE |
                          IR_EFFECT_OPAQUE | IR_EFFECT_CONTROL))
       break;
@@ -249,19 +275,21 @@ static void run_global_chains(ir_context *c, ir_module *m) {
     const ir_instruction *in = &p.a.instructions[i];
     if (in->opcode != IR_OP_LOAD || !plain(&p, in) || !bounded_users(&p, i))
       continue;
-    unsigned previous = predecessor_load(&p, i);
+    int stored = 0;
+    unsigned previous = preceding_value(&p, i, &stored);
     if (previous == IR_NONE)
       continue;
     p.values[in->definition] = p.values[previous] ? p.values[previous] : p.a.definitions[previous].name;
     m->lines[in->line - 1].replacement = "";
     drop_dead_address(&p, &p.a.operands[in->first_operand]);
+    ir_note(c, "candidate", stored ? "private_store_forwarded" :
+                                     "load_across_single_predecessor", 1);
     changed++;
   }
   if (!changed) {
     ir_release_to(c, mark);
     return;
   }
-  ir_note(c, "candidate", "load_across_single_predecessor", changed);
   for (unsigned i = 0; i < p.a.operand_count; i++) {
     spend(&p);
     const ir_operand *op = &p.a.operands[i];

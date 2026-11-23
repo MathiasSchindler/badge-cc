@@ -869,6 +869,7 @@ static void ir_global(ir_context *c,symbol_t *s) {
     for(ir_reloc *r=relocations;r;r=r->next) if(r->size) ordered[at++]=r;
     qsort(ordered,count,sizeof(*ordered),ir_reloc_order);
     ir_text(c,s->linkage==2?"dso_local ":"internal ");
+    if(s->kind==S_STRING) ir_text(c,"unnamed_addr ");
     ir_text(c,(ir_object_qualifiers(t)&Q_CONST) || s->kind==S_STRING?"constant ":"global ");
     if(count==0) {
         uint32_t nonzero=0;

@@ -16,6 +16,56 @@ function run(command, args) {
 }
 const header = 'target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n' +
   'target triple = "thumbv8m.main-unknown-none-eabi"\n';
+test('context wrappers forward both stack words to an independently compiled callee', t => {
+  const dir = fs.mkdtempSync(path.join(root, 'badge-compiler/build/context-wrapper-'));
+  t.after(() => {
+    for (const n of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, n));
+    fs.rmdirSync(dir);
+  });
+  const file = n => path.join(dir, n);
+  fs.writeFileSync(file('input.ll'), header + `
+@check = global i32 4321, align 4
+declare void @callee(ptr, i32, i32, i32, i32, i16 zeroext)
+define internal void @wrapper(i32 %a, i32 %b, i32 %c, i32 %d, i16 zeroext %color) {
+entry:
+  br label %body
+body:
+  call void @callee(ptr @check, i32 %a, i32 %b, i32 %c, i32 %d, i16 zeroext %color)
+  ret void
+}
+define void @drive(i32 %a, i32 %b, i32 %c, i32 %d, i16 zeroext %color) {
+entry:
+  call void @wrapper(i32 %a, i32 %b, i32 %c, i32 %d, i16 zeroext %color)
+  ret void
+}
+`);
+  fs.writeFileSync(file('driver.c'), `
+extern void drive(unsigned, unsigned, unsigned, unsigned, unsigned short);
+static volatile unsigned failed, calls;
+void callee(const unsigned *context, unsigned a, unsigned b, unsigned c,
+            unsigned d, unsigned short color) {
+  if (*context != 4321 || b != a + 13 || c != a + 24 ||
+      d != a + 35 || color != (unsigned short)(0x8000 | a)) ++failed;
+  ++calls;
+}
+int main(void) {
+  for (unsigned n = 0; n < 512; ++n) drive(n,n+13,n+24,n+35,0x8000|n);
+  return failed || calls != 512;
+}
+`);
+  run(tool('badge-codegen-sanitize'), [file('input.ll'), '-o', file('input.s')]);
+  assert.equal(fs.readFileSync(file('input.s'), 'utf8').match(/@ wrapper-stack-arguments:/g)?.length, 1);
+  run(tool('badge-asm'), [file('input.s'), '-o', file('input.o')]);
+  run(tool('badge-asm'), ['badge-compiler/tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang', ['--target=arm-none-eabi', '-mcpu=cortex-m33',
+    '-mthumb', '-Oz', '-ffreestanding', '-c', file('driver.c'), '-o', file('driver.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'badge-compiler/tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('input.o'), file('driver.o'), '-o', file('output.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('output.elf')]);
+});
+
 function wrapper(name, value, post = 0, extra = '', args = 'i32 %x', call = 'call void @sink(i32 %x)') {
   return `define void @${name}(${args}) {
 entry:

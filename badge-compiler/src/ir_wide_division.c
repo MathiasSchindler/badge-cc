@@ -281,6 +281,135 @@ static int little_endian(const ir_module *m) {
   return 0;
 }
 
+typedef struct { int64_t lo, hi; } word_range;
+
+static int64_t signed_word(uint64_t value) {
+  uint32_t word = (uint32_t)value;
+  return word <= INT32_MAX ? (int64_t)word : (int64_t)word - (INT64_C(1) << 32);
+}
+
+static void constrain_word(const ir_analysis *a, const ir_operand *value,
+                           unsigned block, unsigned successor, word_range *range) {
+  const ir_instruction *branch = terminator(a, block);
+  if (branch->opcode != IR_OP_BR || branch->operand_count != 3)
+    return;
+  const ir_operand *condition = inputs(a, branch);
+  int yes = condition[1].block == successor, no = condition[2].block == successor;
+  if (yes == no)
+    return;
+  const ir_instruction *cmp = definition(a, condition);
+  if (!cmp || cmp->opcode != IR_OP_COMPARE || cmp->operand_count != 2)
+    return;
+  const ir_operand *left = inputs(a, cmp);
+  uint64_t raw;
+  if (left->kind != IR_OPERAND_LOCAL || left->definition != value->definition ||
+      !literal(a, left + 1, &raw))
+    return;
+  const ir_line *row = &a->text->lines[cmp->line - 1];
+  const char *pred = ir_text(a->text, row->op + 1);
+  int64_t limit = signed_word(raw);
+  if (!strcmp(pred, "slt") || !strcmp(pred, "sle")) {
+    limit += !strcmp(pred, "sle");
+  } else if (!strcmp(pred, "sgt") || !strcmp(pred, "sge")) {
+    limit += !strcmp(pred, "sgt");
+    yes = !yes;
+  } else {
+    return;
+  }
+  if (yes && range->hi >= limit)
+    range->hi = limit - 1;
+  if (!yes && range->lo < limit)
+    range->lo = limit;
+}
+
+static word_range bounded_word(const ir_analysis *a, const ir_operand *value,
+                                unsigned block, unsigned successor, unsigned depth) {
+  const word_range unknown = {INT32_MIN, INT32_MAX};
+  uint64_t raw;
+  if (literal(a, value, &raw)) {
+    int64_t n = signed_word(raw);
+    return (word_range){n, n};
+  }
+  if (value->kind != IR_OPERAND_LOCAL || depth == 6)
+    return unknown;
+  word_range range = unknown;
+  const ir_instruction *in = definition(a, value);
+  if (plain(a, in, "and", 32) && literal(a, inputs(a, in) + 1, &raw) &&
+      (uint32_t)raw <= INT32_MAX) {
+    range = (word_range){0, (uint32_t)raw};
+  } else if (plain(a, in, "sub", 32) && literal(a, inputs(a, in) + 1, &raw)) {
+    word_range x = bounded_word(a, inputs(a, in), in->block, IR_NONE, depth + 1);
+    int64_t delta = signed_word(raw);
+    if (x.lo - delta >= INT32_MIN && x.hi - delta <= INT32_MAX)
+      range = (word_range){x.lo - delta, x.hi - delta};
+  } else if (in && in->opcode == IR_OP_PHI && in->operand_count == 4 &&
+             a->blocks[in->block].rpo != IR_NONE) {
+    const ir_operand *o = inputs(a, in);
+    if (!ir_dominates(a, in->block, o[1].block) &&
+        !ir_dominates(a, in->block, o[3].block)) {
+      word_range x = bounded_word(a, o, o[1].block, in->block, depth + 1);
+      word_range y = bounded_word(a, o + 2, o[3].block, in->block, depth + 1);
+      range = (word_range){x.lo < y.lo ? x.lo : y.lo, x.hi > y.hi ? x.hi : y.hi};
+    }
+  }
+  // Do not carry an edge fact past a new dynamic definition in a loop.
+  for (unsigned steps = 0; steps < 4; ++steps) {
+    if (in && !ir_dominates(a, in->block, block))
+      break;
+    if (successor != IR_NONE)
+      constrain_word(a, value, block, successor, &range);
+    const ir_block *b = &a->blocks[block];
+    if ((in && in->block == block) || b->predecessor_count != 1)
+      break;
+    successor = block;
+    block = a->predecessors[b->first_predecessor];
+  }
+  return range.lo <= range.hi ? range : unknown;
+}
+
+static int cancel_square_scale(ir_context *c, ir_analysis *a,
+                               const ir_instruction *div) {
+  uint64_t divisor, factor;
+  if (!plain(a, div, "sdiv", 64) ||
+      !literal(a, inputs(a, div) + 1, &divisor) || divisor > INT64_MAX)
+    return 0;
+  const ir_instruction *scaled = definition(a, inputs(a, div));
+  if (!plain(a, scaled, "mul", 64) ||
+      !literal(a, inputs(a, scaled) + 1, &factor) || factor < 2 ||
+      factor > divisor || divisor % factor || divisor / factor > INT32_MAX)
+    return 0;
+  const ir_instruction *square = definition(a, inputs(a, scaled));
+  if (!plain(a, square, "mul", 64))
+    return 0;
+  const ir_operand *lanes[2];
+  for (unsigned k = 0; k < 2; ++k) {
+    const ir_instruction *cast = definition(a, inputs(a, square) + k);
+    if (!plain(a, cast, "sext", 64) || cast->operand_count != 1)
+      return 0;
+    lanes[k] = inputs(a, cast);
+    if (lanes[k]->kind != IR_OPERAND_LOCAL || a->types[lanes[k]->type].bits != 32)
+      return 0;
+  }
+  if (lanes[0]->definition != lanes[1]->definition)
+    return 0;
+  word_range bounds = bounded_word(a, lanes[0], square->block, IR_NONE, 0);
+  if (bounds.lo < -46340 || bounds.hi > 46340)
+    return 0;
+  uint64_t radius = (uint64_t)(-bounds.lo > bounds.hi ? -bounds.lo : bounds.hi);
+  if (radius * radius > INT64_MAX / factor)
+    return 0;
+  ir_module *m = a->text;
+  const char *x = ir_text(m, lanes[0]->token), *n = ir_fresh(c, m, '%');
+  const char *q = ir_fresh(c, m, '%');
+  m->lines[div->line - 1].replacement = ir_format(c,
+      "  %s = mul i32 %s, %s\n  %s = udiv i32 %s, %" PRIu64 "\n"
+      "  %s = zext i32 %s to i64\n", n, x, x, q, n, divisor / factor,
+      a->definitions[div->definition].name, q);
+  c->line = div->line;
+  ir_note(c, "transformed", "bounded_square_scale_cancelled", 1);
+  return 1;
+}
+
 static void narrow_helpers(ir_context *c, const char *udiv, const char *sdiv) {
   if (!udiv)
     return;
@@ -363,13 +492,18 @@ static void declare_clz(ir_context *c, ir_module *m) {
 }
 
 void ir_wide_division(ir_context *c, ir_module *m) {
-  if (strstr(m->source, "sdiv i64 ") && strstr(m->source, "constant [") && little_endian(m)) {
+  int tables = strstr(m->source, "constant [") && little_endian(m);
+  if (strstr(m->source, "sdiv i64 ") && (tables || strstr(m->source, "mul i64 "))) {
     ir_allocation *mark = c->allocations;
     ir_analysis a;
     ir_analyze(c, m, &a);
     int changed = 0;
-    for (unsigned i = 0; i < a.instruction_count; i++)
-      changed |= narrow_rounded_update(c, &a, &a.instructions[i]);
+    for (unsigned i = 0; i < a.instruction_count; i++) {
+      const ir_instruction *in = &a.instructions[i];
+      changed |= cancel_square_scale(c, &a, in);
+      if (tables)
+        changed |= narrow_rounded_update(c, &a, in);
+    }
     if (changed)
       ir_reparse(c, m, mark);
     else

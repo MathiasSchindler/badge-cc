@@ -122,6 +122,86 @@ function lower(file, body, pass = 'local-memory') {
       fixture.replace('i32 8, i1 false)', 'i32 8, i1 true)'),
     ]) assert.match(lower(f, rejected, 'sret-forward'), /call void @llvm.memcpy/);
   });
+test('private initialization is removed only after complete unobserved byte coverage', t => {
+  const f = files(t);
+  const body = (name, intermediate, offset, volatile = 'false') => `
+define i32 @${name}() {
+entry:
+  %slot = alloca [4 x i8], align 4
+  call void @llvm.memset.inline.p0.i32(ptr %slot, i8 0, i32 4, i1 ${volatile})
+  %value = load i16, ptr @source, align 2
+  store i16 %value, ptr %slot, align 2
+  ${intermediate}
+  %tail = getelementptr i8, ptr %slot, i32 ${offset}
+  store i16 33, ptr %tail, align 1
+  %result = load i32, ptr %slot, align 4
+  ret i32 %result
+}`;
+  const text = lower(f, `@source = global i16 61
+declare void @llvm.memset.inline.p0.i32(ptr, i8, i32, i1)
+declare void @observe(ptr)
+${body('covered', '', 2)}
+${body('overlap', '', 1)}
+${body('observed', 'call void @observe(ptr %slot)', 2)}
+${body('ordered', '', 2, 'true')}
+`, 'small-aggregate');
+  const result = name => text.match(new RegExp(`define i32 @${name}[^]*?\\n}`))[0];
+  assert.doesNotMatch(result('covered'), /call void @llvm.memset/);
+  assert.match(result('covered'), /store i16 %value[\s\S]*store i16 33/);
+  for (const name of ['overlap', 'observed', 'ordered'])
+    assert.match(result(name), /call void @llvm.memset/);
+});
+
+test('adjacent high and low bytes pack into one aligned stack halfword', t => {
+  const f = files(t);
+  const fn = (name, access) => `
+define i32 @${name}(i32 %x) {
+entry:
+  %b = alloca [2 x i8], align 1
+  %shift = lshr i32 %x, 8
+  %hi = trunc i32 %shift to i8
+  store ${access}i8 %hi, ptr %b, align 1
+  %tail = getelementptr i8, ptr %b, i32 1
+  %lo = trunc i32 %x to i8
+  store i8 %lo, ptr %tail, align 1
+  call void @observe(ptr %b)
+  ret i32 0
+}`;
+  const text = lower(f, `declare void @observe(ptr)
+${fn('pack', '')}
+${fn('keep', 'volatile ')}
+`, 'small-aggregate,dead-instructions');
+  const result = name => text.match(new RegExp(`define i32 @${name}[^]*?\\n}`))[0];
+  assert.match(result('pack'), /alloca \[2 x i8\], align 2/);
+  assert.match(result('pack'), /call i16 @llvm.bswap.i16/);
+  assert.doesNotMatch(result('pack'), /store i8/);
+  assert.match(result('keep'), /store volatile i8/);
+  if (!oracle) return;
+  fs.writeFileSync(f('caller.c'), `
+extern unsigned pack(unsigned), keep(unsigned);
+static unsigned seen;
+void observe(const unsigned char *p) { seen = p[0] | (unsigned)p[1] << 8; }
+int main(void) {
+  for (unsigned x = 0; x < 65536; x += 17) {
+    unsigned expect = ((x & 255) << 8) | (x >> 8);
+    if (pack(x | 0xabcd0000u) || seen != expect) return 1;
+    if (keep(x) || seen != expect) return 2;
+  }
+  return 0;
+}`);
+  run(tool('badge-codegen'), [f('badge-opt.ll'), '-o', f('output.s')]);
+  assert.match(fs.readFileSync(f('output.s'), 'utf8'), /^rev16.n /m);
+  run(tool('badge-asm'), [f('output.s'), '-o', f('output.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', f('start.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang', ['--target=arm-none-eabi', '-mcpu=cortex-m33',
+    '-mthumb', '-Oz', '-ffreestanding', '-c', f('caller.c'), '-o', f('caller.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    f('start.o'), f('output.o'), f('caller.o'), '-o', f('output.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', f('output.elf')]);
+});
+
 test('exact scalar load reuse never forwards stores or inserts new values and stays bounded', t => {
   assert.deepEqual(emittedMemory('@ note\n.section .text\nf:\nldr.w r0, [r7]\nstrb r1, [r0]\nbl f\nmov r1, r0\n'),
     { instructions: 4, loads: 1, stores: 1, calls: 1 });
@@ -179,6 +259,35 @@ entry:
   const before = fs.readFileSync(f('input.ll'));
   run(tool('badge-opt'), ['--passes=local-memory', f('input.ll'), '-o', f('input.ll')], false);
   assert.deepEqual(fs.readFileSync(f('input.ll')), before);
+});
+
+test('ordinary private stores forward across one-path guards but not barriers', t => {
+  const f = files(t);
+  const candidate = (name, middle) => `
+define i32 @${name}(i32 %x, i1 %flag) {
+entry:
+  store i32 %x, ptr @state, align 4
+  br i1 %flag, label %take, label %skip
+take:
+  ${middle}
+  %v = load i32, ptr @state, align 4
+  %out = xor i32 %v, 3
+  ret i32 %out
+skip:
+  ret i32 1
+}`;
+  const text = lower(f, `@state = internal global i32 0, align 4
+declare void @expose(ptr)
+${candidate('forward', '')}
+${candidate('opaque', 'call void @expose(ptr @state)')}
+${candidate('ordered', '%sample = load volatile i32, ptr @state, align 4')}
+`, 'global-memory');
+  const body = name => text.match(new RegExp(`define i32 @${name}[^]*?\\n}`))[0];
+  assert.match(body('forward'), /store i32 %x, ptr @state/);
+  assert.match(body('forward'), /%out = xor i32 %x, 3/);
+  assert.doesNotMatch(body('forward'), /%v = load/);
+  for (const name of ['opaque', 'ordered'])
+    assert.match(body(name), /%v = load i32, ptr @state/);
 });
 
 test('indexed global reuse across a guard keeps writes, volatile reads, and other indices distinct', t => {

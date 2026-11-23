@@ -1178,7 +1178,9 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   function_header(c, f);
   size_t body_start = c->size;
   cg_inst *leaf = scalar_leaf_entry(c);
-  if (!f->dynamic_stack && !f->variadic && (cg_emit_counted_leaf(c) || emit_abs_leaf(c) || emit_clamp_leaf(c) ||
+  if (!f->dynamic_stack && !f->variadic && (cg_emit_counted_leaf(c) || cg_emit_wide_fill_leaf(c) ||
+      cg_emit_prepend_context_wrapper(c) ||
+      emit_abs_leaf(c) || emit_clamp_leaf(c) ||
       emit_nibble_lookup_leaf(c, leaf) || emit_wide_sum_leaf(c, leaf))) {
     finish_function(c, header, body_start);
     return;

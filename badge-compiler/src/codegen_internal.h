@@ -206,6 +206,8 @@ cg_assembly *cg_instruction_assembly(cg_context *c, cg_inst *instruction);
 cg_inst *cg_selection_countdown(cg_context *c, cg_inst *instruction);
 cg_inst *cg_selection_extended_load(cg_context *c, cg_inst *instruction);
 int cg_emit_counted_leaf(cg_context *c);
+int cg_emit_prepend_context_wrapper(cg_context *c);
+int cg_emit_wide_fill_leaf(cg_context *c);
 
 static inline int cg_global_residency(const cg_context *c) {
   return c->register_residency == BADGE_RESIDENCY_GLOBAL ||

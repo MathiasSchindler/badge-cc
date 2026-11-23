@@ -38,6 +38,73 @@ ret void
 }
 `;
 }
+test('long halfword RAM fills use aligned words without writing outside either edge', t => {
+  const dir = fs.mkdtempSync(path.join(root, 'badge-compiler/build/wide-fill-'));
+  t.after(() => {
+    for (const name of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, name));
+    fs.rmdirSync(dir);
+  });
+  const f = name => path.join(dir, name);
+  const fillLoop = (name, count, access = '') => `
+define void @${name}(ptr %base, i16 zeroext %color) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [0, %entry], [%next, %latch]
+  %bytes = phi i32 [0, %entry], [%advance, %latch]
+  %more = icmp ult i32 %i, ${count}
+  br i1 %more, label %body, label %done
+body:
+  %dst = getelementptr i8, ptr %base, i32 %bytes
+  store ${access}i16 %color, ptr %dst, align 2
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  %advance = add i32 %bytes, 2
+  br label %header
+done:
+  ret void
+}
+`;
+  fs.writeFileSync(f('fills.ll'), 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
+    fillLoop('fill_even', 64) + fillLoop('fill_odd', 65) +
+    fillLoop('keep_short', 8) + fillLoop('keep_volatile', 64, 'volatile '));
+  run(tool('badge-codegen-sanitize'), [f('fills.ll'), '-o', f('fills.s')]);
+  const assembly = fs.readFileSync(f('fills.s'), 'utf8');
+  assert.equal(assembly.match(/^@ wide-halfword-fill:/gm)?.length, 2);
+  for (const name of ['keep_short', 'keep_volatile'])
+    assert.doesNotMatch(assembly.split(`\n${name}:\n`)[1].split(`.size ${name},`)[0], /wide-halfword-fill/);
+  for (const policy of ['--register-residency=stack', '--memory-selection=byte']) {
+    run(tool('badge-codegen-sanitize'), [policy, f('fills.ll'), '-o', f('control.s')]);
+    assert.doesNotMatch(fs.readFileSync(f('control.s'), 'utf8'), /wide-halfword-fill/);
+  }
+  fs.writeFileSync(f('caller.c'), `
+extern void fill_even(unsigned short *, unsigned short);
+extern void fill_odd(unsigned short *, unsigned short);
+int main(void) {
+  _Alignas(4) unsigned short storage[70];
+  for (unsigned parity = 0; parity < 2; ++parity)
+    for (unsigned count = 64; count <= 65; ++count) {
+      unsigned start = 2 + parity;
+      for (unsigned i = 0; i < 70; ++i) storage[i] = 0x1234;
+      (count == 64 ? fill_even : fill_odd)(storage + start, 0x98ab);
+      for (unsigned i = 0; i < 70; ++i)
+        if (storage[i] != (i >= start && i < start + count ? 0x98ab : 0x1234))
+          return 1;
+    }
+  return 0;
+}
+`);
+  run(tool('badge-asm'), [f('fills.s'), '-o', f('fills.o')]);
+  run(tool('badge-asm'), ['badge-compiler/tests/fixtures/codegen_start.S', '-o', f('start.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang', [...flags, '-c', f('caller.c'), '-o', f('caller.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'badge-compiler/tests/fixtures/codegen_fixture.ld',
+    f('start.o'), f('fills.o'), f('caller.o'), '-o', f('fills.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', f('fills.elf')]);
+});
+
 test('repeated scalar streams preserve pixel pairs, unsigned countdowns and clobbering ABI edges', t => {
   const dir = fs.mkdtempSync(path.join(root, 'badge-compiler/build/pixel-fill-'));
   t.after(() => fs.rmSync(dir, { recursive: true }));

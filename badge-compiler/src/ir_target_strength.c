@@ -128,6 +128,82 @@ void ir_exact_pow2(ir_context *c, ir_module *m) {
 
 static void reduce_unsigned(strength *p, int gated);
 
+static int plain_signed_pair_operand(strength *p, const ir_instruction *in) {
+  const ir_line *line = &p->a.text->lines[in->line - 1];
+  return in->opcode == IR_OP_BINARY && in->operand_count == 2 &&
+         p->a.types[in->type].kind == IR_INT && p->a.types[in->type].bits == 32 &&
+         in->end_line == in->line && line->count == 7 &&
+         line->op == line->first + 2 && !line->replacement &&
+         p->a.operands[in->first_operand].kind == IR_OPERAND_LOCAL &&
+         p->a.operands[in->first_operand + 1].kind == IR_OPERAND_LOCAL;
+}
+
+static ir_line *duplicate_extension(strength *p, const ir_operand *first,
+                                    const ir_operand *second, unsigned after) {
+  const ir_definition *a = &p->a.definitions[first->definition];
+  const ir_definition *b = &p->a.definitions[second->definition];
+  if (a->instruction == IR_NONE || b->instruction == IR_NONE || b->use_count != 1)
+    return NULL;
+  const ir_instruction *x = &p->a.instructions[a->instruction];
+  const ir_instruction *y = &p->a.instructions[b->instruction];
+  const ir_line *prior = &p->a.text->lines[x->line - 1];
+  ir_line *line = &p->a.text->lines[y->line - 1];
+  if (x->opcode != IR_OP_CAST || y->opcode != IR_OP_CAST ||
+      x->operand_count != 1 || y->operand_count != 1 ||
+      (strcmp(x->operation, "zext") && strcmp(x->operation, "sext")) ||
+      strcmp(x->operation, y->operation) || b->instruction <= after ||
+      x->end_line != x->line || prior->count != 7 || prior->replacement ||
+      y->end_line != y->line || line->count != 7 || line->replacement)
+    return NULL;
+  const ir_operand *src = &p->a.operands[x->first_operand];
+  const ir_operand *other = &p->a.operands[y->first_operand];
+  return src->kind == IR_OPERAND_LOCAL && other->kind == IR_OPERAND_LOCAL &&
+         src->definition == other->definition && src->type == other->type ? line : NULL;
+}
+
+static void pair_signed_divrem(strength *p, unsigned i) {
+  enum { LOOKAHEAD = 6 };
+  ir_module *m = p->a.text;
+  const ir_instruction *first = &p->a.instructions[i];
+  if (!plain_signed_pair_operand(p, first))
+    return;
+  int remainder_first = !strcmp(first->operation, "srem");
+  const ir_operand *x = &p->a.operands[first->first_operand], *y = x + 1;
+  for (unsigned j = i + 1; j <= i + LOOKAHEAD && j < p->a.instruction_count; ++j) {
+    spend(p);
+    const ir_instruction *second = &p->a.instructions[j];
+    if (second->block != first->block)
+      break;
+    if (plain_signed_pair_operand(p, second) &&
+        !strcmp(second->operation, remainder_first ? "sdiv" : "srem")) {
+      const ir_operand *other = &p->a.operands[second->first_operand];
+      if (y->definition != other[1].definition)
+        break;
+      ir_line *duplicate = NULL;
+      if (x->definition != other->definition) {
+        duplicate = duplicate_extension(p, x, other, i);
+        if (!duplicate)
+          break;
+      } else if (j == i + 1)
+        break;
+      const char *a = p->a.definitions[first->definition].name;
+      const char *b = p->a.definitions[second->definition].name;
+      const char *dividend = ir_text(m, x->token), *divisor = ir_text(m, y->token);
+      m->lines[first->line - 1].replacement = ir_format(
+          p->c, "  %s = sdiv i32 %s, %s\n  %s = srem i32 %s, %s\n",
+          remainder_first ? b : a, dividend, divisor, remainder_first ? a : b,
+          dividend, divisor);
+      m->lines[second->line - 1].replacement = "";
+      if (duplicate)
+        duplicate->replacement = "";
+      ir_note(p->c, "candidate", "adjacent_signed_divrem", 1);
+      break;
+    }
+    if (second->effects)
+      break;
+  }
+}
+
 void ir_divrem_pairs(ir_context *c, ir_module *m) {
   enum { LOOKAHEAD = 6 };
   ir_allocation *mark = c->allocations;
@@ -136,6 +212,11 @@ void ir_divrem_pairs(ir_context *c, ir_module *m) {
   for (unsigned i = 0; i < p.a.instruction_count; i++) {
     spend(&p);
     const ir_instruction *rem = &p.a.instructions[i];
+    if (rem->opcode == IR_OP_BINARY &&
+        (!strcmp(rem->operation, "srem") || !strcmp(rem->operation, "sdiv"))) {
+      pair_signed_divrem(&p, i);
+      continue;
+    }
     if (rem->opcode != IR_OP_BINARY || strcmp(rem->operation, "urem"))
       continue;
     c->line = rem->line;

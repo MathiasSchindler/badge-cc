@@ -93,6 +93,10 @@ static void global_storage_tests(const char *path) {
             "ptr @\"target\"",1,path);
     fixture("int target;struct S{int *p;int n;};struct S value={.p=&target,.p=0};",
             "global [8 x i8] zeroinitializer",1,path);
+    fixture_checked("static const char named[]=\"needle\"; const char *f(void){return \"needle\";}"
+                    "const char *g(void){return named;}",
+                    "internal unnamed_addr constant [7 x i8] c\"needle\\00\"",
+                    "named\" = internal unnamed_addr",1,path);
 }
 int main(void) {
     char dir[]="build/ir-test-XXXXXX"; assert(mkdtemp(dir)!=NULL);

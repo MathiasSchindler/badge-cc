@@ -1109,6 +1109,118 @@ None of the 147 matched objects increased in executable size or per-function
 local-plus-save stack. All 24 exact kernel objects match native outputs on
 256 inputs each, and all nine production IMU digests match.
 
+### Maze generation and RAM fills
+
+The default `divrem-pairs` pass can bring signed i32 operations using the
+same runtime divisor and dividend together. It accepts a duplicate integer
+extension when the source and extension match and the duplicate has one use.
+It preserves intervening effects and flagged operations. The existing Thumb
+selector can then use one `SDIV` and one `MLS`. `small-aggregate` removes
+nonvolatile inline fills of small fixed stack buffers only when same-block
+scalar stores completely cover the buffer before an intervening operation
+can observe it. Both IR changes use the existing final encoding, stack and
+spill admission checks.
+
+The Thumb backend also recognizes closed, fixed-trip halfword fill leaves
+in the word-memory profile. For eligible long fills it uses a halfword
+to reach word alignment if necessary, writes aligned word pairs, and
+preserves the final halfword when needed. Volatile stores are not matched.
+The Cortex-M33 test covers both halfword alignments, odd and even lengths,
+and canaries before and after the output.
+
+| Default changes applied in order | Maze fixture reached instructions |
+| --- | ---: |
+| Prior default | 31,850,143 |
+| Signed div/rem sharing | 31,847,284 |
+| Also remove overwritten fills | 31,741,462 |
+| Also pair aligned RAM stores | 29,667,838 |
+
+These are emulator instruction counts, not hardware timer readings. All 51
+rebuilt UF2s passed payload verification. Compared to the prior default,
+15 images shrink by 1,288 loaded bytes total; no image grows. Tilt Maze
+loads 14,588 bytes instead of 14,732. Across 147 matched objects, 34 shrink
+by 984 executable bytes total, none grow, and no measured local-frame plus
+save area grows.
+
+On the badge, a four-boot comparison of the first two changes moved Maze
+generation from 25,256-25,257 to 22,887-22,889 median timer ticks per batch
+(-9.4%). The separate diagnostics/graphics phase took approximately 0.12%
+longer. A second four-boot comparison isolated word stores: drawing to RAM
+dropped from 54,608 to 37,005-37,007 ticks (-32.2%), and reached frames from
+144,131-144,137 to 139,731-139,736 ticks (-3.1%). The other workloads' sample
+ranges overlapped in the second comparison. Clocks and correctness digests
+matched in both comparisons, and each full-flash restoration was verified
+byte for byte. See the [generation capture](../../build/rp2350-ten-timing/capture/capture.json)
+and [RAM-store capture](../../build/rp2350-ten-fill-timing/capture/capture.json).
+
+The other candidates did not change defaults. The single-call split changed
+no Maze module and grew one Wi-Fi function's frame plus saves by eight bytes.
+Broadening address rematerialization also left Maze unchanged and grew
+several objects. Existing guard splitting remained opt-in: it saved 32
+production object bytes and 4.3% of reached Maze instructions, but retains
+its exceptional spill allowance. The existing pointer induction pass saved
+four executable bytes in IMU Demo only. A four-way source-shape unroll saved
+373,806 reached instructions but added 144 linked text bytes. Passing
+hoisted pixel state through calls added 1,075,389 instructions and 36 linked
+text bytes. A pure cross-unit inline pilot using the LLVM oracle added
+17,545 instructions and 12 linked text bytes. The last three probes do not
+add automatic optimizer passes.
+
+### Cross-application size and code generation
+
+Five changes are enabled in the owned defaults:
+
+- `wide-division` cancels an exact positive factor in a signed wide
+  scaled-square quotient when bounded SSA and branch facts prove both the
+  original product fits signed 64 bits and the square fits signed 32 bits.
+  Tilt Breakout's exact paddle replay agrees on all 32,769 inputs, reaching
+  2,964,764 instead of 21,489,035 QEMU instructions including its caller.
+  The function body alone reaches 1,827,434 instead of 2,357,289 instructions;
+  the larger replay difference includes calls into the removed helper.
+- The frontend marks C string literals `unnamed_addr`. The backend marks
+  eligible complete, byte-aligned literals for exact pooling. The linker
+  shares only byte-identical whole sections in the same script selection;
+  named constants, writable data and ordinary input sections retain their
+  addresses. `--no-literal-pool` preserves unmerged reference comparisons.
+- `global-memory` also forwards a same-width ordinary store to a private
+  global into a nearby load when no intervening operation can write or
+  observe ordered memory. It leaves the original store in place, stops at
+  unknown effects, and admits the result against final Thumb encoding and
+  stack measurements.
+- `small-aggregate` packs adjacent big-endian byte stores to a fixed local
+  buffer into a native `REV16` and aligned halfword store when final
+  code and stack allow it. The display region helper shrinks from 240 to
+  176 bytes with unchanged source. This does not widen volatile transfers.
+- The Thumb backend forwards registers and both outgoing stack words
+  directly in a narrow class of private context-prepending wrappers.
+  Diagnostics' two wrappers drop from 56 to 36 bytes each. Mixed
+  Clang/owned ABI replay checks both stack words and the context pointer.
+
+All 51 RP2350 UF2 payloads verified. Against the preceding defaults, 25
+images shrink by 2,520 loaded bytes in total and none grows. Tilt Breakout
+loads 9,076 instead of 9,480 bytes, Diagnostics 26,276 instead of 26,504,
+IMU Demo 10,876 instead of 10,996, Boat 15,152 instead of 15,236, and
+Tilt Maze 14,516 instead of 14,588. No matched object grew in executable
+size or measured function frame-plus-saves across 147 objects. See the
+[per-image and per-object comparison](../../build/rp2350-more-verified/comparison.json).
+
+The paired single-badge IMU and Maze runs matched all output digests and
+clock snapshots. Maze sample ranges overlap on all six workloads. IMU
+full and dirty pixel generation took 0.010% and 0.087% more ticks
+respectively; the other IMU sample ranges overlap. These are
+previous-owned versus new-owned comparisons, not LLVM comparisons.
+The paddle replay was not timed on silicon.
+
+These experiments did not change defaults:
+
+| Opportunity | Measured result |
+| --- | --- |
+| MMIO address reuse | Local CSE shrank I2C pin initialization by four code bytes, but grew 32 object texts and 37 modules' measured frame/save usage; the broader pass stays explicit. |
+| Private aggregate scalarization | Replacing the IMU projection helper's vector parameter with three scalars in an experiment-only source copy saved 424 bytes in the replay firmware and 1,192 reached instructions. All nine IMU digests matched. This is not a generalized mixed-field pass. |
+| Aligned RAM load pairs | The frame classifier's 64-bit-load prototype passed 240 classifications, but did not reach `LDRD` and grew from 260 to 304 code bytes and from 211,795,821 to 279,917,661 QEMU instructions including the caller. |
+| Packed dispatch keys | An experiment-only source copy with nine combined USB request predicates shrank the Wi-Fi Link handler by 26 bytes and passed the USB protocol test. There is no generalized CFG transform. |
+| Cold outlining | Extracting two repeated Diagnostics action sequences passed the app's host test and saved four object text bytes after charging the new helper. No machine outliner was added. |
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

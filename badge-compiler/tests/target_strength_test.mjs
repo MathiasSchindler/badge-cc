@@ -82,6 +82,123 @@ test('target strength reduction is deterministic, LLVM-valid and preserves work-
   assert.equal(fs.readFileSync(file('preserved.ll'), 'utf8'), 'preserved\n');
 });
 
+test('signed quotient and remainder share a divide through a duplicate extension', t => {
+  const file = fixture(t);
+  fs.writeFileSync(file('input.ll'), irTarget + `
+define i32 @pair(i16 signext %x, i32 %y) {
+entry:
+  %nx = sext i16 %x to i32
+  %r = srem i32 %nx, %y
+  %xx = sext i16 %x to i32
+  %q = sdiv i32 %xx, %y
+  %out = xor i32 %q, %r
+  ret i32 %out
+}
+define i32 @different(i32 %x, i32 %y, i32 %z) {
+entry:
+  %r = srem i32 %x, %y
+  %q = sdiv i32 %x, %z
+  %out = xor i32 %q, %r
+  ret i32 %out
+}
+define i32 @barrier(i32 %x, i32 %y, ptr %p) {
+entry:
+  %r = srem i32 %x, %y
+  store volatile i32 %r, ptr %p, align 4
+  %q = sdiv i32 %x, %y
+  ret i32 %q
+}
+`);
+  invoke(tool('badge-opt-sanitize'), ['--passes=divrem-pairs', file('input.ll'), '-o', file('out.ll')]);
+  const optimized = fs.readFileSync(file('out.ll'), 'utf8');
+  assert.match(optimized, /%q = sdiv i32 %nx, %y\n  %r = srem i32 %nx, %y/);
+  assert.doesNotMatch(optimized, /%xx/);
+  assert.match(optimized, /%r = srem i32 %x, %y\n  %q = sdiv i32 %x, %z/);
+  assert.match(optimized, /store volatile i32 %r, ptr %p, align 4\n  %q = sdiv/);
+  invoke(tool('badge-codegen'), [file('out.ll'), '-o', file('out.s')]);
+  const assembly = fs.readFileSync(file('out.s'), 'utf8').split('\npair:\n')[1].split('.size pair,')[0];
+  assert.equal(assembly.match(/^sdiv /gm)?.length, 1);
+  assert.match(assembly, /^mls /m);
+  if (!oracle) return;
+  fs.writeFileSync(file('caller.c'), `
+extern int pair(short, int);
+int main(void) {
+  static const short dividends[] = {-32768, -199, -1, 0, 1, 199, 32767};
+  static const int divisors[] = {-2147483647 - 1, -17, -1, 1, 5, 37, 2147483647};
+  for (unsigned i = 0; i < sizeof(dividends) / sizeof(*dividends); ++i)
+    for (unsigned j = 0; j < sizeof(divisors) / sizeof(*divisors); ++j) {
+      volatile int x = dividends[i], y = divisors[j];
+      if (pair(x, y) != ((x / y) ^ (x % y))) return 1;
+    }
+  return 0;
+}
+`);
+  invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('out.ll')]);
+  invoke(tool('badge-asm'), [file('out.s'), '-o', file('out.o')]);
+  invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
+  invoke(clang, [...target, '-ffreestanding', '-Oz', '-c', file('caller.c'), '-o', file('caller.o')]);
+  invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+    file('start.o'), file('caller.o'), file('out.o'), '-o', file('out.elf')]);
+  invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('out.elf')]);
+});
+
+test('bounded scaled squares cancel exact factors before wide division', t => {
+  const file = fixture(t);
+  const example = (name, bound, divisor) => `
+define i32 @${name}(i32 %x) {
+entry:
+  %valid = icmp sgt i32 %x, -100
+  br i1 %valid, label %high, label %fallback
+high:
+  %large = icmp sgt i32 %x, ${bound}
+  br i1 %large, label %cap, label %join
+cap:
+  br label %join
+join:
+  %c = phi i32 [%x, %high], [${bound}, %cap]
+  %y = sext i32 %c to i64
+  %sq = mul i64 %y, %y
+  %n = mul i64 %sq, 2240
+  %q = sdiv i64 %n, ${divisor}
+  %out = trunc i64 %q to i32
+  ret i32 %out
+fallback:
+  ret i32 99
+}`;
+  fs.writeFileSync(file('input.ll'), irTarget + example('bounded', 11200, 125440000) +
+    example('not_exact', 11200, 125440001) + example('too_wide', 46341, 125440000));
+  invoke(tool('badge-opt-sanitize'),
+    ['--passes=wide-division,dead-instructions', file('input.ll'), '-o', file('out.ll')]);
+  const ir = fs.readFileSync(file('out.ll'), 'utf8');
+  const body = name => ir.match(new RegExp(`define i32 @${name}[^]*?\\n}`))[0];
+  assert.match(body('bounded'), /udiv i32 %[^,]+, 56000/);
+  assert.doesNotMatch(body('bounded'), /mul i64|call i64/);
+  assert.match(body('not_exact'), /call i64/);
+  assert.match(body('too_wide'), /call i64/);
+  if (!oracle) return;
+  invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('out.ll')]);
+  fs.writeFileSync(file('caller.c'), `
+extern int bounded(int);
+int main(void) {
+  for (int x = -103; x <= 11300; ++x) {
+    volatile int n = x > 11200 ? 11200 : x;
+    if (bounded(x) != (x <= -100 ? 99 : n*n / 56000)) return 1;
+  }
+  return 0;
+}`);
+  invoke(tool('badge-codegen'), [file('out.ll'), '-o', file('out.s')]);
+  invoke(tool('badge-asm'), [file('out.s'), '-o', file('out.o')]);
+  invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
+  invoke(clang, [...target, '-ffreestanding', '-Oz', '-c', file('caller.c'), '-o', file('caller.o')]);
+  invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+    file('start.o'), file('caller.o'), file('out.o'), '-o', file('out.elf')]);
+  invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('out.elf')]);
+});
+
 test('exact signed power-of-two division follows local and internal-return multiples only', t => {
   const file = fixture(t);
   fs.writeFileSync(file('input.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"

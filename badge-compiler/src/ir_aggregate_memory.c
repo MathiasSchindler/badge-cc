@@ -1,4 +1,5 @@
 #include "ir_analysis.h"
+#include "ir_loop_admission.h"
 #include <inttypes.h>
 #include <string.h>
 
@@ -30,6 +31,209 @@ static unsigned byte_buffer(const ir_analysis *a, const ir_definition *def) {
                  a->types[type->element].bits == 8
              ? type->count
              : 0;
+}
+
+static int buffer_offset(const ir_analysis *a, const ir_operand *address,
+                         unsigned buffer, uint64_t *offset) {
+  if (address->kind != IR_OPERAND_LOCAL)
+    return 0;
+  if (address->definition == buffer) {
+    *offset = 0;
+    return 1;
+  }
+  unsigned def = a->definitions[address->definition].instruction;
+  if (def == IR_NONE)
+    return 0;
+  const ir_instruction *gep = &a->instructions[def];
+  if (gep->opcode != IR_OP_GEP || gep->operand_count != 2)
+    return 0;
+  const ir_line *line = &a->text->lines[gep->line - 1];
+  const ir_operand *base = &a->operands[gep->first_operand];
+  return gep->line == gep->end_line && line->count == 10 &&
+         !strcmp(ir_text(a->text, line->op + 1), "i8") &&
+         base->kind == IR_OPERAND_LOCAL && base->definition == buffer &&
+         base[1].kind == IR_OPERAND_LITERAL &&
+         a->types[base[1].type].kind == IR_INT &&
+         a->types[base[1].type].bits == 32 &&
+         ir_integer(ir_text(a->text, base[1].token), offset);
+}
+
+static int remove_overwritten_fills(ir_context *c, ir_analysis *a) {
+  enum { MAX_BYTES = 32, WINDOW = 24 };
+  ir_module *m = a->text;
+  int changed = 0;
+  for (unsigned i = 0; i < a->instruction_count; ++i) {
+    const ir_instruction *fill = &a->instructions[i];
+    if (fill->opcode != IR_OP_CALL || fill->callee == IR_NONE ||
+        fill->operand_count != 5 || fill->line != fill->end_line ||
+        strcmp(ir_text(m, a->operands[fill->callee].token),
+               "@llvm.memset.inline.p0.i32"))
+      continue;
+    const ir_operand *buffer = &a->operands[fill->first_operand + 1];
+    uint64_t size;
+    if (buffer->kind != IR_OPERAND_LOCAL ||
+        buffer[2].kind != IR_OPERAND_LITERAL ||
+        !ir_integer(ir_text(m, buffer[2].token), &size) ||
+        !size || size > MAX_BYTES ||
+        byte_buffer(a, &a->definitions[buffer->definition]) != size ||
+        strcmp(ir_text(m, buffer[3].token), "false"))
+      continue;
+    uint64_t remaining = (UINT64_C(1) << size) - 1;
+    for (unsigned j = i + 1; j <= i + WINDOW && j < a->instruction_count; ++j) {
+      const ir_instruction *next = &a->instructions[j];
+      if (next->block != fill->block ||
+          (next->effects & (IR_EFFECT_VOLATILE | IR_EFFECT_OPAQUE | IR_EFFECT_CALL |
+                            IR_EFFECT_CONTROL)))
+        break;
+      if (!(next->effects & (IR_EFFECT_READ | IR_EFFECT_WRITE)))
+        continue;
+      const ir_operand *op = &a->operands[next->first_operand];
+      if (next->opcode == IR_OP_LOAD && op->kind == IR_OPERAND_GLOBAL)
+        continue;
+      if (next->opcode != IR_OP_STORE || next->line != next->end_line)
+        break;
+      uint64_t offset;
+      const ir_type *type = &a->types[op->type];
+      if (type->kind != IR_INT ||
+          (type->bits != 8 && type->bits != 16 && type->bits != 32) ||
+          !buffer_offset(a, op + 1, buffer->definition, &offset) ||
+          offset >= size || type->bits / 8 > size - offset)
+        break;
+      remaining &= ~(((UINT64_C(1) << (type->bits / 8)) - 1) << offset);
+      if (!remaining) {
+        m->lines[fill->line - 1].replacement = "";
+        ir_note(c, "candidate", "overwritten_private_fill", 1);
+        changed = 1;
+        break;
+      }
+    }
+  }
+  return changed;
+}
+
+static const ir_operand *swap_byte(const ir_analysis *a, const ir_operand *value,
+                                   int high) {
+  if (value->kind != IR_OPERAND_LOCAL)
+    return NULL;
+  unsigned i = a->definitions[value->definition].instruction;
+  if (i == IR_NONE)
+    return NULL;
+  const ir_instruction *cast = &a->instructions[i];
+  const ir_module *m = a->text;
+  if (cast->opcode != IR_OP_CAST || strcmp(cast->operation, "trunc") ||
+      cast->operand_count != 1 || a->types[cast->type].bits != 8 ||
+      cast->line != cast->end_line || m->lines[cast->line - 1].count != 7)
+    return NULL;
+  const ir_operand *word = &a->operands[cast->first_operand];
+  if (word->kind != IR_OPERAND_LOCAL || a->types[word->type].bits != 32)
+    return NULL;
+  if (!high)
+    return word;
+  i = a->definitions[word->definition].instruction;
+  if (i == IR_NONE)
+    return NULL;
+  const ir_instruction *shift = &a->instructions[i];
+  const ir_operand *source = &a->operands[shift->first_operand];
+  if (shift->opcode != IR_OP_BINARY || strcmp(shift->operation, "lshr") ||
+      shift->operand_count != 2 || shift->line != shift->end_line ||
+      m->lines[shift->line - 1].count != 7 ||
+      source->kind != IR_OPERAND_LOCAL ||
+      strcmp(ir_text(m, source[1].token), "8"))
+    return NULL;
+  return source;
+}
+
+static int pack_byte_pairs(ir_context *c, ir_analysis *a) {
+  enum { WINDOW = 6 };
+  ir_module *m = a->text;
+  int little = 0;
+  for (unsigned n = 0; n < m->line_count; ++n) {
+    const ir_line *line = &m->lines[n];
+    if (line->count == 4 && !strcmp(ir_text(m, line->first), "target") &&
+        !strcmp(ir_text(m, line->first + 1), "datalayout"))
+      little = !strncmp(ir_text(m, line->first + 3), "\"e-", 3);
+  }
+  if (!little)
+    return 0;
+  int changed = 0;
+  for (unsigned i = 0; i < a->instruction_count; ++i) {
+    const ir_instruction *store = &a->instructions[i];
+    ir_line *row = &m->lines[store->line - 1];
+    if (store->opcode != IR_OP_STORE || store->effects != (IR_EFFECT_WRITE | IR_EFFECT_TRAP) ||
+        store->line != store->end_line || row->replacement || row->count != 9)
+      continue;
+    const ir_operand *first = &a->operands[store->first_operand], *addr = first + 1;
+    if (addr->kind != IR_OPERAND_LOCAL || a->types[first->type].bits != 8)
+      continue;
+    unsigned base = addr->definition, def = a->definitions[base].instruction;
+    if (def == IR_NONE)
+      continue;
+    const ir_instruction *where = &a->instructions[def];
+    if (where->opcode == IR_OP_GEP && where->operand_count == 2) {
+      const ir_operand *operand = &a->operands[where->first_operand];
+      if (operand->kind != IR_OPERAND_LOCAL)
+        continue;
+      base = operand->definition;
+    }
+    const ir_definition *object = &a->definitions[base];
+    unsigned capacity = byte_buffer(a, object);
+    uint64_t offset;
+    if (capacity < 2 || capacity > 32 || !buffer_offset(a, addr, base, &offset) ||
+        offset % 2 || offset > capacity - 2)
+      continue;
+    ir_line *allocation = &m->lines[a->instructions[object->instruction].line - 1];
+    unsigned align = result_buffer_align(m, allocation->op, allocation->first + allocation->count);
+    if (!align || (align < 2 && allocation->count != 11))
+      continue;
+    const ir_operand *source = swap_byte(a, first, 1);
+    if (!source)
+      continue;
+    for (unsigned j = i + 1; j <= i + WINDOW && j < a->instruction_count; ++j) {
+      const ir_instruction *second = &a->instructions[j];
+      if (second->block != store->block)
+        break;
+      if (!second->effects)
+        continue;
+      ir_line *next = &m->lines[second->line - 1];
+      if (second->opcode != IR_OP_STORE || second->effects != store->effects ||
+          second->line != second->end_line || next->count != 9 || next->replacement)
+        break;
+      const ir_operand *low = &a->operands[second->first_operand];
+      uint64_t following;
+      const ir_operand *same = swap_byte(a, low, 0);
+      if (a->types[low->type].bits == 8 && same &&
+          same->definition == source->definition &&
+          buffer_offset(a, low + 1, base, &following) && following == offset + 1) {
+        const char *half = ir_fresh(c, m, '%'), *swapped = ir_fresh(c, m, '%');
+        row->replacement = ir_format(c,
+            "  %s = trunc i32 %s to i16\n  %s = call i16 @llvm.bswap.i16(i16 %s)\n"
+            "  store i16 %s, ptr %s, align 2\n", half, ir_text(m, source->token),
+            swapped, half, swapped, ir_text(m, addr->token));
+        next->replacement = "";
+        if (a->definitions[first->definition].use_count == 1) {
+          const ir_instruction *high = &a->instructions[a->definitions[first->definition].instruction];
+          m->lines[high->line - 1].replacement = "";
+          const ir_operand *shift = &a->operands[high->first_operand];
+          if (a->definitions[shift->definition].use_count == 1)
+            m->lines[a->instructions[a->definitions[shift->definition].instruction].line - 1].replacement = "";
+        }
+        if (a->definitions[low->definition].use_count == 1)
+          m->lines[a->instructions[a->definitions[low->definition].instruction].line - 1].replacement = "";
+        const ir_operand *tail = low + 1;
+        if (tail->definition != base && a->definitions[tail->definition].use_count == 1)
+          m->lines[a->instructions[a->definitions[tail->definition].instruction].line - 1].replacement = "";
+        if (align < 2) {
+          const char *name = object->name;
+          allocation->replacement = ir_format(c, "  %s = alloca [%u x i8], align 2\n",
+                                               name, capacity);
+        }
+        ir_note(c, "candidate", "private_big_endian_halfword_store", 1);
+        changed = 1;
+      }
+      break;
+    }
+  }
+  return changed;
 }
 
 static const ir_operand *plain_copy(const ir_analysis *a, const ir_instruction *in,
@@ -158,6 +362,24 @@ void ir_small_aggregate(ir_context *c, ir_module *m) {
   ir_allocation *mark = c->allocations;
   ir_analysis a;
   ir_analyze(c, m, &a);
+  int fills = remove_overwritten_fills(c, &a);
+  int packed = pack_byte_pairs(c, &a);
+  if (fills || packed) {
+    ir_function_admission(c, m, &a, BADGE_SELECTION_THUMB_CONSTANTS);
+    int admitted = 0, declared = 0;
+    for (unsigned i = 0; i < m->line_count; ++i)
+      admitted |= m->lines[i].replacement &&
+                  strstr(m->lines[i].replacement, "call i16 @llvm.bswap.i16(") != NULL;
+    for (unsigned i = 0; i < a.global_count; ++i) {
+      const char *name = a.globals[i].name;
+      if (!strcmp(name, "@llvm.bswap.i16") || !strcmp(name, "@\"llvm.bswap.i16\""))
+        declared = 1;
+    }
+    if (admitted && !declared)
+      m->suffix = "declare i16 @llvm.bswap.i16(i16)\n";
+    ir_reparse(c, m, mark);
+    ir_analyze(c, m, &a);
+  }
   unsigned changed = 0;
   for (unsigned i = 0; i < a.instruction_count; i++) {
     const ir_instruction *allocation = &a.instructions[i];

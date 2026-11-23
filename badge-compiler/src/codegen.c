@@ -621,15 +621,16 @@ static void cg_global(cg_context *c) {
   }
   if (!strncmp(name, "llvm.", 5))
     cg_error(c, "unsupported LLVM special global");
-  int internal = 0, external = 0, constant = 0;
+  int internal = 0, external = 0, constant = 0, unnamed = 0;
   while (!cg_is(c, "global") && !cg_is(c, "constant")) {
     char *s = cg_take(c);
     if (!strcmp(s, "internal") || !strcmp(s, "private"))
       internal = 1;
     else if (!strcmp(s, "external"))
       external = 1;
-    else if (strcmp(s, "dso_local") && strcmp(s, "local_unnamed_addr") &&
-             strcmp(s, "unnamed_addr"))
+    else if (!strcmp(s, "unnamed_addr"))
+      unnamed = 1;
+    else if (strcmp(s, "dso_local") && strcmp(s, "local_unnamed_addr"))
       cg_error(c, "unsupported global linkage/attribute");
   }
   constant = cg_accept(c, "constant");
@@ -654,6 +655,10 @@ static void cg_global(cg_context *c) {
     if (section)
       cg_emit(c, ".section \"%s\",\"%s\",%%progbits\n", section,
               constant ? "a" : "aw");
+    else if (internal && unnamed && constant && align == 1 && t->base &&
+             t->base->bits == 8 && t->size && cg_is(c, "c"))
+      cg_emit(c, ".section .rodata.badge.literal.%s,\"aM\",%%progbits,%u\n",
+              name, t->size);
     else
       cg_emit(c, ".section .%s.%s,\"%s\",%%%s\n",
               constant                      ? "rodata"
@@ -1686,6 +1691,17 @@ static void cg_call(cg_context *c, cg_inst *i) {
       c->pos = after;
       return;
     }
+    if (!strcmp(callee, "@llvm.bswap.i16")) {
+      if (count != 1 || !i->result || ret->bits != 16 ||
+          i->result->type->bits != 16 || args[0].type->bits != 16)
+        cg_error(c, "invalid i16 byte-swap intrinsic");
+      c->pos = args[0].start;
+      cg_value_read(c, args[0].type, 0, 0);
+      cg_emit(c, "rev16.n r0, r0\n");
+      cg_save(c, i->result, 0, 0);
+      c->pos = after;
+      return;
+    }
     if (!strcmp(callee, "@llvm.ctlz.i64")) {
       if (count != 2 || !i->result || i->result->type->bits != 64 ||
           args[0].type->bits != 64 || args[1].type->bits != 1)
@@ -1866,7 +1882,8 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
       return 0;
     for (unsigned k = at + 1; k < i->end; k++) {
       cg_register_work(c);
-      if (!strcmp(c->tokens[k].text, "asm"))
+      if (!strcmp(c->tokens[k].text, "asm") ||
+          !strcmp(c->tokens[k].text, "@llvm.bswap.i16"))
         return 0;
     }
     unsigned ret = at + 1;
@@ -2053,11 +2070,135 @@ static int cg_fill_label(const char *token, const char *name) {
           !strncmp(token + 1, name, n) && token[n + 1] == '"');
 }
 
-cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
+int cg_emit_prepend_context_wrapper(cg_context *c) {
+  cg_function *f = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      !cg_global_residency(c) || !f->internal || f->argc != 5 || f->ret->size)
+    return 0;
+  for (unsigned k = 0; k < 5; ++k)
+    if (f->byval[k] || f->arg_align[k] >= 8 ||
+        f->args[k]->type->bits != (k == 4 ? 16u : 32u))
+      return 0;
+  const cg_block *b = f->blocks;
+  while (b && b->next && b->first && b->first == b->last &&
+         b->first->end - b->first->begin == 3 &&
+         !strcmp(c->tokens[b->first->begin].text, "br") &&
+         !strcmp(c->tokens[b->first->begin + 1].text, "label") &&
+         cg_fill_label(c->tokens[b->first->begin + 2].text, b->next->name))
+    b = b->next;
+  if (!b || b->next || !b->first || b->first->next != b->last ||
+      b->last->end - b->last->begin != 2 ||
+      strcmp(c->tokens[b->last->begin].text, "ret") ||
+      strcmp(c->tokens[b->last->begin + 1].text, "void"))
+    return 0;
+  unsigned at = b->first->begin, end = b->first->end;
+  if (end - at != 23 || strcmp(c->tokens[at].text, "call") ||
+      strcmp(c->tokens[at + 1].text, "void") ||
+      c->tokens[at + 2].text[0] != '@' || strcmp(c->tokens[at + 3].text, "(") ||
+      strcmp(c->tokens[at + 4].text, "ptr") || c->tokens[at + 5].text[0] != '@' ||
+      !strncmp(cg_name(c, c->tokens[at + 2].text), "llvm.", 5))
+    return 0;
+  for (unsigned k = 0, n = at + 7; k < 5; ++k, n += 3) {
+    const char *type = c->tokens[n].text;
+    if (strcmp(c->tokens[n - 1].text, ",") ||
+        (k < 4 ? (strcmp(type, "i32") && strcmp(type, "ptr")) : strcmp(type, "i16")))
+      return 0;
+    if (k == 4 && strcmp(c->tokens[++n].text, "zeroext"))
+      return 0;
+    if (strcmp(c->tokens[n + 1].text, f->args[k]->name))
+      return 0;
+  }
+  if (strcmp(c->tokens[end - 1].text, ")"))
+    return 0;
+  f->frame = 0;
+  cg_emit(c, "@ wrapper-stack-arguments: direct incoming and outgoing words\n"
+             "@ frame-incoming: 4 0\nsub.n sp, sp, #8\n"
+             "uxth.n r4, r4\nstrd r3, r4, [sp]\n"
+             "mov r3, r2\nmov r2, r1\nmov r1, r0\n");
+  cg_symbol(c, 0, cg_name(c, c->tokens[at + 5].text), 0);
+  cg_emit(c, "bl %s\nadd.n sp, sp, #8\n",
+          cg_name(c, c->tokens[at + 2].text));
+  return 1;
+}
+
 #define FILL_MATCH(i, ...) \
   cg_fill_tokens(c, i, sizeof((const char *[]){__VA_ARGS__}) / sizeof(char *), \
                  (const char *[]){__VA_ARGS__})
 #define FILL_TOKEN(i, k) (c->tokens[(i)->begin + (k)].text)
+
+int cg_emit_wide_fill_leaf(cg_context *c) {
+  const cg_function *f = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->memory_selection != BADGE_MEMORY_WORD || !cg_global_residency(c) ||
+      f->argc != 2 || f->ret->size ||
+      f->byval[0] || f->byval[1] || f->args[0]->type->size != 4 ||
+      f->args[1]->type->bits != 16)
+    return 0;
+  cg_block *pre = f->blocks;
+  if (!pre)
+    return 0;
+  while (pre->first == pre->last && FILL_MATCH(pre->last, "br", "label", NULL) &&
+         pre->next && pre->next->first == pre->next->last &&
+         cg_fill_label(FILL_TOKEN(pre->last, 2), pre->next->name))
+    pre = pre->next;
+  cg_block *head = pre->next;
+  if (!head || pre->first != pre->last ||
+      !FILL_MATCH(pre->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(pre->last, 2), head->name))
+    return 0;
+  cg_block *body = head->next, *latch = body ? body->next : NULL;
+  cg_block *exit = latch ? latch->next : NULL;
+  if (!exit || exit->next || exit->first != exit->last ||
+      !FILL_MATCH(exit->first, "ret", "void"))
+    return 0;
+  cg_inst *count = head->first, *offset = count ? count->next : NULL;
+  cg_inst *cmp = offset ? offset->next : NULL;
+  if (!FILL_MATCH(count, NULL, "=", "phi", "i32", "[", "0", ",", NULL, "]", ",",
+                  "[", NULL, ",", NULL, "]") ||
+      !FILL_MATCH(offset, NULL, "=", "phi", "i32", "[", "0", ",",
+                  FILL_TOKEN(count, 7), "]", ",", "[", NULL, ",", FILL_TOKEN(count, 13), "]") ||
+      !cg_fill_label(FILL_TOKEN(count, 7), pre->name) ||
+      !cg_fill_label(FILL_TOKEN(count, 13), latch->name) ||
+      !FILL_MATCH(cmp, NULL, "=", "icmp", "ult", "i32", FILL_TOKEN(count, 0), ",", NULL) ||
+      cmp->next != head->last ||
+      !FILL_MATCH(head->last, "br", "i1", FILL_TOKEN(cmp, 0), ",", "label", NULL, ",", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(head->last, 5), body->name) ||
+      !cg_fill_label(FILL_TOKEN(head->last, 8), exit->name))
+    return 0;
+  cg_inst *gep = body->first, *store = gep ? gep->next : NULL;
+  cg_inst *step = latch->first, *advance = step ? step->next : NULL;
+  if (!FILL_MATCH(gep, NULL, "=", "getelementptr", "i8", ",", "ptr", f->args[0]->name, ",",
+                  "i32", FILL_TOKEN(offset, 0)) ||
+      !FILL_MATCH(store, "store", "i16", f->args[1]->name, ",", "ptr", FILL_TOKEN(gep, 0), ",",
+                  "align", "2") ||
+      store->next != body->last || !FILL_MATCH(body->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(body->last, 2), latch->name) ||
+      !FILL_MATCH(step, FILL_TOKEN(count, 11), "=", "add", "i32", FILL_TOKEN(count, 0), ",", "1") ||
+      !FILL_MATCH(advance, FILL_TOKEN(offset, 11), "=", "add", "i32", FILL_TOKEN(offset, 0), ",", "2") ||
+      advance->next != latch->last || !FILL_MATCH(latch->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(latch->last, 2), head->name))
+    return 0;
+  const char *limit = FILL_TOKEN(cmp, 7);
+  if (!isdigit((unsigned char)*limit))
+    return 0;
+  uint64_t trips = cg_number(c, limit);
+  if (trips < 64 || trips / 2 > UINT16_MAX)
+    return 0;
+  unsigned id = ++c->unique;
+  cg_emit(c, "@ stack-frame: 0 + 0 saved-register bytes\n"
+             "@ wide-halfword-fill: aligned word pairs with an edge halfword\n"
+             "movw r2, #%u\nbfi r1, r1, #16, #16\nlsls.n r3, r0, #30\n"
+             "bpl.n .Lcg_fill%u\nstrh.w r1, [r0], #2\n",
+          (unsigned)(trips / 2), id);
+  if (!(trips & 1))
+    cg_emit(c, "subs.n r2, #1\n");
+  cg_emit(c, ".Lcg_fill%u:\nstr.w r1, [r0], #4\nsubs.n r2, #1\nbne.n .Lcg_fill%u\n"
+             "%s r3, .Lcg_fill_done%u\nstrh.n r1, [r0]\n.Lcg_fill_done%u:\nbx lr\n",
+          id, id, trips & 1 ? "cbnz" : "cbz", id, id);
+  return 1;
+}
+
+cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       !cg_global_residency(c) || !pre || !head->next || !head->next->next ||
       !head->next->next->next || !FILL_MATCH(pre->last, "br", "label", NULL) ||

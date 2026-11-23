@@ -23,7 +23,9 @@ typedef struct { const char *name; uint32_t origin,length,permissions; uint64_t 
 typedef struct { const char *name; uint32_t address,load,size,alignment,flags,offset; int region,load_region,noload,fill,laid; } lk_output;
 typedef struct { int kind,out,keep,provide; const char *name; lk_expr *expr; } lk_command;
 typedef struct { const char *path; bo_object_t *object; struct lk_section *sections; uint32_t *globals,*next; } lk_file;
-typedef struct lk_section { lk_file *file; uint32_t index,head,offset; int out,live,discard,placed; } lk_section;
+typedef struct lk_section { lk_file *file; uint32_t index,head,offset;
+    unsigned merge_select; struct lk_section *merge_next;
+    int out,live,discard,placed; } lk_section;
 typedef struct {
     const char *name; lk_file *file; uint32_t symbol,value,size,alignment,visibility,next;
     int binding,type,script,provide,defined,live,out,common,placed;
@@ -37,8 +39,9 @@ typedef struct {
     lk_output outputs[LK_OUTPUTS]; unsigned output_count;
     lk_command commands[LK_COMMANDS]; unsigned command_count;
     lk_global *globals; uint32_t *hash; unsigned global_count;
+    lk_section **literal_hash;
     const char *script,*output,*map,*entry,*cursor,*token; unsigned line;
-    int quoted,gc,active; uint64_t dot;
+    int quoted,gc,active,no_literal_pool; uint64_t dot;
     FILE *reading; unsigned char *temporary;
     unsigned char *image,*map_bytes; size_t image_size,map_size;
 } linker_t;
@@ -552,10 +555,34 @@ static void lk_close_output(linker_t *l) {
     }
     l->active=-1;
 }
-static void lk_place(linker_t *l,lk_section *s) {
+static int lk_share_literal(linker_t *l,lk_section *s,const bo_section_t *input,
+                            unsigned select) {
+    static const char prefix[]=".rodata.badge.literal.";
+    if(l->no_literal_pool || input->type!=BO_PROGBITS ||
+       input->flags!=(2|16) || input->alignment!=1 ||
+       !input->size || input->entry_size!=input->size || s->head!=UINT32_MAX ||
+       strncmp(input->name,prefix,sizeof(prefix)-1)!=0 || l->outputs[l->active].noload)
+        return 0;
+    if(!l->literal_hash) l->literal_hash=lk_allocate(l,LK_HASH*sizeof(*l->literal_hash));
+    uint32_t hash=2166136261u^select;
+    for(uint32_t k=0;k<input->size;++k) hash=(hash^input->data[k])*16777619u;
+    lk_section **bucket=&l->literal_hash[hash%LK_HASH];
+    for(const lk_section *other=*bucket;other;other=other->merge_next) {
+        const bo_section_t *candidate=&other->file->object->sections[other->index-1];
+        if(other->merge_select==select && candidate->size==input->size &&
+           !memcmp(input->data,candidate->data,input->size)) {
+            s->offset=other->offset;
+            return 1;
+        }
+    }
+    s->merge_select=select; s->merge_next=*bucket; *bucket=s;
+    return 0;
+}
+static void lk_place(linker_t *l,lk_section *s,unsigned select) {
     lk_output *o=&l->outputs[l->active]; const bo_section_t *input=&s->file->object->sections[s->index-1];
     if(input->type!=BO_PROGBITS && input->type!=BO_NOBITS) lk_error(l,"unsupported allocated section type in %s",input->name);
     if(input->type==BO_NOBITS && !o->noload) lk_error(l,"NOBITS input requires NOLOAD output");
+    if(lk_share_literal(l,s,input,select)) return;
     l->dot=lk_align(l,l->dot,input->alignment); s->offset=lk_bound(l,l->dot-o->address);
     l->dot+=input->size; lk_bound(l,l->dot);
 }
@@ -605,7 +632,7 @@ static void lk_layout(linker_t *l) {
                         lk_section *s=&f->sections[j];
                         if(s->live && s->out==l->active && lk_matches(command->name,f->object->sections[j-1].name)) {
                             if(s->placed) continue;
-                            lk_place(l,s);
+                            lk_place(l,s,c);
                             s->placed=1;
                         }
                     }
@@ -841,8 +868,9 @@ int main(int argc,char **argv) {
             if(*dest) lk_error(l,"duplicate option '%s'",p); *dest=argv[++k];
         } else if(strcmp(p,"--gc-sections")==0) l->gc=1;
         else if(strcmp(p,"--no-gc-sections")==0) l->gc=0;
+        else if(strcmp(p,"--no-literal-pool")==0) l->no_literal_pool=1;
         else if(strcmp(p,"--help")==0 && argc==2) {
-            printf("usage: badge-link -T script.ld [--gc-sections|--no-gc-sections] [-Map output.map] -o output.elf input.o ...\n");
+            printf("usage: badge-link -T script.ld [--gc-sections|--no-gc-sections] [--no-literal-pool] [-Map output.map] -o output.elf input.o ...\n");
             lk_destroy(l); return 0;
         } else if(p[0]=='-') lk_error(l,"unsupported option '%s'",p);
         else {

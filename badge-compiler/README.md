@@ -162,6 +162,12 @@ to the preceding eight passes. Query the exact list with
 `badge-opt --default-passes`. `divrem-pairs` also replaces profitable
 unsigned power-of-two divisions and remainders with shifts and masks.
 See the [qualification results](docs/current-promotion.md#november-default-update).
+The [Maze follow-up](docs/current-promotion.md#maze-generation-and-ram-fills)
+shares signed quotients and remainders, removes fully overwritten private
+fills, and uses aligned word stores for eligible long halfword RAM fills.
+The [cross-application follow-up](docs/current-promotion.md#cross-application-size-and-code-generation)
+adds bounded fixed-point division narrowing, exact literal pooling, private
+store forwarding and two Thumb argument/buffer transport selections.
 The [short Thumb and tiny-leaf follow-up](docs/current-promotion.md#short-thumb-instruction-and-tiny-leaf-follow-up)
 adds five instruction selections and a bounded exception for inlining
 tiny integer helpers.

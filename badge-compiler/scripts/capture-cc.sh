@@ -246,7 +246,7 @@ for variant in "${variants[@]}"; do
             esac
         done
         run "$ORACLE_CLANG" "${reference_args[@]}" "--ld-path=$ORACLE_LLD"
-        run "$ORACLE_LINK" "${owned_args[@]}"
+        run "$ORACLE_LINK" --no-literal-pool "${owned_args[@]}"
         run "$ORACLE_OBJCOPY" -O binary "$dir/link-reference.elf" "$dir/link-reference.bin"
         run "$ORACLE_ELF2BIN" -O binary "$dir/link-reference.elf" "$dir/ours-link-reference.bin"
         cmp "$dir/link-reference.bin" "$dir/ours-link-reference.bin"
@@ -268,7 +268,7 @@ for variant in "${variants[@]}"; do
             esac
         done
         run "$ORACLE_CLANG" "${reference_args[@]}" "--ld-path=$ORACLE_LLD"
-        run "$ORACLE_LINK" "${owned_args[@]}"
+        run "$ORACLE_LINK" --no-literal-pool "${owned_args[@]}"
         run "$ORACLE_OBJCOPY" -O binary "$dir/$variant-reference.elf" "$dir/$variant-reference.bin"
         run "$ORACLE_ELF2BIN" -O binary "$dir/$variant-reference.elf" "$dir/ours-$variant-reference.bin"
         cmp "$dir/$variant-reference.bin" "$dir/ours-$variant-reference.bin"
