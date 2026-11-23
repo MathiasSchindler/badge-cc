@@ -74,6 +74,45 @@ test('RP2350 byte, halfword, table and carry selectors reject near misses', t =>
     }
   }
 });
+test('unsigned distance diamond preserves extremes and signs without branching', t => {
+  const file = files(t);
+  fs.writeFileSync(file('input.c'), `
+unsigned distance(unsigned a, unsigned b) {
+  return a > b ? a - b : b - a;
+}
+unsigned different(unsigned a, unsigned b) {
+  return a > b ? a + b : b - a;
+}
+`);
+  run(tool('badge-ir'), [file('input.c'), '-o', file('initial.ll')]);
+  run(tool('badge-opt'), [file('initial.ll'), '-o', file('input.ll')]);
+  run(tool('badge-codegen-sanitize'), [file('input.ll'), '-o', file('input.s')]);
+  const asm = fs.readFileSync(file('input.s'), 'utf8');
+  assert.match(asm.slice(0, asm.indexOf('.size distance,')), /@ unsigned-distance:/);
+  assert.doesNotMatch(asm.slice(asm.indexOf('\ndifferent:')), /@ unsigned-distance:/);
+  fs.writeFileSync(file('main.c'), `
+extern unsigned distance(unsigned, unsigned);
+int main(void) {
+  const unsigned inputs[] = {0, 1, 2, 128, 0x7fffffffu, 0x80000000u, 0xfffffffeu, 0xffffffffu};
+  for (unsigned i = 0; i < 8; ++i)
+    for (unsigned j = 0; j < 8; ++j) {
+      unsigned a = inputs[i], b = inputs[j];
+      if (distance(a, b) != (a > b ? a - b : b - a)) return 1;
+    }
+  return 0;
+}
+`);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const arm = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(clang, [...arm, '-Oz', '-ffreestanding', '-c', file('main.c'), '-o', file('main.o')]);
+  run(tool('badge-asm'), [file('input.s'), '-o', file('input.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('input.o'), file('main.o'), '-o', file('oracle.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('oracle.elf')]);
+});
 test('small symmetric clamp preserves both values of sticky Q and retains volatile tails', t => {
   const file = files(t);
   fs.writeFileSync(file('clamp.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
@@ -481,6 +520,7 @@ test('wide arithmetic lowers carry, borrow and word boundaries exactly', t => {
   const file = files(t);
   const fn = (name, args, body) => `define i64 @${name}(${args}) {\nentry:\n${body}\n}\n`;
   const unary = 'i64 %x', binary = 'i64 %x, i64 %y';
+  const truncatedDivisors = [2, 4096, 2147483648];
   const shifts = ['shl', 'lshr', 'ashr'].flatMap(op =>
     [0, 1, 31, 32, 33, 63].map(n => [op, n]));
   const masks = [
@@ -494,8 +534,40 @@ test('wide arithmetic lowers carry, borrow and word boundaries exactly', t => {
     masks.map(([name, op, value]) => fn(name, unary, `%v = ${op} i64 ${value}, %x\nret i64 %v`)).join('') +
     fn('neg', unary, '%v = sub i64 0, %x\nret i64 %v') +
     fn('product', binary, '%v = mul i64 %x, %y\nret i64 %v') +
+    fn('wide_mac', 'i32 %a, i32 %b, i64 %bias', `%x = sext i32 %a to i64
+%y = sext i32 %b to i64
+%p = mul i64 %x, %y
+%v = add i64 %bias, %p
+ret i64 %v`) +
+    `define i32 @wide_reduction(i32 %a, i32 %b) {
+entry:
+  %x = sext i32 %a to i64
+  %y = sext i32 %b to i64
+  %p = mul i64 %x, %y
+  %neg = icmp slt i64 %p, 0
+  br i1 %neg, label %negative, label %positive
+negative:
+  br label %join
+positive:
+  br label %join
+join:
+  %bias = phi i32 [-2048, %negative], [2048, %positive]
+  %wide = sext i32 %bias to i64
+  %v = add i64 %p, %wide
+  %d = sdiv i64 %v, 4096
+  %low = trunc i64 %d to i32
+  ret i32 %low
+}
+` +
     [1, 1024, 2147483648].map(n => fn(`div${n}`, unary,
-      `%v = sdiv i64 %x, ${n}\nret i64 %v`)).join(''));
+      `%v = sdiv i64 %x, ${n}\nret i64 %v`)).join('') +
+    truncatedDivisors.map(n => `define i32 @lowdiv${n}(i64 %x) {
+entry:
+  %v = sdiv i64 %x, ${n}
+  %low = trunc i64 %v to i32
+  ret i32 %low
+}
+`).join(''));
   fs.writeFileSync(file('caller.c'), `
 typedef unsigned long long u64;
 typedef long long s64;
@@ -503,6 +575,9 @@ ${[...shifts.map(([op, n]) => `${op}${n}`), ...masks.map(([name]) => name),
     'neg', 'div1', 'div1024', 'div2147483648']
     .map(name => `extern u64 ${name}(u64);`).join('\n')}
 extern u64 product(u64, u64);
+extern u64 wide_mac(int, int, u64);
+extern unsigned wide_reduction(int, int);
+${truncatedDivisors.map(n => `extern unsigned lowdiv${n}(u64);`).join('\n')}
 int main(void) {
   static const u64 values[] = {
     0, 1, 1023, 1024, 0xffffffffu, 0x100000000ull, 0x100000001ull,
@@ -515,9 +590,14 @@ int main(void) {
     ${masks.map(([name, , , expr]) => `if (${name}(x) != (${expr})) return 2;`).join('\n    ')}
     if (neg(x) != 0ull - x || div1(x) != x || (s64)div1024(x) != (s64)x / 1024ll ||
         (s64)div2147483648(x) != (s64)x / 2147483648ll) return 3;
+    ${truncatedDivisors.map(n => `if (lowdiv${n}(x) != (unsigned)((s64)x / ${n}ll)) return 5;`).join('\n    ')}
     for (unsigned j = 0; j < sizeof(values) / sizeof(*values); j++) {
       u64 y = values[j];
       if (product(x, y) != x * y) return 4;
+      int a = (int)x, b = (int)y;
+      s64 p = (s64)a * b;
+      if (wide_mac(a, b, x) != (u64)p + x) return 6;
+      if (wide_reduction(a, b) != (unsigned)((p + (p < 0 ? -2048 : 2048)) / 4096)) return 7;
     }
   }
   return 0;
@@ -532,7 +612,15 @@ int main(void) {
   assert.doesNotMatch(body('keep_low'), /^and\./m);
   assert.match(body('neg'), /^rsbs\.n r0, r0, #0\nmvn\.w r1, r1\nadc r1, r1, #0$/m);
   assert.match(body('product'), /^umull r0, r1, r0, r2$/m);
+  assert.match(body('wide_mac'), /^smlal /m);
+  assert.doesNotMatch(body('wide_mac'), /^smull /m);
+  assert.match(body('wide_reduction'), /^smull r(?:4, r6|10, r11),/m);
+  assert.doesNotMatch(body('wide_reduction'), /^smlal /m);
   assert.match(body('div1024'), /^lsr(?:\.w|s\.n) r4, r4, #22$/m);
+  for (const n of truncatedDivisors) {
+    assert.match(body(`lowdiv${n}`), /@ truncated-division: low result only/);
+    assert.doesNotMatch(body(`lowdiv${n}`), /^asr\.w r1, r1,/m);
+  }
   const clang = process.env.LLVM_CLANG ?? 'clang';
   const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
   run(tool('badge-asm'), [file('wide.s'), '-o', file('wide.o')]);
@@ -651,10 +739,31 @@ int main(void) {
     '-kernel', file('calls.elf')]);
 });
 
-test('direct scaled and frame addresses preserve indexed volatile accesses', t => {
+test('direct scaled and frame addresses preserve aligned, unaligned, and volatile accesses', t => {
   const file = files(t);
   fs.writeFileSync(file('address.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
 @words = global [4 x i32] [i32 11, i32 20, i32 31, i32 47], align 4
+@halves = global [4 x i16] zeroinitializer, align 2
+define internal zeroext i16 @narrow(i32 %x) {
+entry:
+  %v = trunc i32 %x to i16
+  ret i16 %v
+}
+define internal void @indexed_store(ptr %base, i32 %index, i32 %value) {
+entry:
+  %off = mul i32 %index, 2
+  %dest = getelementptr i8, ptr %base, i32 %off
+  %v = call zeroext i16 @narrow(i32 %value)
+  store i16 %v, ptr %dest, align 2
+  ret void
+}
+define internal void @unaligned_store(ptr %base, i32 %index, i16 %value) {
+entry:
+  %off = mul i32 %index, 2
+  %dest = getelementptr i8, ptr %base, i32 %off
+  store i16 %value, ptr %dest, align 1
+  ret void
+}
 define internal i32 @indexed(ptr %base, i32 %index) {
 entry:
   %p = getelementptr i32, ptr %base, i32 %index
@@ -680,16 +789,25 @@ entry:
   %back = getelementptr i32, ptr %far, i32 -65537
   %a = call i32 @indexed(ptr %back, i32 -1)
   %b = call i32 @frame(i32 3)
+  %bases = getelementptr i16, ptr @halves, i32 2
+  call void @indexed_store(ptr %bases, i32 -1, i32 70000)
+  %h = getelementptr i16, ptr @halves, i32 1
+  %half = load volatile i16, ptr %h, align 2
+  %check = xor i16 %half, 4464
+  %z = zext i16 %check to i32
   %x = xor i32 %a, 20
   %y = xor i32 %b, 1241
-  %status = or i32 %x, %y
+  %sum = or i32 %x, %y
+  %status = or i32 %sum, %z
   ret i32 %status
 }`);
   run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
     file('address.ll'), '-o', file('address.s')]);
   const assembly = fs.readFileSync(file('address.s'), 'utf8');
-  const indexed = assembly.slice(assembly.indexOf('\nindexed:'), assembly.indexOf('.size indexed'));
-  assert.match(indexed, /add\.w r\d+, r(?:[3-6]|8|10|11), r\d+, lsl #2/);
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.match(body('indexed'), /add\.w r\d+, r(?:[3-6]|8|10|11), r\d+, lsl #2/);
+  assert.match(body('indexed_store'), /bl narrow[\s\S]*strh\.w r0, \[r\d+, r\d+, lsl #1\]/);
+  assert.doesNotMatch(body('unaligned_store'), /^strh[. ]/m);
   assert.match(assembly, /addw r\d+, (?:r7|sp), #1024\b/);
   run(tool('badge-asm'), [file('address.s'), '-o', file('owned.o')]);
   const clang = process.env.LLVM_CLANG ?? 'clang';
@@ -1409,7 +1527,7 @@ entry:
     '-kernel', file('load.elf')]);
 });
 
-test('adjacent shifted operands fold without changing multi-use or reversed subtraction', t => {
+test('shifted operands fold without changing multi-use or reversed subtraction', t => {
   const file = files(t);
   fs.writeFileSync(file('shift.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
 define i32 @case(i32 %a, i32 %b) {
@@ -1427,10 +1545,21 @@ entry:
   %result = sub i32 %reverse, %second
   ret i32 %result
 }
+define i32 @masked_shift(i32 %x) {
+entry:
+  %hi = lshr i32 %x, 7
+  %not = xor i32 %x, -1
+  %bits = and i32 %hi, 63519
+  %r = xor i32 %bits, %not
+  ret i32 %r
+}
 define i32 @main() {
 entry:
   %actual = call i32 @case(i32 3, i32 -1)
-  %status = xor i32 %actual, 57340
+  %a = xor i32 %actual, 57340
+  %shifted = call i32 @masked_shift(i32 305419896)
+  %b = xor i32 %shifted, ${(((305419896 >>> 7) & 63519) ^ ~305419896) >>> 0}
+  %status = or i32 %a, %b
   ret i32 %status
 }`);
   run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
@@ -1441,6 +1570,7 @@ entry:
   assert.match(assembly, /^sub\.w .* asr #24$/m);
   assert.match(assembly, /^lsls?\.([wn]) .*#1$/m);
   assert.match(assembly, /^lsrs?\.([wn]) .*#17$/m);
+  assert.match(assembly, /^and\.w .* lsr #7$/m);
   run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
   run(tool('badge-asm'), [file('shift.s'), '-o', file('shift.o')]);
   run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',

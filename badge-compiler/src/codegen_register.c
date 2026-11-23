@@ -90,6 +90,9 @@ void cg_register_prepare(cg_context *c) {
   if (c->register_residency == BADGE_RESIDENCY_STACK)
     return;
   if (cg_global_residency(c)) {
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+        c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT)
+      cg_plan_operands(c);
     cg_global_prepare(c);
     return;
   }
@@ -190,8 +193,9 @@ void cg_register_finish(cg_context *c) {
           c->avoided_loads, c->avoided_stores);
 }
 int cg_register_read(cg_context *c, cg_value *v, unsigned r, unsigned word) {
-  if (cg_global_residency(c) && !word) {
-    unsigned source = cg_global_register(c, v->name);
+  if (cg_global_residency(c) && word < 2) {
+    cg_register_value *entry = cg_register_lookup(c, v->name);
+    unsigned source = word ? entry->high_reg : entry->reg;
     if (source) {
       if (r != source)
         cg_move(c, r, source);
@@ -232,6 +236,16 @@ int cg_register_copy(cg_context *c, cg_value *dst, cg_value *src) {
   return 1;
 }
 int cg_register_save(cg_context *c, cg_value *v, unsigned r, unsigned word) {
+  if (cg_global_residency(c) && word < 2 && v->type->bits == 64) {
+    cg_register_value *entry = cg_register_lookup(c, v->name);
+    if (entry->high_reg) {
+      unsigned destination = word ? entry->high_reg : entry->reg;
+      if (destination != r)
+        cg_move(c, destination, r);
+      c->avoided_stores++;
+      return 1;
+    }
+  }
   if (cg_global_residency(c) && !word && cg_register_eligible(c, v)) {
     cg_register_value *entry = cg_register_lookup(c, v->name);
     if (entry->reg || !entry->uses) {

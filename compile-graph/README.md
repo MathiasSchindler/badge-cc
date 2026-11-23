@@ -56,13 +56,15 @@ Open **Optimized IR** and select a function to filter its remarks and backend
 metrics. The trace picker loads a bounded excerpt on demand; the full trace can
 be large because LLVM includes module events even with a function filter.
 
-## Sixteen small RP2350 programs
+## Twenty-one RP2350 kernel programs
 
-For a narrower comparison than red square or maze, capture sixteen independent UF2
+For a narrower comparison than red square or maze, capture independent UF2
 images: arithmetic recurrence, branch/switch control, CRC32, indexed
 read-only data, helper calls, signed fixed-point scaling, rotate/XOR,
 bitfield insertion, signed halfword dot product, saturation, div/rem, byte
 reversal, rotated halfword addition, parity, a nibble lookup, and a wide sum.
+The five composed kernels add RGB565 blending, sparse record scanning,
+ring-buffer copy and checksum, fixed-point filtering, and byte parsing.
 Each links one C
 translation unit with a shared assembly reset, harness, and RP2350 boot metadata.
 `micro_kernel` receives the seed across a separate assembly call, so neither C
@@ -74,14 +76,15 @@ COMPILE_GRAPH_LLVM_TRACE=micro_kernel,mix \
   node compile-graph/capture.mjs --capture compile-graph/build/micro-demo \
   micro-arithmetic micro-control micro-crc micro-memory micro-calls micro-fixed-point \
   micro-rotate micro-bit-insert micro-packed-dot micro-saturate micro-divmod \
-  micro-byte-swap micro-extend-add micro-parity micro-nibble-map micro-wide-sum
+  micro-byte-swap micro-extend-add micro-parity micro-nibble-map micro-wide-sum \
+  micro-blend-span micro-sparse-scan micro-ring-checksum micro-filter-update micro-byte-parser
 node compile-graph/check-micro.mjs compile-graph/build/micro-demo \
   > compile-graph/build/micro-demo/micro-results.json
 python3 -m http.server 8000 --bind 127.0.0.1 --directory compile-graph/build/micro-demo
 ```
 
 For a control and candidate, capture into separate directories with the same
-targets. The checker also accepts the earlier six- and eleven-target captures. The
+targets. The checker also accepts the earlier six-, eleven-, and sixteen-target captures. The
 current owned backend defaults to `thumb-constants`; an explicit owned
 policy does not change the LLVM flags.
 
@@ -95,6 +98,8 @@ The JSON distinguishes raw flash, UF2 file
 size, linked C function extents, decoded instructions and literal bytes,
 and remaining flash bytes (read-only data and alignment). Reached instruction
 counts exclude the common test harness and are **not physical timing**.
+The [indexed-memory and wide-arithmetic results](../badge-compiler/docs/current-promotion.md#indexed-memory-call-residency-and-wide-arithmetic)
+compare these counts and loaded flash with elapsed time measured on the badge.
 In the firmware, the shared harness uses `0x12345678` and writes the result
 at `0x20000000`, then the completion word `0x444f4e45` at `0x20000004`.
 There is deliberately no screen or USB output. Physical boot is not part

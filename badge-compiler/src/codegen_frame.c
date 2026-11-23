@@ -1234,6 +1234,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   if (cg_operand_selection(c)) cg_reuse_constants(c, body_start);
   if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS) {
     cg_reduce_branches(c, body_start);
+    cg_fold_distances(c, body_start);
     cg_share_return_tails(c, body_start);
     cg_fold_zero_branches(c, body_start);
   }

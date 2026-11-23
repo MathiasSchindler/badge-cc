@@ -1501,11 +1501,13 @@ static int cg_tail_eligible(cg_context *c, cg_inst *i, cg_type *ret,
 }
 
 static void cg_call(cg_context *c, cg_inst *i) {
-  int fast = 0;
+  int fast = 0, zeroext = 0;
   while (!cg_type_start(c)) {
     char *s = cg_take(c);
     if (!strcmp(s, "fastcc"))
       fast = 1;
+    else if (!strcmp(s, "zeroext"))
+      zeroext = 1;
     else if (strcmp(s, "ccc") && !cg_return_hint(c, s))
       cg_error(c, "unsupported call convention/attribute");
     if (cg_accept(c, "(")) {
@@ -1743,6 +1745,15 @@ static void cg_call(cg_context *c, cg_inst *i) {
   if (outgoing)
     cg_adjust_stack(c, 1, outgoing);
   int return_forwarded = 0;
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && i->result &&
+      i->next && i->next->indexed_source && count && zeroext &&
+      (ret->bits == 8 || ret->bits == 16) &&
+      !strcmp(c->tokens[i->next->begin].text, "store") &&
+      !strcmp(c->tokens[i->next->begin + 2].text, i->result->name) &&
+      cg_register_lookup(c, i->result->name)->selection_uses == 1) {
+    i->next->indexed_call_result = 1;
+    return_forwarded = 1;
+  }
   if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
       c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT && i->result &&
       (ret->bits == 32 || ret->bits == 64) && !c->fn->return_ext &&
@@ -1757,7 +1768,11 @@ static void cg_call(cg_context *c, cg_inst *i) {
     for (unsigned w = 0; w < cg_round(ret->size, 4) / 4; w++) {
       if (w >= 4)
         cg_error(c, "unsupported direct aggregate return");
-      cg_save(c, i->result, w, w);
+      if (!w && count && zeroext && (ret->bits == 8 || ret->bits == 16) &&
+          c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS)
+        cg_save_normalized(c, i->result, 0);
+      else
+        cg_save(c, i->result, w, w);
     }
   c->pos = after;
 }
@@ -1772,17 +1787,25 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
       if (!strcmp(c->tokens[k].text, "asm"))
         return 0;
     }
+    unsigned ret = at + 1;
+    int narrow = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+                 ret + 2 < i->end && !strcmp(c->tokens[ret].text, "zeroext") &&
+                 (!strcmp(c->tokens[ret + 1].text, "i8") ||
+                  !strcmp(c->tokens[ret + 1].text, "i16"));
+    ret += narrow;
+    unsigned callee = ret + 1;
     if ((c->scalar_stream_selection ||
          (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
-          at + 2 < i->end && c->tokens[at + 2].text[0] == '@')) &&
-        at + 4 < i->end &&
-        (!strcmp(c->tokens[at + 1].text, "void") ||
-         !strcmp(c->tokens[at + 1].text, "i32") ||
-         !strcmp(c->tokens[at + 1].text, "ptr")) &&
-        (c->tokens[at + 2].text[0] == '@' || c->tokens[at + 2].text[0] == '%') &&
-        strncmp(cg_name(c, c->tokens[at + 2].text), "llvm.", 5) &&
-        !strcmp(c->tokens[at + 3].text, "(")) {
-      unsigned pos = at + 4, arguments = 0;
+          callee < i->end && c->tokens[callee].text[0] == '@')) &&
+        callee + 2 < i->end &&
+        (narrow || !strcmp(c->tokens[ret].text, "void") ||
+         !strcmp(c->tokens[ret].text, "i32") ||
+         !strcmp(c->tokens[ret].text, "ptr")) &&
+        (c->tokens[callee].text[0] == '@' ||
+         (!narrow && c->tokens[callee].text[0] == '%')) &&
+        strncmp(cg_name(c, c->tokens[callee].text), "llvm.", 5) &&
+        !strcmp(c->tokens[callee + 1].text, "(")) {
+      unsigned pos = callee + 2, arguments = 0;
       while (pos + 1 < i->end && arguments < 4 &&
              (!strcmp(c->tokens[pos].text, "i32") || !strcmp(c->tokens[pos].text, "ptr")) &&
              (c->tokens[pos + 1].text[0] == '%' ||
@@ -1795,10 +1818,12 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
         pos++;
       }
       if (pos + 1 == i->end && !strcmp(c->tokens[pos].text, ")")) {
-        if (c->tokens[at + 2].text[0] == '@')
+        if (!narrow && c->tokens[callee].text[0] == '@')
           i->scalar_call_arguments_plus_one = arguments + 1;
         return 1u << 3;
       }
+      if (i->indexed_source)
+        return 0;
     }
     return CG_SCRATCH_R4 | CG_SCRATCH_R5 | (cg_light_frames(c) ? 1u << 3 : 0);
   }
@@ -1831,7 +1856,7 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
           align >= t->size)
         mask = 0;
     } else if (t->size > 4)
-      mask = CG_SCRATCH_R4 | CG_SCRATCH_R5;
+      mask = i->wide_pair_safe ? 0 : CG_SCRATCH_R4 | CG_SCRATCH_R5;
     else if (!strcmp(op, "sdiv") || !strcmp(op, "udiv") ||
              !strcmp(op, "srem") || !strcmp(op, "urem"))
       mask = CG_SCRATCH_R4;
@@ -1895,8 +1920,12 @@ static int cg_zero_rhs(const cg_context *c, const cg_inst *i) {
 static const char *cg_wide_flags(cg_context *c, cg_inst *i,
                                  const char *pred, cg_type *t) {
   if ((!strcmp(pred, "slt") || !strcmp(pred, "sge")) && cg_zero_rhs(c, i)) {
-    cg_value_read(c, t, 0, 1);
-    cg_emit(c, "cmp.n r0, #0\n");
+    const char *name = c->tokens[c->pos].text;
+    unsigned reg = cg_global_residency(c) && *name == '%'
+                       ? cg_register_lookup(c, name)->high_reg : 0;
+    if (!reg)
+      cg_value_read(c, t, 0, 1);
+    cg_emit(c, "cmp.%c r%u, #0\n", reg < 8 ? 'n' : 'w', reg);
     return cg_comparison_condition(pred);
   }
   unsigned left = c->pos;
@@ -2349,31 +2378,45 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       cg_expect(c, ",");
     (void)cg_type_parse(c, 0);
     unsigned pointer = c->pos;
-    if (!is_volatile && cg_direct_record_memory(c, i, store, t, pointer, value))
-      return;
     if (i->indexed_address) {
       unsigned at = i->indexed_address->begin;
+      unsigned source = i->indexed_source ? i->indexed_source : at + 9;
       unsigned base = cg_global_register(c, c->tokens[at + 6].text);
-      unsigned index = cg_global_register(c, c->tokens[at + 9].text);
+      unsigned index = cg_global_register(c, c->tokens[source].text);
       if (!base) {
+        base = store ? 2 : 0;
         c->pos = at + 6;
-        cg_value_read(c, NULL, 0, 0);
+        cg_value_read(c, NULL, base, 0);
       }
       if (!index) {
         index = base == 1 ? 2 : 1;
-        c->pos = at + 9;
+        c->pos = source;
         cg_value_read(c, NULL, index, 0);
       }
-      cg_inst *extension = cg_selection_extended_load(c, i);
+      cg_inst *extension = store ? NULL : cg_selection_extended_load(c, i);
       cg_value *result = extension ? extension->result : i->result;
-      unsigned reg = cg_global_register(c, result->name);
+      unsigned reg = cg_global_register(c, store ? c->tokens[value].text : result->name);
+      if (store && i->indexed_call_result)
+        reg = 0;
+      else if (store && !reg) {
+        c->pos = value;
+        cg_value_read(c, t, 0, 0);
+      }
       int sign = extension && !strcmp(c->tokens[extension->begin + 2].text, "sext");
       const char *suffix = t->size == 1 ? "b" : t->size == 2 ? "h" : "";
-      cg_emit(c, "ldr%s%s.%c r%u, [r%u, r%u]\n", sign ? "s" : "", suffix,
-              reg < 8 && base < 8 && index < 8 ? 'n' : 'w', reg, base, index);
-      cg_save_normalized(c, result, reg);
+      cg_emit(c, "%s%s%s.%c r%u, [r%u, r%u", store ? "str" : "ldr",
+              sign ? "s" : "", suffix,
+              !i->indexed_scale && reg < 8 && base < 8 && index < 8 ? 'n' : 'w',
+              reg, base, index);
+      if (i->indexed_scale)
+        cg_emit(c, ", lsl #%u", i->indexed_scale);
+      cg_emit(c, "]\n");
+      if (!store)
+        cg_save_normalized(c, result, reg);
       return;
     }
+    if (!is_volatile && cg_direct_record_memory(c, i, store, t, pointer, value))
+      return;
     unsigned direct_base = cg_operand_selection(c)
                                ? cg_global_register(c, c->tokens[pointer].text) : 0;
     unsigned fallback_base = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
@@ -2761,6 +2804,39 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     return;
   if (cg_wide_literals(c, i, op, t, left))
     return;
+  if (i->wide_pair_safe && !strcmp(op, "add")) {
+    cg_register_value *a = cg_register_lookup(c, c->tokens[left].text);
+    cg_register_value *b = cg_register_lookup(c, c->tokens[left + 2].text);
+    cg_register_value *out = cg_register_lookup(c, i->result->name);
+    if (a->high_reg || b->high_reg || out->high_reg) {
+      unsigned al = 0, ah = 1, bl = 2, bh = 3;
+      unsigned lo = 0, hi = 1;
+      if (a->high_reg) {
+        al = a->reg;
+        ah = a->high_reg;
+      } else {
+        cg_wide_read(c, t, left);
+      }
+      if (b->high_reg) {
+        bl = b->reg;
+        bh = b->high_reg;
+      } else {
+        c->pos = left + 2;
+        cg_value_read(c, t, bl, 0);
+        c->pos = left + 2;
+        cg_value_read(c, t, bh, 1);
+      }
+      if (out->high_reg) {
+        lo = out->reg;
+        hi = out->high_reg;
+      }
+      cg_emit(c, "adds.%c r%u, r%u, r%u\nadc.w r%u, r%u, r%u\n",
+              (lo | al | bl) < 8 ? 'n' : 'w', lo, al, bl, hi, ah, bh);
+      cg_save(c, i->result, lo, 0);
+      cg_save(c, i->result, hi, 1);
+      return;
+    }
+  }
   cg_value_read(c, t, 0, 0);
   cg_expect(c, ",");
   unsigned right = c->pos;

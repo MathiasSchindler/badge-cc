@@ -1,5 +1,6 @@
 #include "codegen_internal.h"
 #include "thumb_immediate.h"
+#include "target.h"
 #include "target_cost.h"
 #include <errno.h>
 #include <inttypes.h>
@@ -13,7 +14,7 @@ enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP,
        SELECT_BITFIELD, SELECT_MLS, SELECT_MASK_TEST, SELECT_INVERTED_BINARY,
        SELECT_ROTATE, SELECT_ROTATED_XOR, SELECT_BITFIELD_INSERT,
        SELECT_SIGNED_FIELD, SELECT_DUAL_PRODUCT, SELECT_REVERSE_BYTES,
-       SELECT_EXTEND_ADD };
+       SELECT_EXTEND_ADD, SELECT_TRUNCATED_SDIV, SELECT_SIGNED_PRODUCT_ADD };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -81,8 +82,14 @@ static const char *shifted_binary(cg_context *c, cg_inst *shift, cg_inst *use,
     *other = 6;
   else
     return NULL;
-  if (c->tokens[use->begin + *other].text[0] != '%')
-    return NULL;
+  if (c->tokens[use->begin + *other].text[0] != '%') {
+    uint32_t mask;
+    if (strcmp(user, "and") ||
+        !number(c->tokens[use->begin + *other].text, &mask) ||
+        low_mask_width(mask) ||
+        thumb_modified(mask) >= 0 || thumb_modified(~mask) >= 0)
+      return NULL;
+  }
   return scaled_sub || !strcmp(operation, "shl") ? "lsl" :
          !strcmp(operation, "lshr") ? "lsr" : "asr";
 }
@@ -596,6 +603,23 @@ static void absolute_wrapper(cg_context *c) {
 int cg_selection_forward_argument(cg_context *c) {
   return c->selection && c->selection->wrapper;
 }
+static int zero_extension_is_signed(cg_context *c, cg_inst *cast) {
+  const char *source = c->tokens[cast->begin + 4].text;
+  unsigned work = 0;
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i && i != cast; i = i->next) {
+      cg_register_work(c);
+      if (++work > 256)
+        return 0;
+      if (!i->result || strcmp(i->result->name, source))
+        continue;
+      unsigned value;
+      uint32_t mask;
+      return scalar32(c, i, "and") && commutative_literal(c, i, &value, &mask) &&
+             mask <= INT32_MAX;
+    }
+  return 0;
+}
 static void signed_products(cg_context *c) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS)
     return;
@@ -617,10 +641,13 @@ static void signed_products(cg_context *c) {
             cg_inst *p = recent[k];
             if (!p || !p->result || p->end - p->begin != 7 ||
                 pair(c, p)->instruction ||
-                strcmp(c->tokens[p->begin + 2].text, "sext") ||
                 strcmp(c->tokens[p->begin + 3].text, from) ||
                 strcmp(c->tokens[p->begin + 5].text, "to") ||
                 strcmp(c->tokens[p->begin + 6].text, to))
+              continue;
+            const char *op = c->tokens[p->begin + 2].text;
+            if (strcmp(op, "sext") &&
+                (strcmp(to, "i64") || strcmp(op, "zext") || !zero_extension_is_signed(c, p)))
               continue;
             for (unsigned n = 0; n < 2; n++)
               if (!strcmp(p->result->name, c->tokens[i->begin + 4 + 2 * n].text))
@@ -633,6 +660,24 @@ static void signed_products(cg_context *c) {
             if (cg_register_lookup(c, p->result->name)->selection_uses ==
                 (cast[0] == cast[1] ? 2u : 1u))
               *pair(c, p) = (cg_selected_pair){.instruction = p, .kind = SELECT_PRODUCT_CAST};
+          }
+          if (!strcmp(to, "i64") && single_use(c, i)) {
+            unsigned distance = 0;
+            for (cg_inst *add = i->next; add && distance < 4; add = add->next, distance++) {
+              cg_register_work(c);
+              if (!add->result || add->end - add->begin != 7 ||
+                  add->result->type->bits != 64 || pair(c, add)->instruction)
+                break;
+              if (!strcmp(c->tokens[add->begin + 2].text, "add") &&
+                  !strcmp(c->tokens[add->begin + 3].text, "i64") &&
+                  !strcmp(c->tokens[add->begin + 5].text, ",") &&
+                  binary_use_of(c, add, i)) {
+                pair(c, i)->kind = SELECT_SKIP;
+                *pair(c, add) = (cg_selected_pair){.instruction=add, .producer=i,
+                                                   .kind=SELECT_SIGNED_PRODUCT_ADD};
+                break;
+              }
+            }
           }
         }
       }
@@ -703,9 +748,111 @@ static int select_dual_product(cg_context *c, cg_inst *xor) {
   return 1;
 }
 
+static unsigned indexed_access(cg_context *c, cg_inst *i, const char *address,
+                               int store) {
+  unsigned at = i->begin + (i->result ? 2 : 0);
+  if (strcmp(c->tokens[at++].text, store ? "store" : "load"))
+    return 0;
+  const char *type = c->tokens[at].text;
+  unsigned bytes = !strcmp(type, "i8") ? 1 : !strcmp(type, "i16") ? 2 :
+                   !strcmp(type, "i32") ? 4 : 0;
+  unsigned ptr = at + (store ? 4 : 3);
+  if (!bytes || ptr >= i->end || strcmp(c->tokens[ptr - 2].text, ",") ||
+      strcmp(c->tokens[ptr - 1].text, "ptr") ||
+      strcmp(c->tokens[ptr].text, address))
+    return 0;
+  uint32_t align, literal;
+  if (store && c->tokens[at + 1].text[0] != '%' &&
+      !number(c->tokens[at + 1].text, &literal))
+    return 0;
+  return i->end == ptr + 1 ||
+         (i->end == ptr + 4 && !strcmp(c->tokens[ptr + 1].text, ",") &&
+          !strcmp(c->tokens[ptr + 2].text, "align") &&
+          c->tokens[ptr + 3].text[0] != '-' &&
+          number(c->tokens[ptr + 3].text, &align) && align >= bytes);
+}
+
+static void plan_indexed_memory(cg_context *c) {
+  for (cg_block *b = c->fn->blocks; b; b = b->next) {
+    cg_inst *previous = NULL;
+    for (cg_inst *i = b->first; i; previous = i, i = i->next) {
+      cg_register_work(c);
+      unsigned at = i->begin;
+      if (!i->result || i->end - at != 10 ||
+          strcmp(c->tokens[at + 2].text, "getelementptr") ||
+          strcmp(c->tokens[at + 3].text, "i8") ||
+          strcmp(c->tokens[at + 5].text, "ptr") ||
+          (c->tokens[at + 6].text[0] != '%' && c->tokens[at + 6].text[0] != '@') ||
+          strcmp(c->tokens[at + 8].text, "i32") ||
+          c->tokens[at + 9].text[0] != '%' || !single_use(c, i))
+        continue;
+      unsigned source = at + 9, shift = 0, input;
+      uint32_t factor;
+      if (scalar32(c, previous, "mul") && single_use(c, previous) &&
+          !strcmp(previous->result->name, c->tokens[source].text) &&
+          commutative_literal(c, previous, &input, &factor) &&
+          (factor == 2 || factor == 4 || factor == 8) &&
+          c->tokens[previous->begin + input].text[0] == '%') {
+        source = previous->begin + input;
+        shift = (unsigned)__builtin_ctz(factor);
+      }
+      unsigned distance = 0;
+      for (cg_inst *use = i->next; use && distance < 10; use = use->next, distance++) {
+        cg_register_work(c);
+        if (!indexed_access(c, use, i->result->name, 1) &&
+            !(shift && !distance && indexed_access(c, use, i->result->name, 0)))
+          continue;
+        use->indexed_address = i;
+        use->indexed_source = source;
+        use->indexed_scale = shift;
+        i->folded_operand = 1;
+        if (shift)
+          previous->folded_operand = 1;
+        break;
+      }
+    }
+  }
+}
+
+void cg_plan_operands(cg_context *c) {
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next)
+      for (unsigned k = i->begin + (i->result ? 3 : 1); k < i->end; k++) {
+        cg_register_work(c);
+        if (c->tokens[k].text[0] == '%')
+          cg_register_lookup(c, c->tokens[k].text)->selection_uses++;
+      }
+  plan_indexed_memory(c);
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i && i->next; i = i->next) {
+      cg_register_work(c);
+      if (i->folded_operand || i->shifted_producer ||
+          !(scalar32(c, i, "shl") || scalar32(c, i, "lshr") ||
+            scalar32(c, i, "ashr")) || !single_use(c, i))
+        continue;
+      unsigned distance = 0;
+      for (cg_inst *use = i->next; use && distance < 8; use = use->next, distance++) {
+        cg_register_work(c);
+        if (!scalar(c, use))
+          break;
+        uint32_t amount;
+        unsigned source, other;
+        if (use->folded_operand || use->shifted_producer ||
+            !shifted_binary(c, i, use, &amount, &source, &other) ||
+            c->tokens[use->begin + other].text[0] == '%')
+          continue;
+        i->folded_operand = 1;
+        use->shifted_producer = i;
+        use->shifted_source = i->begin + source;
+        use->shifted_other = use->begin + other;
+        break;
+      }
+    }
+}
+
 static void forward_adjacent_address(cg_context *c, cg_inst *i, cg_inst *next) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
-      !cg_global_residency(c) || !i->result ||
+      !cg_global_residency(c) || !i->result || i->folded_operand ||
       strcmp(c->tokens[i->begin + 2].text, "getelementptr") ||
       cg_register_lookup(c, i->result->name)->selection_uses != 1)
     return;
@@ -742,6 +889,18 @@ static void forward_adjacent_address(cg_context *c, cg_inst *i, cg_inst *next) {
     i->ephemeral_address = next->ephemeral_address = 1;
 }
 
+int cg_truncated_sdiv(cg_context *c, cg_inst *i, cg_inst *next) {
+  uint32_t divisor;
+  return i->result && i->end - i->begin == 7 &&
+         !strcmp(c->tokens[i->begin + 2].text, "sdiv") &&
+         !strcmp(c->tokens[i->begin + 3].text, "i64") &&
+         !strcmp(c->tokens[i->begin + 5].text, ",") &&
+         c->tokens[i->begin + 4].text[0] == '%' &&
+         number(c->tokens[i->begin + 6].text, &divisor) &&
+         divisor > 1 && badge_direct_i64_sdiv(divisor) &&
+         cast_from(c, next, i, "trunc", "i64", "i32") && single_use(c, i);
+}
+
 void cg_selection_prepare(cg_context *c) {
   c->selection = NULL;
   if (c->scalar_selection == BADGE_SELECTION_LEGACY)
@@ -774,6 +933,13 @@ void cg_selection_prepare(cg_context *c) {
     c->selection->capacity *= 2;
   c->selection->pairs =
       cg_alloc(c, c->selection->capacity * sizeof(*c->selection->pairs));
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next)
+      if (i->folded_operand)
+        *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
+      else if (i->shifted_producer)
+        *pair(c, i) = (cg_selected_pair){.instruction=i, .producer=i->shifted_producer,
+                                         .kind=SELECT_SHIFTED_BINARY};
   absolute_stores(c);
   absolute_wrapper(c);
   int constants = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
@@ -782,6 +948,15 @@ void cg_selection_prepare(cg_context *c) {
     for (cg_inst *i = b->first; i && i->next; i = i->next) {
       cg_register_work(c);
       cg_inst *next = i->next;
+      if (i->folded_operand || i->shifted_producer)
+        continue;
+      if (constants && cg_truncated_sdiv(c, i, next) &&
+          !pair(c, i)->instruction && !pair(c, next)->instruction) {
+        *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i,
+                                            .kind=SELECT_TRUNCATED_SDIV};
+        continue;
+      }
       forward_adjacent_address(c, i, next);
       if (extended_load(c, i, next)) {
         *pair(c, i) = (cg_selected_pair){.instruction = i, .producer = next, .kind = SELECT_EXTENDED_LOAD};
@@ -1270,15 +1445,34 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
     if (i->result->type->bits == 64) {
       read(c, i, 4, 0);
       read(c, i, 6, 2);
-      cg_emit(c, "smull r0, r1, r0, r2\n");
-      cg_save(c, i->result, 0, 0);
-      cg_save(c, i->result, 1, 1);
+      cg_register_value *value = cg_register_lookup(c, i->result->name);
+      unsigned lo = value->high_reg ? value->reg : 0;
+      unsigned hi = value->high_reg ? value->high_reg : 1;
+      cg_emit(c, "smull r%u, r%u, r0, r2\n", lo, hi);
+      cg_save(c, i->result, lo, 0);
+      cg_save(c, i->result, hi, 1);
     } else {
       unsigned a = operand(c, i, 4, 0), b = operand(c, i, 6, 2);
       unsigned dst = destination(c, i);
       cg_emit(c, "smulbb r%u, r%u, r%u\n", dst, a, b);
       cg_save_normalized(c, i->result, dst);
     }
+    return 1;
+  }
+  if (selected->kind == SELECT_SIGNED_PRODUCT_ADD) {
+    unsigned bias = 10 - binary_use_of(c, i, selected->producer);
+    cg_register_value *out = cg_register_lookup(c, i->result->name);
+    unsigned lo = out->high_reg ? out->reg : 0;
+    unsigned hi = out->high_reg ? out->high_reg : 1;
+    c->pos = i->begin + bias;
+    cg_value_read(c, i->result->type, lo, 0);
+    c->pos = i->begin + bias;
+    cg_value_read(c, i->result->type, hi, 1);
+    read(c, selected->producer, 4, 2);
+    read(c, selected->producer, 6, 3);
+    cg_emit(c, "smlal r%u, r%u, r2, r3\n", lo, hi);
+    cg_save(c, i->result, lo, 0);
+    cg_save(c, i->result, hi, 1);
     return 1;
   }
   if (selected->kind == SELECT_WRAPPER_CALL) {
@@ -1332,6 +1526,34 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (selected->kind == SELECT_SKIP || selected->kind == SELECT_COMPARE_SKIP ||
       selected->kind == SELECT_COUNT_SKIP)
     return 1;
+  if (selected->kind == SELECT_TRUNCATED_SDIV) {
+    cg_inst *div = selected->producer;
+    uint32_t divisor;
+    if (!number(c->tokens[div->begin + 6].text, &divisor))
+      cg_error(c, "truncated division eligibility changed");
+    unsigned shift = (unsigned)__builtin_ctz(divisor), dst = destination(c, i);
+    cg_register_value *value = cg_register_lookup(c, c->tokens[div->begin + 4].text);
+    if (value->high_reg) {
+      cg_emit(c, "asr.w r2, r%u, #31\nlsrs.n r2, r2, #%u\n"
+                 "adds.%c r0, r%u, r2\nadc r1, r%u, #0\n"
+                 "lsrs.n r0, r0, #%u\norr.w r%u, r0, r1, lsl #%u\n"
+                 "@ truncated-division: low result only\n",
+              value->high_reg, 32 - shift, value->reg < 8 ? 'n' : 'w',
+              value->reg, value->high_reg, shift, dst, 32 - shift);
+      cg_save_normalized(c, i->result, dst);
+      return 1;
+    }
+    c->pos = div->begin + 4;
+    cg_value_read(c, div->result->type, 0, 0);
+    c->pos = div->begin + 4;
+    cg_value_read(c, div->result->type, 1, 1);
+    cg_emit(c, "asrs.n r2, r1, #31\nlsrs.n r2, r2, #%u\n"
+               "adds.n r0, r0, r2\nadc r1, r1, #0\nlsr.w r0, r0, #%u\n"
+               "orr.w r%u, r0, r1, lsl #%u\n@ truncated-division: low result only\n",
+            32 - shift, shift, dst, 32 - shift);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
   if (selected->kind == SELECT_REVERSE_BYTES) {
     unsigned at;
     uint32_t mask;
@@ -1442,8 +1664,9 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
     const char *op = c->tokens[i->begin + 2].text;
     const char *mnemonic = !strcmp(op, "xor") ? "eor" : !strcmp(op, "or") ? "orr" :
                            !strcmp(op, "sub") && other == 6 ? "rsb" : op;
+    int literal = c->tokens[i->begin + other].text[0] != '%';
     unsigned src = operand(c, producer, source, 0);
-    unsigned base = operand(c, i, other, 1);
+    unsigned base = operand(c, i, other, literal ? 2 : 1);
     unsigned dst = destination(c, i);
     cg_emit(c, "%s.w r%u, r%u, r%u, %s #%" PRIu32 "\n",
             mnemonic, dst, base, src, shift, amount);

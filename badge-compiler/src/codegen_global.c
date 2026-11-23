@@ -40,6 +40,7 @@ struct cg_global {
   cg_asm_live *assembly, *current_assembly;
   cg_affinity *affinities;
   unsigned registers;
+  int wide_r6;
   cg_asm_live *split_calls, *current_split;
 };
 
@@ -309,6 +310,67 @@ static unsigned preferred(cg_context *c, cg_register_value *v,
   }
   return best;
 }
+
+static void plan_wide_pairs(cg_context *c) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT)
+    return;
+  int reduction = 0;
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next) {
+      cg_register_work(c);
+      reduction |= i->next && cg_truncated_sdiv(c, i, i->next);
+    }
+  if (!reduction)
+    return;
+  /* r6 is otherwise scratch for calls and constant expressions. */
+  int spare_r6 = 1;
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next) {
+      if (cg_instruction_assembly(c, i))
+        return;
+      unsigned op = i->begin + (i->result ? 2 : 0);
+      for (unsigned k = op; k < i->end; k++) {
+        cg_register_work(c);
+        const char *token = c->tokens[k].text;
+        if (!strcmp(token, "call") || !strcmp(token, "("))
+          spare_r6 = 0;
+      }
+    }
+  c->global->wide_r6 = spare_r6;
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next) {
+      cg_register_work(c);
+      if (!i->result || i->result->type->bits != 64 || i->end - i->begin != 7)
+        continue;
+      const char *op = c->tokens[i->begin + 2].text;
+      if (!strcmp(op, "mul") || !strcmp(op, "add")) {
+        cg_register_lookup(c, i->result->name)->wide_pair = 1;
+        i->wide_pair_safe = 1;
+      }
+    }
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next) {
+      unsigned op = i->begin + (i->result ? 2 : 0);
+      if (i->next && cg_truncated_sdiv(c, i, i->next))
+        i->wide_pair_safe = 1;
+      if (i->end - op == 6 && !strcmp(c->tokens[op].text, "icmp") &&
+          !strcmp(c->tokens[op + 2].text, "i64") &&
+          !strcmp(c->tokens[op + 5].text, "0") &&
+          (!strcmp(c->tokens[op + 1].text, "sge") ||
+           !strcmp(c->tokens[op + 1].text, "slt")))
+        i->wide_pair_safe = 1;
+      int reads_words = i->wide_pair_safe || !strcmp(c->tokens[op].text, "icmp");
+      if (reads_words)
+        continue;
+      for (unsigned k = op + 1; k < i->end; k++) {
+        cg_register_work(c);
+        if (c->tokens[k].text[0] == '%')
+          cg_register_lookup(c, c->tokens[k].text)->wide_pair = 0;
+      }
+    }
+}
+
 static void compact_frame(cg_context *c, cg_register_value **order) {
   struct cg_global *g = c->global;
   uint64_t *occupied = bits(c);
@@ -325,6 +387,11 @@ static void compact_frame(cg_context *c, cg_register_value **order) {
     }
   for (unsigned n = 0; n < g->count; n++) {
     cg_register_value *v = order[n];
+    if (v->high_reg) {
+      v->value->slot = UINT32_MAX;
+      omitted++;
+      continue;
+    }
     if (!cg_register_eligible(c, v->value))
       continue;
     narrow += v->reg && v->value->type->bits < 32;
@@ -394,6 +461,7 @@ void cg_global_prepare(cg_context *c) {
   c->global = g;
   c->allocate_r6 = 0;
   c->scalar_stream_selection = 0;
+  plan_wide_pairs(c);
   g->registers = cg_flexible_residency(c)
                      ? 5 : 3;
   if (cg_light_frames(c) && cg_flexible_residency(c) && c->fn->argc <= 3 &&
@@ -484,7 +552,7 @@ void cg_global_prepare(cg_context *c) {
       g->instruction[in].use = bits(c);
       if (i->result) {
         cg_register_value *v = cg_register_lookup(c, i->result->name);
-        if (v->value)
+        if (v->value && !i->folded_operand)
           g->instruction[in].result = v;
       }
       lb->count++;
@@ -521,7 +589,21 @@ void cg_global_prepare(cg_context *c) {
         phi_uses(c, i, b);
         if (li->result)
           li->result->score += 16;
-      } else
+      } else if (i->indexed_source) {
+        /* Operands of a folded address are live at the access, not at the GEP. */
+        unsigned value = op + 2;
+        if (!strcmp(c->tokens[op].text, "store"))
+          uses(c, value, value + 1, li->use, b, 0, b->loop_depth);
+        unsigned base = i->indexed_address->begin + 6;
+        uses(c, base, base + 1, li->use, b, 0, b->loop_depth);
+        uses(c, i->indexed_source, i->indexed_source + 1,
+             li->use, b, 0, b->loop_depth);
+      } else if (i->shifted_producer) {
+        uses(c, i->shifted_source, i->shifted_source + 1,
+             li->use, b, 0, b->loop_depth);
+        uses(c, i->shifted_other, i->shifted_other + 1,
+             li->use, b, 0, b->loop_depth);
+      } else if (!i->folded_operand)
         uses(c, op + 1, i->end, li->use, b, 0, b->loop_depth);
       if (li->result && (!strcmp(c->tokens[op].text, "freeze") ||
                          !strcmp(c->tokens[op].text, "ptrtoint") ||
@@ -636,7 +718,7 @@ void cg_global_prepare(cg_context *c) {
   unsigned allocated = 0, spilled = 0;
   for (unsigned n = 0; n < g->count; n++) {
     cg_register_value *v = order[n];
-    if (!v->uses || !cg_register_eligible(c, v->value))
+    if (!v->uses || (!v->wide_pair && !cg_register_eligible(c, v->value)))
       continue;
     unsigned occupied = v->forbidden;
     uint64_t *row = g->graph + (size_t)v->index * g->words;
@@ -649,8 +731,28 @@ void cg_global_prepare(cg_context *c) {
         for (unsigned r = 0; r < g->registers; r++)
           if (g->values[other]->reg == registers[r])
             occupied |= 1u << registers[r];
+        if (g->values[other]->high_reg)
+          occupied |= 1u << g->values[other]->high_reg;
         mask &= mask - 1;
       }
+    }
+    if (v->wide_pair) {
+      /* Keep pairs disjoint so a dying pair can be reused without overlap copies. */
+      const unsigned lows[] = {4, 10}, highs[] = {g->wide_r6 ? 6u : 5u, 11};
+      for (unsigned k = 0; k < sizeof(lows) / sizeof(*lows); k++)
+        if (!(occupied & ((1u << lows[k]) | (1u << highs[k])))) {
+          v->reg = lows[k];
+          v->high_reg = highs[k];
+          break;
+        }
+      if (v->high_reg) {
+        allocated++;
+        if (v->high_reg == 6)
+          c->allocate_r6 = 1;
+        if (v->high_reg == 11)
+          c->register_saved_bytes = 32;
+      }
+      continue;
     }
     v->reg = preferred(c, v, occupied | (v->split_call ? 1u << 3 : 0));
     /* Keep normal allocations unchanged unless the interval would spill. */
@@ -686,7 +788,7 @@ void cg_global_prepare(cg_context *c) {
       return;
     }
   }
-  if (c->allocate_r6 && c->fn->blocks && c->fn->blocks->first) {
+  if (c->scalar_stream_selection && c->fn->blocks && c->fn->blocks->first) {
     cg_inst *first = c->fn->blocks->first;
     unsigned block = 0;
     int entry_safe = 1;
@@ -753,7 +855,8 @@ void cg_global_prepare(cg_context *c) {
 unsigned cg_global_register(cg_context *c, const char *name) {
   if (!cg_global_residency(c))
     return 0;
-  return cg_register_lookup(c, name)->reg;
+  cg_register_value *entry = cg_register_lookup(c, name);
+  return entry->high_reg ? 0 : entry->reg;
 }
 void cg_global_instruction(cg_context *c, cg_inst *instruction) {
   struct cg_global *g = c->global;

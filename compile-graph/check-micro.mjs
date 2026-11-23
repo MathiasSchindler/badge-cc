@@ -14,6 +14,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const names = ['arithmetic', 'control', 'crc', 'memory', 'calls', 'fixed-point'];
 const extended = [...names, 'rotate', 'bit-insert', 'packed-dot', 'saturate', 'divmod'];
 const current = [...extended, 'byte-swap', 'extend-add', 'parity', 'nibble-map', 'wide-sum'];
+const composed = [...current, 'blend-span', 'sparse-scan', 'ring-checksum', 'filter-update', 'byte-parser'];
 const seeds = [0, 1, 0x12345678, 0x8000ffff, 0xffffffff];
 const validationSeeds = [
   ...seeds, 0x7fffffff, 0x80000000, 0x80008000, 0x7fff7fff, 0x00007f00,
@@ -117,7 +118,7 @@ function execute(object, start, driver, cNames, tmp, countInstructions = true) {
 
 function main(directory) {
   const report = verify(directory), file = rel => path.join(directory, rel);
-  const programsToCheck = [names, extended, current].find(group => group.length === report.modules.length);
+  const programsToCheck = [names, extended, current, composed].find(group => group.length === report.modules.length);
   assert(programsToCheck, 'capture must contain a complete microbenchmark collection');
   assert.equal(report.modules.length, programsToCheck.length);
   assert.deepEqual(new Set(report.projects.map(p => p.name)), new Set(programsToCheck.map(n => `micro-${n}`)));

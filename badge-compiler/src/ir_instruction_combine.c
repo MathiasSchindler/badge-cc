@@ -359,6 +359,27 @@ static int low_bits_only(combining *p, unsigned definition, uint32_t mask) {
   return 0;
 }
 
+static int masked_users(combining *p, const ir_definition *def, uint32_t mask) {
+  if (def->use_count < 2 || def->use_count > 8)
+    return 0;
+  for (unsigned u = def->first_use; u != IR_NONE; u = p->a.operands[u].next_use) {
+    spend(p);
+    const ir_operand *use = &p->a.operands[u];
+    const ir_instruction *in = &p->a.instructions[use->instruction];
+    if (in->block != def->block || in->opcode != IR_OP_BINARY || strcmp(in->operation, "and") ||
+        in->operand_count != 2 || p->a.types[in->type].bits != 32 ||
+        in->end_line != in->line || p->a.text->lines[in->line - 1].count != 7)
+      return 0;
+    const ir_operand *left = &p->a.operands[in->first_operand];
+    const ir_operand *other = left + (use == left);
+    uint64_t value;
+    if (other->kind != IR_OPERAND_LITERAL ||
+        !ir_integer(ir_text(p->a.text, other->token), &value) || ((uint32_t)value & ~mask))
+      return 0;
+  }
+  return 1;
+}
+
 void ir_low_bits(ir_context *c, ir_module *m) {
   ir_allocation *mark = c->allocations;
   combining p = {.c = c, .work = IR_COMBINE_WORK_LIMIT};
@@ -373,14 +394,16 @@ void ir_low_bits(ir_context *c, ir_module *m) {
     const ir_operand *left = &p.a.operands[in->first_operand], *right = left + 1;
     const ir_operand *src = left->kind == IR_OPERAND_LOCAL ? left : right;
     const ir_operand *mask = src == left ? right : left;
+    const ir_definition *def = &p.a.definitions[in->definition];
     uint64_t value;
     if (src->kind != IR_OPERAND_LOCAL || mask->kind != IR_OPERAND_LITERAL ||
         !ir_integer(ir_text(m, mask->token), &value) ||
-        !low_bits_only(&p, in->definition, (uint32_t)value))
+        (!low_bits_only(&p, in->definition, (uint32_t)value) &&
+         !masked_users(&p, def, (uint32_t)value)))
       continue;
     const ir_token *token = &m->tokens[src->token];
-    const ir_operand *use = &p.a.operands[p.a.definitions[in->definition].first_use];
-    m->tokens[use->token].replacement = token->replacement ? token->replacement : token->text;
+    for (unsigned u = def->first_use; u != IR_NONE; u = p.a.operands[u].next_use)
+      m->tokens[p.a.operands[u].token].replacement = token->replacement ? token->replacement : token->text;
     m->lines[in->line - 1].replacement = "";
     ir_note(c, "transformed", "unobserved_upper_bits_mask", 1);
   }

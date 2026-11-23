@@ -1304,7 +1304,7 @@ $(FIRMWARE_DIR)/red_square.o: $(TOOLS_DIR)/red_square.c | $(FIRMWARE_DIR)
 	$(RP2350_CC) $(RP2350_CFLAGS) -c $< -o $@
 
 MICRO_PROGRAMS := arithmetic control crc memory calls fixed-point rotate bit-insert packed-dot saturate divmod \
-	byte-swap extend-add parity nibble-map wide-sum
+	byte-swap extend-add parity nibble-map wide-sum blend-span sparse-scan ring-checksum filter-update byte-parser
 .PHONY: $(addprefix micro-,$(MICRO_PROGRAMS))
 $(addprefix micro-,$(MICRO_PROGRAMS)): micro-%: $(UF2_DIR)/micro-%.uf2
 

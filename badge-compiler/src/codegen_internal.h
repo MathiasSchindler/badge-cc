@@ -37,6 +37,12 @@ typedef struct cg_inst {
   int forwarded_return;
   int ephemeral_address;
   struct cg_inst *indexed_address;
+  unsigned indexed_scale, indexed_source;
+  int indexed_call_result;
+  struct cg_inst *shifted_producer;
+  unsigned shifted_source, shifted_other;
+  int folded_operand;
+  int wide_pair_safe;
 } cg_inst;
 typedef struct cg_assembly {
   char *text;
@@ -73,6 +79,8 @@ typedef struct {
   unsigned last_use, last_cache_use;
   int live_out;
   unsigned index, reg, uses, score;
+  unsigned high_reg;
+  int wide_pair;
   unsigned selection_uses;
   int assembly_home;
   unsigned forbidden, degree;
@@ -172,6 +180,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start);
 int cg_flags_overwritten(cg_context *c, const char *body, const char *text);
 void cg_pool_literals(cg_context *c, size_t start);
 void cg_reduce_branches(cg_context *c, size_t body_start);
+void cg_fold_distances(cg_context *c, size_t body_start);
 void cg_share_return_tails(cg_context *c, size_t body_start);
 void cg_saved_register_list(cg_context *c, unsigned mask, int pop);
 void cg_forward_byte_arguments(cg_context *c, size_t body_start);
@@ -313,6 +322,8 @@ void cg_global_instruction(cg_context *c, cg_inst *instruction);
 void cg_global_after_instruction(cg_context *c);
 unsigned cg_global_register(cg_context *c, const char *name);
 void cg_selection_prepare(cg_context *c);
+void cg_plan_operands(cg_context *c);
+int cg_truncated_sdiv(cg_context *c, cg_inst *i, cg_inst *next);
 int cg_selection_forward_argument(cg_context *c);
 int cg_internal_call_mentions(cg_context *c, const char *name, unsigned *mask);
 int cg_selection_barrier(cg_context *c, cg_inst *i);

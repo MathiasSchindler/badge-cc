@@ -868,6 +868,124 @@ among 38 comparable images or 134 matched objects, and no measured
 frame, save-area, or spill count grows. The nibble lookup is smaller
 than LLVM but reaches more instructions; no physical timing is claimed.
 
+### Composed RP2350 kernel comparison
+
+The suite now includes five small multi-operation kernels with realistic
+loop, helper, and data-access interactions. The same optimized IR also
+goes through LLVM's backend to distinguish lowering gaps from source
+optimization. All 21 kernels match the native reference on 256 seeds
+under both compilers.
+
+| Kernel | Owned flash before → after | LLVM flash | Owned instructions before → after | LLVM instructions |
+| --- | ---: | ---: | ---: | ---: |
+| RGB565 blend span | 508 → 492 B | 384 B | 1,422 → 1,325 | 851 |
+| Sparse scan | 356 → 344 B | 292 B | 912 → 849 | 770 |
+| Ring copy and checksum | 296 → 296 B | 256 B | 1,143 → 1,143 | 728 |
+| Fixed-point filter | 380 → 348 B | 276 B | 2,384 → 1,944 | 895 |
+| Byte parser | 308 → 304 B | 272 B | 487 → 487 | 383 |
+
+The default backend folds a proven unsigned-distance diamond into a
+predicate and reverse subtract, folds small left shifts into indexed
+loads, honors explicit narrow zero-extended call results, and uses
+`SMULL` when a mask proves that a nominally unsigned operand fits in
+the signed range. It also removes a redundant spill reload while keeping
+the store and subsequent indirect access, and proves flag liveness across
+flag-neutral arithmetic to use narrower setup instructions. The
+`low-bits` pass can remove a mask whose same-block users all apply
+submasks. A broader reload rewrite initially altered IMU inlining and
+increased stack use; the final rule is limited to a narrow
+store/address-reload/value-reload/store sequence and excludes byte stores.
+The byte-store candidate had saved four flash bytes and 39 reached
+instructions in the ring kernel, but its repeated on-badge median rose
+from 681 to 698 ticks. It was not promoted.
+
+All 48 UF2s verify. Of 43 comparable images, 24 shrink, saving 1,448
+loaded bytes. Of 139 matched objects, 72 shrink, saving 1,002
+executable bytes. No compared image, object, matched frame, save area,
+or spill count grows. The instruction counts above are QEMU counts.
+
+The physical A/B/B/A replay used the exact owned kernel objects and an
+unchanged timing harness, with 64 calls per protocol case, seven samples
+per image, a native batch digest, and matching clock snapshots.
+
+| Kernel | Baseline median ticks | Final median ticks | Change |
+| --- | ---: | ---: | ---: |
+| RGB565 blend | 4,804 | 4,628 | -3.7% |
+| Sparse scan | 12,484 | 11,272–11,273 | -9.7% |
+| Fixed-point filter | 1,595 | 1,318 | -17.4% |
+
+The ring, parser, and unchanged arithmetic control had overlapping
+sample ranges. These are on-badge comparisons against the previous
+owned backend, not against LLVM. The badge's original 16 MiB flash
+was restored and independently read back after each campaign.
+
+### Low-word division and blend call setup
+
+The default backend computes only the low result for a single-use,
+positive-power-of-two `sdiv i64` immediately truncated to `i32`.
+It still adds the sign bias and propagates the carry across the input
+pair, so signed rounding is unchanged. The wide-arithmetic oracle
+also checks extreme signed inputs with divisors 2, 4096, and 2^31.
+Two narrow peepholes fold a right shift into in-place logical arithmetic
+and avoid reloading an unchanged first argument immediately before
+setting up the second argument of a direct call.
+
+| Kernel | Owned flash before → after | LLVM flash | Owned reached instructions before → after | LLVM instructions |
+| --- | ---: | ---: | ---: | ---: |
+| Blend span | 492 → 488 B | 384 B | 1,325 → 1,303 | 851 |
+| Fixed-point filter | 348 → 336 B | 276 B | 1,944 → 1,784 | 895 |
+
+All 21 exact-object comparisons match native results for 256 inputs.
+No other microbenchmark changes. IMU Demo shrinks from 11,132 to
+11,076 loaded bytes and matches all nine rendering and refreshed-input
+digests. Across 48 verified UF2s, three images save 72 loaded bytes;
+five of 144 matched objects save 76 executable bytes. No image, object,
+local frame, save area, or spill count grows.
+
+On the badge, the exact-object A/B/B/A replay reduces median timer
+ticks from 4,628 to 4,575 for blend span (-1.1%) and from 1,318 to
+1,232 for filter update (-6.5%). Both improvements have nonoverlapping
+sample ranges. All native batch digests and clock snapshots match, and
+the other timed workloads show no resolved change. LLVM is the
+flash-size and QEMU reference above, not the physical timing control.
+
+### Indexed memory, call residency, and wide arithmetic
+
+The Thumb backend now folds single-use byte addresses into aligned scalar
+stores and scaled loads. The allocator keeps the base and index live at
+the access, including across calls when a store follows a call. Direct calls
+with simple scalar arguments and an explicit narrow `zeroext` result no
+longer reserve scratch registers they do not use; an immediately following
+indexed store can consume that result in `r0`. Shift folding looks across a
+bounded scalar window for masks that need a register, without preempting
+contiguous bitfield extraction. The broader shift rule was rejected after it
+grew other kernels.
+
+The backend can keep short-lived wide products and sums in a register pair
+through a signed low-word reduction. A single-use signed widening multiply
+followed by a wide add can use `SMLAL`. The filter still uses `SMULL`: the
+product also feeds its sign check, so the selector does not recompute it.
+The signed boundary oracle verifies both forms.
+
+| Kernel | Owned flash before → after | LLVM flash | Owned QEMU instructions before → after | Badge median ticks before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Blend span | 488 → 428 B | 384 B | 1,303 → 1,094 | 4,575 → 3,903 (-14.7%) |
+| Ring checksum | 296 → 292 B | 256 B | 1,143 → 1,104 | 681 → 678 (-0.4%) |
+| Fixed-point filter | 336 → 320 B | 276 B | 1,784 → 1,584 | 1,232 → 1,054 (-14.4%) |
+
+Blend reached 460 B after indexed memory and 432 B after call transport;
+the narrower shift fold brought it to 428 B. All 21 kernels match native
+results for 256 deterministic inputs, and the nine production IMU
+digests match. The exact-object A/B/B/A timing compared the previous and
+new owned builds, not LLVM. The three timed controls showed no resolved
+change.
+
+All 48 UF2s verified: 25 shrank by 4,832 loaded bytes in total and none
+grew. In 142 matched C objects, 102 shrank and none grew. Stack use is not
+uniformly lower: some production functions trade up to 8 bytes of additional
+local or saved-register stack for smaller code. Blend's frames are unchanged
+and the filter's local frame drops from 56 to 48 B.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

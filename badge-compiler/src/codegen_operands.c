@@ -182,7 +182,8 @@ int cg_flags_overwritten(cg_context *c, const char *body, const char *text) {
       "str", "str.n", "str.w", "strb", "strb.n", "strb.w", "strh", "strh.n", "strh.w",
       "ldr", "ldr.n", "ldr.w", "ldrb", "ldrb.n", "ldrb.w", "ldrh", "ldrh.n", "ldrh.w",
       "ubfx", "clz", "uxtb.n", "uxtb.w", "uxth.n", "uxth.w", "and.w", "bic.w", "orr.w", "orn.w",
-      "eor.w", "lsl.w", "lsr.w", "asr.w", "nop"};
+      "eor.w", "lsl.w", "lsr.w", "asr.w", "nop", "udiv", "sdiv", "mls", "mla",
+      "movs.n"};
     for (unsigned n = 0; n < sizeof(ops) / sizeof(*ops); n++)
       if (!strcmp(opcode, ops[n])) neutral = 1;
     if (!neutral && !immediate(instruction, "movw", &reg, &number) &&
@@ -235,6 +236,100 @@ static int branch_span(cg_context *c, const char *from, const char *to, unsigned
   }
   return 1;
 }
+static const char *edge_body(const char *line) {
+  while (*line == '@' || !strncmp(line, ".Lcg_edge", 9)) {
+    const char *end = strchr(line, '\n');
+    if (!end || (*line == '.' && end[-1] != ':'))
+      break;
+    line = end + 1;
+  }
+  return line;
+}
+
+static const char *only_label(const char *line, char label[128]) {
+  const char *end = strchr(line, '\n');
+  if (strncmp(line, ".Lcg_", 5) || !end || end - line <= 1 ||
+      end[-1] != ':' || end - line > 128)
+    return NULL;
+  size_t n = (size_t)(end - line - 1);
+  memcpy(label, line, n);
+  label[n] = 0;
+  return end + 1;
+}
+
+static const char *fold_unsigned_distance(cg_context *c, const char *body,
+                                          const char *p, const char *end) {
+  unsigned a, b, dst, x, y;
+  int used = 0;
+  if (strncmp(p, "cmp.n ", 6) ||
+      sscanf(p, "cmp.n r%u, r%u%n", &a, &b, &used) != 2 || p + used != end ||
+      a >= 8 || b >= 8)
+    return NULL;
+  const char *branch = end + 1, *branch_end = strchr(branch, '\n');
+  char target[128], join[128], label[128];
+  used = 0;
+  if (!branch_end || sscanf(branch, "bls.n %127s%n", target, &used) != 1 ||
+      branch + used != branch_end)
+    return NULL;
+  const char *first_label = edge_body(branch_end + 1);
+  const char *first = only_label(first_label, label);
+  if (!first || !sole_label_entry(c, body, label, first_label, NULL))
+    return NULL;
+  for (const char *q = branch_end + 1; q < first_label;) {
+    if (*q == '.' && (!only_label(q, label) ||
+                     !sole_label_entry(c, body, label, q, NULL)))
+      return NULL;
+    q = strchr(q, '\n') + 1;
+  }
+  const char *sub_end = strchr(first, '\n');
+  used = 0;
+  if (!sub_end || sscanf(first, "sub.w r%u, r%u, r%u%n", &dst, &x, &y, &used) != 3 ||
+      first + used != sub_end || dst >= 8 || x != a || y != b)
+    return NULL;
+  const char *jump = sub_end + 1, *jump_end = strchr(jump, '\n');
+  used = 0;
+  if (!jump_end || sscanf(jump, "b %127s%n", join, &used) != 1 || jump + used != jump_end)
+    return NULL;
+  const char *other = jump_end + 1, *second = only_label(other, label);
+  if (!second || strcmp(label, target) ||
+      !sole_label_entry(c, body, label, other, branch + 6))
+    return NULL;
+  const char *second_end = strchr(second, '\n');
+  unsigned result;
+  used = 0;
+  if (!second_end || sscanf(second, "sub.w r%u, r%u, r%u%n", &result, &x, &y, &used) != 3 ||
+      second + used != second_end || result != dst || x != b || y != a ||
+      !only_label(second_end + 1, label) || strcmp(label, join))
+    return NULL;
+  /* SUBS sets the same NZCV as CMP; the predicated RSB leaves it intact. */
+  cg_emit(c, "subs.n r%u, r%u, r%u\nit lo\nrsblo.n r%u, r%u, #0\n"
+             "@ unsigned-distance: predicated reverse subtract\n", dst, a, b, dst, dst);
+  return second_end + 1;
+}
+
+void cg_fold_distances(cg_context *c, size_t start) {
+  const char *input = c->out + start;
+  if (!strstr(input, "\nbls.n .Lcg_") || strstr(input, "@ constant-assembly-lines:"))
+    return;
+  size_t length = c->size - start;
+  char *body = cg_alloc(c, length + 1);
+  memcpy(body, input, length);
+  c->size = start;
+  for (const char *p = body; *p;) {
+    cg_register_work(c);
+    const char *end = strchr(p, '\n');
+    if (!end)
+      cg_error(c, "unterminated distance selection instruction");
+    const char *joined = fold_unsigned_distance(c, body, p, end);
+    if (joined)
+      p = joined;
+    else {
+      cg_append(c, p, (size_t)(end + 1 - p));
+      p = end + 1;
+    }
+  }
+}
+
 void cg_reduce_branches(cg_context *c, size_t body_start) {
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
@@ -662,6 +757,129 @@ static const char *fold_stack_pair(cg_context *c, const char *p,
   return finish + 1;
 }
 
+static const char *spill_notes(const char *p) {
+  while (*p == '@' && strncmp(p, "@ constant-assembly-lines:", 26) &&
+         strncmp(p, "@ frame-incoming:", 17) && strncmp(p, "@ assembly-effects:", 19)) {
+    const char *end = strchr(p, '\n');
+    if (!end)
+      break;
+    p = end + 1;
+  }
+  return p;
+}
+
+static const char *fold_spill_reload(cg_context *c, const char *p, const char *end) {
+  scalar_transfer store;
+  if (strncmp(p, "str.", 4) || !parse_transfer(p, end, &store) ||
+      store.bytes != 4 || store.index >= 0 || store.base != 7 || store.reg != 0 || !store.narrow)
+    return NULL;
+  const char *line = spill_notes(end + 1);
+  const char *finish = strchr(line, '\n');
+  scalar_transfer address;
+  if (!finish || !parse_transfer(line, finish, &address) || address.op[0] != 'l' ||
+      address.bytes != 4 || address.base != 7 || address.index >= 0 ||
+      address.reg != 4 || address.offset == store.offset || !address.narrow)
+    return NULL;
+  line = spill_notes(finish + 1);
+  finish = strchr(line, '\n');
+  scalar_transfer reload;
+  if (!finish || !parse_transfer(line, finish, &reload) || reload.op[0] != 'l' ||
+      reload.bytes != 4 || reload.base != 7 || reload.index >= 0 || reload.reg != 0 ||
+      reload.offset != store.offset || !reload.narrow)
+    return NULL;
+  const char *transfer = spill_notes(finish + 1), *last = strchr(transfer, '\n');
+  scalar_transfer output;
+  if (!last || !parse_transfer(transfer, last, &output) || output.op[0] != 's' ||
+      output.bytes == 1 || output.reg != 0 || output.base != 4 ||
+      output.index >= 0 || output.offset)
+    return NULL;
+  cg_append(c, p, (size_t)(line - p));
+  cg_emit(c, "@ spill-reload: value already in the destination register\n");
+  return finish + 1;
+}
+
+static const char *fold_shifted_load(cg_context *c, const char *p, const char *end) {
+  if (strncmp(p, "lsl.w ", 6))
+    return NULL;
+  unsigned dst, index, shift;
+  int used = 0;
+  if (sscanf(p, "lsl.w r%u, r%u, #%u%n", &dst, &index, &shift, &used) != 3 ||
+      p + used != end || dst > 12 || index > 12 || dst == index || !shift || shift > 3)
+    return NULL;
+  const char *line = end + 1;
+  for (unsigned n = 0; n < 4; n++) {
+    line = spill_notes(line);
+    const char *finish = strchr(line, '\n');
+    if (!finish)
+      return NULL;
+    scalar_transfer load;
+    if (parse_transfer(line, finish, &load) && load.op[0] == 'l' && load.reg == dst &&
+        load.index == (int)dst && load.base != dst && load.base != 13 &&
+        !load.shift && !load.offset) {
+      load.index = (int)index;
+      load.shift = shift;
+      cg_append(c, end + 1, (size_t)(line - end - 1));
+      emit_transfer(c, &load, 0);
+      cg_emit(c, "@ memory-index-fold: shifted load\n");
+      return finish + 1;
+    }
+    /* Only address materialization may occur between the shift and load. */
+    if ((strncmp(line, "movw r", 6) && strncmp(line, "movt r", 6)))
+      return NULL;
+    char materialization[256];
+    size_t length = (size_t)(finish - line);
+    if (length >= sizeof(materialization))
+      return NULL;
+    memcpy(materialization, line, length);
+    materialization[length] = 0;
+    if (mentions(materialization, dst) || mentions(materialization, index))
+      return NULL;
+    line = finish + 1;
+  }
+  return NULL;
+}
+
+static const char *fold_shifted_logic(cg_context *c, const char *p, const char *end) {
+  unsigned tmp, src, shift, dst, a, b;
+  int used = 0;
+  if (strncmp(p, "lsr.w ", 6) ||
+      sscanf(p, "lsr.w r%u, r%u, #%u%n", &tmp, &src, &shift, &used) != 3 ||
+      p + used != end || tmp > 12 || src > 12 || !shift || shift >= 32)
+    return NULL;
+  const char *line = spill_notes(end + 1), *finish = strchr(line, '\n');
+  char op[8];
+  used = 0;
+  if (!finish || sscanf(line, "%7[a-z].w r%u, r%u, r%u%n", op, &dst, &a, &b, &used) != 4 ||
+      line + used != finish || dst != tmp || a > 12 || b > 12 ||
+      (a == tmp) == (b == tmp) ||
+      (strcmp(op, "and") && strcmp(op, "eor") && strcmp(op, "orr")))
+    return NULL;
+  cg_append(c, end + 1, (size_t)(line - end - 1));
+  cg_emit(c, "%s.w r%u, r%u, r%u, lsr #%u\n@ shifted-logic: folded in-place result\n",
+          op, dst, a == tmp ? b : a, src, shift);
+  return finish + 1;
+}
+
+static const char *fold_word_argument(cg_context *c, const char *p, const char *end) {
+  scalar_transfer spill, reload;
+  if (!parse_transfer(p, end, &spill) || spill.op[0] != 's' || spill.bytes != 4 ||
+      spill.reg || spill.base != 7 || spill.index >= 0 || !spill.narrow)
+    return NULL;
+  const char *line = spill_notes(end + 1), *finish = strchr(line, '\n');
+  if (!finish || !parse_transfer(line, finish, &reload) || reload.op[0] != 'l' ||
+      reload.bytes != 4 || reload.reg || reload.base != 7 || reload.index >= 0 ||
+      reload.offset != spill.offset || !reload.narrow)
+    return NULL;
+  const char *move = spill_notes(finish + 1), *last = strchr(move, '\n');
+  unsigned dst, src;
+  if (!last || !parse_move(move, last, &dst, &src) || dst != 1 || src < 4 ||
+      strncmp(last + 1, "bl ", 3))
+    return NULL;
+  cg_append(c, p, (size_t)(line - p));
+  cg_emit(c, "@ word-argument: r0 still holds the spilled argument\n");
+  return finish + 1;
+}
+
 void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
@@ -679,7 +897,15 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
     else if (!strncmp(p, "@ constant-assembly-lines:", 26))
       sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
     else {
-      const char *after = fold_stack_pair(c, p, end);
+      const char *after = fold_spill_reload(c, p, end);
+      if (!after)
+        after = fold_word_argument(c, p, end);
+      if (!after)
+        after = fold_shifted_logic(c, p, end);
+      if (!after)
+        after = fold_shifted_load(c, p, end);
+      if (!after)
+        after = fold_stack_pair(c, p, end);
       if (!after)
         after = fold_transfer_move(c, p, end);
       if (after) {
