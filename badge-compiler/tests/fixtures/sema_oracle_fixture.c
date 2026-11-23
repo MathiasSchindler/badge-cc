@@ -2,6 +2,7 @@ struct Layout { char c; short s; int i; long l; long long ll; char tail; };
 union Overlay { char c[9]; long long ll; };
 enum Positive { P0, P2 = 2 };
 enum Negative { N1 = -1, N0 };
+struct Explicit { char tag; short value __attribute__((__aligned__(__alignof__(long long)))); char tail; };
 
 unsigned oracle_pointer_size = sizeof(void *);
 unsigned oracle_long_size = sizeof(long);
@@ -20,8 +21,14 @@ long long oracle_sign_extension = (signed char)255;
 unsigned oracle_short_circuit = 0 && (1 / 0);
 unsigned oracle_conditional = 1 ? 7 : (1 / 0);
 unsigned oracle_shift = 1ull << 40 >> 39;
+unsigned oracle_explicit_size = sizeof(struct Explicit);
+unsigned oracle_explicit_align = _Alignof(struct Explicit);
+unsigned oracle_explicit_offset = (unsigned)&((struct Explicit *)0)->value;
+unsigned oracle_explicit_tail = (unsigned)&((struct Explicit *)0)->tail;
 
 _Static_assert(sizeof(struct Layout) == 32, "target struct layout");
 _Static_assert(_Alignof(struct Layout) == 8, "target struct alignment");
 _Static_assert(sizeof(union Overlay) == 16, "target union layout");
 _Static_assert(sizeof(long double) == 8, "target long double");
+_Static_assert(sizeof(struct Explicit) == 16 && __alignof__(struct Explicit) == 8,
+               "explicit member alignment");

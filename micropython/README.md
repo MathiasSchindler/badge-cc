@@ -1,13 +1,14 @@
 # MicroPython on RP2350
 
 This experiment builds upstream MicroPython v1.29.0 without patching its
-source tree. It produces three Arm Cortex-M33 images:
+source tree. It produces four Arm Cortex-M33 images:
 
 | Image | Target | Compiler |
 | --- | --- | --- |
 | `pico2-stock` | Upstream `RPI_PICO2` board | GCC throughout |
 | `badge-stock` | Universe badge RP2350B, 16 MiB flash | GCC throughout |
 | `badge-mixed` | Same badge configuration | GCC except for LittleFS `lfs2_util.c` |
+| `badge-core` | Same badge configuration | Also replaces `py/smallint.c` with an owned target object |
 
 The [badge board definition](board/BADGE_RP2350/) is for USB REPL and flash
 testing, not a full badge port. It does not configure the display, Wi-Fi,
@@ -24,8 +25,9 @@ node micropython/build.mjs
 ```
 
 The script pins the release and its SDK submodules, builds host `mpy-cross`,
-builds the two GCC controls, swaps in the owned object using
-[a CMake hook](mixed.cmake), and runs the [CRC oracle](crc-oracle.c).
+builds the two GCC controls, swaps in the owned objects using
+[a CMake hook](mixed.cmake), and runs the [CRC oracle](crc-oracle.c) and
+[signed arithmetic oracle](smallint-oracle.c).
 It checks that the mixed build has no GCC compile command for the CRC module
 and that its link map names the owned object. All clones, logs, images and
 comparison JSON are under the ignored `micropython/build/`. GCC 15.3.1
@@ -45,6 +47,7 @@ reference on 1,028 seeded alignment/length pairs, including split updates.
 | Pico 2 stock | 329,756 | 56 |
 | Badge stock | 332,676 | 56 |
 | Badge mixed | 332,692 | 72 |
+| Badge core | 332,788 | 72 |
 
 These are flash sizes, not UF2 container sizes. The mixed image is now
 16 bytes larger than the badge control, down from a 40-byte difference.
@@ -76,9 +79,14 @@ node micropython/survey.mjs
 
 The survey replays six CMake compile commands through GCC preprocessing,
 removes only GCC diagnostic pragmas, then records the owned frontend's
-first result for each. All six hit an aligned `max_align_t` field from
-GCC's `stddef.h` before their own implementation. This is a more immediate
-stock-header blocker than any difference in their generated code.
+first result for each. GNU member alignment and type-form `__alignof__`
+now handle GCC's `max_align_t` layout. All six probes now reach GCC's
+C23 `__typeof__(nullptr)` typedef in `stddef.h`, which the owned frontend
+does not support.
+An exploratory `-std=gnu11` preprocessing run bypassed that typedef for
+`smallint.c` and `parsenumbase.c`; both then stopped at Pico SDK's GNU
+`__inline__` declaration for a memory barrier. Switching dialects alone
+does not make the SDK headers compatible.
 
 With the small header surface it actually needs, the unmodified upstream
 `py/ringbuf.c` builds through the entire owned pipeline. Its five public
@@ -87,6 +95,26 @@ wraparound, empty reads, and oversized requests. The five public symbols
 total 470 bytes versus GCC's 320, not counting their callees. This is an isolated
 Cortex-M33 test, not a second mixed firmware module: the stock badge link
 discards those five functions.
+
+## Core Python arithmetic
+
+The `badge-core` image builds the unmodified `py/smallint.c` using the
+stock headers and CMake definitions. This is a compatibility route:
+GCC preprocesses; Clang emits unoptimized IR; the owned optimizer,
+backend and assembler make the target object. The CMake compile database
+and link map verify that no GCC `smallint.c` object is compiled or linked
+in this image.
+
+The exact objects agree with GCC and an independent arithmetic reference
+on 182 signed pairs in Cortex-M33 QEMU. The owned modulo function is 56
+bytes versus GCC's 28, and floor division is 104 versus 38. The complete
+core image uses 96 more flash bytes than `badge-mixed`.
+The stock/core/stock REPL timing medians were 54,158 / 55,691 / 54,158 us
+per batch (core took 2.8% longer). These are end-to-end VM workload timings,
+not isolated helper timings.
+
+The alignment change passed the target-layout oracle and left the loaded
+size of all 51 compiler-corpus images unchanged.
 
 ## Optional physical smoke test
 
@@ -100,6 +128,11 @@ and set `PICOTOOL` if the USB-enabled tool is not at
 ```sh
 node micropython/smoke.mjs YOUR_16_HEX_DIGIT_BOOTSEL_SERIAL
 ```
+
+Append `--core` to boot `badge-core` instead of `badge-mixed`. That variant
+also checks `//`, `%`, `divmod()` and divide-by-zero through the running
+interpreter, and records seven elapsed-time samples per boot for a loop
+that performs 10,000 divisions and 10,000 remainders per sample.
 
 The runner verifies RP2350B/Arm/16 MiB identity, snapshots all flash before
 writing, and boots the badge GCC control, mixed image, and GCC control again.

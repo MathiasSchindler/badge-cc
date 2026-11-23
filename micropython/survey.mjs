@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { preprocessStock } from './stock-input.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -25,13 +26,6 @@ function checked(tool, args, options) {
     return r.stdout;
 }
 
-function words(command) {
-    return [...command.matchAll(/(?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')+/g)]
-        .map(m => m[0].replace(/"((?:[^"\\]|\\.)*)"|'([^']*)'|\\(.)/g,
-            (_, double, single, escaped) => double !== undefined
-                ? double.replace(/\\(["\\$`])/g, '$1') : single ?? escaped));
-}
-
 const modules = ['py/ringbuf.c', 'py/smallint.c', 'py/parsenumbase.c', 'py/unicode.c',
     'py/sequence.c', 'shared/timeutils/timeutils.c'];
 
@@ -40,17 +34,8 @@ try {
     const results = [];
     for (const module of modules) {
         const source = path.join(upstream, module);
-        const row = db.find(e => e.file === source);
-        assert(row, `Missing GCC compilation command for ${module}`);
-        const [tool, ...args] = row.arguments ?? words(row.command);
-        const at = args.indexOf('-o');
-        assert(at >= 0);
         const stem = path.join(work, `survey-${path.basename(module, '.c')}`);
-        args.splice(at, 2, '-o', `${stem}.i`);
-        args[args.indexOf('-c')] = '-E';
-        checked(tool, [...args, '-P'], { cwd: row.directory });
-        const preprocessed = fs.readFileSync(`${stem}.i`, 'utf8');
-        fs.writeFileSync(`${stem}.i`, preprocessed.replace(/^[ \t]*#pragma GCC diagnostic[^\n]*$/gm, ''));
+        preprocessStock(db, source, `${stem}.i`, checked);
         const probe = run(path.join(compiler, 'badge-ir'), [`${stem}.i`, '-o', `${stem}.ll`]);
         const diagnostic = probe.status === 0 ? null : probe.stderr.trim();
         results.push({ module, mode: 'GCC preprocessing with stock headers; owned frontend', diagnostic });

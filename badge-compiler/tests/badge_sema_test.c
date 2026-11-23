@@ -94,11 +94,11 @@ static void sem_test_layout_oracle(const char *clang) {
         }
         ++comparisons;
     }
-    assert(!ferror(ir) && fclose(ir) == 0 && comparisons == 17);
+    assert(!ferror(ir) && fclose(ir) == 0 && comparisons == 21);
     assert(host_write_file("badge-sema-test", "build/sema-layout-ours.json",
                           (const unsigned char *)p->output, p->output_size));
     sem_test_release(p);
-    printf("badge-sema: %u/17 LLVM target-layout/constant probes match\n", comparisons);
+    printf("badge-sema: %u/21 LLVM target-layout/constant probes match\n", comparisons);
 }
 
 int main(void) {

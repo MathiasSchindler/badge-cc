@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { preprocessStock } from './stock-input.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -16,6 +17,9 @@ const gcc = process.env.ARM_GCC ?? 'arm-none-eabi-gcc';
 const arm = ['-mcpu=cortex-m33', '-mthumb'];
 const source = path.join(upstream, 'lib/littlefs/lfs2_util.c');
 const owned = path.join(build, 'lfs2-owned.o');
+const smallint = path.join(upstream, 'py/smallint.c');
+const ownedSmallint = path.join(build, 'smallint-owned.o');
+const smallintNames = ['mp_small_int_modulo', 'mp_small_int_floor_divide'];
 const fixture = path.join(root, 'badge-compiler/tests/fixtures');
 const qemu = process.env.QEMU_ARM ?? 'qemu-system-arm';
 const emulator = ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
@@ -34,7 +38,7 @@ function run(tool, args, { timeout = 120000, log, capture = false, ...options } 
     return result.stdout ?? '';
 }
 
-function firmware(name, board, mixed = false) {
+function firmware(name, board, mixed = false, core = false) {
     const directory = path.join(build, name);
     const picotool = path.join(build, 'pico2-stock/_deps/picotool');
     const args = ['-S', port, '-B', directory, `-DMICROPY_BOARD=${board}`, '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'];
@@ -42,6 +46,7 @@ function firmware(name, board, mixed = false) {
     if (name !== 'pico2-stock' && fs.existsSync(path.join(picotool, 'picotoolConfig.cmake')))
         args.push(`-Dpicotool_DIR=${picotool}`);
     if (mixed) args.push(`-DCMAKE_PROJECT_INCLUDE=${path.join(here, 'mixed.cmake')}`, `-DBADGE_LFS2_OBJECT=${owned}`);
+    if (core) args.push(`-DBADGE_SMALLINT_OBJECT=${ownedSmallint}`);
     run('cmake', args, {
         cwd: port, timeout: 240000, log: `${name}-configure`,
         env: { ...process.env, CFLAGS: '-Wno-error=array-bounds' },
@@ -49,13 +54,52 @@ function firmware(name, board, mixed = false) {
     run('cmake', ['--build', directory, '-j', jobs], { timeout: 300000, log: name });
     const commands = JSON.parse(fs.readFileSync(path.join(directory, 'compile_commands.json'), 'utf8'));
     assert.equal(commands.filter(row => row.file === source).length, mixed ? 0 : 1);
+    assert.equal(commands.filter(row => row.file === smallint).length, core ? 0 : 1);
     const map = fs.readFileSync(path.join(directory, 'firmware.elf.map'), 'utf8');
     assert(map.includes(mixed ? owned : '/lib/littlefs/lfs2_util.c.o'));
+    assert(map.includes(core ? ownedSmallint : '/py/smallint.c.o'));
     const crc = crcSymbol(path.join(directory, 'firmware.elf')).bytes;
     const bytes = fs.statSync(path.join(directory, 'firmware.bin')).size;
     const uf2 = fs.statSync(path.join(directory, 'firmware.uf2')).size;
     console.log(`${name}: ${bytes} loaded bytes; ${crc} bytes in lfs2_crc`);
     return { directory, bytes, uf2, crc };
+}
+
+function compileSmallint(controlDirectory) {
+    const db = JSON.parse(fs.readFileSync(path.join(controlDirectory, 'compile_commands.json'), 'utf8'));
+    const stem = path.join(build, 'smallint-stock');
+    preprocessStock(db, smallint, `${stem}.i`, run);
+    // O0 keeps LLVM optimization out of this route; disabling optnone lets badge-opt promote locals.
+    run(process.env.LLVM_CLANG ?? 'clang',
+        ['--target=arm-none-eabi', ...arm, '-mfloat-abi=softfp', '-std=gnu23', '-O0', '-fno-discard-value-names',
+            '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-Xclang', '-disable-O0-optnone',
+            '-S', '-emit-llvm', '-x', 'c', `${stem}.i`, '-o', `${stem}.ll`]);
+    run(path.join(tools, 'badge-opt'), [`${stem}.ll`, '-o', `${stem}.opt.ll`]);
+    run(path.join(tools, 'badge-codegen'), [`${stem}.opt.ll`, '-o', `${stem}.s`]);
+    run(path.join(tools, 'badge-asm'), [`${stem}.s`, '-o', ownedSmallint]);
+}
+
+function smallintOracle(controlDirectory, coreDirectory) {
+    const stockObject = path.join(controlDirectory, 'CMakeFiles/firmware.dir', `${smallint}.o`);
+    const control = path.join(build, 'smallint-control.o');
+    run('arm-none-eabi-objcopy', [...smallintNames.map(n => `--redefine-sym=${n}=${n.replace('mp_small_int_', 'gcc_')}`),
+        stockObject, control]);
+    const oracle = path.join(build, 'smallint-oracle.o'), elf = path.join(build, 'smallint-oracle.elf');
+    run(gcc, [...arm, '-mfloat-abi=softfp', '-Os', '-ffreestanding', '-c', path.join(here, 'smallint-oracle.c'), '-o', oracle]);
+    run('ld.lld', ['--gc-sections', '-T', path.join(fixture, 'codegen_fixture.ld'),
+        path.join(build, 'crc-start.o'), oracle, ownedSmallint, control, '-o', elf]);
+    run(qemu, [...emulator, '-kernel', elf], { timeout: 20000 });
+    const symbolSizes = directory => {
+        const symbols = run('llvm-nm', ['--defined-only', '--print-size', path.join(directory, 'firmware.elf')], { capture: true });
+        return Object.fromEntries(smallintNames.map(n => {
+            const m = symbols.match(new RegExp(`^[\\da-f]+ ([\\da-f]+) T ${n}$`, 'm'));
+            assert(m, `${n} missing from ${directory}`);
+            return [n, Number.parseInt(m[1], 16)];
+        }));
+    };
+    const sizes = { gcc: symbolSizes(controlDirectory), owned: symbolSizes(coreDirectory) };
+    console.log('Smallint oracle: 182 signed pairs passed; linked symbol sizes:', sizes);
+    return { oraclePairs: 182, sizes };
 }
 
 function compileOwned() {
@@ -143,9 +187,13 @@ try {
     compileOwned();
     const mixed = firmware('badge-mixed', 'BADGE_RP2350', true);
     crcOracle(stock.directory);
+    compileSmallint(stock.directory);
+    const core = firmware('badge-core', 'BADGE_RP2350', true, true);
+    const smallInteger = smallintOracle(stock.directory, core.directory);
     const sameTokens = crcComparison();
     console.log('Same-token CRC comparison (1,024-byte input):', sameTokens);
-    fs.writeFileSync(path.join(build, 'comparison.json'), JSON.stringify({ revision, pico2, stock, mixed, sameTokens, oracleCases: 1028 }, null, 2) + '\n');
+    fs.writeFileSync(path.join(build, 'comparison.json'),
+        JSON.stringify({ revision, pico2, stock, mixed, core, smallInteger, sameTokens, oracleCases: 1028 }, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython build: ${error.message}`);
     process.exitCode = 1;

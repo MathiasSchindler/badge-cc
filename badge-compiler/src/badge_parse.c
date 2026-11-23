@@ -74,7 +74,7 @@ static int keyword(const char *s) {
         "float for goto if inline int long register restrict return short signed sizeof static "
         "struct switch typedef union unsigned void volatile while _Alignas _Alignof _Atomic "
         "_Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local "
-        "__attribute__ __asm__ __asm asm __volatile__");
+        "__attribute__ __asm__ __asm asm __volatile__ __alignof__ __alignof");
 }
 
 static int at(parser_t *p, const char *s) { return strcmp(peek(p, 0)->text, s) == 0; }
@@ -391,8 +391,8 @@ static node_t *unary(parser_t *p) {
     if (word_in(peek(p, 0)->text, "++ -- & * + - ~ !")) {
         n = node(p, "unary", peek(p, 0)->text); ++p->position;
         child(p, n, unary(p)); finish(p, n);
-    } else if (at(p, "sizeof") || at(p, "_Alignof")) {
-        int alignment = at(p, "_Alignof");
+    } else if (at(p, "sizeof") || word_in(peek(p, 0)->text, "_Alignof __alignof__ __alignof")) {
+        int alignment = !at(p, "sizeof");
         n = node(p, alignment ? "alignof_type" : "sizeof_expression", NULL);
         ++p->position;
         if (at(p, "(") && declaration_start(p, 1)) {

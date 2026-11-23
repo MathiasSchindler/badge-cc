@@ -10,6 +10,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
 const build = path.join(here, 'build');
 const serial = process.argv[2]?.toUpperCase();
+const core = process.argv[3] === '--core';
 const picotool = process.env.PICOTOOL ?? path.join(root, 'build/picotool-usb/picotool');
 const mpremote = process.env.MPREMOTE_PYTHON ?? 'mpremote';
 const mpArgs = process.env.MPREMOTE_PYTHON ? ['-m', 'mpremote'] : [];
@@ -95,15 +96,16 @@ print("MP_CRC_OK " + ${JSON.stringify(phase)})
 
 try {
     assert.match(serial ?? '', /^[0-9A-F]{16}$/, 'Pass the explicitly selected BOOTSEL serial');
+    assert(process.argv.length === 3 || (core && process.argv.length === 4), 'Expected only a serial and optional --core');
     usbPorts();
     const comparison = JSON.parse(fs.readFileSync(path.join(build, 'comparison.json'), 'utf8'));
     capture = fs.mkdtempSync(path.join(build, 'smoke-'));
-    const report = { revision: comparison.revision, backups: [], restoration: [], errors: [], runs: [] };
+    const report = { revision: comparison.revision, variant: core ? 'core' : 'crc', backups: [], restoration: [], errors: [], runs: [] };
     const save = () => fs.writeFileSync(path.join(capture, 'capture.json'), JSON.stringify(report, null, 2) + '\n');
     preserveFlash([serial], capture, command, report, save, () => {
         command(['erase', '-r', '0x10d00000', '0x11000000', '--ser', serial], 'erase-experiment-filesystem');
         for (const phase of ['stock', 'mixed', 'stock-readback']) {
-            const image = comparison[phase === 'mixed' ? 'mixed' : 'stock'];
+            const image = comparison[phase === 'mixed' ? (core ? 'core' : 'mixed') : 'stock'];
             const uf2 = path.join(image.directory, 'firmware.uf2');
             const ports = usbPorts();
             command(['load', '-v', uf2, '--ser', serial], `${phase}-flash`);
@@ -113,7 +115,19 @@ try {
             try {
                 output = exec(port, python(phase), `${phase}-repl`);
                 assert(output.includes(`MP_CRC_OK ${phase}`), `${phase}: missing REPL success marker`);
-                report.runs.push({ phase, uf2Sha256: sha(uf2), output });
+                let smallint;
+                if (core) {
+                    const check = fs.readFileSync(path.join(here, 'smallint-smoke.py'), 'utf8');
+                    const result = exec(port, check, `${phase}-smallint`);
+                    const match = result.match(/^MP_SMALLINT_OK ([0-9,]+)\r?$/m);
+                    assert(match, `${phase}: missing VM arithmetic success marker`);
+                    const samples = match[1].split(',').map(Number);
+                    assert.equal(samples.length, 7);
+                    assert(samples.every(t => Number.isSafeInteger(t) && t > 0));
+                    smallint = { samples, median: [...samples].sort((a, b) => a - b)[3] };
+                    process.stdout.write(result);
+                }
+                report.runs.push({ phase, uf2Sha256: sha(uf2), output, smallint });
                 save();
                 process.stdout.write(output);
             } finally {

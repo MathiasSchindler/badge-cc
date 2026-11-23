@@ -148,6 +148,8 @@ int main(void) {
         {"struct S{int x;};void f(volatile struct S *s){(void)*s;}","i32 4, i1 true"},
         {"struct S{int x;};void f(void){volatile struct S s={3};}","store volatile i32"},
         {"int f(void){int a[2]={1,2};return sizeof(a)+_Alignof(int);}","ret i32 12"},
+        {"struct A{char tag; short x __attribute__((__aligned__(__alignof__(long long))));}; "
+         "struct A a={.x=1};", "[16 x i8]"},
         {"struct S{int x,y;}; struct S a[1]={[0].x=5,[0]={.y=7}};","c\"\\00\\00\\00\\00\\07"},
         {"union S{int x;unsigned char b[4];}; union S a={.x=7};","\\07\\00\\00\\00"},
         {"extern int f(int,...); int g(void){return f(2,3);}","call i32 (i32"},
@@ -173,7 +175,8 @@ int main(void) {
         "struct S{int x:2;};",
         "void f(int n){int x[n];}",
         "int a; unsigned address=(unsigned)&a;",
-        "struct A{long long x __attribute__((aligned(16)));};",
+        "struct A{long long x __attribute__((aligned(3)));};",
+        "struct A{long long x __attribute__((aligned));};",
         "union U{int x;char y;}; union U u={.x=4,.y=1};",
         "union U{int x;char y;};struct S{union U u;};struct S s={.u.x=4,.u.y=1};",
         "struct S; struct S f(void);",

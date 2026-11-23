@@ -240,6 +240,13 @@ static void sem_attributes(sema_t *s, node_t *n, declaration_flags_t *f) {
             if (a->first != NULL) sem_error(s, a, "attribute does not take arguments");
             if (strcmp(a->text, "noreturn") == 0) f->noreturn = 1;
             else f->used = 1;
+        } else if (strcmp(a->text, "aligned") == 0 || strcmp(a->text, "__aligned__") == 0) {
+            if (a->first == NULL || a->first->next != NULL)
+                sem_error(s, a, "aligned requires one explicit alignment");
+            uint64_t value = sem_constant(s, a->first);
+            if (!value || (value & (value - 1)) != 0 || value > 65536)
+                sem_error(s, a, "alignment must be a power of two no larger than 65536");
+            if (value > f->alignment) f->alignment = (uint32_t)value;
         } else if (strcmp(a->text, "section") == 0) {
             if (!sem_kind(a->first, "string_literal") || a->first->next != NULL ||
                 a->first->first->next != NULL) sem_error(s, a, "section requires one string segment");
@@ -264,7 +271,8 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
         if (sem_kind(c, "attributes")) sem_attributes(s, c, &attrs);
         else definition = c;
     }
-    if (attrs.noreturn || attrs.used || attrs.section != NULL) sem_error(s, n, "attribute does not apply to records/enums");
+    if (attrs.noreturn || attrs.used || attrs.section != NULL || attrs.alignment)
+        sem_error(s, n, "attribute does not apply to records/enums");
     c_type_t *t = NULL;
     if (n->text != NULL) {
         for (scope_t *scope = s->scope; scope != NULL; scope = definition != NULL ? NULL : scope->parent) {
@@ -317,7 +325,7 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
                     c_type_t *ft = sem_declarator(s, d, base, 0);
                     declaration_flags_t member_attrs = {0};
                     sem_decl_attributes(s, d, &member_attrs);
-                    if (member_attrs.noreturn || member_attrs.used || member_attrs.section || member_attrs.alignment)
+                    if (member_attrs.noreturn || member_attrs.used || member_attrs.section)
                         sem_error(s, d, "declarator attributes on record members are unsupported");
                     sem_info_t *di = sem_info(s, d);
                     const char *name = NULL;
@@ -332,6 +340,7 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
                     if (flexible && (kind != T_STRUCT || t->fields == NULL || item->next != NULL || member->next != NULL))
                         sem_error(s, d, "flexible array must be the last member of a nonempty struct");
                     uint32_t align = flags.alignment > ft->alignment ? flags.alignment : ft->alignment;
+                    if (member_attrs.alignment > align) align = member_attrs.alignment;
                     if (flags.alignment != 0 && flags.alignment < ft->alignment) sem_error(s, d, "alignment weakens member alignment");
                     c_field_t *field = sem_alloc(s, sizeof(*field));
                     field->name = name; field->type = ft;
@@ -1067,6 +1076,7 @@ static void sem_declaration(sema_t *s, node_t *n) {
     if (file && (flags.is_auto || flags.is_register)) sem_error(s, n, "invalid file-scope storage class");
     if (n->first->next == NULL) {
         if (flags.is_inline) sem_error(s, n, "inline requires a function declaration");
+        if (flags.alignment) sem_error(s, n, "alignment requires an object declaration");
         int tag_declaration = 0;
         for (node_t *c = n->first->first; c != NULL; c = c->next)
             if (sem_kind(c, "struct") || sem_kind(c, "union") || sem_kind(c, "enum")) tag_declaration = 1;

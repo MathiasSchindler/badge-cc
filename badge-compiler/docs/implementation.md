@@ -931,7 +931,9 @@ The checker implements:
   address constants, enum values and `_Static_assert`.
 - Return/condition checks, loop/switch constraints, case-value uniqueness
   and label/goto resolution.
-- `section`, `used` and `noreturn` attributes; assembly operand types/lvalues
+- `section`, `used`, `noreturn` and explicit GNU `aligned` attributes on
+  their supported declarations, including member alignment and type-form
+  `__alignof__`; assembly operand types/lvalues
   and `asm goto` labels. Instruction/register constraints remain a backend
   responsibility.
 - File-scope `inline` on internal-linkage functions (including `static
@@ -948,7 +950,8 @@ multibyte/multicharacter character constants, anonymous record members,
 empty records, general initializer
 brace elision, external and block-scope inline, non-prototype function definitions,
 declaration assembly labels, GNU void/function-pointer arithmetic and
-unrecognized semantic attributes such as `packed`/`aligned`. Floating types
+unrecognized semantic attributes such as `packed`, implicit GNU alignment,
+and record-type alignment attributes. Floating types
 and variable arithmetic are supported without floating constant evaluation.
 Unsupported constructs fail explicitly; syntactic C03 support does not imply
 C04 support. Warning parity, uninitialized-value analysis and proof of all
