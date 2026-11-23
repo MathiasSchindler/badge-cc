@@ -541,8 +541,14 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
         width=thumb_emit(s,l,4,0xe8d0|(unsigned)m.base,0xf000|(half?16:0)|(unsigned)m.index);
     } else if(strcmp(op,"clz")==0 || strcmp(op,"rev")==0 || strcmp(op,"rev16")==0 ||
         strcmp(op,"uxtb")==0 || strcmp(op,"uxth")==0 || strcmp(op,"sxtb")==0 || strcmp(op,"sxth")==0 || strcmp(op,"uxtah")==0) {
-        int add=strcmp(op,"uxtah")==0; thumb_count(s,l,add?3:2,add?3:2);
+        int add=strcmp(op,"uxtah")==0; thumb_count(s,l,add?3:2,add?4:2);
         unsigned rd=(unsigned)as_register(s,l->arg[0]),rm=(unsigned)as_register(s,l->arg[add?2:1]);
+        unsigned rotate=0;
+        if(l->count==4) {
+            unsigned type;
+            thumb_shift(s,l->arg[3],&type,&rotate);
+            if(type!=3 || rotate%8) as_error(s,"UXTAH requires ROR 8, 16 or 24");
+        }
         if(!thumb_data_register(rd) || !thumb_data_register(rm)) as_error(s,"invalid extend/reverse register");
         if(!wide && !add && strcmp(op,"clz")!=0 && rd<8 && rm<8) {
             unsigned base=strcmp(op,"rev")==0?0xba00:strcmp(op,"rev16")==0?0xba40:
@@ -552,7 +558,7 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
             unsigned a,b=0xf080|(rd<<8)|rm;
             if(strcmp(op,"clz")==0) a=0xfab0|rm;
             else if(strcmp(op,"rev")==0 || strcmp(op,"rev16")==0) { a=0xfa90|rm; if(strcmp(op,"rev16")==0) b|=16; }
-            else if(add) { unsigned rn=(unsigned)as_register(s,l->arg[1]); if(!thumb_data_register(rn)) as_error(s,"invalid extend-add register"); a=0xfa10|rn; }
+            else if(add) { unsigned rn=(unsigned)as_register(s,l->arg[1]); if(!thumb_data_register(rn)) as_error(s,"invalid extend-add register"); a=0xfa10|rn; b|=(rotate/8)<<4; }
             else a=strcmp(op,"uxtb")==0?0xfa5f:strcmp(op,"uxth")==0?0xfa1f:strcmp(op,"sxtb")==0?0xfa4f:0xfa0f;
             width=thumb_emit(s,l,4,a,b);
         }

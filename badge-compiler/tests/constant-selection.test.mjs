@@ -29,6 +29,10 @@ smlatt r0, r1, r0, r2
 sbfx r2, r1, #8, #16
 ssat r3, #32, r9, lsl #31
 ssat r12, #8, r1, asr #16
+uxtah r2, r3, r4, ror #8
+uxtah r2, r3, r4, ror #16
+uxtah r2, r3, r4, ror #24
+adc r1, r2, #0
 `);
   run(tool('badge-asm'), [file('dsp.s'), '-o', file('owned.o')]);
   run(process.env.LLVM_CLANG ?? 'clang', ['--target=arm-none-eabi', '-mcpu=cortex-m33',
@@ -49,6 +53,26 @@ ssat r12, #8, r1, asr #16
   }
   assert.match(fs.readFileSync(file('proved.s'), 'utf8'), /^smuad /m);
   assert.doesNotMatch(fs.readFileSync(file('unknown.s'), 'utf8'), /^smuad /m);
+});
+test('RP2350 byte, halfword, table and carry selectors reject near misses', t => {
+  const file = files(t);
+  const cases = [
+    ['byte-swap', 'pairs >> 16u', 'pairs >> 15u', /^rev\.n /m],
+    ['extend-add', 'word >> 8u', 'word >> 7u', /^uxtah /m],
+    ['nibble-map', 'return 13u', 'return 16u', /@ nibble-lookup:/],
+    ['wide-sum', '+ 33u', '+ 256u', /@ wide-sum:/],
+  ];
+  for (const [name, from, to, marker] of cases) {
+    const source = fs.readFileSync(path.join(root, '../src/tools/compiler_micro', `${name}.c`), 'utf8');
+    for (const [accepted, c] of [[true, source], [false, source.replace(from, to)]]) {
+      fs.writeFileSync(file('kernel.c'), c);
+      run(tool('badge-cpp'), ['-I../src/shared', file('kernel.c'), '-o', file('kernel.i')]);
+      run(tool('badge-ir'), [file('kernel.i'), '-o', file('initial.ll')]);
+      run(tool('badge-opt'), [file('initial.ll'), '-o', file('input.ll')]);
+      run(tool('badge-codegen-sanitize'), [file('input.ll'), '-o', file('kernel.s')]);
+      assert.equal(marker.test(fs.readFileSync(file('kernel.s'), 'utf8')), accepted, name);
+    }
+  }
 });
 test('small symmetric clamp preserves both values of sticky Q and retains volatile tails', t => {
   const file = files(t);

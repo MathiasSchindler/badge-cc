@@ -838,6 +838,36 @@ Eleven of 38 verified UF2 payloads shrink by 52 bytes total. Nine of 134
 objects save 34 executable bytes. No image, object, matched frame,
 save area or spill count grows. No physical badge timing was taken.
 
+### Sixteen-kernel Cortex-M33 comparison
+
+Five standalone kernels extend the corpus. They were compared with Clang
+`-Oz` using identical preprocessor tokens, startup objects and a 256-seed
+native reference. The original five inputs still define the counted QEMU
+workload.
+
+| Kernel | Owned flash before → after | LLVM flash | Owned instructions before → after | LLVM instructions |
+| --- | ---: | ---: | ---: | ---: |
+| Byte reversal | 184 → 168 B | 168 B | 35 → 10 | 10 |
+| Rotated halfword add | 172 → 172 B | 172 B | 15 → 10 | 10 |
+| Parity | 200 → 196 B | 196 B | 50 → 40 | 40 |
+| Nibble lookup | 248 → 184 B | 188 B | 93 → 30 | 20 |
+| Wide sum | 264 → 188 B | 192 B | 180 → 45 | 45 |
+
+The default backend selects `REV` for the complete single-use permutation
+and rotated `UXTAH` for a proven halfword extract feeding an add. A
+straight-line shifted-XOR chain can exchange the ABI argument register
+with a scratch register after proving the scratch's first use fully
+overwrites it. Small masked switches returning nibble constants use a
+packed constant instead of a branch tree. A bounded unsigned sum leaf
+uses the Cortex-M33 carry flag instead of allocating 64-bit stack pairs.
+
+The first broader register-swap candidate changed inlining and grew two
+GPIO images. Restricting the rule to its shifted-XOR witness preserves
+the gain without those regressions. All 43 UF2s verify with no growth
+among 38 comparable images or 134 matched objects, and no measured
+frame, save-area, or spill count grows. The nibble lookup is smaller
+than LLVM but reaches more instructions; no physical timing is claimed.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

@@ -12,7 +12,8 @@ enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP,
        SELECT_SIGNED_PRODUCT, SELECT_EXTENDED_LOAD, SELECT_SHIFTED_BINARY,
        SELECT_BITFIELD, SELECT_MLS, SELECT_MASK_TEST, SELECT_INVERTED_BINARY,
        SELECT_ROTATE, SELECT_ROTATED_XOR, SELECT_BITFIELD_INSERT,
-       SELECT_SIGNED_FIELD, SELECT_DUAL_PRODUCT };
+       SELECT_SIGNED_FIELD, SELECT_DUAL_PRODUCT, SELECT_REVERSE_BYTES,
+       SELECT_EXTEND_ADD };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -389,6 +390,43 @@ static cg_selected_pair *pair(cg_context *c, cg_inst *i) {
       return p;
     index = (index + 1) & (c->selection->capacity - 1);
   }
+}
+
+static int select_byte_reverse(cg_context *c, cg_inst *first) {
+  unsigned source;
+  uint32_t mask, shift;
+  if (!scalar32(c, first, "and") || !single_use(c, first) ||
+      !commutative_literal(c, first, &source, &mask) || mask != UINT32_C(0x00ff00ff))
+    return 0;
+  cg_inst *v[8] = {first};
+  for (unsigned k = 1; k < 8; k++) {
+    v[k] = v[k - 1]->next;
+    if (!v[k] || !v[k]->result || pair(c, v[k])->instruction)
+      return 0;
+  }
+  unsigned rhs;
+  if (pair(c, first)->instruction || !scalar32(c, v[1], "shl") ||
+      binary_use_of(c, v[1], first) != 4 ||
+      !number(c->tokens[v[1]->begin + 6].text, &shift) || shift != 8 ||
+      !scalar32(c, v[2], "lshr") ||
+      strcmp(c->tokens[v[2]->begin + 4].text, c->tokens[first->begin + source].text) ||
+      !number(c->tokens[v[2]->begin + 6].text, &shift) || shift != 8 ||
+      !scalar32(c, v[3], "and") || !(rhs = binary_use_of(c, v[3], v[2])) ||
+      !number(c->tokens[v[3]->begin + 10 - rhs].text, &mask) || mask != UINT32_C(0x00ff00ff) ||
+      !scalar32(c, v[4], "or") ||
+      !binary_use_of(c, v[4], v[1]) || !binary_use_of(c, v[4], v[3]) ||
+      !rotate_amount(c, v[5], v[6], v[7], &shift) || shift != 16 ||
+      binary_use_of(c, v[5], v[4]) != 4 ||
+      cg_register_lookup(c, v[4]->result->name)->selection_uses != 2)
+    return 0;
+  for (unsigned k = 1; k < 4; k++)
+    if (!single_use(c, v[k]))
+      return 0;
+  for (unsigned k = 0; k < 7; k++)
+    *pair(c, v[k]) = (cg_selected_pair){.instruction=v[k], .kind=SELECT_SKIP};
+  *pair(c, v[7]) = (cg_selected_pair){.instruction=v[7], .producer=first,
+                                      .kind=SELECT_REVERSE_BYTES};
+  return 1;
 }
 static cg_inst *absolute_pointer(cg_context *c, const char *name, uint32_t *address) {
   for (cg_block *b = c->fn->blocks; b; b = b->next)
@@ -838,6 +876,8 @@ void cg_selection_prepare(cg_context *c) {
       uint32_t amount;
       unsigned width;
       cg_inst *third = next->next, *fourth = third ? third->next : NULL;
+      if (constants && select_byte_reverse(c, i))
+        continue;
       if (constants && third && !pair(c, third)->instruction &&
           rotate_amount(c, i, next, third, &amount)) {
         *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
@@ -865,8 +905,17 @@ void cg_selection_prepare(cg_context *c) {
       }
       if (constants && bitfield(c, i, next, &amount, &width)) {
         *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
-        *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
-                                           .kind = SELECT_BITFIELD};
+        unsigned use;
+        if (width == 16 && !(amount % 8) && scalar32(c, third, "add") &&
+            !pair(c, third)->instruction && single_use(c, next) &&
+            (use = binary_use_of(c, third, next)) &&
+            strcmp(c->tokens[third->begin + 10 - use].text, next->result->name)) {
+          *pair(c, next) = (cg_selected_pair){.instruction=next, .kind=SELECT_SKIP};
+          *pair(c, third) = (cg_selected_pair){.instruction=third, .producer=i,
+                                              .kind=SELECT_EXTEND_ADD};
+        } else
+          *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
+                                             .kind = SELECT_BITFIELD};
         continue;
       }
       unsigned source, other;
@@ -1283,6 +1332,28 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (selected->kind == SELECT_SKIP || selected->kind == SELECT_COMPARE_SKIP ||
       selected->kind == SELECT_COUNT_SKIP)
     return 1;
+  if (selected->kind == SELECT_REVERSE_BYTES) {
+    unsigned at;
+    uint32_t mask;
+    if (!commutative_literal(c, selected->producer, &at, &mask))
+      cg_error(c, "byte reversal eligibility changed");
+    unsigned src = operand(c, selected->producer, at, 0), dst = destination(c, i);
+    cg_emit(c, "rev.%c r%u, r%u\n", src < 8 && dst < 8 ? 'n' : 'w', dst, src);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
+  if (selected->kind == SELECT_EXTEND_ADD) {
+    cg_inst *shift = selected->producer;
+    uint32_t rotate;
+    if (!number(c->tokens[shift->begin + 6].text, &rotate))
+      cg_error(c, "extend-add eligibility changed");
+    unsigned src = operand(c, shift, 4, 0);
+    unsigned base = operand(c, i, 10 - binary_use_of(c, i, shift->next), 1);
+    unsigned dst = destination(c, i);
+    cg_emit(c, "uxtah r%u, r%u, r%u, ror #%" PRIu32 "\n", dst, base, src, rotate);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
   if (selected->kind == SELECT_SIGNED_FIELD) {
     cg_inst *shift = selected->producer;
     uint32_t offset;

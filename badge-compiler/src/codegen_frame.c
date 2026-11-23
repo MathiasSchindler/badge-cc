@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "thumb_immediate.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
@@ -116,7 +117,7 @@ static void summarize_registers(cg_context *c, cg_function *f, size_t start) {
     "lsl", "lsls", "lsr", "lsrs", "asr", "asrs", "ror", "rors",
     "mul", "muls", "mla", "mls", "sdiv", "udiv", "cmp", "cmn",
     "tst", "teq", "clz", "uxtb", "uxth", "sxtb", "sxth", "bfi", "sbfx", "smuad",
-    "rev", "rev16", "revsh", "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrd",
+    "rev", "rev16", "revsh", "uxtah", "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrd",
     "str", "strb", "strh", "strd", "ldm", "stm", "push", "pop", "nop", "it",
     "cbz", "cbnz"
   };
@@ -565,6 +566,127 @@ static int emit_clamp_leaf(cg_context *c) {
   return 1;
 }
 
+static int leaf_result(cg_context *c, const cg_inst *i, const char *value) {
+  return i && !i->next && !i->result && i->end - i->begin == 3 &&
+         !strcmp(guard_token(c, i, 0), "ret") &&
+         !strcmp(guard_token(c, i, 1), "i32") &&
+         !strcmp(guard_token(c, i, 2), value);
+}
+
+static cg_inst *scalar_leaf_entry(cg_context *c) {
+  cg_function *f = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS || f->section ||
+      f->argc != 1 || f->byval[0] || f->args[0]->type->bits != 32 || f->ret->bits != 32)
+    return NULL;
+  cg_block *block = clamp_follow(c, f->blocks);
+  return block ? block->first : NULL;
+}
+
+static int leaf_row(cg_context *c, const cg_inst *i, const char *op, const char *type) {
+  return i && i->result && i->end - i->begin == 7 &&
+         !strcmp(guard_token(c, i, 2), op) && !strcmp(guard_token(c, i, 3), type) &&
+         !strcmp(guard_token(c, i, 5), !strcmp(op, "zext") || !strcmp(op, "trunc") ? "to" : ",");
+}
+
+static int leaf_input(cg_context *c, const cg_inst *i, unsigned slot, const cg_inst *input) {
+  return !strcmp(guard_token(c, i, slot), input->result->name);
+}
+
+static int nibble_return(cg_context *c, const char *label, uint32_t *value) {
+  cg_block *block = clamp_follow(c, guard_block(c, label));
+  cg_inst *ret = block ? block->first : NULL;
+  if (!ret || ret->end - ret->begin != 3 || !leaf_result(c, ret, guard_token(c, ret, 2)))
+    return 0;
+  int valid;
+  *value = clamp_literal(guard_token(c, ret, 2), &valid);
+  return valid && *value <= 15;
+}
+
+static int emit_nibble_lookup_leaf(cg_context *c, cg_inst *mask) {
+  if (!leaf_row(c, mask, "and", "i32") ||
+      strcmp(guard_token(c, mask, 4), c->fn->args[0]->name))
+    return 0;
+  int valid;
+  uint32_t bound = clamp_literal(guard_token(c, mask, 6), &valid);
+  const cg_inst *sw = mask->next;
+  if (!valid || bound != 7 || !sw || sw->next || sw->result ||
+      sw->end - sw->begin < 8 || strcmp(guard_token(c, sw, 0), "switch") ||
+      strcmp(guard_token(c, sw, 1), "i32") ||
+      !leaf_input(c, sw, 2, mask) || strcmp(guard_token(c, sw, 3), ",") ||
+      strcmp(guard_token(c, sw, 4), "label") ||
+      strcmp(guard_token(c, sw, 6), "["))
+    return 0;
+  uint32_t fallback;
+  if (!nibble_return(c, guard_token(c, sw, 5), &fallback))
+    return 0;
+  uint32_t packed = fallback * UINT32_C(0x11111111);
+  unsigned seen = 0, total = sw->end - sw->begin, k = 7;
+  for (; k + 4 < total; k += 5) {
+    if (strcmp(guard_token(c, sw, k), "i32") ||
+        strcmp(guard_token(c, sw, k + 2), ",") ||
+        strcmp(guard_token(c, sw, k + 3), "label"))
+      return 0;
+    uint32_t entry = clamp_literal(guard_token(c, sw, k + 1), &valid), value;
+    if (!valid || entry > bound || (seen & (1u << entry)) ||
+        !nibble_return(c, guard_token(c, sw, k + 4), &value))
+      return 0;
+    seen |= 1u << entry;
+    packed = (packed & ~(15u << (4 * entry))) | (value << (4 * entry));
+  }
+  if (k + 1 != total || strcmp(guard_token(c, sw, k), "]") ||
+      __builtin_popcount(seen) < 5)
+    return 0;
+  int direct = thumb_modified(packed) >= 0;
+  if (!direct && thumb_modified(~packed) < 0)
+    cg_immediate(c, 1, packed);
+  else
+    cg_emit(c, "%s.w r1, #%u\n", direct ? "mov" : "mvn", direct ? packed : ~packed);
+  c->fn->frame = 0;
+  cg_emit(c, "lsls.n r0, r0, #29\nlsrs.n r0, r0, #27\nlsrs.n r1, r1, r0\n"
+             "and.w r0, r1, #15\n@ nibble-lookup: packed constant returns\n");
+  return 1;
+}
+
+static int emit_wide_sum_leaf(cg_context *c, cg_inst *first) {
+  cg_inst *v[9] = {first};
+  for (unsigned k = 1; k < 9; k++) {
+    if (!v[k-1] || !v[k-1]->result || v[k-1]->end - v[k-1]->begin != 7)
+      return 0;
+    v[k] = v[k-1]->next;
+  }
+  if (!v[8] || !v[8]->result)
+    return 0;
+  const char *arg = c->fn->args[0]->name;
+  if (!leaf_row(c, v[0], "zext", "i32") || strcmp(guard_token(c, v[0], 4), arg) ||
+      strcmp(guard_token(c, v[0], 6), "i64") ||
+      !leaf_row(c, v[1], "xor", "i32") || strcmp(guard_token(c, v[1], 4), arg) ||
+      !leaf_row(c, v[2], "zext", "i32") || !leaf_input(c, v[2], 4, v[1]) ||
+      strcmp(guard_token(c, v[2], 6), "i64") ||
+      !leaf_row(c, v[3], "add", "i64") || !leaf_input(c, v[3], 4, v[0]) ||
+      !leaf_input(c, v[3], 6, v[2]) || !leaf_row(c, v[4], "add", "i64") ||
+      !leaf_input(c, v[4], 4, v[3]) || !leaf_row(c, v[5], "trunc", "i64") ||
+      !leaf_input(c, v[5], 4, v[4]) || strcmp(guard_token(c, v[5], 6), "i32") ||
+      !leaf_row(c, v[6], "lshr", "i64") || !leaf_input(c, v[6], 4, v[4]) ||
+      strcmp(guard_token(c, v[6], 6), "32") || !leaf_row(c, v[7], "trunc", "i64") ||
+      !leaf_input(c, v[7], 4, v[6]) || strcmp(guard_token(c, v[7], 6), "i32") ||
+      !leaf_row(c, v[8], "xor", "i32") || !leaf_input(c, v[8], 4, v[5]) ||
+      !leaf_input(c, v[8], 6, v[7]) || !leaf_result(c, v[8]->next, v[8]->result->name))
+    return 0;
+  int valid;
+  uint32_t mask = clamp_literal(guard_token(c, v[1], 6), &valid);
+  if (!valid)
+    return 0;
+  uint32_t bias = clamp_literal(guard_token(c, v[4], 6), &valid);
+  if (!valid || !bias || bias > 255)
+    return 0;
+  c->fn->frame = 0;
+  cg_immediate(c, 1, mask);
+  cg_emit(c, "movs.n r2, #0\neors.n r1, r1, r0\nadds.n r0, r0, r1\n"
+             "adc r1, r2, #0\nadds.n r0, r0, #%u\nadcs.n r1, r1, r2\n"
+             "eors.n r0, r0, r1\n@ wide-sum: carry chain without stack pairs\n", bias);
+  return 1;
+}
+
 static int sp_frame_access(const char *line) {
   unsigned reg, second, offset;
   int n = 0;
@@ -769,7 +891,7 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
           "orr", "orrs", "eor", "eors", "lsl", "lsls", "lsr", "lsrs",
           "asr", "asrs", "mul", "muls", "mla", "mls", "ubfx", "uxtb", "uxth",
           "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs", "cmp", "cmn",
-          "bic", "tst", "orn", "clz", "ldrb", "bfi", "sbfx", "smuad", "ror"};
+          "bic", "tst", "orn", "clz", "ldrb", "bfi", "sbfx", "smuad", "ror", "rev", "uxtah"};
       int supported = 0;
       for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); i++)
         supported |= !strcmp(opcode, allowed[i]);
@@ -797,7 +919,26 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
       !leaf_register_move(first, &entry, &src) || src != 0 || !entry ||
       !leaf_register_move(last, &dst, &src) || dst != 0 || !src)
     return;
-  int merge_entry = !(touched & 1);
+  int swap_entry = 0;
+  if (!branches && (touched & 1) && entry < 4 && src == entry) {
+    int shifted_chain = 0;
+    for (const char *p = first + strlen(first) + 1; p < last; p += strlen(p) + 1) {
+      if (*p == '@' || *p == '.')
+        continue;
+      unsigned regs = mentioned_registers(c, p);
+      if (!(regs & 1)) {
+        if ((regs & (1u << entry)) && !strncmp(p, "eor.w ", 6) && strstr(p, ", lsr #"))
+          shifted_chain = 1;
+        continue;
+      }
+      unsigned imm;
+      int end = 0;
+      swap_entry = shifted_chain && sscanf(p, "movw r0, #%u%n", &imm, &end) == 1 &&
+                   end && !p[end];
+      break;
+    }
+  }
+  int merge_entry = !(touched & 1) || swap_entry;
   if (!merge_entry && !(touched & 0x0f00u))
     return;
   if (branches)
@@ -820,8 +961,9 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
   unsigned map[13];
   for (unsigned r = 0; r <= 12; r++) map[r] = r;
   if (merge_entry) map[entry] = 0;
+  if (swap_entry) map[0] = entry;
   unsigned occupied = touched & 0x7eu;
-  if (merge_entry && entry < 8) occupied &= ~(1u << entry);
+  if (merge_entry && !swap_entry && entry < 8) occupied &= ~(1u << entry);
   for (unsigned r = 4; r < 12; r++) {
     if (!(touched & (1u << r)) || (merge_entry && r == entry))
       continue;
@@ -990,7 +1132,9 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   size_t header = c->size;
   function_header(c, f);
   size_t body_start = c->size;
-  if (cg_emit_counted_leaf(c) || emit_abs_leaf(c) || emit_clamp_leaf(c)) {
+  cg_inst *leaf = scalar_leaf_entry(c);
+  if (cg_emit_counted_leaf(c) || emit_abs_leaf(c) || emit_clamp_leaf(c) ||
+      emit_nibble_lookup_leaf(c, leaf) || emit_wide_sum_leaf(c, leaf)) {
     finish_function(c, header, body_start);
     return;
   }

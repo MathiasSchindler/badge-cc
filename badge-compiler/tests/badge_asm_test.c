@@ -278,6 +278,7 @@ int main(void) {
         "movs r16,#1\n","movs r0,#0x12345678\n","movw r0,#65536\n",
         "ssat r0,#0,r1\n","ssat r0,#33,r1\n","ssat r0,#8,r1,asr #32\n",
         "ssat r0,#8,r1,lsr #1\n","smuad sp,r0,r1\n","sbfx r0,r1,#31,#2\n",
+        "uxtah r0,r1,r2,ror #7\n","uxtah r0,r1,r2,lsl #8\n",
         "mov.w r0,#0x12345678\n","addw r0,r1,#4096\n",
         "movw sp,#1\n","movt sp,#1\n","movw pc,#1\n","movt pc,#1\n",
         "addw sp,r0,#4\n","subw sp,r0,#4\n","addw pc,sp,#4\n","subw pc,sp,#4\n",
