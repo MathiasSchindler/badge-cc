@@ -953,20 +953,35 @@ The checker implements:
   depth limit for genuinely nested statements. Argument-free GNU
   `pure`, `const`, `malloc`, and `warn_unused_result` function attributes
   are accepted without drawing optimization or aliasing conclusions.
+- GNU `__builtin_offsetof` on named member chains, file-scope empty
+  declarations, and diagnostic-only `unused` and `deprecated` hints.
+  Declaration `format`, `alloc_size`, `alloc_align`, and `nonnull` hints do
+  not supply optimizer facts.
+- GNU assembly names on file-scope external declarations are preserved
+  separately from C names. Conflicting declarations, collisions, and local
+  register bindings are rejected.
+- `always_inline` expands prototyped, non-variadic scalar/void calls in
+  the frontend, including standalone GNU/C99 external inline definitions.
+  Unsupported address-taking, recursion, and ABI shapes fail explicitly.
+  Unreferenced inline bodies and external declarations are checked
+  semantically but are not emitted.
+- Packed and explicitly aligned record layouts, empty GNU structs, and
+  AAPCS32 layout for named unsigned 32-bit bit-fields in unpacked
+  structs. Bit-field accesses and initialization are not lowered.
+  Potentially unaligned packed-member accesses and automatic field
+  initializers are diagnosed, not emitted with optimistic alignment.
 
 Value-conversion annotations preserve the source lvalue's qualified type,
 including discarded volatile reads. A constant lvalue address is distinguished
 from a constant pointer value: an MMIO address is not the value loaded from
 that address.
 
-The explicit exclusions are floating literals/constant folding, bit-fields,
+The explicit exclusions are floating literals/constant folding, general bit-fields,
 atomics, TLS, complex/imaginary types, VLAs, wide literals and
 multibyte/multicharacter character constants, anonymous record members,
-empty records, general initializer
-brace elision, external and block-scope inline, non-prototype function definitions,
-declaration assembly labels, GNU void/function-pointer arithmetic and
-unrecognized semantic attributes such as `packed`, implicit GNU alignment,
-and record-type alignment attributes. Floating types
+general initializer brace elision, other external and block-scope inline forms,
+non-prototype function definitions, GNU void/function-pointer arithmetic,
+implicit GNU alignment, and unrecognized semantic attributes. Floating types
 and variable arithmetic are supported without floating constant evaluation.
 Unsupported constructs fail explicitly; syntactic C03 support does not imply
 C04 support. Warning parity, uninitialized-value analysis and proof of all
@@ -3642,6 +3657,15 @@ BADGE_OPT_PASSES=scalar-promotion,mem2reg,sccp,constant-fold,aggregate-memory,wi
 `badge-opt --passes=sccp` independently selects SCCP, including its folding
 and DCE cleanup, but does not implicitly promote storage or perform required
 backend legalizations.
+
+`badge-opt --passes=mem2reg,libc-strcmp` opts into the same SCCP cleanup
+with a standard-libc contract for external `strcmp`. The caller must know
+that the link resolves the declaration to the standard function. The pass
+only folds plain direct calls on bounded, NUL-terminated, module-local
+constant byte arrays when all uses compare the result to zero with `eq`
+or `ne`. It preserves raw return values, defined replacements, mutable
+storage and call-site `nobuiltin` uses. The default pipeline and plain
+`sccp` do not make this libc assumption.
 
 ### Contract and bounds
 

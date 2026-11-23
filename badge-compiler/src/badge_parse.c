@@ -425,6 +425,16 @@ static node_t *unary(parser_t *p) {
                         NULL, p->position - 1);
             child(p, n, compound ? block(p) : expression(p, 1));
             expect(p, ")"); finish(p, n);
+        } else if (at(p, "__builtin_offsetof") && strcmp(peek(p, 1)->text, "(") == 0) {
+            n = node(p, "offsetof", NULL);
+            ++p->position;
+            expect(p, "("); child(p, n, type_name(p)); expect(p, ",");
+            do {
+                node_t *field = node(p, "member_name", NULL);
+                field->text = identifier(p);
+                child(p, n, finish(p, field));
+            } while (accept(p, "."));
+            expect(p, ")"); finish(p, n);
         } else if (accept(p, "_Generic")) {
             n = node_at(p, "generic_selection", NULL, p->position - 1);
             expect(p, "("); child(p, n, expression(p, 2)); expect(p, ",");
@@ -829,7 +839,8 @@ node_t *parse_source(parser_t *p, const char *source, size_t length, const char 
     p->tokens = result;
     node_t *root = node(p, "translation_unit", NULL);
     while (p->position < p->tokens.count) {
-        if (word_in(peek(p, 0)->text, "__asm__ __asm asm")) {
+        if (at(p, ";")) child(p, root, leaf(p, "expression_statement"));
+        else if (word_in(peek(p, 0)->text, "__asm__ __asm asm")) {
             node_t *n = assembly(p); expect(p, ";"); child(p, root, finish(p, n));
         } else child(p, root, declaration(p, 0, 1));
     }

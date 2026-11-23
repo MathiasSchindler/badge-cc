@@ -31,7 +31,14 @@ export function bridgeStages(stem, object, tools) {
                 '-std=gnu23', '-O0', '-fno-builtin', '-fno-discard-value-names', '-fno-unwind-tables',
                 '-fno-asynchronous-unwind-tables', '-Xclang', '-disable-O0-optnone',
                 '-S', '-emit-llvm', '-x', 'c', `${stem}.i`, '-o', `${stem}.ll`]],
-        ['optimization', path.join(tools, 'badge-opt'), [`${stem}.ll`, '-o', `${stem}.opt.ll`]],
+        ...ownedStages(stem, object, tools).slice(1),
+    ];
+}
+
+export function ownedStages(stem, object, tools, optimizerArgs = []) {
+    return [
+        ['frontend', path.join(tools, 'badge-ir'), [`${stem}.i`, '-o', `${stem}.ll`]],
+        ['optimization', path.join(tools, 'badge-opt'), [...optimizerArgs, `${stem}.ll`, '-o', `${stem}.opt.ll`]],
         ['codegen', path.join(tools, 'badge-codegen'), [`${stem}.opt.ll`, '-o', `${stem}.s`]],
         ['assembly', path.join(tools, 'badge-asm'), [`${stem}.s`, '-o', object]],
     ];

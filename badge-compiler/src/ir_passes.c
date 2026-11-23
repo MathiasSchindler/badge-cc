@@ -10,6 +10,7 @@ void ir_dead_instructions(ir_context *, ir_module *);
 void ir_scalar_promotion(ir_context *, ir_module *);
 void ir_mem2reg(ir_context *, ir_module *);
 void ir_sccp(ir_context *, ir_module *);
+void ir_libc_strcmp(ir_context *, ir_module *);
 void ir_instruction_combine(ir_context *, ir_module *);
 void ir_low_bits(ir_context *, ir_module *);
 void ir_linear_bias(ir_context *, ir_module *);
@@ -91,6 +92,9 @@ const ir_pass badge_ir_passes[] = {
      "Propagate scalar integer constants on executable edges, repair CFG/PHIs "
      "and clean up",
      ir_sccp, IR_PASS_OPTIMIZATION},
+    {"libc-strcmp",
+     "Opt-in SCCP of literal equality calls to the standard libc strcmp",
+     ir_libc_strcmp, IR_PASS_OPTIMIZATION},
     {"instruction-combine",
      "Eliminate typed neutral arithmetic and simplify proven integer cast "
      "chains",

@@ -20,6 +20,7 @@ typedef struct {
   unsigned *queue, count, *phi_edges, *selected, *aliases, *parents;
   const char **literals, **resolved;
   uint64_t work;
+  int libc_strcmp;
 } propagation;
 
 void ir_constant_fold(ir_context *, ir_module *);
@@ -94,10 +95,101 @@ static void activate_edge(propagation *p, unsigned e) {
        k++)
     enqueue(p, k);
 }
+enum { STRCMP_CONSTANT_LIMIT = 4096 };
+static int hex_digit(unsigned char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+static int constant_string(propagation *p, const ir_operand *op,
+                           unsigned char bytes[STRCMP_CONSTANT_LIMIT]) {
+  ir_analysis *a = &p->a;
+  if (op->kind != IR_OPERAND_GLOBAL || a->types[op->type].kind != IR_PTR)
+    return 0;
+  const ir_global *g = &a->globals[op->definition];
+  if (g->storage_type == IR_NONE) return 0;
+  const ir_type *type = &a->types[g->storage_type];
+  if (type->kind != IR_ARRAY || !type->count || type->count > STRCMP_CONSTANT_LIMIT ||
+      a->types[type->element].kind != IR_INT || a->types[type->element].bits != 8)
+    return 0;
+  const ir_line *line = &a->text->lines[g->line - 1];
+  unsigned k = line->first + 2, end = line->first + line->count;
+  const char *linkage = ir_text(a->text, k++);
+  if (strcmp(linkage, "internal") && strcmp(linkage, "private")) return 0;
+  if (!strcmp(ir_text(a->text, k), "unnamed_addr") ||
+      !strcmp(ir_text(a->text, k), "local_unnamed_addr")) ++k;
+  if (end < k + 8 || strcmp(ir_text(a->text, k), "constant") ||
+      strcmp(ir_text(a->text, k + 1), "[") || strcmp(ir_text(a->text, k + 6), "c"))
+    return 0;
+  const char *s = ir_text(a->text, k + 7);
+  if (*s++ != '"') return 0;
+  int terminated = 0;
+  for (unsigned j = 0; j < type->count; ++j) {
+    spend(p);
+    if (!*s || *s == '"') return 0;
+    unsigned char ch = (unsigned char)*s++;
+    if (ch == '\\') {
+      int hi = hex_digit((unsigned char)s[0]);
+      if (hi < 0) return 0;
+      int lo = hex_digit((unsigned char)s[1]);
+      if (lo < 0) return 0;
+      ch = (unsigned char)(hi * 16 + lo);
+      s += 2;
+    }
+    bytes[j] = ch;
+    terminated |= ch == 0;
+  }
+  return terminated && s[0] == '"' && s[1] == '\0';
+}
+static value libc_strcmp(propagation *p, const ir_instruction *in) {
+  ir_analysis *a = &p->a;
+  const value unchanged = {OVERDEFINED, 0};
+  if (in->definition == IR_NONE || in->callee == IR_NONE || in->operand_count != 3 ||
+      a->types[in->type].bits != 32)
+    return unchanged;
+  const ir_line *line = &a->text->lines[in->line - 1];
+  const ir_operand *callee = &a->operands[in->callee];
+  if (callee->kind != IR_OPERAND_GLOBAL || line->count != 12 ||
+      line->op != line->first + 2 || callee->token != line->op + 2)
+    return unchanged;
+  const ir_global *g = &a->globals[callee->definition];
+  if ((strcmp(g->name, "@strcmp") && strcmp(g->name, "@\"strcmp\"")) ||
+      g->function == IR_NONE || !a->functions[g->function].declaration)
+    return unchanged;
+  const ir_function *fn = &a->functions[g->function];
+  if (fn->parameter_count != 2 || fn->variadic)
+    return unchanged;
+  const ir_line *decl = &a->text->lines[g->line - 1];
+  if (strcmp(ir_text(a->text, decl->first + 1), "i32") ||
+      strcmp(ir_text(a->text, decl->first + 2), g->name))
+    return unchanged;
+  /* The standard specifies only the sign, not the exact nonzero result. */
+  for (unsigned k = a->definitions[in->definition].first_use; k != IR_NONE;
+       k = a->operands[k].next_use) {
+    spend(p);
+    const ir_instruction *user = &a->instructions[a->operands[k].instruction];
+    if (user->opcode != IR_OP_COMPARE || user->operand_count != 2)
+      return unchanged;
+    const ir_line *test = &a->text->lines[user->line - 1];
+    const char *pred = ir_text(a->text, test->op + 1);
+    unsigned other = user->first_operand + (user->first_operand == k);
+    value zero = operand_value(p, other);
+    if ((strcmp(pred, "eq") && strcmp(pred, "ne")) ||
+        a->operands[other].kind != IR_OPERAND_LITERAL || zero.kind != CONSTANT || zero.integer)
+      return unchanged;
+  }
+  unsigned char left[STRCMP_CONSTANT_LIMIT], right[STRCMP_CONSTANT_LIMIT];
+  if (!constant_string(p, callee + 1, left) || !constant_string(p, callee + 2, right))
+    return unchanged;
+  return (value){CONSTANT, strcmp((const char *)left, (const char *)right) != 0};
+}
 static value evaluate(propagation *p, ir_instruction *in) {
   unsigned first = in->first_operand;
   if ((in->effects & IR_EFFECT_OPAQUE) || p->a.types[in->type].kind != IR_INT)
     return (value){OVERDEFINED, 0};
+  if (p->libc_strcmp && in->opcode == IR_OP_CALL)
+    return libc_strcmp(p, in);
   if (in->opcode == IR_OP_PHI) {
     value result = {UNKNOWN, 0};
     for (unsigned k = first; k < first + in->operand_count; k += 2) {
@@ -480,14 +572,14 @@ static void rewrite(propagation *p) {
     }
   }
 }
-void ir_sccp(ir_context *c, ir_module *m) {
+static void run_sccp(ir_context *c, ir_module *m, int libc) {
   ir_allocation *mark = c->allocations;
   for (unsigned k = 0; k < m->count; k++)
     if (!strcmp(ir_text(m, k), "blockaddress")) {
       ir_note(c, "skipped", "blockaddress_module", 1);
       return;
     }
-  propagation p = {.c = c, .work = IR_SCCP_WORK_LIMIT};
+  propagation p = {.c = c, .work = IR_SCCP_WORK_LIMIT, .libc_strcmp = libc};
   ir_analyze(c, m, &p.a);
   ir_analysis *a = &p.a;
 #define ALLOC(member, n) p.member = ir_allocate(c, (n) * sizeof(*p.member))
@@ -532,3 +624,5 @@ void ir_sccp(ir_context *c, ir_module *m) {
   ir_dead_instructions(c, m);
   ir_reparse(c, m, mark);
 }
+void ir_sccp(ir_context *c, ir_module *m) { run_sccp(c, m, 0); }
+void ir_libc_strcmp(ir_context *c, ir_module *m) { run_sccp(c, m, 1); }

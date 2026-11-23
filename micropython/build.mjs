@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { bridgeStages, preprocessStock } from './stock-input.mjs';
+import { ownedStages, preprocessStock } from './stock-input.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -26,6 +26,8 @@ const unicode = path.join(upstream, 'py/unicode.c');
 const ownedUnicode = path.join(build, 'unicode-owned.o');
 const timeutils = path.join(upstream, 'shared/timeutils/timeutils.c');
 const ownedTimeutils = path.join(build, 'timeutils-owned.o');
+const sequence = path.join(upstream, 'py/sequence.c');
+const ownedSequence = path.join(build, 'sequence-owned.o');
 const fixture = path.join(root, 'badge-compiler/tests/fixtures');
 const qemu = process.env.QEMU_ARM ?? 'qemu-system-arm';
 const emulator = ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
@@ -44,7 +46,7 @@ function run(tool, args, { timeout = 120000, log, capture = false, ...options } 
     return result.stdout ?? '';
 }
 
-function firmware(name, board, mixed = false, core = false, vm = false) {
+function firmware(name, board, mixed = false, core = false, vm = false, sequenceObject = null) {
     const directory = path.join(build, name);
     const picotool = path.join(build, 'pico2-stock/_deps/picotool');
     const args = ['-S', port, '-B', directory, `-DMICROPY_BOARD=${board}`, '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'];
@@ -54,7 +56,7 @@ function firmware(name, board, mixed = false, core = false, vm = false) {
     if (mixed) args.push(`-DCMAKE_PROJECT_INCLUDE=${path.join(here, 'mixed.cmake')}`, `-DBADGE_LFS2_OBJECT=${owned}`);
     if (core) args.push(`-DBADGE_SMALLINT_OBJECT=${ownedSmallint}`);
     if (vm) args.push(`-DBADGE_RADIX_OBJECT=${ownedRadix}`, `-DBADGE_UNICODE_OBJECT=${ownedUnicode}`,
-        `-DBADGE_TIMEUTILS_OBJECT=${ownedTimeutils}`);
+        `-DBADGE_TIMEUTILS_OBJECT=${ownedTimeutils}`, `-DBADGE_SEQUENCE_OBJECT=${sequenceObject ?? ''}`);
     run('cmake', args, {
         cwd: port, timeout: 240000, log: `${name}-configure`,
         env: { ...process.env, CFLAGS: '-Wno-error=array-bounds' },
@@ -66,12 +68,18 @@ function firmware(name, board, mixed = false, core = false, vm = false) {
     assert.equal(commands.filter(row => row.file === radix).length, vm ? 0 : 1);
     assert.equal(commands.filter(row => row.file === unicode).length, vm ? 0 : 1);
     assert.equal(commands.filter(row => row.file === timeutils).length, vm ? 0 : 1);
+    assert.equal(commands.filter(row => row.file === sequence).length, sequenceObject ? 0 : 1);
     const map = fs.readFileSync(path.join(directory, 'firmware.elf.map'), 'utf8');
     assert(map.includes(mixed ? owned : '/lib/littlefs/lfs2_util.c.o'));
     assert(map.includes(core ? ownedSmallint : '/py/smallint.c.o'));
     assert(map.includes(vm ? ownedRadix : '/py/parsenumbase.c.o'));
     assert(map.includes(vm ? ownedUnicode : '/py/unicode.c.o'));
     assert(map.includes(vm ? ownedTimeutils : '/shared/timeutils/timeutils.c.o'));
+    assert(map.includes(sequenceObject ?? '/py/sequence.c.o'));
+    if (sequenceObject === ownedSequence) {
+        assert.match(map, /\.text\.mp_seq_index_obj\s+[^\n]+\n[^\n]*sequence-owned\.o|\.text\.mp_seq_index_obj\s+[^\n]*sequence-owned\.o/);
+        assert.match(map, /libg\.a\(libc_a-strcmp\.o\)/);
+    }
     if (vm) {
         assert.match(map, /\.text\.utf8_get_char\s+[^\n]+\n[^\n]*unicode-owned\.o|\.text\.utf8_get_char\s+[^\n]*unicode-owned\.o/);
         assert.match(map, /\.text\.timeutils_mktime_1970\s+[^\n]+\n[^\n]*timeutils-owned\.o|\.text\.timeutils_mktime_1970\s+[^\n]*timeutils-owned\.o/);
@@ -87,8 +95,66 @@ function compileStockModule(controlDirectory, source, object) {
     const db = JSON.parse(fs.readFileSync(path.join(controlDirectory, 'compile_commands.json'), 'utf8'));
     const stem = path.join(build, `${path.basename(source, '.c')}-stock`);
     preprocessStock(db, source, `${stem}.i`, run);
-    for (const [, tool, args] of bridgeStages(stem, object, tools))
+    for (const [, tool, args] of ownedStages(stem, object, tools))
         run(tool, args);
+}
+
+function compileSequence(controlDirectory) {
+    const db = JSON.parse(fs.readFileSync(path.join(controlDirectory, 'compile_commands.json'), 'utf8'));
+    const stem = path.join(build, 'sequence-stock'), baseline = path.join(build, 'sequence-baseline');
+    preprocessStock(db, sequence, `${stem}.i`, run);
+    fs.copyFileSync(`${stem}.i`, `${baseline}.i`);
+    const optimizer = path.join(tools, 'badge-opt');
+    const passes = run(optimizer, ['--default-passes'], { capture: true }).trim().split(',');
+    const fold = passes.indexOf('constant-fold');
+    assert(passes.includes('mem2reg') && fold > passes.indexOf('mem2reg'));
+    passes[fold] = 'libc-strcmp';
+    const baselineObject = `${baseline}.o`;
+    for (const [, tool, args] of [
+        ...ownedStages(baseline, baselineObject, tools),
+        ...ownedStages(stem, ownedSequence, tools, [`--passes=${passes.join(',')}`]),
+    ]) run(tool, args);
+    return baselineObject;
+}
+
+function sequenceOracle(controlDirectory, baseline) {
+    const gccObject = path.join(controlDirectory, 'CMakeFiles/firmware.dir', `${sequence}.o`);
+    const before = path.join(build, 'sequence-oracle-before.o'), control = path.join(build, 'sequence-control.o');
+    const name = 'mp_seq_index_obj', beforeName = 'before_seq_index_obj', gccName = 'gcc_seq_index_obj';
+    // Keep the public symbols distinct; the oracle link discards unused sections.
+    for (const [object, output, symbol, prefix] of [[baseline, before, beforeName, 'before'], [gccObject, control, gccName, 'gcc']]) {
+        const symbols = run('llvm-nm', ['--defined-only', '--extern-only', object], { capture: true });
+        const publicNames = [...symbols.matchAll(/^[\da-f]+ T (mp_seq_\w+)$/gm)].map(m => m[1]);
+        assert(publicNames.includes(name));
+        run('arm-none-eabi-objcopy', [...publicNames.map(n =>
+            `--redefine-sym=${n}=${n === name ? symbol : `${prefix}_${n}`}`), object, output]);
+    }
+    const oracle = path.join(build, 'sequence-oracle.o'), elf = path.join(build, 'sequence-oracle.elf');
+    const trace = path.join(build, 'sequence-oracle.trace');
+    run(gcc, [...arm, '-Os', '-ffreestanding', '-c', path.join(here, 'sequence-oracle.c'), '-o', oracle]);
+    run('ld.lld', ['--gc-sections', '-T', path.join(fixture, 'codegen_fixture.ld'),
+        path.join(build, 'crc-start.o'), oracle, ownedSequence, before, control, '-o', elf]);
+    run(qemu, [...emulator, '-kernel', elf, '-accel', 'tcg,one-insn-per-tb=on',
+        '-d', 'exec,nochain', '-D', trace], { timeout: 20000 });
+    const symbols = run('llvm-nm', ['--defined-only', '--print-size', elf], { capture: true });
+    const pcs = tracePcs(trace);
+    const symbolInfo = symbol => {
+        const match = symbols.match(new RegExp(`^([\\da-f]+) ([\\da-f]+) T ${symbol}$`, 'm'));
+        assert(match, `Missing oracle symbol ${symbol}`);
+        const [start, bytes] = match.slice(1).map(hex => Number.parseInt(hex, 16));
+        return { start, bytes };
+    };
+    const measure = symbol => {
+        const { start, bytes } = symbolInfo(symbol);
+        return { bytes, qemuInstructions: countReached(pcs, start, bytes) };
+    };
+    const strcmp = symbolInfo('strcmp').start;
+    const result = { baseline: measure(beforeName), optimized: measure(name), gcc: measure(gccName),
+        baselineStrcmpCalls: countReached(pcs, strcmp, 1), lookupCases: 4 };
+    assert(result.baselineStrcmpCalls > 0);
+    assert(result.optimized.bytes <= 256 && result.optimized.bytes * 20 < result.baseline.bytes);
+    console.log('Sequence oracle: matching indexes and identical compressed ValueError bytes:', result);
+    return result;
 }
 
 function calendarOracle(controlDirectory, vmDirectory) {
@@ -252,6 +318,9 @@ function crcOracle(controlDirectory) {
 }
 
 try {
+    const options = process.argv.slice(2);
+    assert(options.length === 0 || (options.length === 1 && options[0] === '--sequence-before'),
+        'usage: node micropython/build.mjs [--sequence-before]');
     fs.mkdirSync(build, { recursive: true });
     if (!fs.existsSync(upstream))
         run('git', ['clone', '--depth', '1', '--branch', 'v1.29.0', 'https://github.com/micropython/micropython.git', upstream]);
@@ -275,10 +344,19 @@ try {
     const vm = firmware('badge-vm', 'BADGE_RP2350', true, true, true);
     const radixParser = radixOracle(stock.directory, vm.directory);
     const calendar = calendarOracle(stock.directory, vm.directory);
+    const sequenceBaseline = compileSequence(stock.directory);
+    const sequenceIndex = sequenceOracle(stock.directory, sequenceBaseline);
+    const sequenceVm = firmware('badge-sequence', 'BADGE_RP2350', true, true, true, ownedSequence);
+    const sequenceBeforeVm = options.length
+        ? firmware('badge-sequence-before', 'BADGE_RP2350', true, true, true, sequenceBaseline) : undefined;
+    if (sequenceBeforeVm) {
+        assert(sequenceVm.bytes < sequenceBeforeVm.bytes);
+        console.log('Sequence fold loaded flash savings:', sequenceBeforeVm.bytes - sequenceVm.bytes);
+    }
     const sameTokens = crcComparison();
     console.log('Same-token CRC comparison (1,024-byte input):', sameTokens);
     fs.writeFileSync(path.join(build, 'comparison.json'),
-        JSON.stringify({ revision, pico2, stock, mixed, core, vm, smallInteger, radixParser, calendar,
+        JSON.stringify({ revision, pico2, stock, mixed, core, vm, sequenceVm, sequenceBeforeVm, smallInteger, radixParser, calendar, sequenceIndex,
             sameTokens, oracleCases: 1028 }, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython build: ${error.message}`);

@@ -164,6 +164,12 @@ int main(void) {
     };
     fixture("extern inline int f(void){return 1;}",NULL,0,path);
     fixture("inline int f(void){return 1;}",NULL,0,path);
+    fixture_checked("extern int c_name(int) __asm__(\"real\" \"_f\"); int c_name(int); "
+                    "int entry(int x){return c_name(x);}", "call i32 @\"real_f\"", "@\"c_name\"", 1, path);
+    fixture_checked("inline __attribute__((always_inline)) int g(int x){if(x)return x;return 5;} "
+                    "int f(int *p){int a=(g)((*p)++);return a+g(*p);}", "store i32 5", "@\"g\"", 1, path);
+    fixture_checked("float opaque(float); static inline void dead(int x){__asm__(\"nop\"::\"r\"(x));} "
+                    "int f(float *p){return sizeof(opaque(*p));}", "ret i32 4", "@\"opaque\"", 1, path);
     fixture_checked("struct V{int x,y,z;}; int use(struct V); int f(const struct V *v){return use(*v);}",
             "load [3 x i32], ptr","call void @llvm.mem",1,path);
     fixture_checked("struct V{int x,y;}; int use(struct V); int f(volatile struct V *v){return use(*v);}",
@@ -200,7 +206,10 @@ int main(void) {
         "void *f(void){__typeof__(nullptr) p=nullptr; return ++p;}",
         "union U{int x;char y;}; union U u={.x=4,.y=1};",
         "union U{int x;char y;};struct S{union U u;};struct S s={.u.x=4,.u.y=1};",
-        "struct S; struct S f(void);",
+        "struct S; struct S f(void); struct S (*p)(void)=f;",
+        "static inline __attribute__((always_inline)) int f(void){return f();} int g(void){return f();}",
+        "static inline __attribute__((always_inline)) int f(void){return 1;} int (*p)(void)=f;",
+        "struct __attribute__((packed)) S{char c;int x;}; int f(struct S *p){return p->x;}",
         "char oversized[16777217];",
     };
     for(size_t k=0;k<sizeof(negative)/sizeof(*negative);++k) fixture(negative[k],NULL,0,path);

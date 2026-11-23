@@ -103,6 +103,46 @@ test('Cortex-M33 validates nested effects, promotions, pointer/record layout and
     }
   }
 });
+test('forced inline calls, linker names and SDK builtins work in Cortex-M33 objects', t => {
+  const file = files(t);
+  const [, ir] = lower(file, `
+extern int link_value __asm__("wire_" "value");
+extern int adjust(int) __asm__("wire_adjust");
+static inline __attribute__((always_inline)) int step(int x) {
+    static int calls;
+    ++calls;
+    if (x < 0) goto negative;
+    return adjust(x) + calls;
+negative:
+    return link_value - calls;
+}
+inline __attribute__((__always_inline__)) int outer(int x) {
+    int local = x + 1;
+    return local * 2;
+}
+static volatile int x = 21, large = 2147483647;
+int main(void) {
+    int first = step(x++);
+    int second = step(-1);
+    int product;
+    if (first != 43 || second != 5 || x != 22 || outer(step(2)) != 16) return 1;
+    if (__builtin_clz((unsigned)x) != 27 || __builtin_ctz((unsigned)x) != 1) return 2;
+    if (__builtin_mul_overflow(x, -2, &product) || product != -44) return 3;
+    if (!__builtin_mul_overflow(large, 2, &product) || product != -2) return 4;
+    return 0;
+}`);
+  assert.doesNotMatch(ir, /@"(?:step|outer|adjust|link_value)"/);
+  fs.writeFileSync(file('provider.c'), 'int wire_value = 7; int wire_adjust(int x) { return x * 2; }');
+  run(clang, [...target, '-Oz', '-c', file('provider.c'), '-o', file('provider.o')]);
+  run(tool('badge-opt'), [file('ssa.ll'), '-o', file('output.ll')]);
+  run(tool('badge-codegen'), [file('output.ll'), '-o', file('output.s')]);
+  run(tool('badge-asm'), [file('output.s'), '-o', file('output.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+    file('start.o'), file('output.o'), file('provider.o'), '-o', file('run.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
+    '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file('run.elf')]);
+});
 test('explicit policy, malformed C and duplicate options preserve existing output', t => {
   const file=files(t);
   assert.equal(run(tool('badge-ir'),['--default-expression-lowering']).stdout.trim(),'ssa');

@@ -47,8 +47,9 @@ static void oracle(const char *source) {
          WEXITSTATUS(status) == 0);
   assert(!unlink(file));
 }
-static void fixture(const char *source, const char *present, const char *absent,
-                    unsigned nb, unsigned ne) {
+static void fixture_for_pass(const char *pass, const char *source,
+                             const char *present, const char *absent,
+                             unsigned nb, unsigned ne) {
   oracle(source);
   ir_context *c = calloc(1, sizeof(*c));
   assert(c);
@@ -59,7 +60,7 @@ static void fixture(const char *source, const char *present, const char *absent,
     abort();
   }
   blocks = edges = 0;
-  ir_pipeline(c, source, strlen(source), "sccp");
+  ir_pipeline(c, source, strlen(source), pass);
   assert(c->memory == 0);
   if ((present && !strstr(c->output, present)) ||
       (absent && strstr(c->output, absent)) || blocks != nb || edges != ne) {
@@ -73,12 +74,47 @@ static void fixture(const char *source, const char *present, const char *absent,
   assert(result);
   size_t size = c->size;
   c->observe = NULL;
-  ir_pipeline(c, result, size, "sccp");
+  ir_pipeline(c, result, size, pass);
   assert(c->size == size && !memcmp(c->output, result, size));
   free(result);
   ir_destroy(c);
   free(c);
   fixtures++;
+}
+static void fixture(const char *source, const char *present, const char *absent,
+                    unsigned nb, unsigned ne) {
+  fixture_for_pass("sccp", source, present, absent, nb, ne);
+}
+static void libc_strcmp_tests(void) {
+#define STRINGS TARGET                                                         \
+  "@a = private unnamed_addr constant [4 x i8] c\"\\FF\\00ab\"\n"              \
+  "@b = internal constant [3 x i8] c\"\\FF\\00c\"\n"                            \
+  "@c = internal constant [2 x i8] c\"x\\00\"\n"                                \
+  "@mutable = internal global [3 x i8] c\"\\FF\\00c\"\n"                         \
+  "@no_nul = internal constant [1 x i8] c\"x\"\n"
+#define DECL STRINGS "declare i32 @strcmp(ptr, ptr)\n"
+#define CALL(rhs) "%v = call i32 @strcmp(ptr @a, ptr @" rhs ")\n"
+#define SELECT "%ok = icmp eq i32 0, %v\n%r = select i1 %ok, i32 17, i32 23\nret i32 %r"
+  const char *equal = DECL FN(CALL("b") SELECT);
+  fixture(equal, "call i32 @strcmp", NULL, 0, 0);
+  fixture_for_pass("libc-strcmp", equal, "ret i32 17", "call i32 @strcmp", 0, 0);
+  fixture_for_pass("libc-strcmp", DECL FN(CALL("c") SELECT),
+                   "ret i32 23", "call i32 @strcmp", 0, 0);
+  fixture_for_pass("libc-strcmp", DECL FN(CALL("c") "ret i32 %v"),
+                   "call i32 @strcmp", NULL, 0, 0);
+  fixture_for_pass("libc-strcmp", DECL FN(CALL("mutable") SELECT),
+                   "call i32 @strcmp", NULL, 0, 0);
+  fixture_for_pass("libc-strcmp", DECL FN(CALL("no_nul") SELECT),
+                   "call i32 @strcmp", NULL, 0, 0);
+  fixture_for_pass("libc-strcmp", DECL FN("%v = call i32 @strcmp(ptr @a, ptr @b) nobuiltin\n" SELECT),
+                   "call i32 @strcmp", NULL, 0, 0);
+  fixture_for_pass("libc-strcmp",
+                   STRINGS "define i32 @strcmp(ptr %a, ptr %b) {\nentry:\nret i32 0\n}\n"
+                   FN(CALL("c") SELECT), "call i32 @strcmp", NULL, 0, 0);
+#undef SELECT
+#undef CALL
+#undef DECL
+#undef STRINGS
 }
 static void failure_tests(void) {
   const char *input = "build/m06-cli-input.ll",
@@ -136,6 +172,7 @@ static void scaling(void) {
   free(c);
 }
 int main(void) {
+  libc_strcmp_tests();
   fixture(TARGET FN("%c = icmp eq i32 4, 4\n"
                     "br i1 %c, label %a, label %b\n"
                     "a:\nbr label %join\nb:\nbr label %join\n"

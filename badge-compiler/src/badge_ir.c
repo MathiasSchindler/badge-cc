@@ -13,13 +13,24 @@ typedef struct ir_label { node_t *node; const char *name; unsigned block; struct
 typedef struct ir_case { node_t *node; unsigned block; struct ir_case *next; } ir_case;
 typedef struct ir_switch { ir_case *cases; struct ir_switch *parent; unsigned end; } ir_switch;
 typedef struct ir_reloc { uint32_t offset,size; const char *type,*value; struct ir_reloc *next; } ir_reloc;
+typedef struct ir_inline_place { symbol_t *symbol; const char *place; struct ir_inline_place *next; } ir_inline_place;
+typedef struct ir_inline {
+    symbol_t *function;
+    unsigned end;
+    const char *result;
+    ir_inline_place *locals;
+    struct ir_inline *parent;
+} ir_inline;
 typedef struct {
-    parser_t *p; sema_t *sema; node_t **initializers,**definitions;
+    parser_t *p; sema_t *sema; node_t **initializers;
     const char **places; unsigned char *allocated;
+    unsigned char *referenced;
+    symbol_t **inline_queue; unsigned inline_count,inline_expansions;
     ir_buffer body,entry; ir_buffer *buffer;
     unsigned reg,temp,label,block,break_block,continue_block,depth;
-    int terminated,ssa_expressions;
+    int terminated,ssa_expressions,uses_ctlz;
     symbol_t *function; ir_label *labels; ir_switch *switches;
+    ir_inline *inlining;
 } ir_context;
 
 static int ir_kind(node_t *n,const char *kind) { return n!=NULL && strcmp(n->kind,kind)==0; }
@@ -108,10 +119,11 @@ static const char *ir_extension(c_type_t *t) {
     return ir_integer(t) && t->size<4?(t->is_unsigned?"zeroext ":"signext "):"";
 }
 static const char *ir_symbol(ir_context *c,symbol_t *s) {
+    if(s->always_inline) ir_error(c,s->definition,"always_inline function requires a direct call");
     if(s->kind==S_STRING) return ir_format(c,"@\".str.%u\"",s->id);
     if(s->static_storage && s->linkage==0)
         return ir_format(c,"@\".b.%u.%s\"",s->id,s->name);
-    return ir_format(c,"@\"%s\"",s->name);
+    return ir_format(c,"@\"%s\"",s->asm_name?s->asm_name:s->name);
 }
 static const char *ir_reg(ir_context *c) { return ir_format(c,"%%v%u",++c->reg); }
 static unsigned ir_new_block(ir_context *c) { return ++c->label; }
@@ -131,6 +143,16 @@ static const char *ir_temp(ir_context *c,c_type_t *t,unsigned extra) {
 }
 static const char *ir_place_symbol(ir_context *c,symbol_t *s) {
     if(s->static_storage || s->kind==S_FUNCTION || s->kind==S_STRING) return ir_symbol(c,s);
+    if(c->inlining) {
+        for(ir_inline_place *p=c->inlining->locals;p;p=p->next) if(p->symbol==s) return p->place;
+        const char *name=ir_format(c,"%%t%u",++c->temp);
+        ir_buffer *saved=c->buffer; c->buffer=&c->entry;
+        ir_emit(c,"  %s = alloca %s, align %u\n",name,ir_storage_type(c,s->type),s->alignment);
+        c->buffer=saved;
+        ir_inline_place *place=ir_allocate(c,sizeof(*place));
+        *place=(ir_inline_place){s,name,c->inlining->locals}; c->inlining->locals=place;
+        return name;
+    }
     if(!c->allocated[s->id]) {
         c->places[s->id]=ir_format(c,"%%s%u",s->id); c->allocated[s->id]=1;
         ir_buffer *saved=c->buffer; c->buffer=&c->entry;
@@ -148,6 +170,7 @@ static ir_value ir_expression(ir_context *,node_t *);
 static const char *ir_condition(ir_context *,node_t *);
 static const char *ir_lvalue(ir_context *,node_t *);
 static void ir_initialize(ir_context *,c_type_t *,const char *,node_t *);
+static ir_value ir_inline_call(ir_context *,node_t *,symbol_t *);
 static const char *ir_truth(ir_context *c,ir_value v) {
     if(v.type->kind==T_BOOL) return v.text;
     const char *r=ir_reg(c);
@@ -217,6 +240,7 @@ static const char *ir_lvalue(ir_context *c,node_t *n) {
     if(ir_kind(n,"generic_selection")) return ir_lvalue(c,i->selected);
     if(ir_kind(n,"unary") && strcmp(n->text,"*")==0) return ir_expression(c,a).text;
     if(ir_kind(n,"member")) {
+        if(i->unaligned_member) ir_error(c,n,"potentially unaligned packed member access is unsupported");
         const char *base=strcmp(n->text,"->")==0?ir_expression(c,a).text:
             ir_info(a)->lvalue?ir_lvalue(c,a):ir_expression(c,a).text;
         return ir_offset(c,base,ir_format(c,"%" PRIu32,i->field_offset));
@@ -341,8 +365,42 @@ static void ir_signature(ir_context *c,c_type_t *fn,int names) {
     }
     if(fn->variadic || !fn->prototype) { if(comma) ir_text(c,", "); ir_text(c,"..."); }
 }
+static ir_value ir_builtin_call(ir_context *c,node_t *n,c_builtin_t builtin) {
+    node_t *a=n->first->next;
+    ir_value x=ir_argument(c,a);
+    if(builtin==BUILTIN_MUL_OVERFLOW) {
+        ir_value y=ir_argument(c,a->next), out=ir_argument(c,a->next->next);
+        c_type_t *wide=ir_primitive(c,T_LLONG), *i32=ir_primitive(c,T_INT);
+        x=ir_cast(c,x,wide); y=ir_cast(c,y,wide);
+        const char *product=ir_reg(c); ir_emit(c,"  %s = mul nsw i64 %s, %s\n",product,x.text,y.text);
+        ir_value low=ir_cast(c,(ir_value){wide,product},i32);
+        ir_store(c,out.type->base,out.text,low);
+        ir_value extended=ir_cast(c,low,wide);
+        const char *result=ir_reg(c); ir_emit(c,"  %s = icmp ne i64 %s, %s\n",result,product,extended.text);
+        return (ir_value){ir_info(n)->type,result};
+    }
+    if(builtin==BUILTIN_CTZ) {
+        const char *neg=ir_reg(c),*low=ir_reg(c);
+        ir_emit(c,"  %s = sub i32 0, %s\n  %s = and i32 %s, %s\n",neg,x.text,low,x.text,neg);
+        x.text=low;
+    }
+    c->uses_ctlz=1;
+    const char *count=ir_reg(c);
+    ir_emit(c,"  %s = call i32 @llvm.ctlz.i32(i32 %s, i1 true)\n",count,x.text);
+    if(builtin==BUILTIN_CTZ) {
+        const char *result=ir_reg(c); ir_emit(c,"  %s = sub i32 31, %s\n",result,count);
+        count=result;
+    }
+    return (ir_value){ir_info(n)->type,count};
+}
 static ir_value ir_call(ir_context *c,node_t *n) {
-    node_t *a=n->first; ir_value callee=ir_expression(c,a); c_type_t *fn=callee.type->base;
+    if(ir_info(n)->builtin) return ir_builtin_call(c,n,ir_info(n)->builtin);
+    node_t *a=n->first;
+    node_t *callee_node=a;
+    while(ir_kind(callee_node,"parenthesized_expression")) callee_node=callee_node->first;
+    symbol_t *direct=ir_kind(callee_node,"identifier")?ir_info(callee_node)->symbol:NULL;
+    if(direct && direct->always_inline) return ir_inline_call(c,n,direct);
+    ir_value callee=ir_expression(c,a); c_type_t *fn=callee.type->base;
     size_t count=0; for(node_t *arg=a->next;arg;arg=arg->next) ++count;
     ir_value *values=ir_allocate(c,(count+1)*sizeof(*values)); size_t k=0;
     for(node_t *arg=a->next;arg;arg=arg->next) values[k++]=ir_argument(c,arg);
@@ -538,6 +596,8 @@ static void ir_initialize(ir_context *c,c_type_t *t,const char *place,node_t *n)
         ir_zero(c,place,t->size,(ir_object_qualifiers(t)&Q_VOLATILE)!=0);
         for(node_t *item=n->first;item;item=item->next) {
             sem_info_t *i=ir_info(item);
+            if(t->alignment<i->type->alignment || i->field_offset%i->type->alignment)
+                ir_error(c,item,"potentially unaligned packed member initializer is unsupported");
             const char *target=ir_offset(c,place,ir_format(c,"%" PRIu32,i->field_offset));
             c_type_t *type=i->type;
             if(t->qualifiers&Q_VOLATILE) {
@@ -654,18 +714,25 @@ static void ir_global(ir_context *c,symbol_t *s) {
     ir_emit(c,", align %u\n",s->alignment);
 }
 
+static void ir_mark_reference(ir_context *c,symbol_t *s) {
+    if(!s || c->referenced[s->id]) return;
+    c->referenced[s->id]=1;
+    if(s->is_inline && s->definition) c->inline_queue[c->inline_count++]=s;
+}
 static void ir_collect(ir_context *c,node_t *n) {
+    if(ir_kind(n,"function_definition") && ir_info(n->first->next)->symbol->is_inline) return;
+    if(ir_kind(n,"sizeof_expression") || ir_kind(n,"sizeof_type") ||
+       ir_kind(n,"alignof_type") || ir_kind(n,"offsetof") || ir_kind(n,"static_assert")) return;
+    if(ir_kind(n,"generic_selection")) { ir_collect(c,ir_info(n)->selected); return; }
+    if(ir_kind(n,"identifier") && ir_info(n)) ir_mark_reference(c,ir_info(n)->symbol);
     if(ir_kind(n,"init_declarator") && ir_info(n) && ir_info(n)->symbol) {
         symbol_t *s=ir_info(n)->symbol;
         for(node_t *child=n->first->next;child;child=child->next)
-            if(!ir_kind(child,"attributes")) {
+            if(!ir_kind(child,"attributes") && !ir_kind(child,"assembly")) {
                 ir_initializer_contract(c,s->type,child); c->initializers[s->id]=child;
             }
     }
     if(ir_kind(n,"compound_literal")) ir_initializer_contract(c,ir_info(n)->type,n->first->next);
-    if(ir_kind(n,"function_definition")) {
-        symbol_t *s=ir_info(n->first->next)->symbol; c->definitions[s->id]=n;
-    }
     for(node_t *child=n->first;child;child=child->next) ir_collect(c,child);
 }
 static node_t *ir_function_declarator(node_t *n) {
@@ -743,7 +810,16 @@ static void ir_statement(ir_context *c,node_t *n) {
     } else if(ir_kind(n,"expression_statement")) { if(a) { ir_live(c); (void)ir_expression(c,a); } }
     else if(ir_kind(n,"assembly")) { ir_live(c); ir_assembly(c,n); }
     else if(ir_kind(n,"return")) {
-        ir_live(c); c_type_t *t=c->function->type->base;
+        ir_live(c);
+        if(c->inlining) {
+            if(a) {
+                ir_value value=ir_expression(c,a);
+                if(c->inlining->result)
+                    ir_store(c,c->inlining->function->type->base,c->inlining->result,value);
+            }
+            ir_branch(c,c->inlining->end); --c->depth; return;
+        }
+        c_type_t *t=c->function->type->base;
         if(a) {
             ir_value value=ir_expression(c,a);
             if(ir_record(t)) {
@@ -822,6 +898,36 @@ static void ir_statement(ir_context *c,node_t *n) {
     } else ir_error(c,n,"unsupported IR statement");
     --c->depth;
 }
+static ir_value ir_inline_call(ir_context *c,node_t *n,symbol_t *s) {
+    if(!s->definition) ir_error(c,n,"always_inline function has no definition");
+    if(c->function==s) ir_error(c,n,"recursive always_inline call");
+    for(ir_inline *p=c->inlining;p;p=p->parent)
+        if(p->function==s) ir_error(c,n,"recursive always_inline call");
+    if(++c->inline_expansions>256) ir_error(c,n,"always_inline expansion limit exceeded");
+    c_type_t *fn=s->type,*result=fn->base;
+    if(ir_record(result) || s->noreturn) ir_error(c,n,"unsupported always_inline return type or attribute");
+    ir_value *args=ir_allocate(c,(fn->parameter_count+1)*sizeof(*args));
+    size_t count=0;
+    for(node_t *a=n->first->next;a;a=a->next) {
+        if(count==fn->parameter_count || ir_record(fn->parameters[count]))
+            ir_error(c,n,"unsupported always_inline arguments");
+        args[count++]=ir_argument(c,a);
+    }
+    if(count!=fn->parameter_count) ir_error(c,n,"wrong number of always_inline arguments");
+    const char *place=result->kind==T_VOID?NULL:ir_temp(c,result,0);
+    ir_inline expansion={.function=s,.end=ir_new_block(c),.result=place,.parent=c->inlining};
+    ir_label *labels=c->labels; c->labels=NULL;
+    c->inlining=&expansion;
+    node_t *d=ir_function_declarator(s->definition->first->next->first);
+    size_t k=0;
+    for(node_t *a=d->first->next->first;a;a=a->next) {
+        sem_info_t *i=ir_info(a);
+        if(i && i->symbol) ir_store(c,i->symbol->type,ir_place_symbol(c,i->symbol),args[k++]);
+    }
+    ir_statement(c,s->definition->last); ir_branch(c,expansion.end); ir_block(c,expansion.end);
+    c->inlining=expansion.parent; c->labels=labels;
+    return place?ir_load(c,result,place):(ir_value){result,""};
+}
 static void ir_function_header(ir_context *c,symbol_t *s,int defined) {
     c_type_t *fn=s->type;
     ir_emit(c,"%s %s%s%s %s(",defined?"define":"declare",defined?(s->linkage==1?"internal ":"dso_local "):"",
@@ -830,7 +936,7 @@ static void ir_function_header(ir_context *c,symbol_t *s,int defined) {
     if(s->section_name) { ir_text(c," section "); ir_string(c,(const unsigned char *)s->section_name,strlen(s->section_name)); }
 }
 static void ir_definition(ir_context *c,symbol_t *s,node_t *n) {
-    c->function=s; c->reg=c->temp=c->label=c->depth=0; c->labels=NULL; c->switches=NULL;
+    c->function=s; c->reg=c->temp=c->label=c->depth=c->inline_expansions=0; c->labels=NULL; c->switches=NULL;
     c->body=(ir_buffer){0}; c->entry=(ir_buffer){0}; c->break_block=c->continue_block=0;
     memset(c->allocated,0,badge_sema_symbol_count(c->sema)+1);
     c->buffer=&c->body; ir_block(c,0);
@@ -865,17 +971,26 @@ static void ir_process_mode(parser_t *p,node_t *root,int ssa_expressions) {
     c->ssa_expressions=ssa_expressions;
     unsigned symbols=badge_sema_symbol_count(c->sema);
     c->initializers=ir_allocate(c,((size_t)symbols+1)*sizeof(*c->initializers));
-    c->definitions=ir_allocate(c,((size_t)symbols+1)*sizeof(*c->definitions));
+    c->inline_queue=ir_allocate(c,((size_t)symbols+1)*sizeof(*c->inline_queue));
+    c->referenced=ir_allocate(c,(size_t)symbols+1);
     c->places=ir_allocate(c,((size_t)symbols+1)*sizeof(*c->places));
     c->allocated=ir_allocate(c,(size_t)symbols+1); ir_collect(c,root);
+    for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next) if(s->used) {
+        ir_mark_reference(c,s);
+        ir_mark_reference(c,s->owner);
+    }
+    for(unsigned k=0;k<c->inline_count;++k) ir_collect(c,c->inline_queue[k]->definition->last);
     ir_text(c,"source_filename = "); ir_string(c,(const unsigned char *)p->file,strlen(p->file));
     ir_text(c,"\ntarget datalayout = " BADGE_IR_LAYOUT "\n"
         "target triple = " BADGE_IR_TRIPLE "\n");
     for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next)
-        if(s->kind==S_STRING || (s->kind==S_OBJECT && s->static_storage)) ir_global(c,s);
+        if((s->kind==S_STRING || (s->kind==S_OBJECT && s->static_storage && (s->defined || c->referenced[s->id]))) &&
+            (!s->owner || s->linkage || !s->owner->is_inline || c->referenced[s->owner->id])) ir_global(c,s);
     for(node_t *n=root->first;n;n=n->next) if(ir_kind(n,"assembly")) ir_assembly(c,n);
     for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next) if(s->kind==S_FUNCTION) {
-        if(c->definitions[s->id]) ir_definition(c,s,c->definitions[s->id]);
+        if(s->always_inline) { if(s->used) ir_error(c,s->definition,"always_inline function cannot be marked used"); continue; }
+        if((s->is_inline || !s->definition) && !c->referenced[s->id]) continue;
+        if(s->definition) ir_definition(c,s,s->definition);
         else { ir_function_header(c,s,0); ir_text(c,"\n"); }
     }
     unsigned used=0; for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next) if(s->used) ++used;
@@ -886,6 +1001,7 @@ static void ir_process_mode(parser_t *p,node_t *root,int ssa_expressions) {
         }
         ir_text(c,"], section \"llvm.metadata\"\n");
     }
+    if(c->uses_ctlz) ir_text(c,"declare i32 @llvm.ctlz.i32(i32, i1 immarg)\n");
     ir_text(c,"declare void @llvm.memcpy.inline.p0.p0.i32(ptr, ptr, i32 immarg, i1 immarg)\n"
         "declare void @llvm.memset.inline.p0.i32(ptr, i8, i32 immarg, i1 immarg)\n"
         "attributes #0 = { nounwind minsize optsize \"no-builtins\" \"target-cpu\"=\"cortex-m33\" \"use-soft-float\"=\"true\" }\n"

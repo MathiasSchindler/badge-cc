@@ -3,6 +3,8 @@ union Overlay { char c[9]; long long ll; };
 enum Positive { P0, P2 = 2 };
 enum Negative { N1 = -1, N0 };
 struct Explicit { char tag; short value __attribute__((__aligned__(__alignof__(long long)))); char tail; };
+struct __attribute__((packed, aligned(4))) Packed { char tag; int value; char tail; };
+struct BitRun { char tag; unsigned small : 3; unsigned wide : 25; char tail; };
 
 unsigned oracle_pointer_size = sizeof(void *);
 unsigned oracle_long_size = sizeof(long);
@@ -25,6 +27,11 @@ unsigned oracle_explicit_size = sizeof(struct Explicit);
 unsigned oracle_explicit_align = _Alignof(struct Explicit);
 unsigned oracle_explicit_offset = (unsigned)&((struct Explicit *)0)->value;
 unsigned oracle_explicit_tail = (unsigned)&((struct Explicit *)0)->tail;
+unsigned oracle_packed_size = sizeof(struct Packed);
+unsigned oracle_packed_align = _Alignof(struct Packed);
+unsigned oracle_packed_tail = (unsigned)&((struct Packed *)0)->tail;
+unsigned oracle_bit_run_size = sizeof(struct BitRun);
+unsigned oracle_bit_run_tail = (unsigned)&((struct BitRun *)0)->tail;
 
 _Static_assert(sizeof(struct Layout) == 32, "target struct layout");
 _Static_assert(_Alignof(struct Layout) == 8, "target struct alignment");

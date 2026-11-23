@@ -94,11 +94,11 @@ static void sem_test_layout_oracle(const char *clang) {
         }
         ++comparisons;
     }
-    assert(!ferror(ir) && fclose(ir) == 0 && comparisons == 21);
+    assert(!ferror(ir) && fclose(ir) == 0 && comparisons == 26);
     assert(host_write_file("badge-sema-test", "build/sema-layout-ours.json",
                           (const unsigned char *)p->output, p->output_size));
     sem_test_release(p);
-    printf("badge-sema: %u/21 LLVM target-layout/constant probes match\n", comparisons);
+    printf("badge-sema: %u/26 LLVM target-layout/constant probes match\n", comparisons);
 }
 
 int main(void) {
@@ -153,6 +153,12 @@ int main(void) {
         "void f(void){__asm__ goto(\"\" : : : : done);done:;}",
         "static void f(void) __attribute__((noreturn)); static void f(void){for(;;){}}",
         "static inline int f(int); static inline int f(int x){return x+1;} int (*p)(int)=f;",
+        "extern int x __asm__(\"renamed\"); extern int x; int f(void){return x;}",
+        "inline __attribute__((__always_inline__)) int f(int x){return x+1;} int g(void){return f(1);}",
+        "; struct N{char c; struct {short x; int y;} inner;}; "
+        "_Static_assert(__builtin_offsetof(struct N, inner.y)==8,\"nested offset\");",
+        "int log_printf(const char *, ...) __attribute__((__format__(__printf__,1,2))); "
+        "void *make(unsigned, unsigned) __attribute__((__alloc_size__(1,2)));",
         "static int f(int); inline int f(int x){return x+1;} int g(void){return f(1);}",
         "__attribute__((used,section(\".data\"))) static int a=1;",
         "void f(void){extern int x; x=1;} int x;",
@@ -173,6 +179,8 @@ int main(void) {
     }
     const char *invalid[] = {
         "int f(void){return missing;}", "int f(void){g();return 0;}",
+        "struct S{int x;}; unsigned n=__builtin_offsetof(struct S, missing);",
+        "struct S{unsigned x:2;}; unsigned n=__builtin_offsetof(struct S, x);",
         "int f(int x){int x;return x;}", "typedef int T; char T;",
         "int x; char x;", "int f(int); int f(char);", "int f(int); int f(void){return 0;}",
         "int x=1; int x=2;", "int f(void){return 1;} int f(void){return 2;}",
@@ -236,11 +244,13 @@ int main(void) {
         }
     }
     const char *unsupported[] = {
-        "double x=1.0;", "struct S{unsigned x:2;};", "_Atomic(int) x;",
-        "void f(int n){int a[n];}", "struct __attribute__((packed)) S{char a;int b;};",
+        "double x=1.0;", "struct S{signed x:2;};", "_Atomic(int) x;",
+        "void f(int n){int a[n];}", "struct __attribute__((packed)) S{unsigned b:2;};",
         "unsigned x=0; char c=L'x';", "int c='ab';", "void f(void*p){p++;}",
         "int f(){return 0;}", "extern inline int f(void){return 0;}",
-        "extern int x __asm__(\"renamed\");"
+        "struct S{unsigned x:2;}; int f(struct S *p){return p->x;}",
+        "void f(void){register int value __asm__(\"r0\");}",
+        "struct Empty{}; struct Empty a[2];"
     };
     for (size_t k=0;k<sizeof(unsupported)/sizeof(unsupported[0]);++k) {
         sem_test_save(input,unsupported[k]);sem_test_save(output,"preserved");

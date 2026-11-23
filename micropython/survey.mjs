@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { bridgeStages, preprocessStock } from './stock-input.mjs';
+import { bridgeStages, ownedStages, preprocessStock } from './stock-input.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -28,16 +28,11 @@ function checked(tool, args, options) {
 
 const modules = ['py/ringbuf.c', 'py/smallint.c', 'py/parsenumbase.c', 'py/unicode.c',
     'py/sequence.c', 'shared/timeutils/timeutils.c'];
+const coreModules = ['py/objstr.c', 'py/runtime.c', 'py/vm.c', 'py/qstr.c', 'py/binary.c', 'py/objint.c'];
 
-function probeModule(db, module) {
+function probeModule(db, module, useBridge) {
     const source = path.join(upstream, module);
     const stem = path.join(work, `survey-${path.basename(module, '.c')}`);
-    const stages = [
-        ['frontend', 'badge-ir', '.i', '.ll'],
-        ['optimization', 'badge-opt', '.ll', '.opt.ll'],
-        ['codegen', 'badge-codegen', '.opt.ll', '.s'],
-        ['assembly', 'badge-asm', '.s', '.o'],
-    ];
     for (const suffix of ['.i', '.ll', '.opt.ll', '.s', '.o'])
         fs.rmSync(`${stem}${suffix}`, { force: true });
     let failure;
@@ -47,15 +42,15 @@ function probeModule(db, module) {
         failure = { stage: 'preprocessing', diagnostic: error.message };
     }
     if (!failure)
-        for (const [stage, tool, input, output] of stages) {
-            const r = run(path.join(compiler, tool), [`${stem}${input}`, '-o', `${stem}${output}`]);
+        for (const [stage, tool, args] of ownedStages(stem, `${stem}.o`, compiler)) {
+            const r = run(tool, args);
             if (r.status !== 0) {
                 failure = { stage, diagnostic: r.stderr.trim() || `exit ${r.status}` };
                 break;
             }
         }
     let bridge;
-    if (failure?.stage === 'frontend') {
+    if (useBridge && failure?.stage === 'frontend') {
         const compatible = `${stem}-bridge`;
         fs.copyFileSync(`${stem}.i`, `${compatible}.i`);
         const object = `${compatible}.o`;
@@ -76,22 +71,21 @@ function probeModule(db, module) {
 }
 
 try {
+    const args = process.argv.slice(2);
+    assert(args.length === 0 || (args.length === 1 && args[0] === '--core'), 'usage: node micropython/survey.mjs [--core]');
     const db = JSON.parse(fs.readFileSync(path.join(firmware, 'compile_commands.json'), 'utf8'));
     const results = [];
-    for (const module of modules) {
-        const result = probeModule(db, module);
+    for (const module of args.length ? [...modules, ...coreModules] : modules) {
+        const result = probeModule(db, module, modules.includes(module));
         results.push(result);
         console.log(`${module} [${result.stage}]: ${result.diagnostic ?? 'object generated'}`);
         if (result.bridge)
             console.log(`  bridge [${result.bridge.stage}]: ${result.bridge.diagnostic ?? 'object generated'}`);
     }
 
-    const ringbuf = path.join(work, 'ringbuf-owned.o');
+    assert.equal(results.find(r => r.module === 'py/ringbuf.c').stage, 'object-ready');
+    const ringbuf = path.join(work, 'survey-ringbuf.o');
     const source = path.join(upstream, 'py/ringbuf.c');
-    checked('bash', [path.join(root, 'badge-compiler/scripts/owned-cc.sh'),
-        '-std=c11', '-Oz', '-mcpu=cortex-m33', '-mthumb', '-ffreestanding',
-        `-I${path.join(here, 'include')}`, `-I${path.join(root, 'src/shared')}`, `-I${upstream}`,
-        '-c', source, '-o', ringbuf]);
     const names = ['get16', 'peek16', 'put16', 'get_bytes', 'put_bytes'];
     const gccObject = path.join(firmware, 'CMakeFiles/firmware.dir', `${source}.o`);
     const control = path.join(work, 'ringbuf-control.o');
@@ -110,9 +104,9 @@ try {
     const ownedBytes = sizes(ringbuf), gccBytes = sizes(gccObject);
     for (const map of [ownedBytes, gccBytes]) assert.deepEqual(Object.keys(map).sort(), [...names].sort());
     console.log('Isolated ringbuf: 2,048 operations passed; public symbol bytes:', { owned: ownedBytes, gcc: gccBytes });
-    results.push({ module: 'py/ringbuf.c', mode: 'owned pipeline with minimal headers; isolated QEMU oracle',
+    results.push({ module: 'py/ringbuf.c', mode: 'owned object with stock headers; isolated QEMU oracle',
         operations: 2048, ownedBytes, gccBytes });
-    fs.writeFileSync(path.join(work, 'survey.json'), JSON.stringify(results, null, 2) + '\n');
+    fs.writeFileSync(path.join(work, args.length ? 'survey-core.json' : 'survey.json'), JSON.stringify(results, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython survey: ${error.message}`);
     process.exitCode = 1;

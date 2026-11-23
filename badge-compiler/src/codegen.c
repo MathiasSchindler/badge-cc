@@ -1645,6 +1645,17 @@ static void cg_call(cg_context *c, cg_inst *i) {
       c->pos = after;
       return;
     }
+    if (!strcmp(callee, "@llvm.ctlz.i32")) {
+      if (count != 2 || !i->result || i->result->type->bits != 32 ||
+          args[0].type->bits != 32 || args[1].type->bits != 1)
+        cg_error(c, "invalid i32 count-leading-zeros intrinsic");
+      c->pos = args[0].start;
+      cg_value_read(c, args[0].type, 0, 0);
+      cg_emit(c, "clz r0, r0\n");
+      cg_save(c, i->result, 0, 0);
+      c->pos = after;
+      return;
+    }
     if (!strcmp(callee, "@llvm.ctlz.i64")) {
       if (count != 2 || !i->result || i->result->type->bits != 64 ||
           args[0].type->bits != 64 || args[1].type->bits != 1)

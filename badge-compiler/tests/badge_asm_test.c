@@ -86,6 +86,15 @@ static void check_branch(const char *source,unsigned width) {
         if(s->lines[k].op[0]=='b') { assert(s->lines[k].width==width); found=1; }
     assert(found); release(s);
 }
+static void check_fixed_branch_during_relaxation(void) {
+    char source[1024] = "";
+    for(unsigned k=0;k<140;++k) strcat(source,"b far\n");
+    strcat(source,"beq.n near\nnop\nnear:nop\n.space 2400\nfar:nop\n");
+    assembler_t *s=fixture(source);
+    assert(s->lines[0].width==4 && s->lines[139].width==4);
+    assert(s->lines[140].width==2 && s->lines[140].displacement==0);
+    release(s);
+}
 static void check_mov_relocations(void) {
     assembler_t *s=fixture("nop\nmovw r12,#:lower16:(data-32768)\n"
         "movt r12,#:upper16:(data-32768)\n"
@@ -362,6 +371,7 @@ int main(void) {
     check_branch("b alias\n.space 2050\ntarget:nop\n.equ alias,target\n",4);
     check_branch("target:nop\n.space 2044\n.equ alias,target\nb alias\n",4);
     check_branch("beq target\n.space 254\nb far\ntarget:nop\n.space 2050\nfar:nop\n",4);
+    check_fixed_branch_during_relaxation();
     check_expression_cache();
     check_synchronization();
     assembler_t *s=fixture("it eq\naddseq r0,r1,#1\n");

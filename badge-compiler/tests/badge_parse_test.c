@@ -100,6 +100,8 @@ int main(void) {
         "int f(int x){__asm__(\"\" : [out] \"+r\"(x) : \"r\"(x) : \"memory\");return x;}",
         "void f(void){__asm__ goto(\"\" : : : : done);done:;}",
         "extern int x __asm__(\"renamed\");",
+        "; struct N{char c; int i;}; int x=__builtin_offsetof(struct N,i);",
+        "int f(void){return ({1;});}",
         "_Static_assert(sizeof(int)==4,\"int size\"); _Alignas(4) int x;",
         "_Atomic(int) x; _Atomic int y; _Noreturn void f(void);",
         "int f(int x){return _Generic(x,int:1,default:2);}",
@@ -157,7 +159,7 @@ int main(void) {
         }
     }
     const char *unsupported[] = {
-        "int f(void){return ({1;});}", "#define X 1\nint x;",
+        "#define X 1\nint x;",
         "# 4294967295 \"a.c\"\nint x;\nint y;\n",
         "# 1 \"\\377.c\"\nint x;"
     };

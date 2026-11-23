@@ -13,6 +13,7 @@ typedef struct c_field {
     const char *name;
     c_type_t *type;
     uint32_t offset;
+    unsigned bit_width,bit_offset;
     struct c_field *next;
 } c_field_t;
 struct c_type {
@@ -30,10 +31,13 @@ struct c_type {
 typedef enum { S_OBJECT,S_FUNCTION,S_TYPEDEF,S_ENUM,S_PARAMETER,S_STRING } symbol_kind_t;
 typedef struct symbol {
     unsigned id;
-    const char *name;
+    const char *name,*asm_name;
     symbol_kind_t kind;
     c_type_t *type;
     int defined,tentative,linkage,static_storage,register_storage,noreturn,used;
+    int is_inline,always_inline;
+    node_t *definition;
+    struct symbol *owner;
     uint32_t alignment,requested_alignment;
     const char *section;
     const char *section_name;
@@ -43,15 +47,17 @@ typedef struct symbol {
     struct symbol *next;
 } symbol_t;
 typedef struct scope scope_t;
+typedef enum { BUILTIN_NONE, BUILTIN_CLZ, BUILTIN_CTZ, BUILTIN_MUL_OVERFLOW } c_builtin_t;
 typedef struct sem_info {
     c_type_t *type,*conversion,*operation_type;
     symbol_t *symbol;
     scope_t *parameters;
     uint64_t value;
-    int constant,ice,lvalue,address;
+    int constant,ice,lvalue,address,unaligned_member;
     int64_t addend;
     uint32_t field_offset;
     node_t *selected;
+    c_builtin_t builtin;
 } sem_info_t;
 typedef struct sema sema_t;
 

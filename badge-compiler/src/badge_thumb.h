@@ -104,7 +104,9 @@ static unsigned thumb_branch(assembler_t *s, as_line_t *l, const char *op, int c
         (known && (d<(cond==14?-2048:-256) || d>(cond==14?2046:254)))?
         "wide branch: displacement exceeds narrow reach":wide?"wide form retained by monotonic layout":
         "narrow branch: displacement fits narrow reach";
-    if(call || external || (known && (d<(cond==14?-2048:-256) || d>(cond==14?2046:254)))) wide=1;
+    /* A fixed-width forward branch may see an old target offset during relaxation. */
+    if(call || external || ((s->final || !(l->encoding&4)) && known &&
+        (d<(cond==14?-2048:-256) || d>(cond==14?2046:254)))) wide=1;
     if(s->final && (d&1)) as_error(s,"odd branch displacement");
     if(external) {
         if(cond!=14) as_error(s,"external conditional branch is unsupported");
