@@ -32,6 +32,9 @@ ssat r12, #8, r1, asr #16
 uxtah r2, r3, r4, ror #8
 uxtah r2, r3, r4, ror #16
 uxtah r2, r3, r4, ror #24
+uxtab r2, r3, r4
+uxtab r10, r1, r7, ror #8
+uxtab r4, r11, r3, ror #24
 adc r1, r2, #0
 `);
   run(tool('badge-asm'), [file('dsp.s'), '-o', file('owned.o')]);

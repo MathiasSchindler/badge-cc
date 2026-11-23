@@ -55,6 +55,80 @@ function execute(file, ir, role, trace = false, selection = 'thumb-operands') {
   }
   return { frames, count };
 }
+test('span fusion preserves zero and odd trips and rerolls only equivalent producer lanes', t => {
+  const file = files(t);
+  const source = fs.readFileSync(path.resolve(root, '../src/tools/compiler_micro/blend-span.c'), 'utf8');
+  const unit = fs.readFileSync(path.resolve(root, '../src/tools/compiler_micro/tile-pipeline.c'), 'utf8');
+  const cases = [
+    ['paired', source, true, true],
+    ['unit', unit, true, false],
+    ['different-lane', source.replace('blend(pixels[i + 1u], alpha)', 'blend(pixels[i], alpha)'), true, false],
+    ['different-count', source.replace('i < count; ++i', 'i + 1u < count; ++i'), false, false],
+    ['escaped', source.replace('return result;', 'return result ^ span[0];'), false, false],
+    ['volatile', source.replace('uint16_t span[9]', 'volatile uint16_t span[9]'), false, false],
+    ['zero-and-odd', source.replace('(seed & 7u) + 2u', 'seed & 7u') + `
+int main(void) {
+    return (int)(micro_kernel(0) | (micro_kernel(1) ^ 31u) |
+                 (micro_kernel(2) ^ ((31u * 33u) ^ 65535u)));
+}`, true, true],
+  ];
+  for (const [label, body, fuses, rolls] of cases) {
+    fs.writeFileSync(file('span.c'), body);
+    run(tool('badge-cpp'), ['-I../src/shared', file('span.c'), '-o', file('span.i')]);
+    run(tool('badge-ir'), [file('span.i'), '-o', file('span.ll')]);
+    run(tool('badge-ir-metrics'), [
+      '--passes=mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar',
+      `--emit-ir=${file('candidate.ll')}`, file('span.ll'), '-o', file('metrics.json')]);
+    run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
+    const reasons = JSON.parse(fs.readFileSync(file('metrics.json'), 'utf8')).events.map(e => e.reason);
+    assert.equal(reasons.includes('private_span_reduction_fusion'), fuses, label);
+    assert.equal(reasons.includes('equivalent_span_producer_lanes'), rolls, label);
+    if (label === 'zero-and-odd') {
+      assert.doesNotMatch(fs.readFileSync(file('candidate.ll'), 'utf8'), /alloca \[18 x i8\]/);
+      execute(file, file('candidate.ll'), 'fused', false, 'thumb-constants');
+    }
+  }
+});
+
+test('narrow unsigned distances fold before allocation without changing full-width differences', t => {
+  const file = files(t);
+  const diamond = (name, type) => `
+define i32 @${name}(${type} %arg0, ${type} %arg1) {
+entry:
+${type === 'i8' ? '  %a = zext i8 %arg0 to i32\n  %b = zext i8 %arg1 to i32\n' : ''}  %cmp = icmp uge i32 ${type === 'i8' ? '%a, %b' : '%arg0, %arg1'}
+  br i1 %cmp, label %positive, label %negative
+positive:
+  %left = sub i32 ${type === 'i8' ? '%a, %b' : '%arg0, %arg1'}
+  br label %join
+negative:
+  %right = sub i32 ${type === 'i8' ? '%b, %a' : '%arg1, %arg0'}
+  br label %join
+join:
+  %distance = phi i32 [%left, %positive], [%right, %negative]
+  ret i32 %distance
+}`;
+  const ir = optimize(file, `${diamond('narrow_distance', 'i8')}
+${diamond('wide_distance', 'i32')}
+define i32 @main() {
+entry:
+  %a = call i32 @narrow_distance(i8 0, i8 255)
+  %b = call i32 @narrow_distance(i8 255, i8 0)
+  %c = call i32 @narrow_distance(i8 255, i8 255)
+  %d = call i32 @wide_distance(i32 -1, i32 1)
+  %x = xor i32 %a, 255
+  %y = xor i32 %b, 255
+  %z = xor i32 %d, -2
+  %xy = or i32 %x, %y
+  %cz = or i32 %c, %z
+  %status = or i32 %xy, %cz
+  ret i32 %status
+}`, 'scalar-cleanup');
+  assert.match(ir, /define i32 @narrow_distance[^}]*call i32 @llvm.abs.i32/);
+  assert.match(ir, /define i32 @wide_distance[^}]*br i1/);
+  execute(file, file('candidate.ll'), 'distances', false, 'thumb-constants');
+  assert.match(fs.readFileSync(file('distances.s'), 'utf8'), /subs\.[nw] [^\n]+\nit mi\nrsbmi\.w/);
+});
+
 test('rounded constant-table recurrence narrows only with a proven signed range', t => {
   const file = files(t);
   const source = fs.readFileSync(path.resolve(root, '../src/tools/compiler_micro/filter-update.c'), 'utf8');

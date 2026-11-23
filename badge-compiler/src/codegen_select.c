@@ -14,7 +14,8 @@ enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP,
        SELECT_BITFIELD, SELECT_MLS, SELECT_MASK_TEST, SELECT_INVERTED_BINARY,
        SELECT_ROTATE, SELECT_ROTATED_XOR, SELECT_BITFIELD_INSERT,
        SELECT_SIGNED_FIELD, SELECT_DUAL_PRODUCT, SELECT_REVERSE_BYTES,
-       SELECT_EXTEND_ADD, SELECT_TRUNCATED_SDIV, SELECT_SIGNED_PRODUCT_ADD };
+       SELECT_EXTEND_ADD, SELECT_TRUNCATED_SDIV, SELECT_SIGNED_PRODUCT_ADD,
+       SELECT_ABS_SUB };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -926,6 +927,21 @@ int cg_truncated_sdiv(cg_context *c, cg_inst *i, cg_inst *next) {
          cast_from(c, next, i, "trunc", "i64", "i32") && single_use(c, i);
 }
 
+const char *cg_abs_operand(cg_context *c, cg_inst *i) {
+  unsigned at = i->begin;
+  return i->result && i->end - at == 12 && i->result->type->bits == 32 &&
+         !strcmp(c->tokens[at + 2].text, "call") &&
+         !strcmp(c->tokens[at + 3].text, "i32") &&
+         !strcmp(c->tokens[at + 4].text, "@llvm.abs.i32") &&
+         !strcmp(c->tokens[at + 5].text, "(") &&
+         !strcmp(c->tokens[at + 6].text, "i32") &&
+         c->tokens[at + 7].text[0] == '%' &&
+         !strcmp(c->tokens[at + 8].text, ",") &&
+         !strcmp(c->tokens[at + 9].text, "i1") &&
+         !strcmp(c->tokens[at + 10].text, "false") &&
+         !strcmp(c->tokens[at + 11].text, ")") ? c->tokens[at + 7].text : NULL;
+}
+
 static uint32_t zero_bits(cg_context *c, const char *text) {
   uint32_t value;
   if (*text == '%')
@@ -1002,6 +1018,16 @@ void cg_selection_prepare(cg_context *c) {
         *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i,
                                             .kind=SELECT_TRUNCATED_SDIV};
         continue;
+      }
+      if (constants && scalar32(c, i, "sub") && single_use(c, i) &&
+          !pair(c, i)->instruction && !pair(c, next)->instruction) {
+        const char *operand = cg_abs_operand(c, next);
+        if (operand && !strcmp(operand, i->result->name)) {
+          *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
+          *pair(c, next) = (cg_selected_pair){.instruction=next, .producer=i,
+                                              .kind=SELECT_ABS_SUB};
+          continue;
+        }
       }
       forward_adjacent_address(c, i, next);
       if (extended_load(c, i, next)) {
@@ -1127,7 +1153,7 @@ void cg_selection_prepare(cg_context *c) {
       if (constants && bitfield(c, i, next, &amount, &width)) {
         *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
         unsigned use;
-        if (width == 16 && !(amount % 8) && scalar32(c, third, "add") &&
+        if ((width == 8 || width == 16) && !(amount % 8) && scalar32(c, third, "add") &&
             !pair(c, third)->instruction && single_use(c, next) &&
             (use = binary_use_of(c, third, next)) &&
             strcmp(c->tokens[third->begin + 10 - use].text, next->result->name)) {
@@ -1572,6 +1598,15 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (selected->kind == SELECT_SKIP || selected->kind == SELECT_COMPARE_SKIP ||
       selected->kind == SELECT_COUNT_SKIP)
     return 1;
+  if (selected->kind == SELECT_ABS_SUB) {
+    unsigned left = operand(c, selected->producer, 4, 0);
+    unsigned right = operand(c, selected->producer, 6, 2);
+    unsigned dst = destination(c, i);
+    cg_emit(c, "subs.%c r%u, r%u, r%u\nit mi\nrsbmi.w r%u, r%u, #0\n",
+            (dst | left | right) < 8 ? 'n' : 'w', dst, left, right, dst, dst);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
   if (selected->kind == SELECT_TRUNCATED_SDIV) {
     cg_inst *div = selected->producer;
     uint32_t divisor;
@@ -1613,12 +1648,14 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (selected->kind == SELECT_EXTEND_ADD) {
     cg_inst *shift = selected->producer;
     uint32_t rotate;
-    if (!number(c->tokens[shift->begin + 6].text, &rotate))
+    unsigned width;
+    if (!bitfield(c, shift, shift->next, &rotate, &width))
       cg_error(c, "extend-add eligibility changed");
     unsigned src = operand(c, shift, 4, 0);
     unsigned base = operand(c, i, 10 - binary_use_of(c, i, shift->next), 1);
     unsigned dst = destination(c, i);
-    cg_emit(c, "uxtah r%u, r%u, r%u, ror #%" PRIu32 "\n", dst, base, src, rotate);
+    cg_emit(c, "uxta%c r%u, r%u, r%u, ror #%" PRIu32 "\n",
+            width == 8 ? 'b' : 'h', dst, base, src, rotate);
     cg_save_normalized(c, i->result, dst);
     return 1;
   }

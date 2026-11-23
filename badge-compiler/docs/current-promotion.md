@@ -1024,6 +1024,51 @@ alpha combination and loaded **332 B** with the same boot objects. This is
 evidence for a future loop-fusion pass, not a change to the benchmark or a
 transformation the compiler performs automatically.
 
+### Private-span fusion and larger kernels
+
+The loop-scalar pass can substitute an in-order reduction for a temporary
+span written by one loop and consumed by the next. It requires a proven
+common trip count, a private stack array, and exactly one nonvolatile write
+and read per element. A two-lane producer keeps its original order, including
+an odd tail. When both lanes and the tail match after renaming their local
+values and adjusting the index, the pass can also fold them back into one
+loop. Final encoded size, frame, saves, and spills gate both changes.
+
+The original blend source now loads in 332 B without a source rewrite.
+Fusion with the original two-lane producer reached 388 B and 778 QEMU
+instructions, down from 396 B and 947 instructions. Folding the repeated
+lanes into one trades 17 reached instructions for another 56 saved bytes.
+The larger tile pipeline also fuses, though LLVM still emits a smaller
+helper and caller from the same IR. The stencil's proven narrow unsigned distances now use
+subtract/conditional-negate instead of branch diamonds, saving 44 loaded
+bytes and 1,336 reached instructions. Record dispatch uses the new rotated
+`UXTAB` selector; the assembler checks its encoding against LLVM.
+
+| Kernel | Loaded bytes, owned / LLVM `-Oz` | QEMU instructions, owned / LLVM | Badge median ticks, owned / LLVM |
+| --- | ---: | ---: | ---: |
+| RGB565 blend span | 332 / 384 | 795 / 851 | 2,879 / 3,303 |
+| Tile pipeline | 392 / 356 | 3,951 / 3,087 | 46,269 / 28,502 |
+| Stencil tile | 456 / 344 | 14,795 / 7,300 | 8,961 / 3,753–3,754 |
+| Record dispatch | 504 / 428 | 3,881 / 2,435 | 2,524–2,525 / 1,680–1,681 |
+
+The badge comparison alternates the exact LLVM and owned objects twice,
+with shared harness, inputs, and clocks. Each timing uses the same batch
+size for both compilers within a row; batch sizes differ across rows.
+
+With the same optimized IR, LLVM needs no explicit frame accesses in the
+stencil, versus 37 in owned code. It can reuse a row pointer and address
+neighbors at constant offsets. Record dispatch still has 27 owned frame
+accesses versus seven in LLVM's same-IR build. These are static instruction
+sites, not executed stack-traffic counts. On larger applications the loaded
+flash is 10,996 versus 5,784 B for IMU Demo, 14,732 versus 8,692 B for Tilt
+Maze, and 26,680 versus 16,864 B for Diagnostics. Those application
+comparisons are for size only.
+
+All 24 kernel objects matched native results for 256 inputs each. All 51
+UF2s verified. Among 48 existing images, only blend changed, saving 64
+bytes. None of the matched objects or measured function stack frames grew.
+All nine production IMU digests matched.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

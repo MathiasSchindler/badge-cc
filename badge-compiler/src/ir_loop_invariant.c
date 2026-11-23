@@ -901,7 +901,9 @@ static void run(ir_context *c, ir_module *m, int cost_gated) {
 }
 void ir_loop_invariant(ir_context *c, ir_module *m) { run(c, m, 0); }
 void ir_loop_cost(ir_context *c, ir_module *m) { run(c, m, 1); }
+void ir_span_fusion(ir_context *, ir_module *);
 void ir_loop_scalar(ir_context *c, ir_module *m) {
+  ir_span_fusion(c, m);
   run(c, m, 2);
   if (strstr(m->source, "getelementptr i8, ptr @") && strstr(m->source, "constant ["))
     run(c, m, 5);

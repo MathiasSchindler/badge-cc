@@ -328,6 +328,7 @@ unsigned cg_global_register(cg_context *c, const char *name);
 void cg_selection_prepare(cg_context *c);
 void cg_plan_operands(cg_context *c);
 int cg_truncated_sdiv(cg_context *c, cg_inst *i, cg_inst *next);
+const char *cg_abs_operand(cg_context *c, cg_inst *i);
 int cg_selection_forward_argument(cg_context *c);
 int cg_internal_call_mentions(cg_context *c, const char *name, unsigned *mask);
 int cg_selection_barrier(cg_context *c, cg_inst *i);

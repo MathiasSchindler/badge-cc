@@ -347,7 +347,7 @@ static const char *thumb_mnemonic(const char *name) {
         "lda","ldab","ldaex","ldaexb","ldaexh","ldah","ldm","ldr","ldrb","ldrd","ldrex","ldrexb","ldrexh","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mla","mls","mov","movs","movt","movw","mrs","msr","mul","muls","mvn","mvns","nop","orn","orr","orrs",
         "pop","push","rev","rev16","ror","rors","rsb","rsbs","sbc","sbcs","sbfx","sdiv","sev","smlabb","smlal","smlatt","smuad","smulbb","smull","ssat",
         "stl","stlb","stlex","stlexb","stlexh","stlh","stm","str","strb","strd","strex","strexb","strexh","strh","sub","subs","subw",
-        "svc","sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtah","uxtb","uxth","wfe","wfi","yield"
+        "svc","sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtab","uxtah","uxtb","uxth","wfe","wfi","yield"
     };
     size_t lo=0,hi=sizeof(bases)/sizeof(*bases);
     while(lo<hi) {
@@ -540,14 +540,16 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
         if(m.index<0 || !thumb_data_register((unsigned)m.index) || m.writeback || m.shift!=(half?1:0)) as_error(s,"invalid table branch");
         width=thumb_emit(s,l,4,0xe8d0|(unsigned)m.base,0xf000|(half?16:0)|(unsigned)m.index);
     } else if(strcmp(op,"clz")==0 || strcmp(op,"rev")==0 || strcmp(op,"rev16")==0 ||
-        strcmp(op,"uxtb")==0 || strcmp(op,"uxth")==0 || strcmp(op,"sxtb")==0 || strcmp(op,"sxth")==0 || strcmp(op,"uxtah")==0) {
-        int add=strcmp(op,"uxtah")==0; thumb_count(s,l,add?3:2,add?4:2);
+        strcmp(op,"uxtb")==0 || strcmp(op,"uxth")==0 || strcmp(op,"sxtb")==0 || strcmp(op,"sxth")==0 ||
+        strcmp(op,"uxtab")==0 || strcmp(op,"uxtah")==0) {
+        int add=strcmp(op,"uxtab")==0 || strcmp(op,"uxtah")==0;
+        thumb_count(s,l,add?3:2,add?4:2);
         unsigned rd=(unsigned)as_register(s,l->arg[0]),rm=(unsigned)as_register(s,l->arg[add?2:1]);
         unsigned rotate=0;
         if(l->count==4) {
             unsigned type;
             thumb_shift(s,l->arg[3],&type,&rotate);
-            if(type!=3 || rotate%8) as_error(s,"UXTAH requires ROR 8, 16 or 24");
+            if(type!=3 || rotate%8) as_error(s,"extend-add requires ROR 8, 16 or 24");
         }
         if(!thumb_data_register(rd) || !thumb_data_register(rm)) as_error(s,"invalid extend/reverse register");
         if(!wide && !add && strcmp(op,"clz")!=0 && rd<8 && rm<8) {
@@ -558,7 +560,7 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
             unsigned a,b=0xf080|(rd<<8)|rm;
             if(strcmp(op,"clz")==0) a=0xfab0|rm;
             else if(strcmp(op,"rev")==0 || strcmp(op,"rev16")==0) { a=0xfa90|rm; if(strcmp(op,"rev16")==0) b|=16; }
-            else if(add) { unsigned rn=(unsigned)as_register(s,l->arg[1]); if(!thumb_data_register(rn)) as_error(s,"invalid extend-add register"); a=0xfa10|rn; b|=(rotate/8)<<4; }
+            else if(add) { unsigned rn=(unsigned)as_register(s,l->arg[1]); if(!thumb_data_register(rn)) as_error(s,"invalid extend-add register"); a=(op[4]=='b'?0xfa50:0xfa10)|rn; b|=(rotate/8)<<4; }
             else a=strcmp(op,"uxtb")==0?0xfa5f:strcmp(op,"uxth")==0?0xfa1f:strcmp(op,"sxtb")==0?0xfa4f:0xfa0f;
             width=thumb_emit(s,l,4,a,b);
         }

@@ -318,7 +318,12 @@ static void run(ir_context *c, ir_module *m, int booleans) {
   ir_reparse(c, m, mark);
 }
 void ir_instruction_combine(ir_context *c, ir_module *m) { run(c, m, 0); }
-void ir_scalar_cleanup(ir_context *c, ir_module *m) { run(c, m, 1); }
+static void fold_narrow_distances(ir_context *c, ir_module *m);
+void ir_scalar_cleanup(ir_context *c, ir_module *m) {
+  run(c, m, 1);
+  if (strstr(m->source, "zext i") && strstr(m->source, "icmp u"))
+    fold_narrow_distances(c, m);
+}
 
 static int low_bits_only(combining *p, unsigned definition, uint32_t mask) {
   for (unsigned step = 0, shifted = 0; step < 8; step++) {
@@ -416,6 +421,115 @@ static int plain_i32_binary(const ir_analysis *a, const ir_instruction *in,
       in->operand_count == 2 && a->types[in->type].bits == 32 &&
       in->end_line == in->line && a->text->lines[in->line - 1].count == 7 &&
       !a->text->lines[in->line - 1].replacement;
+}
+
+static const ir_instruction *from_operand(const ir_analysis *a, const ir_operand *o) {
+  if (o->kind != IR_OPERAND_LOCAL)
+    return NULL;
+  unsigned i = a->definitions[o->definition].instruction;
+  return i == IR_NONE ? NULL : &a->instructions[i];
+}
+
+static int zero_extended_word(const ir_analysis *a, const ir_operand *o) {
+  const ir_instruction *i = from_operand(a, o);
+  return i && i->opcode == IR_OP_CAST && !strcmp(i->operation, "zext") &&
+         a->types[i->type].bits == 32 &&
+         a->types[a->operands[i->first_operand].type].bits <= 16;
+}
+
+static int same_local(const ir_operand *a, const ir_operand *b) {
+  return a->kind == IR_OPERAND_LOCAL && b->kind == IR_OPERAND_LOCAL &&
+         a->definition == b->definition;
+}
+
+static void fold_narrow_distances(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  ir_analysis a;
+  ir_analyze(c, m, &a);
+  int changed = 0;
+  for (unsigned b = 0; b < a.block_count; b++) {
+    const ir_block *head = &a.blocks[b];
+    const ir_instruction *branch = &a.instructions[head->first_instruction + head->instruction_count - 1];
+    if (branch->opcode != IR_OP_BR || branch->operand_count != 3 ||
+        m->lines[branch->line - 1].replacement)
+      continue;
+    const ir_operand *edges = &a.operands[branch->first_operand];
+    const ir_instruction *cmp = from_operand(&a, edges);
+    if (!cmp || cmp->opcode != IR_OP_COMPARE || cmp->block != b ||
+        m->lines[cmp->line - 1].replacement ||
+        a.definitions[cmp->definition].use_count != 1)
+      continue;
+    const char *pred = ir_text(m, m->lines[cmp->line - 1].op + 1);
+    int reversed = !strcmp(pred, "ult") || !strcmp(pred, "ule");
+    if (!reversed && strcmp(pred, "ugt") && strcmp(pred, "uge"))
+      continue;
+    const ir_operand *ops = &a.operands[cmp->first_operand];
+    if (!zero_extended_word(&a, ops) || !zero_extended_word(&a, ops + 1))
+      continue;
+    const ir_instruction *difference[2];
+    unsigned join = IR_NONE;
+    unsigned n = 0;
+    for (; n < 2; n++) {
+      const ir_block *arm = &a.blocks[edges[n + 1].block];
+      difference[n] = &a.instructions[arm->first_instruction];
+      const ir_instruction *jump = difference[n] + 1;
+      if (arm->predecessor_count != 1 || arm->instruction_count != 2 ||
+          !plain_i32_binary(&a, difference[n], "sub") || jump->opcode != IR_OP_BR ||
+          jump->operand_count != 1 || m->lines[jump->line - 1].replacement ||
+          a.definitions[difference[n]->definition].use_count != 1)
+        break;
+      const ir_operand *values = &a.operands[difference[n]->first_operand];
+      unsigned order = n ^ (unsigned)reversed;
+      if (!same_local(values, ops + order) || !same_local(values + 1, ops + (1 - order)))
+        break;
+      unsigned destination = a.operands[jump->first_operand].block;
+      if (n && destination != join)
+        break;
+      join = destination;
+    }
+    if (n != 2 || edges[1].block == edges[2].block)
+      continue;
+    const ir_block *merge = &a.blocks[join];
+    const ir_instruction *phi = &a.instructions[merge->first_instruction];
+    if (merge->predecessor_count != 2 || merge->instruction_count < 2 ||
+        phi->opcode != IR_OP_PHI || phi->operand_count != 4 ||
+        m->lines[phi->line - 1].replacement || (phi + 1)->opcode == IR_OP_PHI)
+      continue;
+    for (n = 0; n < 2; n++) {
+      const ir_operand *v = &a.operands[phi->first_operand];
+      if (v[1].block != edges[n + 1].block) v += 2;
+      if (v[1].block != edges[n + 1].block || v->kind != IR_OPERAND_LOCAL ||
+          v->definition != difference[n]->definition)
+        break;
+    }
+    if (n != 2)
+      continue;
+    const char *delta = ir_fresh(c, m, '%');
+    m->lines[cmp->line - 1].replacement = "";
+    m->lines[branch->line - 1].replacement = ir_format(c,
+        "  %s = sub i32 %s, %s\n  %s = call i32 @llvm.abs.i32(i32 %s, i1 false)\n"
+        "  br label %%%s\n", delta, ir_text(m, ops->token), ir_text(m, ops[1].token),
+        a.definitions[phi->definition].name, delta, merge->name);
+    m->lines[phi->line - 1].replacement = "";
+    for (n = 0; n < 2; n++) {
+      m->lines[a.blocks[edges[n + 1].block].line - 1].replacement = "";
+      m->lines[difference[n]->line - 1].replacement = "";
+      m->lines[(difference[n] + 1)->line - 1].replacement = "";
+    }
+    c->line = branch->line;
+    ir_note(c, "transformed", "bounded_unsigned_distance", 1);
+    changed = 1;
+  }
+  if (changed) {
+    int declared = 0;
+    for (unsigned n = 0; n < a.global_count; n++)
+      declared |= !strcmp(ir_name_key(c, a.globals[n].name), "@llvm.abs.i32");
+    if (!declared)
+      m->suffix = ir_format(c, "%sdeclare i32 @llvm.abs.i32(i32, i1 immarg)\n",
+                           m->suffix ? m->suffix : "");
+    ir_reparse(c, m, mark);
+  } else
+    ir_release_to(c, mark);
 }
 
 void ir_linear_bias(ir_context *c, ir_module *m) {

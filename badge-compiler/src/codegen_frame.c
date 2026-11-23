@@ -117,7 +117,7 @@ static void summarize_registers(cg_context *c, cg_function *f, size_t start) {
     "lsl", "lsls", "lsr", "lsrs", "asr", "asrs", "ror", "rors",
     "mul", "muls", "mla", "mls", "sdiv", "udiv", "cmp", "cmn",
     "tst", "teq", "clz", "uxtb", "uxth", "sxtb", "sxth", "bfi", "sbfx", "smuad",
-    "rev", "rev16", "revsh", "uxtah", "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrd",
+    "rev", "rev16", "revsh", "uxtab", "uxtah", "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrd",
     "str", "strb", "strh", "strd", "ldm", "stm", "push", "pop", "nop", "it",
     "cbz", "cbnz"
   };
@@ -893,7 +893,7 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
           "orr", "orrs", "eor", "eors", "lsl", "lsls", "lsr", "lsrs",
           "asr", "asrs", "mul", "muls", "mla", "mls", "ubfx", "uxtb", "uxth",
           "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs", "cmp", "cmn",
-          "bic", "tst", "orn", "clz", "ldrb", "bfi", "sbfx", "smuad", "ror", "rev", "uxtah"};
+          "bic", "tst", "orn", "clz", "ldrb", "bfi", "sbfx", "smuad", "ror", "rev", "uxtab", "uxtah"};
       int supported = 0;
       for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); i++)
         supported |= !strcmp(opcode, allowed[i]);

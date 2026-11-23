@@ -19,6 +19,7 @@ COST_SOURCES := src/target_cost.c
 COST_HEADERS := src/target_cost.h src/thumb_immediate.h
 OPT_SOURCES += src/ir_target_strength.c $(COST_SOURCES)
 OPT_SOURCES += src/ir_local_memory.c
+OPT_SOURCES += src/ir_span_fusion.c
 OPT_SOURCES += src/ir_cross_function.c
 OPT_HEADERS += $(COST_HEADERS)
 CODEGEN_SOURCES += $(COST_SOURCES)

@@ -1784,6 +1784,8 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
     at++;
   const char *op = c->tokens[at].text;
   if (!strcmp(op, "call")) {
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && cg_abs_operand(c, i))
+      return 0;
     for (unsigned k = at + 1; k < i->end; k++) {
       cg_register_work(c);
       if (!strcmp(c->tokens[k].text, "asm"))

@@ -56,7 +56,7 @@ Open **Optimized IR** and select a function to filter its remarks and backend
 metrics. The trace picker loads a bounded excerpt on demand; the full trace can
 be large because LLVM includes module events even with a function filter.
 
-## Twenty-one RP2350 kernel programs
+## Twenty-four RP2350 kernel programs
 
 For a narrower comparison than red square or maze, capture independent UF2
 images: arithmetic recurrence, branch/switch control, CRC32, indexed
@@ -65,7 +65,9 @@ bitfield insertion, signed halfword dot product, saturation, div/rem, byte
 reversal, rotated halfword addition, parity, a nibble lookup, and a wide sum.
 The five composed kernels add RGB565 blending, sparse record scanning,
 ring-buffer copy and checksum, fixed-point filtering, and byte parsing.
-Each links one C
+Three larger cases add palette shading with a private intermediate tile,
+a nested stencil with five neighboring byte loads, and record dispatch with
+multiple live states, helper calls, and an eight-way switch. Each links one C
 translation unit with a shared assembly reset, harness, and RP2350 boot metadata.
 `micro_kernel` receives the seed across a separate assembly call, so neither C
 compiler can precompute the answer from the startup seed. No display, radio,
@@ -77,14 +79,16 @@ COMPILE_GRAPH_LLVM_TRACE=micro_kernel,mix \
   micro-arithmetic micro-control micro-crc micro-memory micro-calls micro-fixed-point \
   micro-rotate micro-bit-insert micro-packed-dot micro-saturate micro-divmod \
   micro-byte-swap micro-extend-add micro-parity micro-nibble-map micro-wide-sum \
-  micro-blend-span micro-sparse-scan micro-ring-checksum micro-filter-update micro-byte-parser
+  micro-blend-span micro-sparse-scan micro-ring-checksum micro-filter-update micro-byte-parser \
+  micro-tile-pipeline micro-stencil-tile micro-record-dispatch
 node compile-graph/check-micro.mjs compile-graph/build/micro-demo \
   > compile-graph/build/micro-demo/micro-results.json
 python3 -m http.server 8000 --bind 127.0.0.1 --directory compile-graph/build/micro-demo
 ```
 
 For a control and candidate, capture into separate directories with the same
-targets. The checker also accepts the earlier six-, eleven-, and sixteen-target captures. The
+targets. The checker also accepts the earlier six-, eleven-, sixteen-, and
+twenty-one-target captures. The
 current owned backend defaults to `thumb-constants`; an explicit owned
 policy does not change the LLVM flags.
 
@@ -102,6 +106,8 @@ The [indexed-memory and wide-arithmetic results](../badge-compiler/docs/current-
 compare these counts and loaded flash with elapsed time measured on the badge.
 The [signed range proof and LLVM badge comparison](../badge-compiler/docs/current-promotion.md#closing-the-llvm-gap-with-signed-range-proofs)
 also report elapsed time against LLVM's exact kernel objects.
+The [private-span and larger-kernel comparison](../badge-compiler/docs/current-promotion.md#private-span-fusion-and-larger-kernels)
+includes the three new kernels and real badge application image sizes.
 In the firmware, the shared harness uses `0x12345678` and writes the result
 at `0x20000000`, then the completion word `0x444f4e45` at `0x20000004`.
 There is deliberately no screen or USB output. Physical boot is not part
