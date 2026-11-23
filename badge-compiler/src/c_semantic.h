@@ -35,10 +35,11 @@ typedef struct symbol {
     symbol_kind_t kind;
     c_type_t *type;
     int defined,tentative,linkage,static_storage,register_storage,noreturn,used;
-    int is_inline,always_inline;
+    int is_inline,always_inline,noinline;
     node_t *definition;
+    node_t **label_targets;
     struct symbol *owner;
-    uint32_t alignment,requested_alignment;
+    uint32_t alignment,requested_alignment,storage_size;
     const char *section;
     const char *section_name;
     uint64_t value;
@@ -47,15 +48,19 @@ typedef struct symbol {
     struct symbol *next;
 } symbol_t;
 typedef struct scope scope_t;
-typedef enum { BUILTIN_NONE, BUILTIN_CLZ, BUILTIN_CTZ, BUILTIN_MUL_OVERFLOW } c_builtin_t;
+typedef enum {
+    BUILTIN_NONE, BUILTIN_CLZ, BUILTIN_CTZ, BUILTIN_MUL_OVERFLOW, BUILTIN_EXPECT,
+    BUILTIN_ALLOCA, BUILTIN_VA_START, BUILTIN_VA_END
+} c_builtin_t;
 typedef struct sem_info {
     c_type_t *type,*conversion,*operation_type;
     symbol_t *symbol;
     scope_t *parameters;
     uint64_t value;
-    int constant,ice,lvalue,address,unaligned_member;
+    int constant,ice,lvalue,address,unaligned_member,null_pointer_constant,float_literal;
     int64_t addend;
     uint32_t field_offset;
+    unsigned bit_width,bit_offset;
     node_t *selected;
     c_builtin_t builtin;
 } sem_info_t;

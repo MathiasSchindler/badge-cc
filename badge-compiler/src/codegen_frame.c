@@ -742,6 +742,7 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   if (constants && c->frame_addressing == BADGE_FRAME_DIRECT && !inline_asm &&
       !opaque && sp_stable)
     based = 0;
+  if (f->dynamic_stack) based = 1;
   if (!based) touched &= ~(1u << 7);
   unsigned mask = touched & 0x0ff0u;
   if (opaque) {
@@ -798,7 +799,7 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   }
   cg_emit(c, ".Lcg_return%u:\n", f->id);
   /* Generated call sequences balance SP; inline assembly is not rewritten. */
-  if (based && (!constants || inline_asm || opaque)) cg_emit(c, "mov sp, r7\n");
+  if (based && (!constants || inline_asm || opaque || f->dynamic_stack)) cg_emit(c, "mov sp, r7\n");
   if (f->frame)
     cg_adjust_stack(c, 1, f->frame);
   if (mask) cg_saved_register_list(c, mask, 1);
@@ -866,7 +867,7 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
   int two_args = f->argc == 2 && f->args[1]->type->bits == 32 && !f->byval[1];
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT ||
-      f->frame || (f->argc != 1 && !two_args) || f->byval[0] ||
+      f->frame || f->dynamic_stack || f->variadic || (f->argc != 1 && !two_args) || f->byval[0] ||
       f->args[0]->type->bits != 32 ||
       (f->ret->bits != 32 && !(two_args && (f->ret->bits == 8 || f->ret->bits == 16))))
     return;
@@ -1089,8 +1090,13 @@ static void finish_function(cg_context *c, size_t header, size_t body_start) {
     cg_emit(c, ".Lcg_return%u:\nmov sp, r7\n", f->id);
     cg_immediate(c, 12, f->frame);
     cg_emit(c, "add.w sp, sp, r12\n");
-    cg_emit(c, c->register_saved_bytes == 32 ? "pop.w {r4-r8, r10, r11, pc}\n"
-                                          : "pop.w {r4-r8, pc}\n");
+    if (f->variadic) {
+      cg_emit(c, c->register_saved_bytes == 32 ? "pop.w {r4-r8, r10, r11, lr}\n"
+                                             : "pop.w {r4-r8, lr}\n");
+      cg_adjust_stack(c, 1, 16);
+      cg_emit(c,"bx lr\n");
+    } else cg_emit(c, c->register_saved_bytes == 32 ? "pop.w {r4-r8, r10, r11, pc}\n"
+                                                 : "pop.w {r4-r8, pc}\n");
   }
   if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS) {
     summarize_registers(c, f, header);
@@ -1172,12 +1178,14 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   function_header(c, f);
   size_t body_start = c->size;
   cg_inst *leaf = scalar_leaf_entry(c);
-  if (cg_emit_counted_leaf(c) || emit_abs_leaf(c) || emit_clamp_leaf(c) ||
-      emit_nibble_lookup_leaf(c, leaf) || emit_wide_sum_leaf(c, leaf)) {
+  if (!f->dynamic_stack && !f->variadic && (cg_emit_counted_leaf(c) || emit_abs_leaf(c) || emit_clamp_leaf(c) ||
+      emit_nibble_lookup_leaf(c, leaf) || emit_wide_sum_leaf(c, leaf))) {
     finish_function(c, header, body_start);
     return;
   }
   if (!cg_light_frames(c)) {
+    /* Put the argument registers immediately below the caller's stack arguments. */
+    if (f->variadic) cg_emit(c, "push.n {r0-r3}\n");
     cg_emit(c, c->register_saved_bytes == 32 ? "push.w {r4-r8, r10, r11, lr}\n"
                                            : "push.w {r4-r8, lr}\n");
   cg_immediate(c, 12, f->frame);
@@ -1185,7 +1193,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   }
   unsigned cursor = 0;
   for (unsigned k = 0; k < f->argc; k++) {
-    if (cg_selection_forward_argument(c)) {
+    if (!f->variadic && cg_selection_forward_argument(c)) {
       c->call_entry_copies++;
       continue;
     }
@@ -1204,7 +1212,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
         cg_emit(c, "@ frame-incoming: %u %u\n", 5u, (cursor - 4) * 4);
       else
         cg_stack(c, 0, 5,
-                 f->frame + c->register_saved_bytes + (cursor - 4) * 4);
+                 f->frame + c->register_saved_bytes + (f->variadic ? 16 : 0) + (cursor - 4) * 4);
       if (f->byval[k])
         cg_stack(c, 1, 5, objects[k] + w * 4);
       else {
@@ -1220,6 +1228,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
         cg_stack(c, 1, 5, v->slot);
     }
   }
+  f->fixed_arg_words = cursor;
   for (cg_block *b = f->blocks, *pre = NULL; b;) {
     c->schedule_active = 0;
     cg_register_block(c, b);

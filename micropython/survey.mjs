@@ -33,6 +33,8 @@ const coreModules = ['py/objstr.c', 'py/runtime.c', 'py/vm.c', 'py/qstr.c', 'py/
 function probeModule(db, module, useBridge) {
     const source = path.join(upstream, module);
     const stem = path.join(work, `survey-${path.basename(module, '.c')}`);
+    const literalLookup = ['py/objstr.c', 'py/objint.c', 'py/runtime.c', 'py/vm.c'].includes(module);
+    const flags = literalLookup ? ['--libc-strcmp'] : [];
     for (const suffix of ['.i', '.ll', '.opt.ll', '.s', '.o'])
         fs.rmSync(`${stem}${suffix}`, { force: true });
     let failure;
@@ -42,7 +44,7 @@ function probeModule(db, module, useBridge) {
         failure = { stage: 'preprocessing', diagnostic: error.message };
     }
     if (!failure)
-        for (const [stage, tool, args] of ownedStages(stem, `${stem}.o`, compiler)) {
+        for (const [stage, tool, args] of ownedStages(stem, `${stem}.o`, compiler, [], flags)) {
             const r = run(tool, args);
             if (r.status !== 0) {
                 failure = { stage, diagnostic: r.stderr.trim() || `exit ${r.status}` };
@@ -65,15 +67,74 @@ function probeModule(db, module, useBridge) {
         }
     }
     return {
-        module, mode: 'GCC preprocessing with stock headers; owned frontend through assembly',
+        module, mode: `GCC preprocessing with stock headers; owned frontend through assembly${literalLookup ? '; standard libc strcmp' : ''}`,
         ...(failure ?? { stage: 'object-ready', diagnostic: null, link: 'not attempted by survey' }), bridge,
     };
+}
+
+function executeOracle(name, owned, control, libraries = [], flags = []) {
+    const oracle = path.join(work, `${name}-oracle.o`), elf = path.join(work, `${name}-oracle.elf`);
+    checked(gcc, [...arm, ...flags, '-Os', '-ffreestanding', '-c', path.join(here, `${name}-oracle.c`), '-o', oracle]);
+    const fixture = path.join(root, 'badge-compiler/tests/fixtures/codegen_fixture.ld');
+    checked('ld.lld', ['--gc-sections', '-T', fixture, path.join(work, 'crc-start.o'), oracle, owned, control,
+        ...libraries, '-o', elf]);
+    checked(process.env.QEMU_ARM ?? 'qemu-system-arm',
+        ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
+            '-semihosting-config', 'enable=on,target=native', '-kernel', elf]);
+}
+
+function stockOracleObjects(module, name) {
+    const owned = path.join(work, `survey-${module}.o`);
+    const gccObject = path.join(firmware, 'CMakeFiles/firmware.dir', `${upstream}/py/${module}.c.o`);
+    const control = path.join(work, `${name}-control.o`);
+    const exports = file => [...checked('llvm-nm', ['--defined-only', '--extern-only', '--print-size', file])
+        .matchAll(/^[\da-f]+ ([\da-f]+) [A-Z] (\w+)$/gm)];
+    const gccExports = exports(gccObject);
+    assert(gccExports.length > 0);
+    checked('arm-none-eabi-objcopy', [...gccExports.map(([, , fn]) =>
+        `--redefine-sym=${fn}=gcc_${fn}`), gccObject, control]);
+    return { owned, control, gccExports, ownedExports: exports(owned) };
+}
+
+function qualifyQstr() {
+    const { owned, control, gccExports, ownedExports } = stockOracleObjects('qstr', 'qstr-pool');
+    const poolEntries = rows => Object.fromEntries(rows
+        .filter(([, , fn]) => /^mp_qstr_const_pool(_static)?$/.test(fn))
+        .map(([, bytes, fn]) => [fn, (Number.parseInt(bytes, 16) - 24) / 4]));
+    const entries = poolEntries(gccExports);
+    assert.equal(Object.keys(entries).length, 2);
+    assert(Object.values(entries).every(n => Number.isInteger(n) && n > 0));
+    assert.deepEqual(poolEntries(ownedExports), entries);
+    executeOracle('qstr-pool', owned, control);
+    console.log('Isolated qstr pools: exact object layouts, strings, lengths and hashes match GCC:', entries);
+    return { module: 'py/qstr.c', mode: 'owned object with stock headers; isolated QEMU oracle', entries };
+}
+
+function qualifyBinary() {
+    const { owned, control } = stockOracleObjects('binary', 'binary-float');
+    const libc = checked(gcc, [...arm, '-print-file-name=libg.a']).trim();
+    const libgcc = checked(gcc, [...arm, '-print-libgcc-file-name']).trim();
+    const stem = path.join(work, 'binary-float-fixture');
+    const fixture = `${stem}.o`;
+    checked(gcc, [...arm, '-E', '-P', '-DOWNED_FLOAT_FIXTURE', path.join(here, 'binary-float-oracle.c'), '-o', `${stem}.i`]);
+    for (const [, tool, args] of ownedStages(stem, fixture, compiler)) checked(tool, args);
+    executeOracle('binary-float', owned, control, [fixture, libc, libgcc]);
+    console.log('Isolated binary float ABI: 99 format/byte-order/value combinations match GCC in both directions');
+    return { module: 'py/binary.c', mode: 'owned object with stock headers; isolated QEMU oracle', cases: 99 };
+}
+
+function qualifyRuntime() {
+    const { owned, control } = stockOracleObjects('runtime', 'runtime-varargs');
+    executeOracle('runtime-varargs', owned, control, [], ['-mfloat-abi=soft']);
+    console.log('Isolated runtime varargs: exact MicroPython objects match GCC across the register/stack boundary');
+    return { module: 'py/runtime.c', mode: 'owned object with stock headers; isolated QEMU oracle', symbol: 'mp_raise_msg_varg' };
 }
 
 try {
     const args = process.argv.slice(2);
     assert(args.length === 0 || (args.length === 1 && args[0] === '--core'), 'usage: node micropython/survey.mjs [--core]');
     const db = JSON.parse(fs.readFileSync(path.join(firmware, 'compile_commands.json'), 'utf8'));
+    if (args.length) assert.match(fs.readFileSync(path.join(firmware, 'firmware.elf.map'), 'utf8'), /libg\.a\(libc_a-strcmp\.o\)/);
     const results = [];
     for (const module of args.length ? [...modules, ...coreModules] : modules) {
         const result = probeModule(db, module, modules.includes(module));
@@ -90,14 +151,7 @@ try {
     const gccObject = path.join(firmware, 'CMakeFiles/firmware.dir', `${source}.o`);
     const control = path.join(work, 'ringbuf-control.o');
     checked('arm-none-eabi-objcopy', [...names.map(n => `--redefine-sym=ringbuf_${n}=gcc_${n}`), gccObject, control]);
-    const oracle = path.join(work, 'ringbuf-oracle.o'), elf = path.join(work, 'ringbuf-oracle.elf');
-    checked(gcc, [...arm, '-Os', '-ffreestanding', '-c', path.join(here, 'ringbuf-oracle.c'), '-o', oracle]);
-    const start = path.join(work, 'crc-start.o');
-    const fixture = path.join(root, 'badge-compiler/tests/fixtures/codegen_fixture.ld');
-    checked('ld.lld', ['--gc-sections', '-T', fixture, start, oracle, ringbuf, control, '-o', elf]);
-    checked(process.env.QEMU_ARM ?? 'qemu-system-arm',
-        ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
-            '-semihosting-config', 'enable=on,target=native', '-kernel', elf]);
+    executeOracle('ringbuf', ringbuf, control);
     const sizes = file => Object.fromEntries([...checked('llvm-nm', ['--defined-only', '--print-size', file])
         .matchAll(/^[\da-f]+ ([\da-f]+) T ringbuf_(\w+)$/gm)]
         .map(([, bytes, fn]) => [fn, Number.parseInt(bytes, 16)]));
@@ -106,6 +160,12 @@ try {
     console.log('Isolated ringbuf: 2,048 operations passed; public symbol bytes:', { owned: ownedBytes, gcc: gccBytes });
     results.push({ module: 'py/ringbuf.c', mode: 'owned object with stock headers; isolated QEMU oracle',
         operations: 2048, ownedBytes, gccBytes });
+    if (results.some(r => r.module === 'py/qstr.c' && r.stage === 'object-ready'))
+        results.push(qualifyQstr());
+    if (results.some(r => r.module === 'py/binary.c' && r.stage === 'object-ready'))
+        results.push(qualifyBinary());
+    if (results.some(r => r.module === 'py/runtime.c' && r.stage === 'object-ready'))
+        results.push(qualifyRuntime());
     fs.writeFileSync(path.join(work, args.length ? 'survey-core.json' : 'survey.json'), JSON.stringify(results, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython survey: ${error.message}`);

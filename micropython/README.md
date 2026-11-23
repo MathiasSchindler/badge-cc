@@ -102,12 +102,39 @@ survey reports the sequence object with the standard freestanding pass
 selection; the image build separately enables the libc optimization below.
 
 `--core` adds six larger translation units and writes `survey-core.json`.
-Record-member `__builtin_offsetof`, GCC declaration hints, and stray
-file-scope semicolons are accepted. The next failures are bit-field reads or
-assignments in `objstr.c`, `binary.c`, and `objint.c`; bit-field initialization
-in `qstr.c`; a zero-length trailing array in `runtime.c`; and GNU range
-designators in the VM's computed-goto dispatch table. Object-ready in the
-survey means that assembly succeeded, not that a module linked or executed.
+All twelve surveyed modules now produce ARM objects. The frontend supports
+the surveyed unsigned bit-field reads, writes and initializers, GNU zero-length
+trailing arrays, and initialized file-scope flexible tails. The exact stock
+`qstr.c` objects match in QEMU for both constant pools: 778 ordinary and
+217 static entries, including pool links, metadata, relocations, string
+bytes, and computed hashes. This [oracle](qstr-pool-oracle.c) does not
+replace `qstr.c` in the badge firmware.
+
+The stock build commands now pass the frontend's ARM base-PCS float mode.
+It preserves scalar float and double ABI bits and uses `__aeabi_*` helpers
+from the target runtime. The exact `binary.c` objects match on 99
+format/byte-order/value combinations, including half, single and double
+precision, signed zero, subnormals, infinities and quiet NaNs. The same
+[oracle](binary-float-oracle.c) exercises a GCC caller of owned float
+functions, including a stack argument after a double-width parameter.
+`objint.c` and `objstr.c` also assemble; both opt into literal
+`strcmp` lookup specialization before forced-inline expansion. These
+three objects are not included in the mixed badge image.
+
+The final two modules are `runtime.c` and `vm.c`. Dynamic stack allocation
+keeps AAPCS stack alignment, and the [runtime oracle](runtime-varargs-oracle.c)
+checks that the exact owned `mp_raise_msg_varg` passes a variadic argument
+list to GCC code across the register/stack boundary. The stock VM source is
+unchanged: its GNU computed-goto table becomes a shared switch, including the
+default range and subsequent entry overrides.
+The existing mixed image and all 51 compiler-corpus images retained
+their loaded sizes.
+
+Run `node micropython/build.mjs --interpreter` to link both last modules
+into the experimental `badge-interpreter` variant, in addition to the six
+modules in `badge-sequence`. It has 344,368 loaded bytes, 10,184 B above
+`badge-sequence` and 11,692 B above the all-GCC control. GCC still builds
+the other modules, and this variant has not been boot-tested on a badge.
 
 ## Core Python arithmetic
 
@@ -208,9 +235,7 @@ lowering, and more SDK/toolchain interoperability. The owned preprocessor
 now handles LittleFS's stringification and standard variadic macros; token
 pasting and broader SDK/system-header compatibility remain separate work.
 
-For a fully owned stock build, qualify bit-field value operations and
-initialization, ARM varargs, and live SDK register-operand assembly against
-GCC. Test switch dispatch with a separately configured VM before adding
-range designators and computed `goto` for stock dispatch. Add floating point
-and mixed soft-float calling convention tests independently before attempting
-to replace all stock target objects.
+Completing the survey is not the same as replacing all interpreter objects.
+Next, boot-test the eight-module variant, expand the survey to more stock
+translation units, and qualify any additional varargs forms and live SDK
+register-operand assembly needed by those units.

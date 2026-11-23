@@ -396,7 +396,10 @@ static node_t *postfix(parser_t *p, node_t *n) {
 static node_t *unary(parser_t *p) {
     enter(p);
     node_t *n;
-    if (word_in(peek(p, 0)->text, "++ -- & * + - ~ !")) {
+    if (accept(p, "&&")) {
+        n = node_at(p, "label_address", NULL, p->position - 1);
+        n->text = identifier(p); finish(p, n);
+    } else if (word_in(peek(p, 0)->text, "++ -- & * + - ~ !")) {
         n = node(p, "unary", peek(p, 0)->text); ++p->position;
         child(p, n, unary(p)); finish(p, n);
     } else if (at(p, "sizeof") || word_in(peek(p, 0)->text, "_Alignof __alignof__ __alignof")) {
@@ -513,7 +516,12 @@ static node_t *initializer(parser_t *p) {
                     if (accept(p, ".")) d->text = identifier(p);
                     else {
                         d->kind = "index_designator"; expect(p, "[");
-                        child(p, d, expression(p, 3)); expect(p, "]");
+                        child(p, d, expression(p, 3));
+                        if (accept(p, "...")) {
+                            d->kind = "range_designator";
+                            child(p, d, expression(p, 3));
+                        }
+                        expect(p, "]");
                     }
                     child(p, item, finish(p, d));
                 } while (at(p, ".") || at(p, "["));
@@ -695,7 +703,10 @@ static node_t *statement(parser_t *p) {
         identifier(p); expect(p, ":"); child(p, n, statement(p)); finish(p, n);
     } else if (word_in(peek(p, 0)->text, "return goto break continue")) {
         n = node(p, peek(p, 0)->text, NULL); ++p->position;
-        if (strcmp(n->kind, "goto") == 0) n->text = identifier(p);
+        if (strcmp(n->kind, "goto") == 0) {
+            if (accept(p, "*")) { n->kind = "computed_goto"; child(p, n, expression(p, 1)); }
+            else n->text = identifier(p);
+        }
         else if (strcmp(n->kind, "return") == 0 && !at(p, ";")) child(p, n, expression(p, 1));
         expect(p, ";"); finish(p, n);
     } else if (word_in(peek(p, 0)->text, "__asm__ __asm asm")) {

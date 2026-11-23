@@ -948,7 +948,9 @@ The checker implements:
 - Scoped GNU statement expressions with scalar results or no result.
   Control transfers and aggregate results inside them are rejected.
   The AAPCS32 `__builtin_va_list` type has the layout of a one-pointer
-  record; using the variadic builtins is a separate, unsupported operation.
+  record. `va_start` (including the C23 form) and `va_end` are supported
+  for handing that list to a base-PCS callee; owned `va_arg` and `va_copy`
+  are not implemented.
 - Long `else if` chains use a flat representation, without raising the
   depth limit for genuinely nested statements. Argument-free GNU
   `pure`, `const`, `malloc`, and `warn_unused_result` function attributes
@@ -966,17 +968,42 @@ The checker implements:
   Unreferenced inline bodies and external declarations are checked
   semantically but are not emitted.
 - Packed and explicitly aligned record layouts, empty GNU structs, and
-  AAPCS32 layout for named unsigned 32-bit bit-fields in unpacked
-  structs. Bit-field accesses and initialization are not lowered.
+  AAPCS32 layout, integer promotions, reads, writes, and initialization
+  for named nonvolatile unsigned 32-bit bit-fields in unpacked structs.
+  A read or masked update only touches the bytes containing the field.
   Potentially unaligned packed-member accesses and automatic field
   initializers are diagnosed, not emitted with optimistic alignment.
+- GNU zero-length arrays as trailing struct members. An explicit `[0]`
+  is complete and has size zero; an omitted bound remains incomplete.
+  A file-scope object can initialize a naturally aligned flexible tail
+  that starts at the end of the declared struct. Only the initialized
+  symbol gets extra storage; `sizeof` still uses the declared type.
+- A zero integer constant expression cast to `void *` is recognized as
+  a null pointer constant, including in function-pointer conditionals.
+- In GNU array bounds, `==` and `!=` can compare direct addresses of
+  named, nonempty static-storage objects. Runtime comparisons are not
+  folded by this rule. Assembly aliases, sections and module assembly
+  are excluded. GNU equality comparisons between a function pointer
+  and `void *` are also accepted, and `__builtin_expect` preserves the
+  evaluated value without adding branch weights.
+- GNU `__builtin_alloca` supports dynamic byte counts under the normal C
+  stack-lifetime rules. The backend keeps fixed slots on `r7`, rounds each
+  allocation to eight bytes, and restores the frame on return. Real stack
+  exhaustion is not checked. `noinline` is preserved on function declarations
+  and definitions.
+- GNU `goto *table[index]` supports a fully initialized, function-local
+  `static const void *const` label table of up to 256 entries. Inclusive
+  ranges and subsequent overrides follow source order. The frontend emits
+  one shared switch per table, evaluates the index once at each dispatch,
+  and traps on out-of-range indices. General label pointers and general
+  range initializers are not supported.
 
 Value-conversion annotations preserve the source lvalue's qualified type,
 including discarded volatile reads. A constant lvalue address is distinguished
 from a constant pointer value: an MMIO address is not the value loaded from
 that address.
 
-The explicit exclusions are floating literals/constant folding, general bit-fields,
+The explicit exclusions are general floating constant evaluation and general bit-fields,
 atomics, TLS, complex/imaginary types, VLAs, wide literals and
 multibyte/multicharacter character constants, anonymous record members,
 general initializer brace elision, other external and block-scope inline forms,
@@ -1447,12 +1474,23 @@ opt -passes=verify -disable-output badge-compiler/build/screen-owned.ll
 - If/loops, break/continue, switch/fallthrough, labels/goto, short-circuit,
   comma and conditional expressions, compound literals, and the semantic
   checker's selected `_Generic` association, including lvalue selections.
+- `badge-ir --float-lowering=base-pcs` is opt-in. It transports binary32
+  and binary64 as `i32`/`i64` under the ARM base procedure-call standard.
+  Arithmetic, ordered comparisons, and conversions use ARM EABI helpers;
+  literal values and sign operations use their IEEE encodings. The link
+  must supply those helpers and use the base PCS, not the hard-float PCS.
+  This does not implement floating-point constant expressions or a floating
+  environment. Default LLVM floating operations are unchanged.
+- `badge-ir --libc-strcmp` recognizes a bounded shape of long, side-effect-free
+  forced-inline lookup chains. A literal input selects an existing literal
+  result (or the original input) before IR expansion. It requires the same
+  standard-libc contract as the optimizer's opt-in string pass.
 - Section/alignment/used/noreturn annotations; decoded section names and
   `llvm.compiler.used` optimization retention. Operand-free inline/module assembly;
   inline clobbers are limited to `memory` and `cc`.
 
 This is the documented C04 subset, not an unrestricted C compiler.
-VLA/bit-field/atomic/complex types, floating literals, unsupported attributes,
+VLAs, unsupported/volatile bit-fields, atomic and complex types, unsupported attributes,
 incomplete record ABI types, asm operands/register clobbers/asm goto, multiple
 union initializer items and designators traversing a nested union member
 are explicitly diagnosed. Initialize a nested union as its own braced

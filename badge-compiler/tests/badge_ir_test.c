@@ -164,6 +164,9 @@ int main(void) {
     };
     fixture("extern inline int f(void){return 1;}",NULL,0,path);
     fixture("inline int f(void){return 1;}",NULL,0,path);
+    fixture_checked("extern int a,b; unsigned f(void){return sizeof(char[1-2*!(&a!=&b)]);}",
+                    "ret i32 1", "icmp", 1, path);
+    fixture("extern int a,b; int f(void){return &a!=&b;}", "icmp ne ptr", 1, path);
     fixture_checked("extern int c_name(int) __asm__(\"real\" \"_f\"); int c_name(int); "
                     "int entry(int x){return c_name(x);}", "call i32 @\"real_f\"", "@\"c_name\"", 1, path);
     fixture_checked("inline __attribute__((always_inline)) int g(int x){if(x)return x;return 5;} "
@@ -210,6 +213,13 @@ int main(void) {
         "static inline __attribute__((always_inline)) int f(void){return f();} int g(void){return f();}",
         "static inline __attribute__((always_inline)) int f(void){return 1;} int (*p)(void)=f;",
         "struct __attribute__((packed)) S{char c;int x;}; int f(struct S *p){return p->x;}",
+        "struct Bits{unsigned a:3;}; unsigned f(volatile struct Bits *p){return p->a;}",
+        "extern int *a,*b; unsigned f(void){return sizeof(char[1-2*!(a!=b)]);}",
+        "void f(int n){static const void *const t[2]={[0]=&&x}; goto *t[n]; x:;}",
+        "const void *f(void){static const void *const t[1]={&&x}; x:return t[0];}",
+        "void f(int n){static const void *const t[2]={[0 ... 2]=&&x}; goto *t[n]; x:;}",
+        "void f(int n){static const void *const t[2]={[0 ... 1]=&&x}; goto *t[n];}",
+        "void f(void){__builtin_va_list args; __builtin_c23_va_start(args);}",
         "char oversized[16777217];",
     };
     for(size_t k=0;k<sizeof(negative)/sizeof(*negative);++k) fixture(negative[k],NULL,0,path);

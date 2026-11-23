@@ -129,6 +129,7 @@ int main(void) {
     if (__builtin_clz((unsigned)x) != 27 || __builtin_ctz((unsigned)x) != 1) return 2;
     if (__builtin_mul_overflow(x, -2, &product) || product != -44) return 3;
     if (!__builtin_mul_overflow(large, 2, &product) || product != -2) return 4;
+    if (__builtin_expect(x++, 22) != 22 || x != 23) return 5;
     return 0;
 }`);
   assert.doesNotMatch(ir, /@"(?:step|outer|adjust|link_value)"/);
@@ -142,6 +143,201 @@ int main(void) {
     file('start.o'), file('output.o'), file('provider.o'), '-o', file('run.elf')]);
   run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
     '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file('run.elf')]);
+});
+test('literal lookup specialization is opt-in and does not elide an effectful arm', t => {
+  const file = files(t);
+  const lookup = (effect = '') => `
+int strcmp(const char *, const char *);
+int writes;
+static inline __attribute__((always_inline)) const char *lookup(const char *s) {
+    ${Array.from({ length: 20 }, (_, i) =>
+        `if (strcmp(s, "key${i}") == 0) { ${i === 12 ? effect : ''} return "value${i}"; } else`).join('\n')}
+    return s;
+}
+int main(void) {
+    const char *hit = lookup("key12");
+    const char *miss = lookup("other");
+    return hit[0] != 'v' || hit[5] != '1' || hit[6] != '2' || miss[0] != 'o';
+}`;
+  const [unfolded] = lower(file, lookup());
+  assert.match(unfolded, /call i32 @"strcmp"/);
+  const compile = source => {
+    fs.writeFileSync(file('source.c'), source);
+    run(tool('badge-ir'), ['--libc-strcmp', file('source.c'), '-o', file('lookup.ll')]);
+    run(opt, ['-passes=verify', '-disable-output', file('lookup.ll')]);
+    return fs.readFileSync(file('lookup.ll'), 'utf8');
+  };
+  assert.match(compile(lookup('++writes;')), /call i32 @"strcmp"/);
+  assert.doesNotMatch(compile(lookup()), /call i32 @"strcmp"/);
+  run(tool('badge-opt'), [file('lookup.ll'), '-o', file('output.ll')]);
+  run(tool('badge-codegen'), [file('output.ll'), '-o', file('output.s')]);
+  run(tool('badge-asm'), [file('output.s'), '-o', file('output.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+    file('start.o'), file('output.o'), '-o', file('run.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
+    '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file('run.elf')]);
+});
+test('AAPCS bit-fields preserve adjacent bytes and GNU zero-length tails are addressable', t => {
+  const file = files(t);
+  lower(file, `
+struct Mixed {
+    unsigned char prefix;
+    unsigned narrow:5;
+    unsigned medium:11;
+    unsigned char guard;
+    unsigned wide:24;
+    unsigned tag:8;
+    unsigned full:32;
+};
+struct Tail { char tag; unsigned values[0]; };
+struct Pool { unsigned live:1; const unsigned *items[]; };
+_Static_assert(sizeof(struct Mixed)==12 && sizeof(struct Tail)==4, "layout");
+_Static_assert(sizeof(((struct Tail *)0)->values)==0, "zero-length array is complete");
+static const unsigned item=713, other=41;
+static const struct Pool pool={.live=1,.items={&item,&other,0}};
+_Static_assert(sizeof(pool)==4, "only the initialized symbol has extra storage");
+static struct Mixed g={.prefix=0xa7,.narrow=17,.medium=(signed char)-1,.guard=0xcc,
+                       .wide=0x123456,.tag=0x5a,.full=0x87654321};
+static unsigned evaluations;
+static struct Mixed *get(void) { ++evaluations; return &g; }
+int main(void) {
+    unsigned char *raw=(unsigned char*)&g;
+    if (raw[0]!=0xa7 || raw[1]!=0xf1 || raw[2]!=0xff || raw[3]!=0xcc || g.medium!=2047)
+        return 1;
+    unsigned value=63;
+    if ((get()->narrow=value)!=31 || evaluations!=1) return 2;
+    if (++g.narrow!=0 || g.medium++!=2047 || (g.medium+=0x123)!=0x123) return 3;
+    if (-g.medium>=0 || raw[1]!=0x60 || raw[2]!=0x24 || raw[3]!=0xcc || raw[0]!=0xa7)
+        return 4;
+    g.wide^=0x543210;
+    if (g.wide!=0x460646 || g.tag!=0x5a || g.full!=0x87654321) return 5;
+    struct Mixed local={0x11,2,511,0x33,{0xabcd12},0xa5,0xfedcba98};
+    if (local.narrow!=2 || local.medium!=511 || local.guard!=0x33 ||
+        local.wide!=0xabcd12 || local.tag!=0xa5 || local.full!=0xfedcba98) return 6;
+    union Buffer { struct Tail packet; unsigned words[3]; } storage;
+    storage.packet.tag=0x65;
+    storage.packet.values[1]=local.medium;
+    if (storage.words[2]!=511 || storage.packet.tag!=0x65) return 7;
+    if (pool.live!=1 || *pool.items[0]!=713 || *pool.items[1]!=41 || pool.items[2]!=0) return 8;
+    return 0;
+}`);
+  run(clang, [...target, '-std=gnu11', '-Oz', '-c', file('source.c'), '-o', file('reference.o')]);
+  run(tool('badge-opt'), [file('ssa.ll'), '-o', file('output.ll')]);
+  run(tool('badge-codegen'), [file('output.ll'), '-o', file('output.s')]);
+  run(tool('badge-asm'), [file('output.s'), '-o', file('output.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const object of ['reference.o', 'output.o']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+      file('start.o'), file(object), '-o', file('run.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
+      '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file('run.elf')]);
+  }
+});
+test('dynamic stack and va-list handoff preserve AAPCS frames across calls', t => {
+  const file = files(t);
+  lower(file, `
+extern unsigned consume(__builtin_va_list);
+extern unsigned aligned_call(unsigned char *, unsigned, unsigned, unsigned, unsigned);
+unsigned variadic(unsigned tag, ...) {
+    __builtin_va_list args;
+    __builtin_c23_va_start(args, tag);
+    unsigned sum=consume(args);
+    __builtin_va_end(args);
+    return sum+tag;
+}
+unsigned stack_args(unsigned a,unsigned b,unsigned c,unsigned d,unsigned tag, ...) {
+    __builtin_va_list args;
+    __builtin_va_start(args, tag);
+    unsigned sum=consume(args);
+    __builtin_va_end(args);
+    return sum+a+b+c+d+tag;
+}
+unsigned allocate(unsigned n) {
+    unsigned char *a=__builtin_alloca(n);
+    unsigned char *b=__builtin_alloca(n+1);
+    a[0]=29; b[0]=31; a[n-1]=37; b[n]=41;
+    if (((unsigned)a&7) || ((unsigned)b&7)) return 0;
+    unsigned first=aligned_call(a,n,3,5,7);
+    unsigned second=aligned_call(b,n+1,11,13,17);
+    return first+second+a[0]+b[0]+n;
+}
+unsigned leaf_stack(unsigned n) {
+    unsigned char *p=__builtin_alloca(n);
+    p[0]=30; p[n-1]=55;
+    return p[0]+p[n-1]+((unsigned)p&7);
+}`);
+  fs.writeFileSync(file('provider.c'), `
+extern unsigned variadic(unsigned, ...), stack_args(unsigned,unsigned,unsigned,unsigned,unsigned,...);
+extern unsigned allocate(unsigned), leaf_stack(unsigned);
+unsigned consume(__builtin_va_list args) {
+    unsigned a=__builtin_va_arg(args,unsigned);
+    unsigned long long b=__builtin_va_arg(args,unsigned long long);
+    unsigned c=__builtin_va_arg(args,unsigned);
+    return a+(unsigned)b+(unsigned)(b>>32)+c;
+}
+unsigned aligned_call(unsigned char *p, unsigned n, unsigned a,unsigned b,unsigned c) {
+    unsigned sp;
+    __asm__("mov %0, sp" : "=r"(sp));
+    if ((sp&7) || ((unsigned)p&7)) return 0;
+    return p[0]+p[n-1]+a+b+c;
+}
+int main(void) {
+    if (variadic(2, 5u, 0x10000000bULL, 13u)!=32) return 1;
+    if (stack_args(1,2,3,4,5,5u,0x10000000bULL,13u)!=45) return 2;
+    for (unsigned n=2;n<75;++n)
+        if (allocate(n)!=254+n || leaf_stack(n)!=85) return 3;
+    return 0;
+}`);
+  run(clang, [...target, '-Oz', '-c', file('provider.c'), '-o', file('provider.o')]);
+  run(tool('badge-opt'), [file('ssa.ll'), '-o', file('output.ll')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const scalar of ['legacy', 'thumb-homes', 'thumb-constants']) {
+    run(tool('badge-codegen'), [`--scalar-selection=${scalar}`, file('output.ll'), '-o', file('output.s')]);
+    run(tool('badge-asm'), [file('output.s'), '-o', file('output.o')]);
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+      file('start.o'), file('output.o'), file('provider.o'), '-o', file('run.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
+      '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file('run.elf')]);
+  }
+});
+test('local label table dispatch preserves range overrides and index side effects', t => {
+  const file = files(t);
+  const [, ir] = lower(file, `
+static __attribute__((noinline)) unsigned dispatch(const unsigned char *code) {
+    static const void *const targets[256] = {[0 ... 255]=&&fallback,[1 ... 3]=&&plus,[2]=&&twice,[0]=&&end};
+    unsigned n=1;
+    goto *targets[*code++];
+plus:
+    n+=3;
+    goto *targets[*code++];
+twice:
+    n*=2;
+    goto *targets[*code++];
+fallback:
+    n+=9;
+    goto *targets[*code++];
+end:
+    return n;
+}
+int main(void) {
+    const unsigned char code[]={1,2,3,255,0};
+    return dispatch(code)!=20;
+}`);
+  assert.equal((ir.match(/switch i32/g) ?? []).length, 1);
+  assert.doesNotMatch(ir, /blockaddress|indirectbr/);
+  assert.match(ir, /noinline/);
+  run(clang, [...target, '-std=gnu11', '-Oz', '-c', file('source.c'), '-o', file('reference.o')]);
+  run(tool('badge-opt'), [file('ssa.ll'), '-o', file('output.ll')]);
+  run(tool('badge-codegen'), [file('output.ll'), '-o', file('output.s')]);
+  run(tool('badge-asm'), [file('output.s'), '-o', file('output.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const object of ['reference.o', 'output.o']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+      file('start.o'), file(object), '-o', file('run.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic', '-monitor', 'none',
+      '-serial', 'none', '-semihosting-config', 'enable=on,target=native', '-kernel', file('run.elf')]);
+  }
 });
 test('explicit policy, malformed C and duplicate options preserve existing output', t => {
   const file=files(t);

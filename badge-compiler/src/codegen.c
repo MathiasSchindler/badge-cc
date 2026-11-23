@@ -709,8 +709,12 @@ static void cg_function_parse(cg_context *c) {
   while (!cg_accept(c, ")")) {
     if (f->argc == 256)
       cg_error(c, "too many parameters");
-    if (cg_accept(c, "..."))
-      cg_error(c, "variadic function definitions are unsupported");
+    if (cg_accept(c, "...")) {
+      if (fast) cg_error(c, "variadic fastcc is unsupported");
+      f->variadic = 1;
+      cg_expect(c, ")");
+      break;
+    }
     cg_type *t = cg_type_parse(c, 0);
     unsigned byval = 0, parameter_align = t->align;
     while (c->pos < c->count && !cg_is(c, ",") && !cg_is(c, ")") &&
@@ -831,19 +835,31 @@ static void cg_function_parse(cg_context *c) {
         cg_type *object = cg_type_parse(c, 0);
         unsigned align = object->align;
         if (cg_accept(c, ",") && !cg_is(c, "align")) {
-          (void)cg_type_parse(c, 0);
-          if (cg_number(c, cg_take(c)) != 1)
-            cg_error(c, "variable/count alloca unsupported");
+          cg_type *count = cg_type_parse(c, 0);
+          unsigned operand = c->pos;
+          const char *value = cg_take(c);
+          if (strcmp(value, "1") || object->bits == 8) {
+            if (object->bits != 8 || count->bits != 32)
+              cg_error(c, "counted alloca requires an i32 byte count");
+            i->stack_count_operand = operand;
+            f->dynamic_stack = 1;
+          }
         }
         for (unsigned k = c->pos; k < c->count && c->tokens[k].line == line;
              k++)
           if (!strcmp(c->tokens[k].text, "align") && k + 1 < c->count)
             align = (unsigned)cg_number(c, c->tokens[k + 1].text);
-        i->result->object = cg_slot(c, object->size, align);
-        i->result->object_size = object->size;
-        i->result->object_align = align;
-        i->result->memory_align = align;
-        i->result->memory_size = object->size;
+        if (i->stack_count_operand) {
+          if (!align || (align & (align - 1)) || align > 8)
+            cg_error(c, "counted byte alloca supports alignment up to eight");
+          i->result->memory_align = 8;
+        } else {
+          i->result->object = cg_slot(c, object->size, align);
+          i->result->object_size = object->size;
+          i->result->object_align = align;
+          i->result->memory_align = align;
+          i->result->memory_size = object->size;
+        }
         c->pos = saved;
       }
     }
@@ -1499,7 +1515,7 @@ static int cg_direct_record_memory(cg_context *c, cg_inst *i, int store,
 static int cg_tail_eligible(cg_context *c, cg_inst *i, cg_type *ret,
                             unsigned cursor) {
   const cg_function *fn = c->fn;
-  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+  if (fn->dynamic_stack || fn->variadic || c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       cursor > 3 || !i->next || i->next != fn->last->last || fn->return_ext ||
       strcmp(c->tokens[i->begin + (i->result ? 2 : 0)].text, "tail") ||
       strcmp(c->tokens[i->next->begin].text, "ret") ||
@@ -1606,6 +1622,20 @@ static void cg_call(cg_context *c, cg_inst *i) {
   cg_arg args[256] = {0};
   unsigned count = cg_arguments(c, args);
   unsigned after = c->pos;
+  if (!strcmp(callee, "@llvm.va_start") || !strcmp(callee, "@llvm.va_end")) {
+    int start = !strcmp(callee, "@llvm.va_start");
+    if (count != 1 || ret->size || strcmp(c->tokens[args[0].start - 1].text, "ptr") ||
+        (start && !c->fn->variadic))
+      cg_error(c, "invalid AAPCS va_start/va_end");
+    if (start) {
+      c->pos = args[0].start;
+      cg_value_read(c, args[0].type, 0, 0);
+      cg_address(c, 1, c->fn->frame + c->register_saved_bytes + 4 * c->fn->fixed_arg_words);
+      cg_emit(c, "str.n r1, [r0]\n");
+    }
+    c->pos = after;
+    return;
+  }
   if (!strncmp(callee, "@llvm.", 6)) {
     if (!strncmp(callee, "@llvm.lifetime.", 15))
       return;
@@ -2264,6 +2294,15 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     return;
   }
   if (!strcmp(op, "alloca")) {
+    if (i->stack_count_operand) {
+      c->pos = i->stack_count_operand;
+      cg_value_read(c, NULL, 0, 0);
+      unsigned id = ++c->unique;
+      cg_emit(c, "adds.n r0, #7\nbcc.n .Lcg_stack_size%u\n.short 0xde00\n"
+                 ".Lcg_stack_size%u:\nbic.w r0, r0, #7\nsub.w sp, sp, r0\nmov r0, sp\n", id, id);
+      cg_save(c, i->result, 0, 0);
+      return;
+    }
     if (i->result->rematerialize_frame_address)
       return;
     cg_address(c, 0, i->result->object);

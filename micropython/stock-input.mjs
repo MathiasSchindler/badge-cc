@@ -13,6 +13,9 @@ export function preprocessStock(db, source, output, run) {
     const row = db.find(e => e.file === source);
     assert(row, `Missing GCC compilation command for ${source}`);
     const [tool, ...args] = row.arguments ?? words(row.command);
+    const floatFlags = args.filter(arg => arg.startsWith('-mfloat-abi='));
+    assert(!floatFlags.length || /^(?:-mfloat-abi=soft|-mfloat-abi=softfp)$/.test(floatFlags.at(-1)),
+        `Stock ARM object must use base PCS: ${source}`);
     const at = args.indexOf('-o');
     const compile = args.indexOf('-c');
     assert(at >= 0 && compile >= 0, `Malformed GCC compilation command for ${source}`);
@@ -35,9 +38,9 @@ export function bridgeStages(stem, object, tools) {
     ];
 }
 
-export function ownedStages(stem, object, tools, optimizerArgs = []) {
+export function ownedStages(stem, object, tools, optimizerArgs = [], frontendArgs = []) {
     return [
-        ['frontend', path.join(tools, 'badge-ir'), [`${stem}.i`, '-o', `${stem}.ll`]],
+        ['frontend', path.join(tools, 'badge-ir'), ['--float-lowering=base-pcs', ...frontendArgs, `${stem}.i`, '-o', `${stem}.ll`]],
         ['optimization', path.join(tools, 'badge-opt'), [...optimizerArgs, `${stem}.ll`, '-o', `${stem}.opt.ll`]],
         ['codegen', path.join(tools, 'badge-codegen'), [`${stem}.opt.ll`, '-o', `${stem}.s`]],
         ['assembly', path.join(tools, 'badge-asm'), [`${stem}.s`, '-o', object]],

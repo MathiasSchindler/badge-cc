@@ -159,6 +159,14 @@ int main(void) {
         "_Static_assert(__builtin_offsetof(struct N, inner.y)==8,\"nested offset\");",
         "int log_printf(const char *, ...) __attribute__((__format__(__printf__,1,2))); "
         "void *make(unsigned, unsigned) __attribute__((__alloc_size__(1,2)));",
+        "struct T{char tag; unsigned values[0];}; "
+        "_Static_assert(sizeof(struct T)==4 && sizeof(((struct T*)0)->values)==0,\"trailing array\");",
+        "struct Bits{unsigned a:7; unsigned int b:32;}; extern struct Bits x; "
+        "_Static_assert(_Generic(+x.a,int:1,default:0),\"narrow promotion\");"
+        "_Static_assert(_Generic(+x.b,unsigned int:1,default:0),\"full width\");",
+        "typedef int (*F)(void); F choose(int flag,F f){return flag?f:(void*)0;}",
+        "struct Pool{unsigned live:1; int *items[];}; int x; "
+        "struct Pool p={1,{&x,0}}; _Static_assert(sizeof(p)==4,\"declared size\");",
         "static int f(int); inline int f(int x){return x+1;} int g(void){return f(1);}",
         "__attribute__((used,section(\".data\"))) static int a=1;",
         "void f(void){extern int x; x=1;} int x;",
@@ -181,6 +189,10 @@ int main(void) {
         "int f(void){return missing;}", "int f(void){g();return 0;}",
         "struct S{int x;}; unsigned n=__builtin_offsetof(struct S, missing);",
         "struct S{unsigned x:2;}; unsigned n=__builtin_offsetof(struct S, x);",
+        "struct S{unsigned x:2;}; unsigned *get(struct S *p){return &p->x;}",
+        "struct S{unsigned x:2;}; unsigned get(struct S *p){return sizeof(p->x);}",
+        "struct P{int tag; int tail[];}; void f(void){struct P p={1,{2}};}",
+        "typedef int (*F)(void); F invalid(int flag,F f,void *p){return flag?f:p;}",
         "int f(int x){int x;return x;}", "typedef int T; char T;",
         "int x; char x;", "int f(int); int f(char);", "int f(int); int f(void){return 0;}",
         "int x=1; int x=2;", "int f(void){return 1;} int f(void){return 2;}",
@@ -248,7 +260,7 @@ int main(void) {
         "void f(int n){int a[n];}", "struct __attribute__((packed)) S{unsigned b:2;};",
         "unsigned x=0; char c=L'x';", "int c='ab';", "void f(void*p){p++;}",
         "int f(){return 0;}", "extern inline int f(void){return 0;}",
-        "struct S{unsigned x:2;}; int f(struct S *p){return p->x;}",
+        "struct S{int a[0]; int y;};",
         "void f(void){register int value __asm__(\"r0\");}",
         "struct Empty{}; struct Empty a[2];"
     };

@@ -28,6 +28,10 @@ const timeutils = path.join(upstream, 'shared/timeutils/timeutils.c');
 const ownedTimeutils = path.join(build, 'timeutils-owned.o');
 const sequence = path.join(upstream, 'py/sequence.c');
 const ownedSequence = path.join(build, 'sequence-owned.o');
+const interpreterModules = [
+    { source: 'py/runtime.c', option: 'BADGE_RUNTIME_OBJECT', object: 'runtime-owned.o', symbol: 'mp_import_from' },
+    { source: 'py/vm.c', option: 'BADGE_VM_OBJECT', object: 'vm-owned.o', symbol: 'mp_execute_bytecode' },
+];
 const fixture = path.join(root, 'badge-compiler/tests/fixtures');
 const qemu = process.env.QEMU_ARM ?? 'qemu-system-arm';
 const emulator = ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
@@ -46,7 +50,7 @@ function run(tool, args, { timeout = 120000, log, capture = false, ...options } 
     return result.stdout ?? '';
 }
 
-function firmware(name, board, mixed = false, core = false, vm = false, sequenceObject = null) {
+function firmware(name, board, mixed = false, core = false, vm = false, sequenceObject = null, interpreter = false) {
     const directory = path.join(build, name);
     const picotool = path.join(build, 'pico2-stock/_deps/picotool');
     const args = ['-S', port, '-B', directory, `-DMICROPY_BOARD=${board}`, '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'];
@@ -57,6 +61,9 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     if (core) args.push(`-DBADGE_SMALLINT_OBJECT=${ownedSmallint}`);
     if (vm) args.push(`-DBADGE_RADIX_OBJECT=${ownedRadix}`, `-DBADGE_UNICODE_OBJECT=${ownedUnicode}`,
         `-DBADGE_TIMEUTILS_OBJECT=${ownedTimeutils}`, `-DBADGE_SEQUENCE_OBJECT=${sequenceObject ?? ''}`);
+    if (interpreter) {
+        for (const mod of interpreterModules) args.push(`-D${mod.option}=${path.join(build, mod.object)}`);
+    }
     run('cmake', args, {
         cwd: port, timeout: 240000, log: `${name}-configure`,
         env: { ...process.env, CFLAGS: '-Wno-error=array-bounds' },
@@ -76,6 +83,16 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     assert(map.includes(vm ? ownedUnicode : '/py/unicode.c.o'));
     assert(map.includes(vm ? ownedTimeutils : '/shared/timeutils/timeutils.c.o'));
     assert(map.includes(sequenceObject ?? '/py/sequence.c.o'));
+    for (const mod of interpreterModules) {
+        assert.equal(commands.filter(row => row.file === path.join(upstream, mod.source)).length, interpreter ? 0 : 1);
+        if (interpreter) {
+            const object = path.join(build, mod.object);
+            assert(map.includes(object));
+            const section = map.indexOf(` .text.${mod.symbol}\n`);
+            assert(section >= 0 && map.slice(section, section + 512).split('\n').slice(0, 3).join('\n').includes(object),
+                `Missing linked ${mod.symbol} from ${object}`);
+        }
+    }
     if (sequenceObject === ownedSequence) {
         assert.match(map, /\.text\.mp_seq_index_obj\s+[^\n]+\n[^\n]*sequence-owned\.o|\.text\.mp_seq_index_obj\s+[^\n]*sequence-owned\.o/);
         assert.match(map, /libg\.a\(libc_a-strcmp\.o\)/);
@@ -91,11 +108,11 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     return { directory, bytes, uf2, crc };
 }
 
-function compileStockModule(controlDirectory, source, object) {
+function compileStockModule(controlDirectory, source, object, frontendArgs = []) {
     const db = JSON.parse(fs.readFileSync(path.join(controlDirectory, 'compile_commands.json'), 'utf8'));
     const stem = path.join(build, `${path.basename(source, '.c')}-stock`);
     preprocessStock(db, source, `${stem}.i`, run);
-    for (const [, tool, args] of ownedStages(stem, object, tools))
+    for (const [, tool, args] of ownedStages(stem, object, tools, [], frontendArgs))
         run(tool, args);
 }
 
@@ -318,9 +335,9 @@ function crcOracle(controlDirectory) {
 }
 
 try {
-    const options = process.argv.slice(2);
-    assert(options.length === 0 || (options.length === 1 && options[0] === '--sequence-before'),
-        'usage: node micropython/build.mjs [--sequence-before]');
+    const options = new Set(process.argv.slice(2));
+    assert(options.size === process.argv.length - 2 && [...options].every(arg => ['--sequence-before', '--interpreter'].includes(arg)),
+        'usage: node micropython/build.mjs [--sequence-before] [--interpreter]');
     fs.mkdirSync(build, { recursive: true });
     if (!fs.existsSync(upstream))
         run('git', ['clone', '--depth', '1', '--branch', 'v1.29.0', 'https://github.com/micropython/micropython.git', upstream]);
@@ -347,16 +364,24 @@ try {
     const sequenceBaseline = compileSequence(stock.directory);
     const sequenceIndex = sequenceOracle(stock.directory, sequenceBaseline);
     const sequenceVm = firmware('badge-sequence', 'BADGE_RP2350', true, true, true, ownedSequence);
-    const sequenceBeforeVm = options.length
+    const sequenceBeforeVm = options.has('--sequence-before')
         ? firmware('badge-sequence-before', 'BADGE_RP2350', true, true, true, sequenceBaseline) : undefined;
     if (sequenceBeforeVm) {
         assert(sequenceVm.bytes < sequenceBeforeVm.bytes);
         console.log('Sequence fold loaded flash savings:', sequenceBeforeVm.bytes - sequenceVm.bytes);
     }
+    let interpreter;
+    if (options.has('--interpreter')) {
+        const map = fs.readFileSync(path.join(stock.directory, 'firmware.elf.map'), 'utf8');
+        assert.match(map, /libg\.a\(libc_a-strcmp\.o\)/);
+        for (const mod of interpreterModules)
+            compileStockModule(stock.directory, path.join(upstream, mod.source), path.join(build, mod.object), ['--libc-strcmp']);
+        interpreter = firmware('badge-interpreter', 'BADGE_RP2350', true, true, true, ownedSequence, true);
+    }
     const sameTokens = crcComparison();
     console.log('Same-token CRC comparison (1,024-byte input):', sameTokens);
     fs.writeFileSync(path.join(build, 'comparison.json'),
-        JSON.stringify({ revision, pico2, stock, mixed, core, vm, sequenceVm, sequenceBeforeVm, smallInteger, radixParser, calendar, sequenceIndex,
+        JSON.stringify({ revision, pico2, stock, mixed, core, vm, sequenceVm, sequenceBeforeVm, interpreter, smallInteger, radixParser, calendar, sequenceIndex,
             sameTokens, oracleCases: 1028 }, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython build: ${error.message}`);

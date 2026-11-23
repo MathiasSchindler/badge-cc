@@ -48,6 +48,7 @@ typedef struct cg_inst {
   unsigned shifted_source, shifted_other;
   int folded_operand;
   int wide_pair_safe;
+  unsigned stack_count_operand;
 } cg_inst;
 typedef struct cg_assembly {
   char *text;
@@ -72,7 +73,8 @@ typedef struct cg_function {
   unsigned source_begin, source_end;
   unsigned machine_register_mentions;
   int machine_registers_known;
-  int internal, return_ext;
+  unsigned fixed_arg_words;
+  int internal, return_ext, dynamic_stack, variadic;
   struct cg_function *next;
 } cg_function;
 typedef struct cg_allocation {
@@ -170,10 +172,11 @@ static inline int cg_width_selection(const cg_context *c) {
          c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
 }
 static inline int cg_light_frames(const cg_context *c) {
-  return c->scalar_selection == BADGE_SELECTION_THUMB_FRAMES ||
+  return (!c->fn || !c->fn->variadic) &&
+         (c->scalar_selection == BADGE_SELECTION_THUMB_FRAMES ||
          c->scalar_selection == BADGE_SELECTION_THUMB_CONTROL ||
          c->scalar_selection == BADGE_SELECTION_THUMB_OPERANDS ||
-         cg_width_selection(c);
+         cg_width_selection(c));
 }
 static inline int cg_control_selection(const cg_context *c) {
   return c->scalar_selection == BADGE_SELECTION_THUMB_CONTROL ||

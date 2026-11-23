@@ -11,8 +11,19 @@ typedef struct { char *data; size_t size,capacity; } ir_buffer;
 typedef struct { c_type_t *type; const char *text; } ir_value;
 typedef struct ir_label { node_t *node; const char *name; unsigned block; struct ir_label *next; } ir_label;
 typedef struct ir_case { node_t *node; unsigned block; struct ir_case *next; } ir_case;
+typedef struct ir_dispatch {
+    symbol_t *table;
+    const char *index;
+    unsigned block;
+    struct ir_dispatch *next;
+} ir_dispatch;
 typedef struct ir_switch { ir_case *cases; struct ir_switch *parent; unsigned end; } ir_switch;
 typedef struct ir_reloc { uint32_t offset,size; const char *type,*value; struct ir_reloc *next; } ir_reloc;
+typedef struct ir_float_helper {
+    const char *name;
+    c_type_t *result,*left,*right;
+    struct ir_float_helper *next;
+} ir_float_helper;
 typedef struct ir_inline_place { symbol_t *symbol; const char *place; struct ir_inline_place *next; } ir_inline_place;
 typedef struct ir_inline {
     symbol_t *function;
@@ -28,8 +39,11 @@ typedef struct {
     symbol_t **inline_queue; unsigned inline_count,inline_expansions;
     ir_buffer body,entry; ir_buffer *buffer;
     unsigned reg,temp,label,block,break_block,continue_block,depth;
-    int terminated,ssa_expressions,uses_ctlz;
+    int terminated,ssa_expressions,uses_ctlz,base_pcs_float,libc_strcmp;
+    unsigned va_intrinsics;
+    ir_float_helper *float_helpers;
     symbol_t *function; ir_label *labels; ir_switch *switches;
+    ir_dispatch *dispatches;
     ir_inline *inlining;
 } ir_context;
 
@@ -95,7 +109,7 @@ static const char *ir_type(ir_context *c,c_type_t *t) {
     if(t->kind==T_VOID) return "void";
     if(t->kind==T_POINTER || t->kind==T_FUNCTION || t->kind==T_NULLPTR) return "ptr";
     if(ir_integer(t)) return ir_format(c,"i%u",ir_bits(t));
-    if(ir_float(t)) return t->kind==T_FLOAT?"float":"double";
+    if(ir_float(t)) return c->base_pcs_float?(t->size==4?"i32":"i64"):(t->kind==T_FLOAT?"float":"double");
     if(ir_aggregate(t)) return ir_format(c,"[%" PRIu32 " x i8]",t->size);
     ir_error(c,NULL,"unsupported IR type");
 }
@@ -171,19 +185,57 @@ static const char *ir_condition(ir_context *,node_t *);
 static const char *ir_lvalue(ir_context *,node_t *);
 static void ir_initialize(ir_context *,c_type_t *,const char *,node_t *);
 static ir_value ir_inline_call(ir_context *,node_t *,symbol_t *);
+static ir_value ir_float_call(ir_context *c,const char *name,c_type_t *result,ir_value left,const ir_value *right) {
+    ir_float_helper *h=c->float_helpers;
+    while(h && strcmp(h->name,name)!=0) h=h->next;
+    if(!h) {
+        h=ir_allocate(c,sizeof(*h));
+        *h=(ir_float_helper){name,result,left.type,right?right->type:NULL,c->float_helpers};
+        c->float_helpers=h;
+    }
+    const char *r=ir_reg(c);
+    ir_emit(c,"  %s = call %s @%s(%s %s",r,ir_type(c,result),name,ir_type(c,left.type),left.text);
+    if(right) ir_emit(c,", %s %s",ir_type(c,right->type),right->text);
+    ir_text(c,")\n"); return (ir_value){result,r};
+}
 static const char *ir_truth(ir_context *c,ir_value v) {
     if(v.type->kind==T_BOOL) return v.text;
     const char *r=ir_reg(c);
-    if(ir_float(v.type)) ir_emit(c,"  %s = fcmp une %s %s, 0.0\n",r,ir_type(c,v.type),v.text);
+    if(ir_float(v.type) && c->base_pcs_float) {
+        const char *bits=ir_reg(c),*type=ir_type(c,v.type);
+        ir_emit(c,"  %s = and %s %s, %" PRIu64 "\n  %s = icmp ne %s %s, 0\n",bits,type,v.text,
+            ir_mask(v.type)>>1,r,type,bits);
+    } else if(ir_float(v.type)) ir_emit(c,"  %s = fcmp une %s %s, 0.0\n",r,ir_type(c,v.type),v.text);
     else ir_emit(c,"  %s = icmp ne %s %s, %s\n",r,ir_type(c,v.type),v.text,
                  v.type->kind==T_POINTER || v.type->kind==T_NULLPTR?"null":"0");
     return r;
+}
+static ir_value ir_float_cast(ir_context *c,ir_value v,c_type_t *to) {
+    char from_float=v.type->size==4?'f':'d',to_float=to->size==4?'f':'d';
+    if(ir_float(v.type) && ir_float(to)) {
+        if(v.type->size==to->size) return (ir_value){to,v.text};
+        return ir_float_call(c,ir_format(c,"__aeabi_%c2%c",from_float,to_float),to,v,NULL);
+    }
+    if(ir_integer(v.type) && ir_float(to)) {
+        if(v.type->size<4) v=ir_cast(c,v,ir_primitive(c,v.type->is_unsigned?T_UINT:T_INT));
+        const char *name=ir_format(c,"__aeabi_%s%c2%c",v.type->is_unsigned?"u":"",
+            v.type->size==8?'l':'i',to_float);
+        return ir_float_call(c,name,to,v,NULL);
+    }
+    if(ir_float(v.type) && ir_integer(to)) {
+        c_type_t *result=to->size<4?ir_primitive(c,to->is_unsigned?T_UINT:T_INT):to;
+        const char *name=ir_format(c,"__aeabi_%c2%s%cz",from_float,result->is_unsigned?"u":"",
+            result->size==8?'l':'i');
+        return ir_cast(c,ir_float_call(c,name,result,v,NULL),to);
+    }
+    ir_error(c,NULL,"unsupported base-PCS floating conversion");
 }
 static ir_value ir_cast(ir_context *c,ir_value v,c_type_t *to) {
     if(to==NULL || to==v.type) return v;
     if(to->kind==T_VOID) return (ir_value){to,""};
     if(ir_aggregate(to)) { if(!ir_aggregate(v.type)) ir_error(c,NULL,"invalid aggregate conversion"); v.type=to; return v; }
     if(to->kind==T_BOOL) return (ir_value){to,ir_truth(c,v)};
+    if(c->base_pcs_float && (ir_float(v.type) || ir_float(to))) return ir_float_cast(c,v,to);
     const char *op=NULL;
     if((v.type->kind==T_POINTER && to->kind==T_POINTER) ||
        (v.type->kind==T_NULLPTR && (to->kind==T_NULLPTR || to->kind==T_POINTER))) { v.type=to; return v; }
@@ -233,6 +285,67 @@ static void ir_store(ir_context *c,c_type_t *t,const char *place,ir_value value)
     }
     ir_emit(c,"  store %s%s %s, ptr %s, align %u\n",(t->qualifiers&Q_VOLATILE)?"volatile ":"",ir_storage_type(c,t),text,place,t->alignment);
 }
+typedef struct { unsigned first, size, shift; } ir_field_window;
+static ir_field_window ir_bit_window(const sem_info_t *i) {
+    unsigned first=i->bit_offset/8;
+    return (ir_field_window){first,(i->bit_offset+i->bit_width+7)/8-first,i->bit_offset%8};
+}
+static uint32_t ir_bit_mask(unsigned width) {
+    return width==32?UINT32_MAX:(UINT32_C(1)<<width)-1;
+}
+static const char *ir_bits_op(ir_context *c,const char *op,const char *a,const char *b) {
+    const char *result=ir_reg(c);
+    ir_emit(c,"  %s = %s i32 %s, %s\n",result,op,a,b);
+    return result;
+}
+static const char *ir_bits_immediate(ir_context *c,const char *op,const char *a,uint32_t b) {
+    return ir_bits_op(c,op,a,ir_format(c,"%" PRIu32,b));
+}
+static c_type_t *ir_field_chunk(ir_context *c,unsigned offset,unsigned left) {
+    return ir_primitive(c,left==4?T_UINT:left>=2 && !(offset&1)?T_USHORT:T_UCHAR);
+}
+static const char *ir_read_window(ir_context *c,const char *place,ir_field_window w) {
+    const char *bits=NULL;
+    for(unsigned k=0;k<w.size;) {
+        c_type_t *type=ir_field_chunk(c,w.first+k,w.size-k);
+        const char *part=ir_offset(c,place,ir_format(c,"%u",w.first+k));
+        ir_value value=ir_cast(c,ir_load(c,type,part),ir_primitive(c,T_UINT));
+        bits=k?ir_bits_op(c,"or",bits,ir_bits_immediate(c,"shl",value.text,k*8)):value.text;
+        k+=type->size;
+    }
+    return bits;
+}
+static ir_value ir_read_object(ir_context *c,node_t *n,const char *place) {
+    sem_info_t *i=ir_info(n);
+    if(!i->bit_width) return ir_load(c,i->type,place);
+    if(i->type->qualifiers&Q_VOLATILE) ir_error(c,n,"volatile bit-field access is unsupported");
+    ir_field_window w=ir_bit_window(i);
+    const char *bits=ir_read_window(c,place,w);
+    if(w.shift) bits=ir_bits_immediate(c,"lshr",bits,w.shift);
+    if(i->bit_width!=w.size*8) bits=ir_bits_immediate(c,"and",bits,ir_bit_mask(i->bit_width));
+    return (ir_value){i->type,bits};
+}
+static ir_value ir_write_object(ir_context *c,node_t *n,const sem_info_t *i,c_type_t *t,const char *place,ir_value value) {
+    value=ir_cast(c,value,t);
+    if(!i->bit_width) { ir_store(c,t,place,value); return value; }
+    if(t->qualifiers&Q_VOLATILE) ir_error(c,n,"volatile bit-field access is unsupported");
+    ir_field_window w=ir_bit_window(i);
+    uint32_t mask=ir_bit_mask(i->bit_width);
+    if(i->bit_width<32) value.text=ir_bits_immediate(c,"and",value.text,mask);
+    const char *bits=value.text;
+    if(w.shift) bits=ir_bits_immediate(c,"shl",bits,w.shift);
+    mask<<=w.shift;
+    if(mask!=ir_bit_mask(w.size*8))
+        bits=ir_bits_op(c,"or",ir_bits_immediate(c,"and",ir_read_window(c,place,w),~mask),bits);
+    for(unsigned k=0;k<w.size;) {
+        c_type_t *type=ir_field_chunk(c,w.first+k,w.size-k);
+        const char *part=ir_offset(c,place,ir_format(c,"%u",w.first+k));
+        const char *chunk=k?ir_bits_immediate(c,"lshr",bits,k*8):bits;
+        ir_store(c,type,part,(ir_value){ir_primitive(c,T_UINT),chunk});
+        k+=type->size;
+    }
+    return value;
+}
 static const char *ir_lvalue(ir_context *c,node_t *n) {
     sem_info_t *i=ir_info(n); node_t *a=n->first,*b=a==NULL?NULL:a->next;
     if(ir_kind(n,"identifier")) return ir_place_symbol(c,i->symbol);
@@ -260,6 +373,19 @@ static const char *ir_lvalue(ir_context *c,node_t *n) {
     }
     if(ir_kind(n,"string_literal")) return ir_symbol(c,i->symbol);
     ir_error(c,n,"unsupported addressable expression");
+}
+static ir_value ir_float_binary(ir_context *c,const char *op,ir_value left,ir_value right,c_type_t *result) {
+    static const char *const ops[]={"+","-","*","/","==","!=","<","<=",">",">="};
+    static const char *const lib[]={"add","sub","mul","div","cmpeq","cmpeq","cmplt","cmple","cmpgt","cmpge"};
+    for(unsigned k=0;k<sizeof(ops)/sizeof(*ops);++k) if(strcmp(op,ops[k])==0) {
+        const char *name=ir_format(c,"__aeabi_%c%s",left.type->size==4?'f':'d',lib[k]);
+        ir_value v=ir_float_call(c,name,k<4?left.type:ir_primitive(c,T_INT),left,&right);
+        if(k<4) return ir_cast(c,v,result);
+        const char *r=ir_reg(c);
+        ir_emit(c,"  %s = icmp %s i32 %s, 0\n",r,k==5?"eq":"ne",v.text);
+        return ir_cast(c,(ir_value){ir_primitive(c,T_BOOL),r},result);
+    }
+    ir_error(c,NULL,"unsupported base-PCS floating operation");
 }
 static ir_value ir_binary(ir_context *c,const char *op,ir_value left,ir_value right,c_type_t *result,c_type_t *operation) {
     if(left.type->kind==T_POINTER || right.type->kind==T_POINTER) {
@@ -290,6 +416,7 @@ static ir_value ir_binary(ir_context *c,const char *op,ir_value left,ir_value ri
     }
     c_type_t *type=operation==NULL?left.type:operation;
     left=ir_cast(c,left,type); right=ir_cast(c,right,type);
+    if(c->base_pcs_float && ir_float(type)) return ir_float_binary(c,op,left,right,result);
     const char *instruction=NULL,*pred=NULL;
     int floating=ir_float(type);
     if(strcmp(op,"+")==0) instruction=floating?"fadd":"add";
@@ -367,7 +494,22 @@ static void ir_signature(ir_context *c,c_type_t *fn,int names) {
 }
 static ir_value ir_builtin_call(ir_context *c,node_t *n,c_builtin_t builtin) {
     node_t *a=n->first->next;
+    if(builtin==BUILTIN_VA_START || builtin==BUILTIN_VA_END) {
+        int start=builtin==BUILTIN_VA_START;
+        if(start && c->inlining) ir_error(c,n,"va_start in forced-inline expansion is unsupported");
+        const char *place=ir_lvalue(c,a);
+        c->va_intrinsics|=start?1u:2u;
+        ir_emit(c,"  call void @llvm.va_%s(ptr %s)\n",start?"start":"end",place);
+        return (ir_value){ir_info(n)->type,""};
+    }
     ir_value x=ir_argument(c,a);
+    if(builtin==BUILTIN_EXPECT) return x;
+    if(builtin==BUILTIN_ALLOCA) {
+        if(c->inlining) ir_error(c,n,"__builtin_alloca inside forced-inline expansion is unsupported");
+        const char *place=ir_reg(c);
+        ir_emit(c,"  %s = alloca i8, i32 %s, align 8\n",place,x.text);
+        return (ir_value){ir_info(n)->type,place};
+    }
     if(builtin==BUILTIN_MUL_OVERFLOW) {
         ir_value y=ir_argument(c,a->next), out=ir_argument(c,a->next->next);
         c_type_t *wide=ir_primitive(c,T_LLONG), *i32=ir_primitive(c,T_INT);
@@ -501,6 +643,10 @@ static ir_value ir_raw_expression(ir_context *c,node_t *n) {
     if(i==NULL || i->type==NULL) ir_error(c,n,"expression lacks semantic type");
     if(i->constant && !i->lvalue && ir_integer(i->type))
         return (ir_value){i->type,ir_format(c,"%" PRIu64,i->value&ir_mask(i->type))};
+    if(i->float_literal) {
+        if(!c->base_pcs_float) ir_error(c,n,"floating literals require --float-lowering=base-pcs");
+        return (ir_value){i->type,ir_format(c,"%" PRIu64,i->value)};
+    }
     if(ir_kind(n,"nullptr_literal")) return (ir_value){i->type,"null"};
     if(ir_kind(n,"identifier")) return ir_load(c,i->type,ir_place_symbol(c,i->symbol));
     if(ir_kind(n,"string_literal")) return (ir_value){ir_pointer(c,i->type->base),ir_symbol(c,i->symbol)};
@@ -516,7 +662,7 @@ static ir_value ir_raw_expression(ir_context *c,node_t *n) {
         return result;
     }
     if(ir_kind(n,"cast")) return ir_cast(c,ir_expression(c,b),i->type);
-    if(ir_kind(n,"member") || ir_kind(n,"subscript") || ir_kind(n,"compound_literal")) return ir_load(c,i->type,ir_lvalue(c,n));
+    if(ir_kind(n,"member") || ir_kind(n,"subscript") || ir_kind(n,"compound_literal")) return ir_read_object(c,n,ir_lvalue(c,n));
     if(ir_kind(n,"call")) return ir_call(c,n);
     if(ir_kind(n,"conditional")) return ir_conditional(c,n);
     if(ir_kind(n,"binary") || ir_kind(n,"assignment")) {
@@ -527,10 +673,10 @@ static ir_value ir_raw_expression(ir_context *c,node_t *n) {
             ir_value right=ir_expression(c,b);
             if(strcmp(n->text,"=")!=0) {
                 char op[4]; size_t length=strlen(n->text)-1; memcpy(op,n->text,length); op[length]=0;
-                ir_value left=ir_load(c,type,place);
+                ir_value left=ir_read_object(c,a,place);
                 right=ir_binary(c,op,left,right,type,i->operation_type);
             }
-            right=ir_cast(c,right,type); ir_store(c,type,place,right); return right;
+            return ir_write_object(c,a,ir_info(a),type,place,right);
         }
         ir_value left=ir_expression(c,a),right=ir_expression(c,b);
         return ir_binary(c,n->text,left,right,i->type,i->operation_type);
@@ -540,9 +686,10 @@ static ir_value ir_raw_expression(ir_context *c,node_t *n) {
         if(strcmp(op,"&")==0) return (ir_value){i->type,ir_lvalue(c,a)};
         if(strcmp(op,"*")==0) return ir_load(c,i->type,ir_lvalue(c,n));
         if(strcmp(op,"++")==0 || strcmp(op,"--")==0) {
-            const char *place=ir_lvalue(c,a); ir_value old=ir_load(c,ir_info(a)->type,place);
+            const char *place=ir_lvalue(c,a); ir_value old=ir_read_object(c,a,place);
             ir_value next=ir_binary(c,strcmp(op,"++")==0?"+":"-",old,(ir_value){ir_primitive(c,T_INT),"1"},i->type,ir_promote(c,i->type));
-            ir_store(c,ir_info(a)->type,place,next); return ir_kind(n,"postfix")?old:next;
+            next=ir_write_object(c,a,ir_info(a),ir_info(a)->type,place,next);
+            return ir_kind(n,"postfix")?old:next;
         }
         if(strcmp(op,"!")==0) {
             const char *truth=ir_condition(c,a),*r=ir_reg(c); ir_emit(c,"  %s = xor i1 %s, true\n",r,truth);
@@ -552,7 +699,10 @@ static ir_value ir_raw_expression(ir_context *c,node_t *n) {
         value=ir_cast(c,value,i->type);
         if(strcmp(op,"+")==0) return value;
         const char *r=ir_reg(c);
-        if(strcmp(op,"-")==0 && ir_float(i->type)) ir_emit(c,"  %s = fneg %s %s\n",r,ir_type(c,i->type),value.text);
+        if(strcmp(op,"-")==0 && ir_float(i->type) && c->base_pcs_float)
+            ir_emit(c,"  %s = xor %s %s, %" PRIu64 "\n",r,ir_type(c,i->type),value.text,
+                UINT64_C(1)<<(ir_bits(i->type)-1));
+        else if(strcmp(op,"-")==0 && ir_float(i->type)) ir_emit(c,"  %s = fneg %s %s\n",r,ir_type(c,i->type),value.text);
         else if(strcmp(op,"-")==0) ir_emit(c,"  %s = sub %s 0, %s\n",r,ir_type(c,i->type),value.text);
         else ir_emit(c,"  %s = xor %s %s, -1\n",r,ir_type(c,i->type),value.text);
         return (ir_value){i->type,r};
@@ -574,6 +724,10 @@ static ir_value ir_expression(ir_context *c,node_t *n) {
 static node_t *ir_initializer_value(node_t *item) {
     node_t *n=item->first;
     while(ir_kind(n,"field_designator") || ir_kind(n,"index_designator")) n=n->next;
+    return n;
+}
+static node_t *ir_scalar_initializer(node_t *n) {
+    while(ir_kind(n,"initializer_list")) n=n->first?ir_initializer_value(n->first):NULL;
     return n;
 }
 static void ir_initializer_contract(ir_context *c,c_type_t *t,node_t *n) {
@@ -603,7 +757,11 @@ static void ir_initialize(ir_context *c,c_type_t *t,const char *place,node_t *n)
             if(t->qualifiers&Q_VOLATILE) {
                 type=ir_allocate(c,sizeof(*type)); *type=*i->type; type->qualifiers|=Q_VOLATILE;
             }
-            ir_initialize(c,type,target,ir_initializer_value(item));
+            node_t *value=ir_initializer_value(item);
+            if(i->bit_width) {
+                value=ir_scalar_initializer(value);
+                (void)ir_write_object(c,item,i,type,target,value?ir_expression(c,value):(ir_value){type,"0"});
+            } else ir_initialize(c,type,target,value);
         }
     } else if(t->kind==T_ARRAY && ir_kind(n,"string_literal")) {
         symbol_t *s=ir_info(n)->symbol; uint32_t size=(uint32_t)s->byte_count;
@@ -619,6 +777,27 @@ static const char *ir_constant_pointer(ir_context *c,sem_info_t *i) {
     if(i->addend) value=ir_format(c,"getelementptr (i8, ptr %s, i32 %" PRIu32 ")",value,(uint32_t)i->addend);
     return value;
 }
+static uint64_t ir_integer_initializer(c_type_t *type,const sem_info_t *i) {
+    uint64_t value=i->value;
+    if(!i->type->is_unsigned && ir_integer(i->type) && i->type->size<8) {
+        unsigned bits=ir_bits(i->type); uint64_t sign=UINT64_C(1)<<(bits-1),mask=ir_mask(i->type);
+        if(value&sign) value|=~mask;
+    }
+    return type->kind==T_BOOL?value!=0:value&ir_mask(type);
+}
+static void ir_global_bit_field(ir_context *c,const sem_info_t *i,node_t *n,
+                                uint32_t offset,unsigned char *bytes,uint32_t total) {
+    ir_field_window w=ir_bit_window(i);
+    if(offset>total || w.first+w.size>total-offset) ir_error(c,n,"bit-field initializer exceeds object");
+    n=ir_scalar_initializer(n);
+    uint32_t mask=ir_bit_mask(i->bit_width);
+    uint32_t bits=n?(uint32_t)ir_integer_initializer(i->type,ir_info(n))&mask:0;
+    mask<<=w.shift; bits<<=w.shift;
+    for(unsigned k=0;k<w.size;++k) {
+        unsigned char *byte=&bytes[offset+w.first+k];
+        *byte=(unsigned char)((*byte&~(mask>>(k*8))) | (bits>>(k*8)));
+    }
+}
 static void ir_global_value(ir_context *c,c_type_t *t,node_t *n,uint32_t offset,
                             unsigned char *bytes,ir_reloc **relocations,uint32_t total) {
     if(t->size>total || offset>total-t->size) ir_error(c,n,"global initializer exceeds object");
@@ -628,7 +807,9 @@ static void ir_global_value(ir_context *c,c_type_t *t,node_t *n,uint32_t offset,
         if(offset<r->offset+r->size && r->offset<offset+t->size) r->size=0;
     if(ir_kind(n,"initializer_list")) {
         for(node_t *item=n->first;item;item=item->next) {
-            sem_info_t *i=ir_info(item); ir_global_value(c,i->type,ir_initializer_value(item),offset+i->field_offset,bytes,relocations,total);
+            sem_info_t *i=ir_info(item); node_t *value=ir_initializer_value(item);
+            if(i->bit_width) ir_global_bit_field(c,i,value,offset+i->field_offset,bytes,total);
+            else ir_global_value(c,i->type,value,offset+i->field_offset,bytes,relocations,total);
         }
         return;
     }
@@ -646,11 +827,7 @@ static void ir_global_value(ir_context *c,c_type_t *t,node_t *n,uint32_t offset,
     }
     uint64_t value=i->value;
     if(ir_integer(t)) {
-        if(!i->type->is_unsigned && ir_integer(i->type) && i->type->size<8) {
-            unsigned bits=ir_bits(i->type); uint64_t sign=UINT64_C(1)<<(bits-1),mask=ir_mask(i->type);
-            if(value&sign) value|=~mask;
-        }
-        value=t->kind==T_BOOL?value!=0:value&ir_mask(t);
+        value=ir_integer_initializer(t,i);
     } else if(ir_float(t)) {
         double number;
         if(i->type->is_unsigned) number=(double)i->value;
@@ -668,6 +845,13 @@ static int ir_reloc_order(const void *a,const void *b) {
     const ir_reloc *x=*(const ir_reloc *const *)a,*y=*(const ir_reloc *const *)b;
     return (x->offset>y->offset)-(x->offset<y->offset);
 }
+static size_t ir_reloc_run(ir_reloc **ordered,size_t at,size_t count,int group) {
+    size_t end=at+1;
+    if(group && !strcmp(ordered[at]->type,"ptr"))
+        while(end<count && !strcmp(ordered[end]->type,"ptr") &&
+              ordered[end]->offset==ordered[end-1]->offset+ordered[end-1]->size) ++end;
+    return end;
+}
 static void ir_byte_constant(ir_context *c,const unsigned char *bytes,uint32_t size) {
     ir_emit(c,"[%" PRIu32 " x i8] c",size); ir_string(c,bytes,size);
 }
@@ -675,10 +859,11 @@ static void ir_global(ir_context *c,symbol_t *s) {
     c_type_t *t=s->type; int defined=s->defined || s->tentative || (s->linkage==0 && s->static_storage) || s->kind==S_STRING;
     ir_emit(c,"%s = ",ir_symbol(c,s));
     if(!defined) { ir_emit(c,"external global %s, align %u\n",ir_storage_type(c,t),s->alignment); return; }
-    if(t->size>PARSE_MAX_BYTES) ir_error(c,NULL,"global object exceeds C05 size bound");
-    unsigned char *bytes=ir_allocate(c,(size_t)t->size+1); ir_reloc *relocations=NULL;
+    uint32_t size=s->storage_size?s->storage_size:t->size;
+    if(size>PARSE_MAX_BYTES) ir_error(c,NULL,"global object exceeds C05 size bound");
+    unsigned char *bytes=ir_allocate(c,(size_t)size+1); ir_reloc *relocations=NULL;
     if(s->kind==S_STRING) memcpy(bytes,s->bytes,s->byte_count);
-    else ir_global_value(c,t,c->initializers[s->id],0,bytes,&relocations,t->size);
+    else ir_global_value(c,t,c->initializers[s->id],0,bytes,&relocations,size);
     size_t count=0; for(ir_reloc *r=relocations;r;r=r->next) if(r->size) ++count;
     ir_reloc **ordered=ir_allocate(c,(count+1)*sizeof(*ordered)); size_t at=0;
     for(ir_reloc *r=relocations;r;r=r->next) if(r->size) ordered[at++]=r;
@@ -687,27 +872,37 @@ static void ir_global(ir_context *c,symbol_t *s) {
     ir_text(c,(ir_object_qualifiers(t)&Q_CONST) || s->kind==S_STRING?"constant ":"global ");
     if(count==0) {
         uint32_t nonzero=0;
-        while(nonzero<t->size && bytes[nonzero]==0) ++nonzero;
-        if(nonzero==t->size) ir_emit(c,"[%" PRIu32 " x i8] zeroinitializer",t->size);
-        else ir_byte_constant(c,bytes,t->size);
+        while(nonzero<size && bytes[nonzero]==0) ++nonzero;
+        if(nonzero==size) ir_emit(c,"[%" PRIu32 " x i8] zeroinitializer",size);
+        else ir_byte_constant(c,bytes,size);
     }
     else {
         ir_text(c,"<{ "); uint32_t position=0;
-        for(size_t k=0;k<count;++k) {
+        for(size_t k=0;k<count;) {
             ir_reloc *r=ordered[k]; if(r->offset<position) ir_error(c,NULL,"overlapping static relocations");
             if(r->offset>position) ir_emit(c,"[%" PRIu32 " x i8], ",r->offset-position);
-            ir_text(c,r->type); if(k+1<count || r->offset+r->size<t->size) ir_text(c,", ");
-            position=r->offset+r->size;
+            size_t end=ir_reloc_run(ordered,k,count,s->storage_size!=0);
+            if(end>k+1) ir_emit(c,"[%zu x ptr]",end-k); else ir_text(c,r->type);
+            position=ordered[end-1]->offset+ordered[end-1]->size;
+            if(end<count || position<size) ir_text(c,", ");
+            k=end;
         }
-        if(position<t->size) ir_emit(c,"[%" PRIu32 " x i8]",t->size-position);
+        if(position<size) ir_emit(c,"[%" PRIu32 " x i8]",size-position);
         ir_text(c," }> <{ "); position=0;
-        for(size_t k=0;k<count;++k) {
+        for(size_t k=0;k<count;) {
             ir_reloc *r=ordered[k];
             if(r->offset>position) { ir_byte_constant(c,bytes+position,r->offset-position); ir_text(c,", "); }
-            ir_emit(c,"%s %s",r->type,r->value);
-            if(k+1<count || r->offset+r->size<t->size) ir_text(c,", "); position=r->offset+r->size;
+            size_t end=ir_reloc_run(ordered,k,count,s->storage_size!=0);
+            if(end>k+1) {
+                ir_emit(c,"[%zu x ptr] [",end-k);
+                for(size_t j=k;j<end;++j) ir_emit(c,"%sptr %s",j==k?"":", ",ordered[j]->value);
+                ir_text(c,"]");
+            } else ir_emit(c,"%s %s",r->type,r->value);
+            position=ordered[end-1]->offset+ordered[end-1]->size;
+            if(end<count || position<size) ir_text(c,", ");
+            k=end;
         }
-        if(position<t->size) ir_byte_constant(c,bytes+position,t->size-position);
+        if(position<size) ir_byte_constant(c,bytes+position,size-position);
         ir_text(c," }>");
     }
     if(s->section_name) { ir_text(c,", section "); ir_string(c,(const unsigned char *)s->section_name,strlen(s->section_name)); }
@@ -727,6 +922,7 @@ static void ir_collect(ir_context *c,node_t *n) {
     if(ir_kind(n,"identifier") && ir_info(n)) ir_mark_reference(c,ir_info(n)->symbol);
     if(ir_kind(n,"init_declarator") && ir_info(n) && ir_info(n)->symbol) {
         symbol_t *s=ir_info(n)->symbol;
+        if(s->label_targets) return;
         for(node_t *child=n->first->next;child;child=child->next)
             if(!ir_kind(child,"attributes") && !ir_kind(child,"assembly")) {
                 ir_initializer_contract(c,s->type,child); c->initializers[s->id]=child;
@@ -744,6 +940,32 @@ static ir_label *ir_find_label(ir_context *c,node_t *n) {
     for(ir_label *label=c->labels;label;label=label->next) if(strcmp(label->name,n->text)==0) return label;
     ir_label *label=ir_allocate(c,sizeof(*label)); label->name=n->text; label->node=n;
     label->block=ir_new_block(c); label->next=c->labels; c->labels=label; return label;
+}
+static void ir_computed_goto(ir_context *c,node_t *n) {
+    sem_info_t *i=ir_info(n);
+    if(c->inlining) ir_error(c,n,"computed goto inside forced-inline expansion is unsupported");
+    ir_dispatch *d=c->dispatches;
+    while(d && d->table!=i->symbol) d=d->next;
+    if(!d) {
+        d=ir_allocate(c,sizeof(*d));
+        *d=(ir_dispatch){i->symbol,ir_temp(c,ir_primitive(c,T_UINT),0),ir_new_block(c),c->dispatches};
+        c->dispatches=d;
+    }
+    ir_live(c);
+    ir_store(c,ir_primitive(c,T_UINT),d->index,ir_expression(c,i->selected));
+    ir_branch(c,d->block);
+}
+static void ir_emit_dispatches(ir_context *c) {
+    for(ir_dispatch *d=c->dispatches;d;d=d->next) {
+        ir_block(c,d->block);
+        ir_value index=ir_load(c,ir_primitive(c,T_UINT),d->index);
+        unsigned invalid=ir_new_block(c);
+        ir_emit(c,"  switch i32 %s, label %%b%u [\n",index.text,invalid);
+        for(unsigned k=0;k<d->table->type->length;++k)
+            ir_emit(c,"    i32 %u, label %%b%u\n",k,ir_find_label(c,d->table->label_targets[k])->block);
+        ir_text(c,"  ]\n");
+        ir_block(c,invalid); ir_text(c,"  unreachable\n"); c->terminated=1;
+    }
 }
 static void ir_cases(ir_context *c,ir_switch *sw,node_t *n) {
     if(ir_kind(n,"switch")) return;
@@ -877,6 +1099,7 @@ static void ir_statement(ir_context *c,node_t *n) {
     } else if(ir_kind(n,"break") || ir_kind(n,"continue")) {
         ir_live(c); ir_branch(c,ir_kind(n,"break")?c->break_block:c->continue_block);
     } else if(ir_kind(n,"goto")) { ir_live(c); ir_branch(c,ir_find_label(c,n)->block); }
+    else if(ir_kind(n,"computed_goto")) ir_computed_goto(c,n);
     else if(ir_kind(n,"label")) { ir_label *label=ir_find_label(c,n); ir_branch(c,label->block); ir_block(c,label->block); ir_statement(c,a); }
     else if(ir_kind(n,"switch")) {
         ir_live(c); ir_switch sw={.parent=c->switches,.end=ir_new_block(c)}; ir_cases(c,&sw,b);
@@ -898,14 +1121,72 @@ static void ir_statement(ir_context *c,node_t *n) {
     } else ir_error(c,n,"unsupported IR statement");
     --c->depth;
 }
+static node_t *ir_unparen(node_t *n) {
+    while(ir_kind(n,"parenthesized_expression")) n=n->first;
+    return n;
+}
+static symbol_t *ir_direct_symbol(node_t *n,const char *kind) {
+    n=ir_unparen(n);
+    return ir_kind(n,kind)?ir_info(n)->symbol:NULL;
+}
+static node_t *ir_single_return(node_t *n) {
+    if(ir_kind(n,"block") && n->first==n->last) n=n->first;
+    return ir_kind(n,"return")?n->first:NULL;
+}
+static int ir_char_pointer(c_type_t *t) {
+    return t->kind==T_POINTER && t->base->kind==T_CHAR && t->base->qualifiers==Q_CONST;
+}
+static symbol_t *ir_literal_lookup(node_t *body,symbol_t *parameter,symbol_t *input) {
+    node_t *chain=body->first;
+    if(!ir_kind(chain,"if_chain")) return NULL;
+    symbol_t *selected=NULL;
+    node_t *fallback=chain->next;
+    for(node_t *arm=chain->first;arm;arm=arm->next) {
+        if(ir_kind(arm,"else_arm")) { if(fallback) return NULL; fallback=arm->first; break; }
+        node_t *condition=ir_unparen(arm->first);
+        if(!ir_kind(condition,"binary") || strcmp(condition->text,"==")) return NULL;
+        node_t *call=ir_unparen(condition->first),*zero=ir_unparen(condition->first->next);
+        if(!ir_kind(call,"call") || !ir_info(zero)->ice || !ir_info(zero)->constant || ir_info(zero)->value)
+            return NULL;
+        node_t *callee=call->first,*lhs=callee->next,*rhs=lhs?lhs->next:NULL;
+        symbol_t *strcmp_symbol=ir_direct_symbol(callee,"identifier");
+        if(!strcmp_symbol || strcmp(strcmp_symbol->name,"strcmp") || strcmp_symbol->asm_name ||
+           strcmp_symbol->kind!=S_FUNCTION || strcmp_symbol->linkage!=2 || strcmp_symbol->definition ||
+           !strcmp_symbol->type->prototype || strcmp_symbol->type->parameter_count!=2 ||
+           strcmp_symbol->type->variadic || strcmp_symbol->type->base->kind!=T_INT ||
+           !ir_char_pointer(strcmp_symbol->type->parameters[0]) ||
+           !ir_char_pointer(strcmp_symbol->type->parameters[1]) ||
+           !rhs || rhs->next || ir_direct_symbol(lhs,"identifier")!=parameter)
+            return NULL;
+        symbol_t *key=ir_direct_symbol(rhs,"string_literal");
+        symbol_t *result=ir_direct_symbol(ir_single_return(arm->first->next),"string_literal");
+        if(!key || !result) return NULL;
+        if(!selected && strcmp((const char *)input->bytes,(const char *)key->bytes)==0) selected=result;
+    }
+    if(!fallback || (fallback==chain->next && fallback->next) ||
+       ir_direct_symbol(ir_single_return(fallback),"identifier")!=parameter)
+        return NULL;
+    return selected?selected:input;
+}
 static ir_value ir_inline_call(ir_context *c,node_t *n,symbol_t *s) {
     if(!s->definition) ir_error(c,n,"always_inline function has no definition");
     if(c->function==s) ir_error(c,n,"recursive always_inline call");
     for(ir_inline *p=c->inlining;p;p=p->parent)
         if(p->function==s) ir_error(c,n,"recursive always_inline call");
-    if(++c->inline_expansions>256) ir_error(c,n,"always_inline expansion limit exceeded");
     c_type_t *fn=s->type,*result=fn->base;
     if(ir_record(result) || s->noreturn) ir_error(c,n,"unsupported always_inline return type or attribute");
+    node_t *d=ir_function_declarator(s->definition->first->next->first);
+    node_t *argument=n->first->next;
+    if(c->libc_strcmp && fn->parameter_count==1 && argument && !argument->next &&
+       ir_char_pointer(result) && ir_char_pointer(fn->parameters[0])) {
+        symbol_t *input=ir_direct_symbol(argument,"string_literal");
+        sem_info_t *parameter=ir_info(d->first->next->first);
+        if(input && parameter && parameter->symbol && !(parameter->symbol->type->qualifiers&Q_VOLATILE)) {
+            symbol_t *selected=ir_literal_lookup(s->definition->last,parameter->symbol,input);
+            if(selected) return (ir_value){result,ir_symbol(c,selected)};
+        }
+    }
+    if(++c->inline_expansions>256) ir_error(c,n,"always_inline expansion limit exceeded");
     ir_value *args=ir_allocate(c,(fn->parameter_count+1)*sizeof(*args));
     size_t count=0;
     for(node_t *a=n->first->next;a;a=a->next) {
@@ -918,7 +1199,6 @@ static ir_value ir_inline_call(ir_context *c,node_t *n,symbol_t *s) {
     ir_inline expansion={.function=s,.end=ir_new_block(c),.result=place,.parent=c->inlining};
     ir_label *labels=c->labels; c->labels=NULL;
     c->inlining=&expansion;
-    node_t *d=ir_function_declarator(s->definition->first->next->first);
     size_t k=0;
     for(node_t *a=d->first->next->first;a;a=a->next) {
         sem_info_t *i=ir_info(a);
@@ -933,11 +1213,12 @@ static void ir_function_header(ir_context *c,symbol_t *s,int defined) {
     ir_emit(c,"%s %s%s%s %s(",defined?"define":"declare",defined?(s->linkage==1?"internal ":"dso_local "):"",
         ir_record(fn->base)?"":ir_extension(fn->base),ir_return_type(c,fn),ir_symbol(c,s));
     ir_signature(c,fn,defined); ir_emit(c,") #%u",s->noreturn?1:0);
+    if(s->noinline) ir_text(c," noinline");
     if(s->section_name) { ir_text(c," section "); ir_string(c,(const unsigned char *)s->section_name,strlen(s->section_name)); }
 }
 static void ir_definition(ir_context *c,symbol_t *s,node_t *n) {
     c->function=s; c->reg=c->temp=c->label=c->depth=c->inline_expansions=0; c->labels=NULL; c->switches=NULL;
-    c->body=(ir_buffer){0}; c->entry=(ir_buffer){0}; c->break_block=c->continue_block=0;
+    c->body=(ir_buffer){0}; c->entry=(ir_buffer){0}; c->break_block=c->continue_block=0; c->dispatches=NULL;
     memset(c->allocated,0,badge_sema_symbol_count(c->sema)+1);
     c->buffer=&c->body; ir_block(c,0);
     node_t *fn=ir_function_declarator(n->first->next->first); size_t k=0;
@@ -962,13 +1243,17 @@ static void ir_definition(ir_context *c,symbol_t *s,node_t *n) {
         else if(s->type->base->kind==T_VOID || (ir_record(s->type->base) && s->type->base->size>4)) ir_text(c,"  ret void\n");
         else ir_emit(c,"  ret %s undef\n",ir_return_type(c,s->type));
     }
+    ir_emit_dispatches(c);
     c->buffer=NULL; ir_function_header(c,s,1); ir_text(c," {\nentry:\n");
     ir_bytes(c,c->entry.data,c->entry.size); ir_text(c,"  br label %b0\n"); ir_bytes(c,c->body.data,c->body.size); ir_text(c,"}\n");
     c->function=NULL;
 }
-static void ir_process_mode(parser_t *p,node_t *root,int ssa_expressions) {
+enum { IR_SSA=1,IR_BASE_PCS_FLOAT=2,IR_LIBC_STRCMP=4 };
+static void ir_process_mode(parser_t *p,node_t *root,int mode) {
     ir_context *c=parse_allocate(p,sizeof(*c)); c->p=p; c->sema=badge_sema_analyze(p,root);
-    c->ssa_expressions=ssa_expressions;
+    c->ssa_expressions=(mode&IR_SSA)!=0;
+    c->base_pcs_float=(mode&IR_BASE_PCS_FLOAT)!=0;
+    c->libc_strcmp=(mode&IR_LIBC_STRCMP)!=0;
     unsigned symbols=badge_sema_symbol_count(c->sema);
     c->initializers=ir_allocate(c,((size_t)symbols+1)*sizeof(*c->initializers));
     c->inline_queue=ir_allocate(c,((size_t)symbols+1)*sizeof(*c->inline_queue));
@@ -984,7 +1269,8 @@ static void ir_process_mode(parser_t *p,node_t *root,int ssa_expressions) {
     ir_text(c,"\ntarget datalayout = " BADGE_IR_LAYOUT "\n"
         "target triple = " BADGE_IR_TRIPLE "\n");
     for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next)
-        if((s->kind==S_STRING || (s->kind==S_OBJECT && s->static_storage && (s->defined || c->referenced[s->id]))) &&
+        if(!s->label_targets &&
+            (s->kind==S_STRING || (s->kind==S_OBJECT && s->static_storage && (s->defined || c->referenced[s->id]))) &&
             (!s->owner || s->linkage || !s->owner->is_inline || c->referenced[s->owner->id])) ir_global(c,s);
     for(node_t *n=root->first;n;n=n->next) if(ir_kind(n,"assembly")) ir_assembly(c,n);
     for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next) if(s->kind==S_FUNCTION) {
@@ -1002,27 +1288,42 @@ static void ir_process_mode(parser_t *p,node_t *root,int ssa_expressions) {
         ir_text(c,"], section \"llvm.metadata\"\n");
     }
     if(c->uses_ctlz) ir_text(c,"declare i32 @llvm.ctlz.i32(i32, i1 immarg)\n");
+    if(c->va_intrinsics&1) ir_text(c,"declare void @llvm.va_start(ptr)\n");
+    if(c->va_intrinsics&2) ir_text(c,"declare void @llvm.va_end(ptr)\n");
+    for(ir_float_helper *h=c->float_helpers;h;h=h->next) {
+        for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next)
+            if(s->linkage && strcmp(s->asm_name?s->asm_name:s->name,h->name)==0)
+                ir_error(c,s->definition,"declaration collides with reserved base-PCS float helper");
+        ir_emit(c,"declare %s @%s(%s",ir_type(c,h->result),h->name,ir_type(c,h->left));
+        if(h->right) ir_emit(c,", %s",ir_type(c,h->right));
+        ir_text(c,")\n");
+    }
     ir_text(c,"declare void @llvm.memcpy.inline.p0.p0.i32(ptr, ptr, i32 immarg, i1 immarg)\n"
         "declare void @llvm.memset.inline.p0.i32(ptr, i8, i32 immarg, i1 immarg)\n"
         "attributes #0 = { nounwind minsize optsize \"no-builtins\" \"target-cpu\"=\"cortex-m33\" \"use-soft-float\"=\"true\" }\n"
         "attributes #1 = { noreturn nounwind minsize optsize \"no-builtins\" \"target-cpu\"=\"cortex-m33\" \"use-soft-float\"=\"true\" }\n");
 }
-static void ir_process(parser_t *p,node_t *root) { ir_process_mode(p,root,0); }
-static void ir_process_ssa(parser_t *p,node_t *root) { ir_process_mode(p,root,1); }
+static int ir_cli_mode;
+static void ir_process_cli(parser_t *p,node_t *root) { ir_process_mode(p,root,ir_cli_mode); }
 int main(int argc,char **argv) {
-    const char *usage="usage: badge-ir [--expression-lowering=legacy|ssa] input.i -o output.ll";
+    const char *usage="usage: badge-ir [--expression-lowering=legacy|ssa] [--float-lowering=base-pcs] [--libc-strcmp] input.i -o output.ll";
     if(argc==2 && strcmp(argv[1],"--help")==0) { puts(usage); return 0; }
     if(argc==2 && strcmp(argv[1],"--default-expression-lowering")==0) { puts("ssa"); return 0; }
-    int ssa=1;
-    if(argc>1 && !strncmp(argv[1],"--expression-lowering=",22)) {
-        if(strcmp(argv[1]+22,"legacy") && strcmp(argv[1]+22,"ssa")) {
-            fputs("badge-ir: unsupported expression lowering\n",stderr); return 2;
-        }
-        ssa=!strcmp(argv[1]+22,"ssa");
+    int seen_expression=0; ir_cli_mode=IR_SSA;
+    while(argc>1 && argv[1][0]=='-') {
+        if(!seen_expression && !strncmp(argv[1],"--expression-lowering=",22) &&
+            (!strcmp(argv[1]+22,"legacy") || !strcmp(argv[1]+22,"ssa"))) {
+            if(!strcmp(argv[1]+22,"legacy")) ir_cli_mode&=~IR_SSA;
+            seen_expression=1;
+        } else if(!(ir_cli_mode&IR_BASE_PCS_FLOAT) && !strcmp(argv[1],"--float-lowering=base-pcs"))
+            ir_cli_mode|=IR_BASE_PCS_FLOAT;
+        else if(!(ir_cli_mode&IR_LIBC_STRCMP) && !strcmp(argv[1],"--libc-strcmp"))
+            ir_cli_mode|=IR_LIBC_STRCMP;
+        else break;
         argc--; argv++;
     }
     if(argc!=4 || strcmp(argv[2],"-o")!=0 || argv[1][0]=='-' || argv[3][0]=='\0') {
         fprintf(stderr,"%s\n",usage); return 2;
     }
-    return frontend_run(argc,argv,"badge-ir",ssa?ir_process_ssa:ir_process);
+    return frontend_run(argc,argv,"badge-ir",ir_process_cli);
 }
