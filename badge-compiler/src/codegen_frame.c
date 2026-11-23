@@ -65,7 +65,7 @@ static void function_header(cg_context *c, cg_function *f) {
   if (!f->internal) cg_emit(c, ".global %s\n", f->name);
   cg_emit(c, ".type %s, %%function\n.thumb_func\n%s:\n", f->name, f->name);
 }
-static void register_list(cg_context *c, unsigned mask, int pop) {
+void cg_saved_register_list(cg_context *c, unsigned mask, int pop) {
   cg_emit(c, "%s%s {", pop ? "pop" : "push", mask & 0x1f00u ? ".w" : ".n");
   int first = 1;
   for (unsigned r = 0; r < 15; r++)
@@ -115,7 +115,7 @@ static void summarize_registers(cg_context *c, cg_function *f, size_t start) {
     "eor", "eors", "bic", "bics", "orn", "orns",
     "lsl", "lsls", "lsr", "lsrs", "asr", "asrs", "ror", "rors",
     "mul", "muls", "mla", "mls", "sdiv", "udiv", "cmp", "cmn",
-    "tst", "teq", "clz", "uxtb", "uxth", "sxtb", "sxth",
+    "tst", "teq", "clz", "uxtb", "uxth", "sxtb", "sxth", "bfi", "sbfx", "smuad",
     "rev", "rev16", "revsh", "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrd",
     "str", "strb", "strh", "strd", "ldm", "stm", "push", "pop", "nop", "it",
     "cbz", "cbnz"
@@ -465,6 +465,106 @@ static int emit_abs_leaf(cg_context *c) {
   return 1;
 }
 
+static uint32_t clamp_literal(const char *text, int *valid) {
+  char *end;
+  int64_t value = strtoll(text, &end, 10);
+  *valid = end != text && !*end && value >= INT32_MIN && value <= UINT32_MAX;
+  return (uint32_t)value;
+}
+
+static cg_block *clamp_follow(cg_context *c, cg_block *block) {
+  for (unsigned depth = 0; block && depth < GUARD_BLOCKS; depth++) {
+    cg_inst *i = block->first;
+    if (!i || i->next || i->result || i->end - i->begin != 3 ||
+        strcmp(guard_token(c, i, 0), "br") || strcmp(guard_token(c, i, 1), "label"))
+      return block;
+    block = guard_block(c, guard_token(c, i, 2));
+  }
+  return NULL;
+}
+
+static const char *clamp_return(cg_context *c, const cg_inst *branch, unsigned edge) {
+  cg_block *block = clamp_follow(c, guard_block(c, guard_token(c, branch, edge)));
+  cg_inst *i = block ? block->first : NULL;
+  return i && !i->next && !i->result && i->end - i->begin == 3 &&
+         !strcmp(guard_token(c, i, 0), "ret") && !strcmp(guard_token(c, i, 1), "i32")
+             ? guard_token(c, i, 2) : NULL;
+}
+
+static const cg_inst *clamp_test(cg_context *c, cg_inst *cmp, const char *pred,
+                                 const char *value, uint32_t *bound) {
+  int valid;
+  if (!cmp || !cmp->result || cmp->end - cmp->begin != 8 ||
+      strcmp(guard_token(c, cmp, 2), "icmp") ||
+      strcmp(guard_token(c, cmp, 3), pred) || strcmp(guard_token(c, cmp, 4), "i32") ||
+      strcmp(guard_token(c, cmp, 5), value) || strcmp(guard_token(c, cmp, 6), ","))
+    return NULL;
+  *bound = clamp_literal(guard_token(c, cmp, 7), &valid);
+  const cg_inst *branch = cmp->next;
+  return valid && branch && !branch->result && !branch->next &&
+         branch->end - branch->begin == 9 && !strcmp(guard_token(c, branch, 0), "br") &&
+         !strcmp(guard_token(c, branch, 1), "i1") &&
+         !strcmp(guard_token(c, branch, 2), cmp->result->name) ? branch : NULL;
+}
+
+static int emit_clamp_leaf(cg_context *c) {
+  cg_function *f = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS || f->section ||
+      f->argc != 1 || f->byval[0] || f->args[0]->type->bits != 32 || f->ret->bits != 32)
+    return 0;
+  cg_block *block = clamp_follow(c, f->blocks);
+  cg_inst *cmp = block ? block->first : NULL;
+  const char *value = f->args[0]->name;
+  unsigned offset = 0;
+  if (cmp && cmp->result && cmp->end - cmp->begin == 7 &&
+      !strcmp(guard_token(c, cmp, 2), "lshr")) {
+    cg_inst *trunc = cmp->next, *ext = trunc ? trunc->next : NULL;
+    if (!trunc || !trunc->result || trunc->end - trunc->begin != 7 ||
+        !ext || !ext->result || ext->end - ext->begin != 7 ||
+        strcmp(guard_token(c, cmp, 3), "i32") || strcmp(guard_token(c, cmp, 4), value) ||
+        strcmp(guard_token(c, trunc, 2), "trunc") || strcmp(guard_token(c, trunc, 3), "i32") ||
+        strcmp(guard_token(c, trunc, 4), cmp->result->name) ||
+        strcmp(guard_token(c, trunc, 5), "to") || strcmp(guard_token(c, trunc, 6), "i16") ||
+        strcmp(guard_token(c, ext, 2), "sext") || strcmp(guard_token(c, ext, 3), "i16") ||
+        strcmp(guard_token(c, ext, 4), trunc->result->name) ||
+        strcmp(guard_token(c, ext, 5), "to") || strcmp(guard_token(c, ext, 6), "i32"))
+      return 0;
+    int valid;
+    offset = clamp_literal(guard_token(c, cmp, 6), &valid);
+    if (!valid || !offset || offset > 16)
+      return 0;
+    value = ext->result->name;
+    cmp = ext->next;
+  }
+  uint32_t high, low;
+  const cg_inst *upper = clamp_test(c, cmp, "sgt", value, &high);
+  if (!upper || !high || high > 127 || (high & (high + 1)))
+    return 0;
+  cg_block *lower_block = clamp_follow(c, guard_block(c, guard_token(c, upper, 8)));
+  const cg_inst *lower = clamp_test(c, lower_block ? lower_block->first : NULL, "slt", value, &low);
+  if (!lower || low != ~high)
+    return 0;
+  const char *above = clamp_return(c, upper, 5), *below = clamp_return(c, lower, 5),
+             *in_range = clamp_return(c, lower, 8);
+  int valid_high, valid_low;
+  if (!above || !below || !in_range || strcmp(in_range, value) ||
+      clamp_literal(above, &valid_high) != high || !valid_high ||
+      clamp_literal(below, &valid_low) != low || !valid_low)
+    return 0;
+  f->frame = 0;
+  if (offset)
+    cg_emit(c, "sbfx r0, r0, #%u, #16\n", offset);
+  const char *outside = "hi";
+  if (high == 127) {
+    cg_emit(c, "sxtb.n r1, r0\ncmp.n r1, r0\n");
+    outside = "ne";
+  } else
+    cg_emit(c, "add.w r1, r0, #%u\ncmp.n r1, #%u\n", high + 1, high * 2 + 1);
+  cg_emit(c, "itt %s\nasr%s.n r0, r0, #31\neor%s.w r0, r0, #%u\n@ clamp-leaf: Q-neutral\n",
+          outside, outside, outside, high);
+  return 1;
+}
+
 static int sp_frame_access(const char *line) {
   unsigned reg, second, offset;
   int n = 0;
@@ -542,7 +642,7 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   function_header(c, f);
   cg_emit(c, "@ lightweight-frame: mask %u base %s calls %d\n", mask, based ? "r7" : "sp", calls);
   emit_entry_guards(c, f->frame + c->register_saved_bytes, calls, opaque);
-  if (mask) register_list(c, mask, 0);
+  if (mask) cg_saved_register_list(c, mask, 0);
   if (f->frame)
     cg_adjust_stack(c, 0, f->frame);
   if (based) cg_emit(c, "mov r7, sp\n");
@@ -579,7 +679,7 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   if (based && (!constants || inline_asm || opaque)) cg_emit(c, "mov sp, r7\n");
   if (f->frame)
     cg_adjust_stack(c, 1, f->frame);
-  if (mask) register_list(c, mask, 1);
+  if (mask) cg_saved_register_list(c, mask, 1);
   if (c->tail_target)
     cg_emit(c, "@ sibling-call: frame restored\nb.w %s\n", c->tail_target);
   else if (!calls && !fused_return)
@@ -597,6 +697,18 @@ static int narrow_leaf_instruction(cg_context *c, const char *line, const unsign
   char op[9];
   unsigned dst, left, right;
   int end = 0;
+  if (!strncmp(line, "movw ", 5) &&
+      sscanf(line, "movw r%u, #%u%n", &dst, &right, &end) == 2 &&
+      end && !line[end] && dst <= 12 && map[dst] < 8 && right <= 255) {
+    cg_emit(c, "movs.n r%u, #%u\n", map[dst], right);
+    return 1;
+  }
+  end = 0;
+  if (!strncmp(line, "mul ", 4) &&
+      sscanf(line, "mul r%u, r%u, r%u%n", &dst, &left, &right, &end) == 3 &&
+      end && !line[end] && dst <= 12 && left <= 12 && right <= 12)
+    return cg_narrow_flag_binary(c, "mul", map[dst], map[left], map[right]);
+  end = 0;
   if (sscanf(line, "%8[a-z].w r%u, r%u, r%u%n", op, &dst, &left, &right, &end) == 4 &&
       end && !line[end] && dst <= 12 && left <= 12 && right <= 12) {
     const char *ir = !strcmp(op, "eor") ? "xor" : !strcmp(op, "orr") ? "or" :
@@ -657,14 +769,17 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
           "orr", "orrs", "eor", "eors", "lsl", "lsls", "lsr", "lsrs",
           "asr", "asrs", "mul", "muls", "mla", "mls", "ubfx", "uxtb", "uxth",
           "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs", "cmp", "cmn",
-          "bic", "tst", "orn", "clz"};
+          "bic", "tst", "orn", "clz", "ldrb", "bfi", "sbfx", "smuad", "ror"};
       int supported = 0;
       for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); i++)
         supported |= !strcmp(opcode, allowed[i]);
       char target[128];
       int branch = leaf_branch(p, target);
       branches += branch;
-      if ((!supported && !branch) || strchr(p, ':') || branches > 32)
+      int address = (!strncmp(p, "movw r", 6) && strstr(p, ", #:lower16:(")) ||
+                    (!strncmp(p, "movt r", 6) && strstr(p, ", #:upper16:("));
+      if ((!supported && !branch) || (strchr(p, ':') && !address) ||
+          strchr(p, '!') || branches > 32)
         return;
       unsigned mentioned = mentioned_registers(c, p);
       if ((!mentioned && !branch) || (mentioned & ~0x1fffu))
@@ -680,8 +795,10 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
      copies are its only existing mentions. */
   if (!first || first == last ||
       !leaf_register_move(first, &entry, &src) || src != 0 || !entry ||
-      !leaf_register_move(last, &dst, &src) || dst != 0 || !src ||
-      (touched & 1))
+      !leaf_register_move(last, &dst, &src) || dst != 0 || !src)
+    return;
+  int merge_entry = !(touched & 1);
+  if (!merge_entry && !(touched & 0x0f00u))
     return;
   if (branches)
     for (const char *p = first + strlen(first) + 1; p < last; p += strlen(p) + 1) {
@@ -702,28 +819,46 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
     return;
   unsigned map[13];
   for (unsigned r = 0; r <= 12; r++) map[r] = r;
-  map[entry] = 0;
-  unsigned occupied = touched & 14u;
-  if (entry < 4) occupied &= ~(1u << entry);
+  if (merge_entry) map[entry] = 0;
+  unsigned occupied = touched & 0x7eu;
+  if (merge_entry && entry < 8) occupied &= ~(1u << entry);
   for (unsigned r = 4; r < 12; r++) {
-    if (!(touched & (1u << r)) || r == entry)
+    if (!(touched & (1u << r)) || (merge_entry && r == entry))
       continue;
     unsigned free = 14u & ~occupied;
-    if (!free)
-      return;
+    if (!free) {
+      if (!(touched & 0x0f00u))
+        return;
+      if (r < 8)
+        continue;
+      unsigned low = 0x70u & ~occupied;
+      if (!low)
+        return;
+      free = low;
+    }
     map[r] = (unsigned)__builtin_ctz(free);
+    if (r < 8)
+      occupied &= ~(1u << r);
     occupied |= 1u << map[r];
+  }
+  char *original = NULL;
+  if (branches && (touched & 0x0f00u)) {
+    original = cg_alloc(c, length + 1);
+    memcpy(original, c->out + start, length);
   }
   c->size = start;
   c->out[start] = 0;
   for (char *p = body; p < body + length;) {
     char *next = p + strlen(p) + 1;
-    if (p == first || (p == last && !map[src])) skip++;
+    if ((p == first && merge_entry) || (p == last && !map[src])) skip++;
     else if (!*p || *p == '@' || *p == '.')
       cg_emit(c, "%s\n", p);
     /* The complete whitelist excludes flag consumers and IT, not just the
        instruction immediately following a rewrite. */
-    else if (!branches && narrow_leaf_instruction(c, p, map))
+    else if ((!branches ||
+              (original && (!strncmp(p, "add.w ", 6) || !strncmp(p, "movw ", 5)) &&
+               cg_flags_overwritten(c, original, original + (next - body)))) &&
+             narrow_leaf_instruction(c, p, map))
       narrowed++;
     else {
       unsigned reg, constant;
@@ -736,12 +871,17 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
         continue;
       }
       const char *q = p;
+      const char *relocation = strstr(p, "#:");
       while (*q) {
-        if (*q == 'r' && q > p && (q[-1] == ' ' || q[-1] == ',') &&
+        if (q == relocation) {
+          cg_emit(c, "%s", q);
+          break;
+        }
+        if (*q == 'r' && q > p && (q[-1] == ' ' || q[-1] == ',' || q[-1] == '[') &&
             isdigit((unsigned char)q[1])) {
           char *end;
           unsigned long r = strtoul(q + 1, &end, 10);
-          if (r <= 12 && (!*end || *end == ',' || *end == ' ')) {
+          if (r <= 12 && (!*end || *end == ',' || *end == ' ' || *end == ']')) {
             cg_emit(c, "r%u", map[r]);
             q = end;
             continue;
@@ -850,7 +990,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   size_t header = c->size;
   function_header(c, f);
   size_t body_start = c->size;
-  if (cg_emit_counted_leaf(c) || emit_abs_leaf(c)) {
+  if (cg_emit_counted_leaf(c) || emit_abs_leaf(c) || emit_clamp_leaf(c)) {
     finish_function(c, header, body_start);
     return;
   }

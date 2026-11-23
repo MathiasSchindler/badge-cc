@@ -12,7 +12,16 @@ import { disassemblyFunctions } from '../badge-compiler/tools/backend-attributio
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const names = ['arithmetic', 'control', 'crc', 'memory', 'calls', 'fixed-point'];
+const extended = [...names, 'rotate', 'bit-insert', 'packed-dot', 'saturate', 'divmod'];
 const seeds = [0, 1, 0x12345678, 0x8000ffff, 0xffffffff];
+const validationSeeds = [
+  ...seeds, 0x7fffffff, 0x80000000, 0x80008000, 0x7fff7fff, 0x00007f00,
+  0x00008000, 0x00ff7f00, 0x00ff8000
+];
+for (let x = 0x9e3779b9; validationSeeds.length < 256;) {
+  x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+  validationSeeds.push(x);
+}
 const tools = {
   cc: process.env.HOST_CC ?? 'cc',
   clang: process.env.LLVM_CLANG ?? 'clang',
@@ -32,20 +41,20 @@ function reference(source, tmp) {
 #include <stdio.h>
 uint32_t micro_kernel(uint32_t);
 int main(void) {
-${seeds.map(seed => `    printf("%08x\\n", (unsigned)micro_kernel(${seed}u));`).join('\n')}
+${validationSeeds.map(seed => `    printf("%08x\\n", (unsigned)micro_kernel(${seed}u));`).join('\n')}
     return 0;
 }
 `);
   run(tools.cc, ['-std=c11', '-O0', '-Wall', '-Wextra', '-Werror', source, driver, '-o', program]);
   const expected = run(program, []).trim().split('\n');
-  assert.equal(expected.length, seeds.length);
+  assert.equal(expected.length, validationSeeds.length);
   assert(expected.every(line => /^[0-9a-f]{8}$/.test(line)));
   return expected;
 }
 
-function oracle(expected, tmp) {
+function oracle(inputs, expected, tmp, name) {
   const move = (reg, value) => `movw ${reg}, #${value & 65535}\nmovt ${reg}, #${value >>> 16}`;
-  const source = path.join(tmp, 'oracle.s'), object = path.join(tmp, 'oracle.o');
+  const source = path.join(tmp, `${name}.s`), object = path.join(tmp, `${name}.o`);
   fs.writeFileSync(source, `.syntax unified
 .thumb
 .text
@@ -54,7 +63,7 @@ function oracle(expected, tmp) {
 .thumb_func
 main:
 push {r4, lr}
-${seeds.map((seed, i) => `${move('r0', seed)}
+${inputs.map((seed, i) => `${move('r0', seed)}
 bl micro_kernel
 ${move('r4', Number.parseInt(expected[i], 16))}
 cmp r0, r4
@@ -88,12 +97,13 @@ function kernelStats(elf, cNames) {
   });
 }
 
-function execute(object, start, driver, cNames, tmp) {
+function execute(object, start, driver, cNames, tmp, countInstructions = true) {
   const elf = path.join(tmp, 'oracle.elf'), trace = path.join(tmp, 'execution.log');
   run(tools.lld, ['--gc-sections', '-T', `${fixture}/tilt_maze_fixture.ld`, start, driver, object, '-o', elf]);
   run(tools.qemu, ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
-    '-semihosting-config', 'enable=on,target=native', '-kernel', elf, '-accel',
-    'tcg,one-insn-per-tb=on', '-d', 'exec,nochain', '-D', trace]);
+    '-semihosting-config', 'enable=on,target=native', '-kernel', elf,
+    ...(countInstructions ? ['-accel', 'tcg,one-insn-per-tb=on', '-d', 'exec,nochain', '-D', trace] : [])]);
+  if (!countInstructions) return;
   const functions = parseElf(elf).symbols.filter(s => s.type === 2 && cNames.has(s.name))
     .map(s => ({ start: s.value & ~1, end: (s.value & ~1) + s.size }));
   const reached = [...fs.readFileSync(trace, 'utf8').matchAll(/^Trace .*?\[[0-9a-f]+\/([0-9a-f]+)\//gm)]
@@ -105,19 +115,21 @@ function execute(object, start, driver, cNames, tmp) {
 
 function main(directory) {
   const report = verify(directory), file = rel => path.join(directory, rel);
-  assert.equal(report.modules.length, names.length);
-  assert.deepEqual(new Set(report.projects.map(p => p.name)), new Set(names.map(n => `micro-${n}`)));
+  const programsToCheck = report.modules.length === names.length ? names : extended;
+  assert.equal(report.modules.length, programsToCheck.length);
+  assert.deepEqual(new Set(report.projects.map(p => p.name)), new Set(programsToCheck.map(n => `micro-${n}`)));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'compile-graph-micro-'));
   try {
     const oracleStart = path.join(tmp, 'start.o');
     run(tools.clang, [...target, '-c', `${fixture}/codegen_start.S`, '-o', oracleStart]);
-    const programs = names.map(name => {
+    const programs = programsToCheck.map(name => {
       const project = `micro-${name}`;
       const module = report.modules.find(m => m.id === `${project}.o`);
       assert(module, `missing module: ${project}`);
       assert.equal(module.preprocessing_comparison.status, 'identical', `${project}: C tokens differ`);
       const expected = reference(file(module.roles.owned.stages.source.file), tmp);
-      const driver = oracle(expected, tmp);
+      const validation = oracle(validationSeeds, expected, tmp, 'validation');
+      const driver = oracle(seeds, expected.slice(0, seeds.length), tmp, 'timing');
       const images = Object.fromEntries(['owned', 'llvm'].map(role => [role,
         report.images.find(i => i.name === project && i.role === role)]));
       const bootBytes = commonObjects.reduce((sum, basename) => {
@@ -142,13 +154,16 @@ function main(directory) {
         const extent = functions.reduce((sum, f) => sum + f.extent_bytes, 0);
         const remaining = payload.length - bootBytes - extent;
         assert(remaining >= 0, 'function and boot extents exceed flash bytes');
+        execute(object, oracleStart, validation, cNames, tmp, false);
         return [role, { flash_bytes: payload.length, uf2_bytes: container.length,
           c_function_bytes: extent, other_flash_bytes: remaining, functions,
           qemu_kernel_instructions: execute(object, oracleStart, driver, cNames, tmp) }];
       }));
-      return { name: project, shared_boot_input_bytes: bootBytes, expected, ...roles };
+      return { name: project, shared_boot_input_bytes: bootBytes,
+        expected: expected.slice(0, seeds.length), ...roles };
     });
-    return { scope: 'RP2350 ELF/UF2 and Cortex-M33 QEMU execution; not physical timing', seeds, programs };
+    return { scope: 'RP2350 ELF/UF2 and Cortex-M33 QEMU execution; not physical timing',
+      seeds, validation_seed_count: validationSeeds.length, programs };
   } finally { fs.rmSync(tmp, { recursive: true }); }
 }
 

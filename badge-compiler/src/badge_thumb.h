@@ -345,7 +345,7 @@ static const char *thumb_mnemonic(const char *name) {
     static const char *const bases[]={
         "adc","adcs","add","adds","addw","adr","and","ands","asr","asrs","b","bfc","bfi","bic","bics","bkpt","bl","blx","bx","cbnz","cbz","clrex","clz","cmn","cmp","cpsid","cpsie","dmb","dsb","eor","eors","isb",
         "lda","ldab","ldaex","ldaexb","ldaexh","ldah","ldm","ldr","ldrb","ldrd","ldrex","ldrexb","ldrexh","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mla","mls","mov","movs","movt","movw","mrs","msr","mul","muls","mvn","mvns","nop","orn","orr","orrs",
-        "pop","push","rev","rev16","ror","rors","rsb","rsbs","sbc","sbcs","sdiv","sev","smlabb","smlal","smulbb","smull",
+        "pop","push","rev","rev16","ror","rors","rsb","rsbs","sbc","sbcs","sbfx","sdiv","sev","smlabb","smlal","smlatt","smuad","smulbb","smull","ssat",
         "stl","stlb","stlex","stlexb","stlexh","stlh","stm","str","strb","strd","strex","strexb","strexh","strh","sub","subs","subw",
         "svc","sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtah","uxtb","uxth","wfe","wfi","yield"
     };
@@ -495,10 +495,13 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
         width=thumb_emit(s,l,4,first|((imm>>11&1)<<10)|(mov?imm>>12:(unsigned)rn),
             ((imm>>8&7)<<12)|((unsigned)rd<<8)|(imm&255));
     } else if(strcmp(op,"mul")==0 || strcmp(op,"muls")==0 || strcmp(op,"mla")==0 || strcmp(op,"mls")==0 ||
-        strcmp(op,"smlabb")==0 || strcmp(op,"smulbb")==0 || strcmp(op,"smull")==0 || strcmp(op,"umull")==0 || strcmp(op,"smlal")==0 || strcmp(op,"sdiv")==0 || strcmp(op,"udiv")==0) {
+        strcmp(op,"smlabb")==0 || strcmp(op,"smlatt")==0 || strcmp(op,"smulbb")==0 || strcmp(op,"smuad")==0 ||
+        strcmp(op,"smull")==0 || strcmp(op,"umull")==0 || strcmp(op,"smlal")==0 || strcmp(op,"sdiv")==0 || strcmp(op,"udiv")==0) {
         int basic=strcmp(op,"mul")==0 || strcmp(op,"muls")==0,divide=strstr(op,"div")!=NULL;
-        int half=strcmp(op,"smulbb")==0;
-        thumb_count(s,l,basic||divide||half?3:4,basic||divide||half?3:4);
+        int half=strcmp(op,"smulbb")==0, dual=strcmp(op,"smuad")==0;
+        int half_acc=strcmp(op,"smlabb")==0 || strcmp(op,"smlatt")==0;
+        unsigned operands=basic||divide||half||dual?3:4;
+        thumb_count(s,l,operands,operands);
         unsigned r[4]={0}; for(unsigned k=0;k<l->count;++k) { r[k]=(unsigned)as_register(s,l->arg[k]); if(!thumb_data_register(r[k])) as_error(s,"invalid multiply/divide register"); }
         if(basic && !wide && ((strcmp(op,"muls")==0 && !in_it) || (strcmp(op,"mul")==0 && in_it)) && r[0]<8 && r[1]<8 && r[2]<8 && (r[0]==r[1] || r[0]==r[2])) {
             unsigned other=r[0]==r[1]?r[2]:r[1]; width=thumb_emit(s,l,2,0x4340|(other<<3)|r[0],0);
@@ -507,15 +510,30 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
             if(r[0]==r[1]) as_error(s,"overlapping long multiply outputs");
             width=thumb_emit(s,l,4,(strcmp(op,"smlal")==0?0xfbc0:strcmp(op,"umull")==0?0xfba0:0xfb80)|r[2],(r[0]<<12)|(r[1]<<8)|r[3]);
         } else if(divide) width=thumb_emit(s,l,4,(strcmp(op,"udiv")==0?0xfbb0:0xfb90)|r[1],0xf0f0|(r[0]<<8)|r[2]);
-        else width=thumb_emit(s,l,4,((half||strcmp(op,"smlabb")==0)?0xfb10:0xfb00)|r[1],
-            ((basic||half?15:r[3])<<12)|(r[0]<<8)|(strcmp(op,"mls")==0?16:0)|r[2]);
-    } else if(strcmp(op,"bfc")==0 || strcmp(op,"bfi")==0 || strcmp(op,"ubfx")==0) {
+        else width=thumb_emit(s,l,4,(dual?0xfb20:(half||half_acc)?0xfb10:0xfb00)|r[1],
+            ((basic||half||dual?15:r[3])<<12)|(r[0]<<8)|
+            (strcmp(op,"mls")==0?16:(half||half_acc)&&op[strlen(op)-1]=='t'?48:0)|r[2]);
+    } else if(strcmp(op,"ssat")==0) {
+        thumb_count(s,l,3,4);
+        unsigned rd=(unsigned)as_register(s,l->arg[0]), rn=(unsigned)as_register(s,l->arg[2]);
+        unsigned bits=as_bounded(s,l->arg[1],32), type=0, amount=0;
+        if(l->count==4) {
+            thumb_shift(s,l->arg[3],&type,&amount);
+            if((type!=0 && type!=2) || (type==2 && amount==0))
+                as_error(s,"SSAT requires LSL 0..31 or ASR 1..31");
+        }
+        if(!bits || !thumb_data_register(rd) || !thumb_data_register(rn))
+            as_error(s,"invalid SSAT width or registers");
+        width=thumb_emit(s,l,4,0xf300|(type==2?32:0)|rn,
+            ((amount>>2)<<12)|(rd<<8)|((amount&3)<<6)|(bits-1));
+    } else if(strcmp(op,"bfc")==0 || strcmp(op,"bfi")==0 || strcmp(op,"ubfx")==0 || strcmp(op,"sbfx")==0) {
         int clear=strcmp(op,"bfc")==0; thumb_count(s,l,clear?3:4,clear?3:4);
         unsigned rd=(unsigned)as_register(s,l->arg[0]),rn=clear?15:(unsigned)as_register(s,l->arg[1]);
         unsigned bit=as_bounded(s,l->arg[clear?1:2],31),bits=as_bounded(s,l->arg[clear?2:3],32);
         if(!thumb_data_register(rd) || (!clear && !thumb_data_register(rn)) || bits==0 || bit+bits>32) as_error(s,"invalid bitfield operands");
-        width=thumb_emit(s,l,4,(strcmp(op,"ubfx")==0?0xf3c0:0xf360)|rn,
-            ((bit>>2)<<12)|(rd<<8)|((bit&3)<<6)|(strcmp(op,"ubfx")==0?bits-1:bit+bits-1));
+        int extract=op[2]=='f' && op[3]=='x';
+        width=thumb_emit(s,l,4,(extract?(op[0]=='u'?0xf3c0:0xf340):0xf360)|rn,
+            ((bit>>2)<<12)|(rd<<8)|((bit&3)<<6)|(extract?bits-1:bit+bits-1));
     } else if(strcmp(op,"tbb")==0 || strcmp(op,"tbh")==0) {
         thumb_count(s,l,1,1); thumb_memory_t m=thumb_memory(s,l->arg[0],NULL);
         int half=strcmp(op,"tbh")==0;

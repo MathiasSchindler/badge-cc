@@ -256,6 +256,8 @@ int main(void) {
         "strb r0,[r1,#255]!\nldrh r2,[r3],#255\n",
         "a:ldr.w r8,b\nnop\n.p2align 2\nb:.word 42\n",
         "b.n target\ntarget:nop\nb.w target\nnop.w\n",
+        ("smuad r2,r1,r0\nsmlatt r0,r1,r0,r2\nsbfx r2,r1,#8,#16\n"
+         "ssat r2,#1,r3\nssat r3,#32,r9,lsl #31\nssat r12,#8,r1,asr #1\n"),
         ".equ extent,end-start\nstart:nop\nend:.word extent,extent\n",
         ".equ first,second+1\n.word first,first\n.equ second,41\n",
         "itttt eq\nmoveq r0,#1\naddeq r0,#1\nsubeq r0,#1\nbxeq lr\n",
@@ -274,6 +276,8 @@ int main(void) {
     const char *invalid[]={
         ".byte -129\n",".byte 256\n",".short -32769\n",".long 4294967296\n",
         "movs r16,#1\n","movs r0,#0x12345678\n","movw r0,#65536\n",
+        "ssat r0,#0,r1\n","ssat r0,#33,r1\n","ssat r0,#8,r1,asr #32\n",
+        "ssat r0,#8,r1,lsr #1\n","smuad sp,r0,r1\n","sbfx r0,r1,#31,#2\n",
         "mov.w r0,#0x12345678\n","addw r0,r1,#4096\n",
         "movw sp,#1\n","movt sp,#1\n","movw pc,#1\n","movt pc,#1\n",
         "addw sp,r0,#4\n","subw sp,r0,#4\n","addw pc,sp,#4\n","subw pc,sp,#4\n",

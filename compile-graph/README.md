@@ -56,11 +56,13 @@ Open **Optimized IR** and select a function to filter its remarks and backend
 metrics. The trace picker loads a bounded excerpt on demand; the full trace can
 be large because LLVM includes module events even with a function filter.
 
-## Six small RP2350 programs
+## Eleven small RP2350 programs
 
-For a narrower comparison than red square or maze, capture six independent UF2
+For a narrower comparison than red square or maze, capture eleven independent UF2
 images: arithmetic recurrence, branch/switch control, CRC32, indexed
-read-only data, helper calls, and signed fixed-point scaling. Each links one C
+read-only data, helper calls, signed fixed-point scaling, rotate/XOR,
+bitfield insertion, signed halfword dot product, saturation, and div/rem.
+Each links one C
 translation unit with a shared assembly reset, harness, and RP2350 boot metadata.
 `micro_kernel` receives the seed across a separate assembly call, so neither C
 compiler can precompute the answer from the startup seed. No display, radio,
@@ -69,22 +71,25 @@ SDK, or library code is linked.
 ```sh
 COMPILE_GRAPH_LLVM_TRACE=micro_kernel,mix \
   node compile-graph/capture.mjs --capture compile-graph/build/micro-demo \
-  micro-arithmetic micro-control micro-crc micro-memory micro-calls micro-fixed-point
+  micro-arithmetic micro-control micro-crc micro-memory micro-calls micro-fixed-point \
+  micro-rotate micro-bit-insert micro-packed-dot micro-saturate micro-divmod
 node compile-graph/check-micro.mjs compile-graph/build/micro-demo \
   > compile-graph/build/micro-demo/micro-results.json
 python3 -m http.server 8000 --bind 127.0.0.1 --directory compile-graph/build/micro-demo
 ```
 
 For a control and candidate, capture into separate directories with the same
-six targets. Set `BADGE_CODEGEN_SCALAR_SELECTION=thumb-constants` to measure
-the opt-in backend instead of the qualified default. The LLVM flags are
-unchanged.
+targets. The checker also accepts the original six-target capture. The
+current owned backend defaults to `thumb-constants`; an explicit owned
+policy does not change the LLVM flags.
 
 The check also requires `qemu-system-arm` and can use `HOST_CC`, `LLVM_CLANG`,
 `LLVM_LLD`, `LLVM_OBJDUMP`, and `QEMU_ARM`. It checks identical C tokens and
 boot input bytes/relocations, verifies every UF2 block against its flash
 payload, and runs the exact captured C objects on Cortex-M33 QEMU against
-native results for five seeds. The JSON distinguishes raw flash, UF2 file
+native results for 256 deterministic seeds. The five original seeds remain
+the separate instruction-count workload so earlier runs stay comparable.
+The JSON distinguishes raw flash, UF2 file
 size, linked C function extents, decoded instructions and literal bytes,
 and remaining flash bytes (read-only data and alignment). Reached instruction
 counts exclude the common test harness and are **not physical timing**.

@@ -69,3 +69,17 @@ more than the single D08 fixture. Run fresh 37-module/12-image and ABI/stack
 checks, then D09 timing with reached IMU/breakout work. The opportunity is
 small and bounded; its bytes, spill reduction and hardware speed remain
 unmeasured until that implementation exists.
+
+### Follow-up: signed halfword dot product
+
+A separate microbenchmark qualifies one bounded packed selection under the
+default `thumb-constants` backend. `SMUAD` is selected only for two
+unflagged signed-halfword products and their sum from the same packed
+pair, where an explicit nonzero XOR makes the inputs different. The
+signed sum can overflow only when both words are `0x80008000`: each
+halfword product reaches `2^30` only for two copies of `INT16_MIN`, and
+the most-negative sum still fits. This restriction leaves sticky Q
+unchanged. Arbitrary two-input dot products keep the scalar fallback.
+The assembler accepts `SSAT` for explicit code and LLVM crossover, but
+the compiler does not silently substitute it for clamping C code that
+does not change sticky Q.

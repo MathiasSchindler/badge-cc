@@ -10,7 +10,9 @@ enum { SELECT_SKIP = 1, SELECT_MLA, SELECT_DIVISION, SELECT_COMPARE_SKIP,
        SELECT_COMPARE_BRANCH, SELECT_COUNT_SKIP, SELECT_ABSOLUTE_STORE,
        SELECT_WRAPPER_STORE, SELECT_WRAPPER_CALL, SELECT_PRODUCT_CAST,
        SELECT_SIGNED_PRODUCT, SELECT_EXTENDED_LOAD, SELECT_SHIFTED_BINARY,
-       SELECT_BITFIELD, SELECT_MLS, SELECT_MASK_TEST, SELECT_INVERTED_BINARY };
+       SELECT_BITFIELD, SELECT_MLS, SELECT_MASK_TEST, SELECT_INVERTED_BINARY,
+       SELECT_ROTATE, SELECT_ROTATED_XOR, SELECT_BITFIELD_INSERT,
+       SELECT_SIGNED_FIELD, SELECT_DUAL_PRODUCT };
 typedef struct {
   cg_inst *instruction, *producer, *countdown;
   unsigned kind;
@@ -118,6 +120,83 @@ static int scalar(cg_context *c, cg_inst *i) {
       return 0;
   }
   return 1;
+}
+static int scalar32(cg_context *c, cg_inst *i, const char *op) {
+  return i && i->result && i->end - i->begin == 7 && i->result->type->bits == 32 &&
+         !strcmp(c->tokens[i->begin + 2].text, op) && scalar(c, i);
+}
+static int single_use(cg_context *c, cg_inst *i) {
+  return cg_register_lookup(c, i->result->name)->selection_uses == 1;
+}
+static unsigned binary_use_of(cg_context *c, cg_inst *i, cg_inst *definition) {
+  if (!strcmp(c->tokens[i->begin + 4].text, definition->result->name))
+    return 4;
+  return !strcmp(c->tokens[i->begin + 6].text, definition->result->name) ? 6 : 0;
+}
+static int rotate_amount(cg_context *c, cg_inst *left, cg_inst *right,
+                          cg_inst *combine, uint32_t *amount) {
+  if (!scalar32(c, left, "shl")) {
+    cg_inst *swap = left;
+    left = right;
+    right = swap;
+  }
+  uint32_t lsl;
+  unsigned a, b;
+  return scalar32(c, left, "shl") && scalar32(c, right, "lshr") &&
+         scalar32(c, combine, "or") && single_use(c, left) && single_use(c, right) &&
+         (a = binary_use_of(c, combine, left)) &&
+         (b = binary_use_of(c, combine, right)) && a != b &&
+         !strcmp(c->tokens[left->begin + 4].text, c->tokens[right->begin + 4].text) &&
+         number(c->tokens[left->begin + 6].text, &lsl) &&
+         number(c->tokens[right->begin + 6].text, amount) &&
+         lsl > 0 && lsl < 32 && *amount == 32 - lsl;
+}
+static int inserted_field(cg_context *c, cg_inst *clear, cg_inst *shift,
+                           cg_inst *clip, cg_inst *combine, unsigned *base,
+                           uint32_t *lsb, unsigned *width) {
+  uint32_t mask, cleared;
+  unsigned data, a, b;
+  if (!scalar32(c, clear, "and") || !scalar32(c, shift, "shl") ||
+      !scalar32(c, clip, "and") || !scalar32(c, combine, "or") ||
+      !single_use(c, clear) || !single_use(c, shift) || !single_use(c, clip) ||
+      !(a = binary_use_of(c, combine, clear)) ||
+      !(b = binary_use_of(c, combine, clip)) || a == b ||
+      !(data = binary_use_of(c, clip, shift)) ||
+      !number(c->tokens[clip->begin + (10 - data)].text, &mask) ||
+      !commutative_literal(c, clear, base, &cleared) || cleared != ~mask ||
+      !number(c->tokens[shift->begin + 6].text, lsb) || *lsb >= 32)
+    return 0;
+  *width = low_mask_width(mask >> *lsb);
+  return *width && (mask >> *lsb << *lsb) == mask;
+}
+static int cast_from(cg_context *c, cg_inst *cast, cg_inst *source,
+                     const char *op, const char *from, const char *to) {
+  return cast && cast->result && cast->end - cast->begin == 7 &&
+         !strcmp(c->tokens[cast->begin + 2].text, op) &&
+         !strcmp(c->tokens[cast->begin + 3].text, from) &&
+         !strcmp(c->tokens[cast->begin + 4].text, source->result->name) &&
+         !strcmp(c->tokens[cast->begin + 5].text, "to") &&
+         !strcmp(c->tokens[cast->begin + 6].text, to);
+}
+static int signed_halfword(cg_context *c, cg_inst *trunc, cg_inst *extend,
+                            const char *source) {
+  return trunc && trunc->result && trunc->end - trunc->begin == 7 &&
+         !strcmp(c->tokens[trunc->begin + 2].text, "trunc") &&
+         !strcmp(c->tokens[trunc->begin + 3].text, "i32") &&
+         !strcmp(c->tokens[trunc->begin + 4].text, source) &&
+         !strcmp(c->tokens[trunc->begin + 5].text, "to") &&
+         !strcmp(c->tokens[trunc->begin + 6].text, "i16") &&
+         cast_from(c, extend, trunc, "sext", "i16", "i32");
+}
+static int ordered_binary(cg_context *c, cg_inst *i, const char *op,
+                          cg_inst *left, cg_inst *right) {
+  return scalar32(c, i, op) && binary_use_of(c, i, left) == 4 &&
+         binary_use_of(c, i, right) == 6;
+}
+static int high_half(cg_context *c, cg_inst *shift, const char *source) {
+  return scalar32(c, shift, "lshr") &&
+         !strcmp(c->tokens[shift->begin + 4].text, source) &&
+         !strcmp(c->tokens[shift->begin + 6].text, "16");
 }
 static int bitfield(cg_context *c, cg_inst *shift, cg_inst *use,
                     uint32_t *lsb, unsigned *width) {
@@ -555,6 +634,37 @@ static int extended_load(cg_context *c, cg_inst *i, cg_inst *next) {
      number(c->tokens[at + 6].text, &align) && align >= i->result->type->size);
 }
 
+static int select_dual_product(cg_context *c, cg_inst *xor) {
+  unsigned base;
+  uint32_t difference;
+  if (!scalar32(c, xor, "xor") ||
+      !commutative_literal(c, xor, &base, &difference) || !difference)
+    return 0;
+  const char *a = c->tokens[xor->begin + base].text, *b = xor->result->name;
+  if (*a != '%')
+    return 0;
+  cg_inst *v[13], *p = xor->next;
+  for (unsigned n = 0; n < 13; n++, p = p->next) {
+    if (!p || !p->result || pair(c, p)->instruction || (n < 12 && !single_use(c, p)))
+      return 0;
+    v[n] = p;
+  }
+  if (!signed_halfword(c, v[0], v[1], a) || !signed_halfword(c, v[2], v[3], b) ||
+      !ordered_binary(c, v[4], "mul", v[1], v[3]) ||
+      !high_half(c, v[5], a) || !signed_halfword(c, v[6], v[7], v[5]->result->name) ||
+      !high_half(c, v[8], b) || !signed_halfword(c, v[9], v[10], v[8]->result->name) ||
+      !ordered_binary(c, v[11], "mul", v[7], v[10]) ||
+      !ordered_binary(c, v[12], "add", v[4], v[11]))
+    return 0;
+  /* Two signed halfword products overflow only when both packed inputs
+     are 0x80008000. A nonzero XOR proves that SMUAD leaves sticky Q alone. */
+  for (unsigned n = 0; n < 12; n++)
+    *pair(c, v[n]) = (cg_selected_pair){.instruction=v[n], .kind=SELECT_SKIP};
+  *pair(c, v[12]) = (cg_selected_pair){.instruction=v[12], .producer=xor,
+                                      .kind=SELECT_DUAL_PRODUCT};
+  return 1;
+}
+
 static void forward_adjacent_address(cg_context *c, cg_inst *i, cg_inst *next) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       !cg_global_residency(c) || !i->result ||
@@ -707,11 +817,52 @@ void cg_selection_prepare(cg_context *c) {
           continue;
         }
       }
+      if (constants && select_dual_product(c, i))
+        continue;
+      cg_inst *extend = next->next;
+      uint32_t offset;
+      if (constants && scalar32(c, i, "lshr") && !pair(c, i)->instruction &&
+          signed_halfword(c, next, extend, i->result->name) &&
+          !pair(c, next)->instruction && !pair(c, extend)->instruction &&
+          single_use(c, i) && single_use(c, next) &&
+          number(c->tokens[i->begin + 6].text, &offset) && offset > 0 && offset <= 16) {
+        *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction=next, .kind=SELECT_SKIP};
+        *pair(c, extend) = (cg_selected_pair){.instruction=extend, .producer=i,
+                                              .kind=SELECT_SIGNED_FIELD};
+        continue;
+      }
       if (!scalar(c, i) || !scalar(c, next) || pair(c, i)->instruction ||
           pair(c, next)->instruction)
         continue;
       uint32_t amount;
       unsigned width;
+      cg_inst *third = next->next, *fourth = third ? third->next : NULL;
+      if (constants && third && !pair(c, third)->instruction &&
+          rotate_amount(c, i, next, third, &amount)) {
+        *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction=next, .kind=SELECT_SKIP};
+        *pair(c, third) = (cg_selected_pair){.instruction=third, .producer=i,
+                                            .kind=SELECT_ROTATE};
+        if (fourth && !pair(c, fourth)->instruction && scalar32(c, fourth, "xor") &&
+            single_use(c, third) && binary_use_of(c, fourth, third)) {
+          pair(c, third)->kind = SELECT_SKIP;
+          *pair(c, fourth) = (cg_selected_pair){.instruction=fourth, .producer=i,
+                                               .kind=SELECT_ROTATED_XOR};
+        }
+        continue;
+      }
+      unsigned base;
+      if (constants && third && fourth && !pair(c, third)->instruction &&
+          !pair(c, fourth)->instruction &&
+          inserted_field(c, i, next, third, fourth, &base, &amount, &width)) {
+        *pair(c, i) = (cg_selected_pair){.instruction=i, .kind=SELECT_SKIP};
+        *pair(c, next) = (cg_selected_pair){.instruction=next, .kind=SELECT_SKIP};
+        *pair(c, third) = (cg_selected_pair){.instruction=third, .kind=SELECT_SKIP};
+        *pair(c, fourth) = (cg_selected_pair){.instruction=fourth, .producer=i,
+                                             .kind=SELECT_BITFIELD_INSERT};
+        continue;
+      }
       if (constants && bitfield(c, i, next, &amount, &width)) {
         *pair(c, i) = (cg_selected_pair){.instruction = i, .kind = SELECT_SKIP};
         *pair(c, next) = (cg_selected_pair){.instruction = next, .producer = i,
@@ -947,11 +1098,12 @@ int cg_selection_compare_operands(cg_context *c, cg_inst *i, cg_type *type) {
   }
   if (constant && narrow)
     n &= (UINT32_C(1) << type->bits) - 1;
+  /* CMP x, -k and CMN x, k have the same NZCV unless negation overflows. */
   if (constant && thumb_modified(n) >= 0) {
     cg_emit(c, "cmp.%s r%u, #%" PRIu32 "\n", left < 8 && n <= 255 ? "n" : "w",
             left, n);
   } else if (constant && !strcmp(kind, "i32") && (n & UINT32_C(0x80000000)) &&
-             (!strcmp(pred, "eq") || !strcmp(pred, "ne")) &&
+             (n != UINT32_C(0x80000000) || !strcmp(pred, "eq") || !strcmp(pred, "ne")) &&
              thumb_modified(0u - n) >= 0) {
     cg_emit(c, "cmn.w r%u, #%" PRIu32 "\n", left, 0u - n);
   } else {
@@ -1035,7 +1187,7 @@ static int register_instruction(cg_context *c, cg_inst *i) {
       const cg_selected_pair *consumer = i->next ? pair(c, i->next) : NULL;
       int shared = consumer && consumer->kind == SELECT_DIVISION && consumer->producer == i;
       unsigned quotient = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
-          !remainder && !shared ? dst : 4;
+          !remainder && (!shared || cg_global_register(c, i->result->name)) ? dst : 4;
       cg_emit(c, "%s r%u, r%u, r%u\n", op[0] == 's' ? "sdiv" : "udiv",
               quotient, left, right);
       if (remainder)
@@ -1131,6 +1283,61 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
   if (selected->kind == SELECT_SKIP || selected->kind == SELECT_COMPARE_SKIP ||
       selected->kind == SELECT_COUNT_SKIP)
     return 1;
+  if (selected->kind == SELECT_SIGNED_FIELD) {
+    cg_inst *shift = selected->producer;
+    uint32_t offset;
+    if (!number(c->tokens[shift->begin + 6].text, &offset))
+      cg_error(c, "signed field eligibility changed");
+    unsigned src = operand(c, shift, 4, 0), dst = destination(c, i);
+    cg_emit(c, "sbfx r%u, r%u, #%" PRIu32 ", #16\n", dst, src, offset);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
+  if (selected->kind == SELECT_DUAL_PRODUCT) {
+    cg_inst *xor = selected->producer;
+    unsigned at;
+    uint32_t difference;
+    if (!commutative_literal(c, xor, &at, &difference) || !difference)
+      cg_error(c, "dual product overflow proof changed");
+    unsigned left = operand(c, xor, at, 0);
+    unsigned right = operand(c, xor->next->next->next, 4, 1);
+    unsigned dst = destination(c, i);
+    cg_emit(c, "smuad r%u, r%u, r%u\n", dst, left, right);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
+  if (selected->kind == SELECT_ROTATE || selected->kind == SELECT_ROTATED_XOR) {
+    cg_inst *first = selected->producer, *combine = first->next->next;
+    uint32_t amount;
+    if (!rotate_amount(c, first, first->next, combine, &amount))
+      cg_error(c, "rotate eligibility changed");
+    unsigned source = operand(c, first, 4, 0), dst = destination(c, i);
+    if (selected->kind == SELECT_ROTATED_XOR) {
+      unsigned base = operand(c, i, 10 - binary_use_of(c, i, combine), 1);
+      cg_emit(c, "eor.w r%u, r%u, r%u, ror #%" PRIu32 "\n", dst, base, source, amount);
+    } else
+      cg_emit(c, "ror.w r%u, r%u, #%" PRIu32 "\n", dst, source, amount);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
+  if (selected->kind == SELECT_BITFIELD_INSERT) {
+    cg_inst *clear = selected->producer, *shift = clear->next;
+    uint32_t lsb;
+    unsigned base, width;
+    if (!inserted_field(c, clear, shift, shift->next, i, &base, &lsb, &width))
+      cg_error(c, "bitfield insertion eligibility changed");
+    unsigned field = operand(c, shift, 4, 0);
+    unsigned original = operand(c, clear, base, 1), dst = destination(c, i);
+    if (dst == field && dst != original) {
+      cg_move(c, 12, field);
+      field = 12;
+    }
+    if (dst != original)
+      cg_move(c, dst, original);
+    cg_emit(c, "bfi r%u, r%u, #%" PRIu32 ", #%u\n", dst, field, lsb, width);
+    cg_save_normalized(c, i->result, dst);
+    return 1;
+  }
   if (selected->kind == SELECT_BITFIELD) {
     uint32_t lsb;
     unsigned width;
@@ -1234,7 +1441,9 @@ int cg_selection_instruction(cg_context *c, cg_inst *i) {
       unsigned dst = destination(c, i);
       if (strstr(op, "rem")) {
         unsigned left = operand(c, i, 4, 0), right = operand(c, i, 6, 2);
-        cg_emit(c, "mls r%u, r4, r%u, r%u\n", dst, right, left);
+        unsigned quotient = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS ?
+            cg_global_register(c, selected->producer->result->name) : 0;
+        cg_emit(c, "mls r%u, r%u, r%u, r%u\n", dst, quotient ? quotient : 4, right, left);
       } else
         cg_emit(c, "mov r%u, r4\n", dst);
       cg_save(c, i->result, dst, 0);

@@ -169,9 +169,11 @@ static inline int cg_operand_selection(const cg_context *c) {
          cg_width_selection(c);
 }
 void cg_reuse_constants(cg_context *c, size_t body_start);
+int cg_flags_overwritten(cg_context *c, const char *body, const char *text);
 void cg_pool_literals(cg_context *c, size_t start);
 void cg_reduce_branches(cg_context *c, size_t body_start);
 void cg_share_return_tails(cg_context *c, size_t body_start);
+void cg_saved_register_list(cg_context *c, unsigned mask, int pop);
 void cg_forward_byte_arguments(cg_context *c, size_t body_start);
 void cg_fold_zero_branches(cg_context *c, size_t body_start);
 void cg_fold_memory_addresses(cg_context *c, size_t body_start);

@@ -751,6 +751,93 @@ Fresh Maze, IMU, and Diagnostics UF2s were byte-identical. The clean
 parallel build medians were 652 and 621 ms, with overlapping ranges;
 the one-file rebuild also had no resolved change.
 
+### Five microbenchmark follow-ups
+
+These default `thumb-constants` changes were measured cumulatively in
+the order below, using the exact linked objects and the established
+five-seed Cortex-M33 instruction workload. The larger 256-input oracle
+checks the same objects against native results without changing the
+counted workload. No hardware elapsed times were measured.
+
+| Candidate | Witness | Loaded flash | Reached instructions |
+| --- | --- | ---: | ---: |
+| Map high registers to available low registers in a bounded frame-free leaf; remove ABI copies only when their register is free | Arithmetic | 212 → 204 B | 475 → 465 |
+| Rotate a proven positive, single-backedge counter loop without changing the live counter | Indexed memory | 240 → 240 B | 710 → 620 |
+| Fuse branchless one-bit feedback with the shifted XOR when countdown flags overwrite the new flags and the temporary values are dead | CRC32 | 224 → 216 B | 1,485 → 1,325 |
+| Use narrow immediate loads in the existing branch-free, flag-independent leaf rewrite | Fixed point | 200 → 196 B | 50 → 50 |
+| Skip a dead input shift on the last pass through a bounded, forward-branch loop | Control | 220 → 220 B | 606 → 586 |
+
+Helper calls remain at 220 B and 80 instructions. Arithmetic, control,
+helper calls, and fixed point now tie LLVM for loaded flash. The remaining
+gaps are CRC32 (8 B) and indexed memory (20 B). Against fresh HEAD control
+builds, **18 of 33 verified UF2 payloads** shrink by **488 bytes** total, and
+**52 of 129 objects** save **670 executable bytes**. No image or object
+grows, and none of the 1,534 matched functions gains frame bytes,
+saved-register bytes, or allocation spills.
+
+### Expanded RP2350 microbenchmark corpus
+
+Five additional standalone kernels exercise rotate/XOR, bitfield insert,
+packed signed dot product, saturation and paired div/rem. They use the
+same startup, LLVM crossover and 256-seed native-reference check as the
+original six. This round compares against an eleven-program control,
+with the added assembler encodings but without the new selectors.
+
+| Kernel | Owned flash before → after | LLVM flash | Owned reached instructions before → after | LLVM instructions |
+| --- | ---: | ---: | ---: | ---: |
+| Rotate/XOR | 180 → 176 B | 176 B | 25 → 15 | 15 |
+| Bitfield insert | 180 → 172 B | 172 B | 30 → 15 | 15 |
+| Packed dot | 224 → 180 B | 184 B | 105 → 20 | 25 |
+| Saturate | 204 → 196 B | 172 B | 51 → 38 | 15 |
+| Div/rem | 184 → 184 B | 188 B | 35 → 30 | 35 |
+| CRC32 | 216 → 212 B | 208 B | 1,325 → 1,320 | 1,635 |
+| Indexed memory | 240 → 236 B | 220 B | 620 → 620 | 765 |
+
+The default backend uses `ROR` (including shifted `EOR`), `BFI`, and
+`SBFX` for exact single-use scalar patterns. `SMUAD` requires a proof that
+the signed lane sum cannot set sticky Q; arbitrary packed inputs fall
+back. `SSAT` and `SMLATT` are available for explicit assembly and
+same-source LLVM crossover. The C clamp uses signed field extraction
+and an ordered negative-immediate `CMN` when NZCV is equivalent; the
+extra sticky-Q effect of an automatic `SSAT` is not silently introduced.
+Shared div/rem keeps the quotient in its allocated register, and the
+CRC and indexed-memory improvements remove stale saves or enable narrow
+ones without increasing stack use.
+
+All 38 application and microbenchmark UF2s verify. Of the 33 comparable
+payloads, nine shrink, saving 112 loaded bytes, and none grows. The
+129-module fixed-IR replay cuts 92 executable bytes in nine objects,
+without object, frame, save or spill growth. Reached instructions are
+from Cortex-M33 QEMU, not physical badge timings.
+
+### Closing more microbenchmark size gaps
+
+Four more changes are enabled in the default `thumb-constants` backend:
+
+| Kernel | Owned flash before → after | LLVM flash | Owned reached instructions before → after | LLVM instructions |
+| --- | ---: | ---: | ---: | ---: |
+| Saturate | 196 → 184 B | 172 B | 38 → 35 | 15 |
+| Indexed memory | 236 → 232 B | 220 B | 620 → 620 | 765 |
+| CRC32 | 212 → 208 B | 208 B | 1,320 → 1,315 | 1,635 |
+| Fixed point | 196 → 192 B | 196 B | 50 → 50 | 50 |
+
+The small symmetric clamp uses sign extension to test signed-byte range
+and an IT block to select an endpoint. It does not write sticky Q.
+Cortex-M33 execution checks Q both set and clear, and the selector rejects
+a return path with a volatile store. LLVM's `SSAT` can set Q on the same
+inputs, so the compiler does not substitute it silently.
+
+Leaf remapping revisits narrow adds and moves only when a flag overwrite
+is proved. Branch-free leaves use an eligible narrow multiply. The CRC
+return complements directly into `r0` on the closed feedback path.
+Arithmetic, switch control, helper calls, rotate, bitfield insert, packed
+dot, and div/rem produce the same measurements as before.
+
+The 256-seed oracle passed for all 22 owned and LLVM kernel objects.
+Eleven of 38 verified UF2 payloads shrink by 52 bytes total. Nine of 134
+objects save 34 executable bytes. No image, object, matched frame,
+save area or spill count grows. No physical badge timing was taken.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

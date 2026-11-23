@@ -136,7 +136,7 @@ static void effects(const char *text, cg_constant facts[13]) {
 static const char *find_label(cg_context *c, const char *body, const char *name);
 static int sole_label_entry(cg_context *c, const char *body, const char *name,
                             const char *label, const char *jump);
-static int flags_overwritten(cg_context *c, const char *body, const char *text) {
+int cg_flags_overwritten(cg_context *c, const char *body, const char *text) {
   /* Follow only neutral instructions and unconditional edges to an NZCV kill. */
   unsigned instructions = 0;
   for (unsigned lines = 0; lines < 64 && instructions < 8 && *text; lines++) {
@@ -451,8 +451,8 @@ void cg_fold_zero_branches(cg_context *c, size_t body_start) {
           cg_register_work(c);
         }
         if (bounded && instructions &&
-            flags_overwritten(c, body, branch_end + 1) &&
-            flags_overwritten(c, body, destination)) {
+            cg_flags_overwritten(c, body, branch_end + 1) &&
+            cg_flags_overwritten(c, body, destination)) {
           cg_emit(c, "%s r%u, %s\n@ zero-branch: saved 2\n",
                   opcode[1] == 'e' ? "cbz" : "cbnz", reg, target);
           p = branch_end + 1;
@@ -868,7 +868,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
           continue;
         }
         if (shift && (op[2] == 'l' ? number <= 31 : number >= 1 && number <= 32)) {
-          if (flags_overwritten(c, original, original + (next_line - body))) {
+          if (cg_flags_overwritten(c, original, original + (next_line - body))) {
             cg_emit(c, "%.*ss.n r%u, r%u, #%u\n@ scalar-shift: saved 2\n",
                     3, op, dst, src, number);
             facts[dst].known = 0;
@@ -877,7 +877,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
           }
         }
         if ((arithmetic || sets_flags) && (number <= 7 || (dst == src && number <= 255)) &&
-            (sets_flags || flags_overwritten(c, original, original + (next_line - body)))) {
+            (sets_flags || cg_flags_overwritten(c, original, original + (next_line - body)))) {
           cg_emit(c, "%ss.n r%u, r%u, #%u\n@ scalar-width: saved 2\n",
                   op[0] == 'a' ? "add" : "sub", dst, src, number);
           facts[dst].known = 0;
@@ -891,7 +891,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
       if (arithmetic &&
           sscanf(op + 5, " r%u, r%u, r%u%n", &dst, &src, &right, &consumed) == 3 &&
           !op[5 + consumed] && dst < 7 && src < 7 && right < 7 &&
-          flags_overwritten(c, original, original + (next_line - body))) {
+          cg_flags_overwritten(c, original, original + (next_line - body))) {
         cg_emit(c, "%ss.n r%u, r%u, r%u\n@ scalar-width: saved 2\n",
                 op[0] == 'a' ? "add" : "sub", dst, src, right);
         facts[dst].known = 0;
@@ -975,7 +975,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
                          !modified && thumb_modified(~next.number) >= 0;
       int narrow_immediate = synthesis && !next.symbol && dst < 8 &&
                               next.number <= 255 &&
-                              flags_overwritten(c, original, original + (after - body));
+                              cg_flags_overwritten(c, original, original + (after - body));
       unsigned materialization_bytes = narrow_immediate ? 2 :
                                        modified || complemented ? 4 : old_bytes;
       if (!reuse(c, facts, dst, next, materialization_bytes)) {
@@ -1177,6 +1177,283 @@ static int countdown_loop(cg_context *c, char *const *lines, unsigned count,
   return instructions <= 60;
 }
 
+static const char *rotate_fixed_loop(cg_context *c, char *const *lines,
+                                     const closed_loop *loop, unsigned *compare) {
+  *compare = loop->header + 1;
+  while (*compare < loop->guard && loop_metadata(lines[*compare])) (*compare)++;
+  const char *branch = lines[loop->guard];
+  int inclusive = !strncmp(branch, "bhi.n ", 6);
+  if (*compare + 1 != loop->guard || (!inclusive && strncmp(branch, "bhs.n ", 6)) ||
+      loop->latch - loop->header > 60)
+    return NULL;
+  unsigned reg, bound;
+  int end = 0;
+  if (sscanf(lines[*compare], "cmp.n r%u, #%u%n", &reg, &bound, &end) != 2 ||
+      !end || lines[*compare][end] || reg >= 8 || !bound || bound > 254)
+    return NULL;
+  unsigned init = loop->header, step = loop->latch - 1;
+  while (init && !mentions(lines[init - 1], reg)) init--;
+  while (step > loop->guard && loop_metadata(lines[step])) step--;
+  unsigned dst, src, seed, increment;
+  end = 0;
+  if (!init || sscanf(lines[init - 1], "movs.n r%u, #%u%n", &dst, &seed, &end) != 2 ||
+      !end || lines[init - 1][end] || dst != reg || seed > bound ||
+      (!inclusive && seed == bound))
+    return NULL;
+  end = 0;
+  if (sscanf(lines[step], "adds.n r%u, r%u, #%u%n", &dst, &src, &increment, &end) != 3 ||
+      !end || lines[step][end] || dst != reg || src != reg || increment != 1)
+    return NULL;
+  for (unsigned i = loop->guard + 1; i < step; i++) {
+    cg_register_work(c);
+    if (!loop_metadata(lines[i]) && mentions(lines[i], reg)) {
+      cg_constant facts[13] = {{0}};
+      facts[reg].known = 1;
+      effects(lines[i], facts);
+      if (!facts[reg].known)
+        return NULL;
+    }
+  }
+  for (unsigned i = loop->latch + 1; i < loop->exit; i++)
+    if (!loop_metadata(lines[i]))
+      return NULL;
+  return inclusive ? "ls" : "lo";
+}
+
+static int loop_uses_register(char *const *lines, unsigned from, unsigned to,
+                              unsigned reg) {
+  for (unsigned i = from; i < to; i++)
+    if (!loop_metadata(lines[i]) && mentions(lines[i], reg))
+      return 1;
+  return 0;
+}
+
+typedef struct { unsigned at, last, state, input, polynomial, scratch, dead; } bit_feedback;
+
+static int plan_bit_feedback(cg_context *c, char *const *lines, unsigned count,
+                              const closed_loop *loop, const unsigned char *hoisted,
+                              bit_feedback *out) {
+  for (unsigned i = loop->guard + 1; i + 6 < loop->latch; i++) {
+    cg_register_work(c);
+    if (strncmp(lines[i], "eor.w ", 6))
+      continue;
+    const char *row[6];
+    unsigned n = 0, last = i;
+    for (; last < loop->latch && n < 6; last++) {
+      if (hoisted[last])
+        last++;
+      else
+        row[n++] = lines[last];
+    }
+    if (n != 6)
+      continue;
+    unsigned bit, state, input, tmp, polynomial, a, b, d;
+    int end[6] = {0};
+    if (sscanf(row[0], "eor.w r%u, r%u, r%u%n", &bit, &state, &input, &end[0]) != 3 ||
+        sscanf(row[1], "and.w r%u, r%u, #1%n", &a, &b, &end[1]) != 2 ||
+        a != bit || b != bit ||
+        sscanf(row[2], "lsr.w r%u, r%u, #1%n", &tmp, &b, &end[2]) != 2 ||
+        b != state ||
+        sscanf(row[3], "rsb.w r%u, r%u, #0%n", &d, &b, &end[3]) != 2 ||
+        d != state || b != bit ||
+        sscanf(row[4], "and.w r%u, r%u, r%u%n", &d, &b, &polynomial, &end[4]) != 3 ||
+        d != state || b != state ||
+        sscanf(row[5], "eor.w r%u, r%u, r%u%n", &d, &a, &b, &end[5]) != 3 ||
+        d != state || a != tmp || b != state ||
+        bit > 12 || state > 12 || input > 12 || tmp > 12 || polynomial > 12)
+      continue;
+    int complete = 1;
+    for (unsigned j = 0; j < 6; j++)
+      complete &= end[j] && !row[j][end[j]];
+    unsigned regs = (1u << bit) | (1u << state) | (1u << input) |
+                    (1u << tmp) | (1u << polynomial);
+    if (!complete || __builtin_popcount(regs) != 5)
+      continue;
+    unsigned overwritten[] = {bit, tmp};
+    for (unsigned j = 0; j < 2 && complete; j++) {
+      unsigned r = overwritten[j];
+      complete = !loop_uses_register(lines, loop->header + 1, i, r) &&
+                 !loop_uses_register(lines, last, loop->latch, r) &&
+                 pool_exits_without_value(lines, loop->exit, count, r);
+    }
+    if (!complete)
+      continue;
+    unsigned scratch = bit < 8 ? bit : tmp < 8 ? tmp : 0;
+    if (bit >= 8 && tmp >= 8 &&
+        ((regs & 1) || loop_uses_register(lines, loop->header + 1, i, 0) ||
+         loop_uses_register(lines, last, loop->latch, 0) ||
+         !pool_exits_without_value(lines, loop->exit, count, 0)))
+      continue;
+    *out = (bit_feedback){i, last - 1, state, input, polynomial, scratch,
+                          ((1u << bit) | (1u << tmp)) & ~(1u << scratch)};
+    return 1;
+  }
+  return 0;
+}
+
+typedef struct { unsigned frame, metadata, push, pop, mask; } feedback_frame;
+
+static int trim_feedback_frame(cg_context *c, char *const *lines, unsigned count,
+                               const bit_feedback *feedback, feedback_frame *out) {
+  if (c->fn->frame || c->fn->argc > 4 || !(feedback->dead & 0x0ff0u))
+    return 0;
+  for (unsigned k = 0; k < c->fn->argc; k++)
+    if (c->fn->byval[k] || c->fn->args[k]->type->size > 4)
+      return 0;
+  feedback_frame f = {count, count, count, count, 0};
+  unsigned mask = 0, saved;
+  for (unsigned i = 0; i < count; i++) {
+    const char *p = lines[i];
+    int end = 0;
+    if (!strncmp(p, "@ stack-frame: ", 15) &&
+        sscanf(p, "@ stack-frame: 0 + %u saved-register bytes%n", &saved, &end) == 1 &&
+        end && !p[end] && saved == c->register_saved_bytes)
+      f.frame = i;
+    else if (!strncmp(p, "@ lightweight-frame: ", 21) &&
+             sscanf(p, "@ lightweight-frame: mask %u base sp calls 0%n", &mask, &end) == 1 &&
+             end && !p[end])
+      f.metadata = i;
+    else if (!strncmp(p, "push.", 5) && f.push == count && !strstr(p, "lr"))
+      f.push = i;
+    else if (!strncmp(p, "pop.", 4) && f.pop == count && !strstr(p, "pc"))
+      f.pop = i;
+    else if (!loop_metadata(p) && strstr(p, "sp"))
+      return 0;
+  }
+  if (f.frame == count || f.metadata >= f.push || f.push >= feedback->at ||
+      f.pop <= feedback->last || f.pop == count || (mask & ~0x0ff0u) ||
+      (unsigned)__builtin_popcount(mask) * 4 != c->register_saved_bytes)
+    return 0;
+  unsigned dead = mask & feedback->dead;
+  for (unsigned i = 0; dead && i < count; i++) {
+    if (i == f.push || i == f.pop || (i >= feedback->at && i <= feedback->last) ||
+        loop_metadata(lines[i]))
+      continue;
+    for (unsigned r = 4; r < 12; r++)
+      if ((dead & (1u << r)) && mentions(lines[i], r))
+        dead &= ~(1u << r);
+  }
+  if (!dead)
+    return 0;
+  f.mask = mask & ~dead;
+  *out = f;
+  return 1;
+}
+
+static unsigned before_instruction(char *const *lines, unsigned i) {
+  while (i && loop_metadata(lines[--i])) {}
+  return i;
+}
+
+static int plan_feedback_return(cg_context *c, char *const *lines, unsigned count,
+                                unsigned exit, unsigned *invert, unsigned *move,
+                                unsigned *source) {
+  if (c->fn->ret->bits != 32)
+    return 0;
+  unsigned last = before_instruction(lines, count);
+  if (last <= exit || strcmp(lines[last], "bx lr"))
+    return 0;
+  *move = before_instruction(lines, last);
+  if (!strncmp(lines[*move], "pop.", 4))
+    *move = before_instruction(lines, *move);
+  *invert = before_instruction(lines, *move);
+  int end = 0;
+  if (*invert <= exit ||
+      sscanf(lines[*move], "mov r0, r%u%n", source, &end) != 1 ||
+      !end || lines[*move][end] || *source >= 8)
+    return 0;
+  unsigned dst, value;
+  end = 0;
+  return sscanf(lines[*invert], "eor.w r%u, r%u, #4294967295%n",
+                &dst, &value, &end) == 2 && end && !lines[*invert][end] &&
+         dst == *source && value == *source;
+}
+
+typedef struct { unsigned compare, guard, shift; } tail_shift;
+
+static int plan_tail_shift(cg_context *c, const char *source, const char *body,
+                            char *const *lines, unsigned count, tail_shift *out) {
+  for (unsigned guard = 2; guard < count; guard++) {
+    if (strncmp(lines[guard], "bhs.n .Lcg_", 11))
+      continue;
+    unsigned compare = guard - 1, header = compare - 1;
+    /* Work backwards over comments, but retain the actual header label. */
+    while (header && *lines[header] == '@') header--;
+    if (strncmp(lines[header], ".Lcg_", 5))
+      continue;
+    unsigned reg, bound;
+    int end = 0;
+    if (sscanf(lines[compare], "cmp.n r%u, #%u%n", &reg, &bound, &end) != 2 ||
+        !end || lines[compare][end] || reg >= 8 || !bound || bound > 254)
+      continue;
+    unsigned exit = guard + 1;
+    while (exit < count && !pool_label(lines[exit], lines[guard] + 6)) exit++;
+    if (exit == count || exit - header > 60)
+      continue;
+    unsigned latch = before_instruction(lines, exit);
+    unsigned shift = before_instruction(lines, latch), step = before_instruction(lines, shift);
+    if (step <= guard || strncmp(lines[latch], "b .Lcg_", 7) ||
+        !pool_label(lines[header], lines[latch] + 2) ||
+        !sole_label_entry(c, source, lines[latch] + 2,
+                          source + (lines[header] - body), source + (lines[latch] - body) + 2))
+      continue;
+    unsigned dst, src, n, shifted;
+    end = 0;
+    if (sscanf(lines[step], "adds.n r%u, r%u, #%u%n", &dst, &src, &n, &end) != 3 ||
+        !end || lines[step][end] || dst != reg || src != reg || n != 1)
+      continue;
+    end = 0;
+    if (sscanf(lines[shift], "lsrs.n r%u, r%u, #%u%n", &shifted, &src, &n, &end) != 3 ||
+        !end || lines[shift][end] || shifted >= 8 || src != shifted || shifted == reg ||
+        !n || n > 32 || !pool_exits_without_value(lines, exit, count, shifted))
+      continue;
+    int safe = 1;
+    for (unsigned i = step + 1; i < exit; i++)
+      if (i != shift && i != latch && *lines[i] && *lines[i] != '@')
+        safe = 0;
+    for (unsigned i = exit + 1; i < count; i++)
+      if (!loop_metadata(lines[i]) &&
+          ((lines[i][0] == 'b' && strcmp(lines[i], "bx lr")) ||
+           !strncmp(lines[i], "cb", 2)))
+        safe = 0;
+    unsigned init = header;
+    while (init && !mentions(lines[init - 1], reg)) init--;
+    end = 0;
+    if (!safe || !init ||
+        sscanf(lines[init - 1], "movs.n r%u, #%u%n", &dst, &n, &end) != 2 ||
+        !end || lines[init - 1][end] || dst != reg || n >= bound ||
+        !cg_flags_overwritten(c, source, source + (lines[guard + 1] - body)))
+      continue;
+    for (unsigned i = 0; i < header; i++)
+      if (!loop_metadata(lines[i]) && (lines[i][0] == 'b' || !strncmp(lines[i], "cb", 2)))
+        safe = 0;
+    for (unsigned i = guard + 1; safe && i < step; i++) {
+      cg_register_work(c);
+      const char *p = lines[i];
+      if (loop_metadata(p))
+        continue;
+      if (*p == 'b' || !strncmp(p, "cb", 2)) {
+        const char *target = strrchr(p, ' ');
+        unsigned j = i + 1;
+        while (target && j < step && !pool_label(lines[j], target + 1)) j++;
+        if (j == step || !target)
+          safe = 0;
+      } else {
+        cg_constant facts[13] = {{0}};
+        facts[reg].known = 1;
+        effects(p, facts);
+        if (!facts[reg].known)
+          safe = 0;
+      }
+    }
+    if (safe) {
+      *out = (tail_shift){compare, guard, shift};
+      return 1;
+    }
+  }
+  return 0;
+}
+
 void cg_pool_literals(cg_context *c, size_t start) {
   enum { MAX_LINES = 920, MAX_NARROW_LINES = 220, MAX_LITERALS = 32 };
   const char *source = c->out + start;
@@ -1243,12 +1520,39 @@ void cg_pool_literals(cg_context *c, size_t start) {
   unsigned init, compare, step, reg, trips;
   int countdown = closed && countdown_loop(c, lines, count, &loop, &init, &compare,
                                             &step, &reg, &trips);
-  if (!pooled && !countdown)
-    return;
+  const char *rotate = closed && !countdown ? rotate_fixed_loop(c, lines, &loop, &compare) : NULL;
   if (closed && pooled)
     hoist_pool_loads(c, lines, count, &loop, site, regs, hoisted);
+  bit_feedback feedback = {0};
+  /* The countdown kills the shift flags before any control transfer. */
+  int fuse_feedback = countdown && plan_bit_feedback(c, lines, count, &loop, hoisted, &feedback);
+  feedback_frame frame = {0};
+  int trim = fuse_feedback && trim_feedback_frame(c, lines, count, &feedback, &frame);
+  unsigned invert = 0, move = 0, complement = 0;
+  int direct_feedback_return = fuse_feedback &&
+      plan_feedback_return(c, lines, count, loop.exit, &invert, &move, &complement);
+  tail_shift tail = {0};
+  int fold_tail = narrow_reach && !closed && plan_tail_shift(c, source, body, lines, count, &tail);
+  if (!pooled && !countdown && !rotate && !fold_tail)
+    return;
   c->size = start;
   for (unsigned i = 0; i < count; i++) {
+    if (trim) {
+      if (i == frame.frame) {
+        cg_emit(c, "@ stack-frame: 0 + %u saved-register bytes\n",
+                (unsigned)__builtin_popcount(frame.mask) * 4);
+        continue;
+      }
+      if (i == frame.metadata) {
+        cg_emit(c, "@ lightweight-frame: mask %u base sp calls 0\n", frame.mask);
+        continue;
+      }
+      if (i == frame.push || i == frame.pop) {
+        if (frame.mask)
+          cg_saved_register_list(c, frame.mask, i == frame.pop);
+        continue;
+      }
+    }
     if (closed && i == loop.header)
       for (unsigned j = loop.header + 1; j < count; j++)
         if (hoisted[j])
@@ -1269,6 +1573,41 @@ void cg_pool_literals(cg_context *c, size_t start) {
         cg_emit(c, "bne.n %s\n@ loop-countdown: fixed positive trip count\n", loop.head_name);
         continue;
       }
+    }
+    if (rotate) {
+      if (i == compare || i == loop.guard)
+        continue;
+      if (i == loop.latch) {
+        cg_emit(c, "%s\nb%s.n %s\n@ loop-rotation: positive trip count\n",
+                lines[compare], rotate, loop.head_name);
+        continue;
+      }
+    }
+    if (fuse_feedback && i == feedback.at) {
+      unsigned scratch = feedback.scratch, state = feedback.state;
+      cg_emit(c, "eor.w r%u, r%u, r%u\nlsls.n r%u, r%u, #31\n"
+              "asrs.n r%u, r%u, #31\nand.w r%u, r%u, r%u\n"
+              "eor.w r%u, r%u, r%u, lsr #1\n@ bit-feedback: branchless shifted xor\n",
+              scratch, state, feedback.input, scratch, scratch, scratch, scratch,
+              scratch, scratch, feedback.polynomial, state, scratch, state);
+      i = feedback.last;
+      continue;
+    }
+    if (direct_feedback_return) {
+      if (i == invert) {
+        cg_emit(c, "mvns.n r0, r%u\n@ bit-feedback: complement into return register\n",
+                complement);
+        continue;
+      }
+      if (i == move)
+        continue;
+    }
+    if (fold_tail) {
+      if (i == tail.compare || i == tail.guard)
+        continue;
+      if (i == tail.shift)
+        cg_emit(c, "%s\n%s\n@ loop-tail-shift: skipped on exit\n",
+                lines[tail.compare], lines[tail.guard]);
     }
     unsigned k = site[i];
     if (k && (entries[k - 1].uses > 1 || entries[k - 1].low_uses)) {

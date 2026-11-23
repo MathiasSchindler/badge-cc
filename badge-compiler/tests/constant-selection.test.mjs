@@ -19,6 +19,118 @@ function files(t) {
   t.after(() => fs.rmSync(directory, { recursive: true }));
   return name => path.join(directory, name);
 }
+test('RP2350 DSP extensions match LLVM and unknown packed operands do not select sticky-Q multiply', t => {
+  const file = files(t);
+  fs.writeFileSync(file('dsp.s'), `.syntax unified
+.cpu cortex-m33
+.thumb
+smuad r2, r1, r0
+smlatt r0, r1, r0, r2
+sbfx r2, r1, #8, #16
+ssat r3, #32, r9, lsl #31
+ssat r12, #8, r1, asr #16
+`);
+  run(tool('badge-asm'), [file('dsp.s'), '-o', file('owned.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang', ['--target=arm-none-eabi', '-mcpu=cortex-m33',
+    '-mthumb', '-c', file('dsp.s'), '-o', file('llvm.o')]);
+  const text = name => decodeElf(fs.readFileSync(file(name))).sections.find(s => s.name === '.text').data;
+  assert.deepEqual(text('owned.o'), text('llvm.o'));
+
+  const dot = fs.readFileSync(path.join(root, '../src/tools/compiler_micro/packed-dot.c'), 'utf8');
+  const unknown = dot.replace('uint32_t word)', 'uint32_t word, uint32_t other)')
+    .replace('    uint32_t other = word ^ 0x73962dd1u;\n', '');
+  for (const [name, source] of [['proved', dot], ['unknown', unknown]]) {
+    fs.writeFileSync(file(`${name}.c`), source);
+    run(tool('badge-cpp'), ['-I../src/shared', file(`${name}.c`), '-o', file(`${name}.i`)]);
+    run(tool('badge-ir'), [file(`${name}.i`), '-o', file('initial.ll')]);
+    run(tool('badge-opt'), [file('initial.ll'), '-o', file('input.ll')]);
+    run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
+      file('input.ll'), '-o', file(`${name}.s`)]);
+  }
+  assert.match(fs.readFileSync(file('proved.s'), 'utf8'), /^smuad /m);
+  assert.doesNotMatch(fs.readFileSync(file('unknown.s'), 'utf8'), /^smuad /m);
+});
+test('small symmetric clamp preserves both values of sticky Q and retains volatile tails', t => {
+  const file = files(t);
+  fs.writeFileSync(file('clamp.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+@sink = global i32 0, align 4
+define i32 @clamp(i32 %x) {
+entry:
+  %hi = icmp sgt i32 %x, 127
+  br i1 %hi, label %upper, label %low
+upper:
+  ret i32 127
+low:
+  %lo = icmp slt i32 %x, -128
+  br i1 %lo, label %lower, label %keep
+lower:
+  ret i32 -128
+keep:
+  ret i32 %x
+}
+define i32 @with_effect(i32 %x) {
+entry:
+  %hi = icmp sgt i32 %x, 127
+  br i1 %hi, label %upper, label %low
+upper:
+  store volatile i32 %x, ptr @sink, align 4
+  ret i32 127
+low:
+  %lo = icmp slt i32 %x, -128
+  br i1 %lo, label %lower, label %keep
+lower:
+  ret i32 -128
+keep:
+  ret i32 %x
+}
+`);
+  run(tool('badge-codegen-sanitize'), [file('clamp.ll'), '-o', file('clamp.s')]);
+  const asm = fs.readFileSync(file('clamp.s'), 'utf8');
+  assert.match(asm.slice(0, asm.indexOf('.size clamp,')), /@ clamp-leaf: Q-neutral/);
+  const effect = asm.slice(asm.indexOf('\nwith_effect:'), asm.indexOf('.size with_effect,'));
+  assert.doesNotMatch(effect, /@ clamp-leaf:/);
+  assert.match(effect, /^str/m);
+  fs.writeFileSync(file('caller.s'), `.syntax unified
+.cpu cortex-m33
+.thumb
+.text
+.global main
+.thumb_func
+main:
+  push {r4, lr}
+  movs r0, #0
+  msr apsr_nzcvq, r0
+  movw r0, #256
+  bl clamp
+  mrs r1, apsr
+  tst.w r1, #134217728
+  bne fail
+  cmp r0, #127
+  bne fail
+  mov.w r1, #134217728
+  msr apsr_nzcvq, r1
+  mov.w r0, #2147483648
+  bl clamp
+  mrs r1, apsr
+  tst.w r1, #134217728
+  beq fail
+  cmn.w r0, #128
+  bne fail
+  movs r0, #0
+  pop {r4, pc}
+fail:
+  movs r0, #1
+  pop {r4, pc}
+`);
+  const objects = [['tests/fixtures/codegen_start.S', 'start.o'],
+    [file('caller.s'), 'caller.o'], [file('clamp.s'), 'clamp.o']];
+  for (const [s, o] of objects) run(tool('badge-asm'), [s, '-o', file(o)]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    ...objects.map(([, o]) => file(o)), '-o', file('clamp.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('clamp.elf')]);
+});
 test('numeric synthesis and copy folding retain flags and match LLVM encodings', t => {
   const file = files(t);
   fs.writeFileSync(file('matrix.s'), run(tool('constant_selection_test'), []));
@@ -185,10 +297,13 @@ test('short constant arithmetic and inverted operands preserve Thumb results', t
     fn('keep_reg', binary, '%n = xor i32 %x, -1\n%r = and i32 %n, %y\n%a = xor i32 %n, %r\nret i32 %a') +
     fn('equal', unary, '%c = icmp eq i32 -17, %x\nbr i1 %c, label %yes, label %no\n' +
       'yes:\nret i32 8\nno:\nret i32 3') +
-    fn('ordered', unary, '%c = icmp ult i32 %x, -17\n%r = zext i1 %c to i32\nret i32 %r'));
+    fn('ordered', unary, '%c = icmp ult i32 %x, -17\n%r = zext i1 %c to i32\nret i32 %r') +
+    fn('signed_ordered', unary, '%c = icmp slt i32 %x, -128\n%r = zext i1 %c to i32\nret i32 %r') +
+    fn('signed_minimum', unary, '%c = icmp sgt i32 %x, -2147483648\n%r = zext i1 %c to i32\nret i32 %r'));
   fs.writeFileSync(file('caller.c'), `
 extern unsigned low(unsigned), plus(unsigned), minus(unsigned), literal(unsigned),
-                equal(unsigned), ordered(unsigned);
+                equal(unsigned), ordered(unsigned), signed_ordered(unsigned),
+                signed_minimum(unsigned);
 extern unsigned scaled(unsigned, unsigned), clear_reg(unsigned, unsigned),
                 set_reg(unsigned, unsigned), keep_reg(unsigned, unsigned),
                 reverse(unsigned, unsigned);
@@ -196,14 +311,15 @@ int main(void) {
   unsigned seed = 9;
   for (unsigned i = 0; i < 264; i++) {
     unsigned x = i == 0 ? 0 : i == 1 ? ~0u : i == 2 ? 0x80000000u :
-                 i < 6 ? ~0u - (i + 12u) : seed;
+                 i < 6 ? ~0u - (i + 12u) : i < 9 ? (unsigned)(-136 + (int)i) : seed;
     unsigned y = seed ^ 0xba2fe3b9u;
     if (low(x) != (x & 2047u) || plus(x) != 5u * x ||
         minus(x) != 2147483647u * x || scaled(x, y) != y - 64u * x ||
         reverse(x, y) != 8u * x - y || literal(x) != 8u * x - 3u ||
         clear_reg(x, y) != (~x & y) || set_reg(x, y) != (~x | y) ||
         keep_reg(x, y) != (~x ^ (~x & y)) ||
-        equal(x) != (x == -17u ? 8u : 3u) || ordered(x) != (x < -17u)) return 1;
+        equal(x) != (x == -17u ? 8u : 3u) || ordered(x) != (x < -17u) ||
+        signed_ordered(x) != ((int)x < -128) || signed_minimum(x) != (x != 0x80000000u)) return 1;
     seed = seed * 1664525u + 1013904223u;
   }
   return 0;
@@ -218,10 +334,11 @@ int main(void) {
     reverse: /^rsb\.w .*lsl #3$/m,
     clear_reg: /^bic\.w r\d+, r\d+, r\d+$/m, set_reg: /^orn\.w r\d+, r\d+, r\d+$/m,
     equal: /^cmn\.w .*#17$/m,
+    ordered: /^cmn\.w .*#17$/m, signed_ordered: /^cmn\.w .*#128$/m,
   })) assert.match(body(name), expected);
   assert.doesNotMatch(body('keep_reg'), /^bic\.w /m);
   assert.doesNotMatch(body('literal'), /^rsb\.w .*lsl #3$/m);
-  assert.doesNotMatch(body('ordered'), /^cmn\.w /m);
+  assert.doesNotMatch(body('signed_minimum'), /^cmn\.w /m);
   const clang = process.env.LLVM_CLANG ?? 'clang';
   const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
   run(tool('badge-asm'), [file('arith.s'), '-o', file('arith.o')]);
