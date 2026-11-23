@@ -72,7 +72,7 @@ static int eligible(loops *p, const ir_instruction *in) {
   for (unsigned k = line->op + 1; k < line->first + line->count; k++) {
     spend(p, 1);
     const char *s = ir_text(m, k);
-    if (!strcmp(s, "nsw") || !strcmp(s, "nuw") || !strcmp(s, "exact") ||
+    if (!strcmp(s, "nsw") || !strcmp(s, "nuw") || !strcmp(s, "nusw") || !strcmp(s, "exact") ||
         !strcmp(s, "disjoint") || !strcmp(s, "inbounds") || *s == '!')
       return 0;
   }

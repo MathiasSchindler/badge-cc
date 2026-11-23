@@ -82,7 +82,7 @@ static c_type_t *ir_promote(ir_context *c,c_type_t *t) {
 }
 static const char *ir_type(ir_context *c,c_type_t *t) {
     if(t->kind==T_VOID) return "void";
-    if(t->kind==T_POINTER || t->kind==T_FUNCTION) return "ptr";
+    if(t->kind==T_POINTER || t->kind==T_FUNCTION || t->kind==T_NULLPTR) return "ptr";
     if(ir_integer(t)) return ir_format(c,"i%u",ir_bits(t));
     if(ir_float(t)) return t->kind==T_FLOAT?"float":"double";
     if(ir_aggregate(t)) return ir_format(c,"[%" PRIu32 " x i8]",t->size);
@@ -152,7 +152,8 @@ static const char *ir_truth(ir_context *c,ir_value v) {
     if(v.type->kind==T_BOOL) return v.text;
     const char *r=ir_reg(c);
     if(ir_float(v.type)) ir_emit(c,"  %s = fcmp une %s %s, 0.0\n",r,ir_type(c,v.type),v.text);
-    else ir_emit(c,"  %s = icmp ne %s %s, %s\n",r,ir_type(c,v.type),v.text,v.type->kind==T_POINTER?"null":"0");
+    else ir_emit(c,"  %s = icmp ne %s %s, %s\n",r,ir_type(c,v.type),v.text,
+                 v.type->kind==T_POINTER || v.type->kind==T_NULLPTR?"null":"0");
     return r;
 }
 static ir_value ir_cast(ir_context *c,ir_value v,c_type_t *to) {
@@ -161,7 +162,8 @@ static ir_value ir_cast(ir_context *c,ir_value v,c_type_t *to) {
     if(ir_aggregate(to)) { if(!ir_aggregate(v.type)) ir_error(c,NULL,"invalid aggregate conversion"); v.type=to; return v; }
     if(to->kind==T_BOOL) return (ir_value){to,ir_truth(c,v)};
     const char *op=NULL;
-    if(v.type->kind==T_POINTER && to->kind==T_POINTER) { v.type=to; return v; }
+    if((v.type->kind==T_POINTER && to->kind==T_POINTER) ||
+       (v.type->kind==T_NULLPTR && (to->kind==T_NULLPTR || to->kind==T_POINTER))) { v.type=to; return v; }
     if(ir_integer(v.type) && ir_integer(to)) {
         if(ir_bits(v.type)==ir_bits(to)) { v.type=to; return v; }
         op=ir_bits(v.type)>ir_bits(to)?"trunc":v.type->is_unsigned?"zext":"sext";
@@ -435,14 +437,26 @@ static const char *ir_condition(ir_context *c,node_t *n) {
     } else truth=ir_truth(c,ir_expression(c,n));
     --c->depth; return truth;
 }
+static void ir_statement(ir_context *c,node_t *n);
 static ir_value ir_raw_expression(ir_context *c,node_t *n) {
     sem_info_t *i=ir_info(n); node_t *a=n->first,*b=a==NULL?NULL:a->next;
     if(i==NULL || i->type==NULL) ir_error(c,n,"expression lacks semantic type");
     if(i->constant && !i->lvalue && ir_integer(i->type))
         return (ir_value){i->type,ir_format(c,"%" PRIu64,i->value&ir_mask(i->type))};
+    if(ir_kind(n,"nullptr_literal")) return (ir_value){i->type,"null"};
     if(ir_kind(n,"identifier")) return ir_load(c,i->type,ir_place_symbol(c,i->symbol));
     if(ir_kind(n,"string_literal")) return (ir_value){ir_pointer(c,i->type->base),ir_symbol(c,i->symbol)};
     if(ir_kind(n,"parenthesized_expression")) return ir_raw_expression(c,a);
+    if(ir_kind(n,"statement_expression")) {
+        node_t *last=a->last; ir_value result={i->type,""};
+        for(node_t *child=a->first;child;child=child->next)
+            if(child==last && ir_kind(child,"expression_statement") && child->first) {
+                ir_live(c);
+                result=ir_expression(c,child->first);
+                result.type=i->type;
+            } else ir_statement(c,child);
+        return result;
+    }
     if(ir_kind(n,"cast")) return ir_cast(c,ir_expression(c,b),i->type);
     if(ir_kind(n,"member") || ir_kind(n,"subscript") || ir_kind(n,"compound_literal")) return ir_load(c,i->type,ir_lvalue(c,n));
     if(ir_kind(n,"call")) return ir_call(c,n);
@@ -564,7 +578,7 @@ static void ir_global_value(ir_context *c,c_type_t *t,node_t *n,uint32_t offset,
         memcpy(bytes+offset,s->bytes,size); return;
     }
     if(ir_aggregate(t)) ir_error(c,n,"nonconstant static aggregate expression is unsupported");
-    if(t->kind==T_POINTER) {
+    if(t->kind==T_POINTER || t->kind==T_NULLPTR) {
         const char *value=ir_constant_pointer(c,i);
         if(!strcmp(value,"null")) return;
         ir_reloc *r=ir_allocate(c,sizeof(*r)); r->offset=offset; r->size=4; r->type="ptr";
@@ -743,6 +757,19 @@ static void ir_statement(ir_context *c,node_t *n) {
             else { value=ir_cast(c,value,t); ir_emit(c,"  ret %s %s\n",ir_type(c,t),value.text); }
         } else ir_text(c,"  ret void\n");
         c->terminated=1;
+    } else if(ir_kind(n,"if_chain")) {
+        unsigned end=ir_new_block(c);
+        for(node_t *arm=a;arm;arm=arm->next) {
+            ir_live(c);
+            if(ir_kind(arm,"else_arm")) { ir_statement(c,arm->first); break; }
+            const char *truth=ir_condition(c,arm->first);
+            unsigned yes=ir_new_block(c), no=arm->next?ir_new_block(c):end;
+            ir_emit(c,"  br i1 %s, label %%b%u, label %%b%u\n",truth,yes,no);
+            c->terminated=1; ir_block(c,yes); ir_statement(c,arm->first->next); ir_branch(c,end);
+            if(no!=end) ir_block(c,no);
+        }
+        ir_branch(c,end);
+        ir_block(c,end);
     } else if(ir_kind(n,"if")) {
         ir_live(c); const char *truth=ir_condition(c,a);
         unsigned yes=ir_new_block(c),no=ir_new_block(c),end=ir_new_block(c);

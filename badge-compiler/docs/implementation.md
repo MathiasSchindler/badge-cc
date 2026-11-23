@@ -937,7 +937,22 @@ The checker implements:
   and `asm goto` labels. Instruction/register constraints remain a backend
   responsibility.
 - File-scope `inline` on internal-linkage functions (including `static
-  inline`). It preserves ordinary internal linkage, not a requirement to inline.
+  inline` and GNU `__inline__`). It preserves ordinary internal linkage,
+  not a requirement to inline. GNU `__extension__` may prefix declaration
+  specifiers. Forced inlining attributes are not accepted as ordinary hints.
+- GNU `__typeof__` for supported complete or incomplete C types and
+  expressions, including the C23 null-pointer type used by GCC headers.
+  The null-pointer type has the Arm pointer size and alignment but is
+  distinct from pointer and integer types. C23 `bool`, `true`, and `false`
+  use the existing Boolean representation.
+- Scoped GNU statement expressions with scalar results or no result.
+  Control transfers and aggregate results inside them are rejected.
+  The AAPCS32 `__builtin_va_list` type has the layout of a one-pointer
+  record; using the variadic builtins is a separate, unsupported operation.
+- Long `else if` chains use a flat representation, without raising the
+  depth limit for genuinely nested statements. Argument-free GNU
+  `pure`, `const`, `malloc`, and `warn_unused_result` function attributes
+  are accepted without drawing optimization or aliasing conclusions.
 
 Value-conversion annotations preserve the source lvalue's qualified type,
 including discarded volatile reads. A constant lvalue address is distinguished

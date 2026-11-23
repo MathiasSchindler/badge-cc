@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { preprocessStock } from './stock-input.mjs';
+import { bridgeStages, preprocessStock } from './stock-input.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -20,6 +20,12 @@ const owned = path.join(build, 'lfs2-owned.o');
 const smallint = path.join(upstream, 'py/smallint.c');
 const ownedSmallint = path.join(build, 'smallint-owned.o');
 const smallintNames = ['mp_small_int_modulo', 'mp_small_int_floor_divide'];
+const radix = path.join(upstream, 'py/parsenumbase.c');
+const ownedRadix = path.join(build, 'radix-owned.o');
+const unicode = path.join(upstream, 'py/unicode.c');
+const ownedUnicode = path.join(build, 'unicode-owned.o');
+const timeutils = path.join(upstream, 'shared/timeutils/timeutils.c');
+const ownedTimeutils = path.join(build, 'timeutils-owned.o');
 const fixture = path.join(root, 'badge-compiler/tests/fixtures');
 const qemu = process.env.QEMU_ARM ?? 'qemu-system-arm';
 const emulator = ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
@@ -38,7 +44,7 @@ function run(tool, args, { timeout = 120000, log, capture = false, ...options } 
     return result.stdout ?? '';
 }
 
-function firmware(name, board, mixed = false, core = false) {
+function firmware(name, board, mixed = false, core = false, vm = false) {
     const directory = path.join(build, name);
     const picotool = path.join(build, 'pico2-stock/_deps/picotool');
     const args = ['-S', port, '-B', directory, `-DMICROPY_BOARD=${board}`, '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'];
@@ -47,6 +53,8 @@ function firmware(name, board, mixed = false, core = false) {
         args.push(`-Dpicotool_DIR=${picotool}`);
     if (mixed) args.push(`-DCMAKE_PROJECT_INCLUDE=${path.join(here, 'mixed.cmake')}`, `-DBADGE_LFS2_OBJECT=${owned}`);
     if (core) args.push(`-DBADGE_SMALLINT_OBJECT=${ownedSmallint}`);
+    if (vm) args.push(`-DBADGE_RADIX_OBJECT=${ownedRadix}`, `-DBADGE_UNICODE_OBJECT=${ownedUnicode}`,
+        `-DBADGE_TIMEUTILS_OBJECT=${ownedTimeutils}`);
     run('cmake', args, {
         cwd: port, timeout: 240000, log: `${name}-configure`,
         env: { ...process.env, CFLAGS: '-Wno-error=array-bounds' },
@@ -55,9 +63,19 @@ function firmware(name, board, mixed = false, core = false) {
     const commands = JSON.parse(fs.readFileSync(path.join(directory, 'compile_commands.json'), 'utf8'));
     assert.equal(commands.filter(row => row.file === source).length, mixed ? 0 : 1);
     assert.equal(commands.filter(row => row.file === smallint).length, core ? 0 : 1);
+    assert.equal(commands.filter(row => row.file === radix).length, vm ? 0 : 1);
+    assert.equal(commands.filter(row => row.file === unicode).length, vm ? 0 : 1);
+    assert.equal(commands.filter(row => row.file === timeutils).length, vm ? 0 : 1);
     const map = fs.readFileSync(path.join(directory, 'firmware.elf.map'), 'utf8');
     assert(map.includes(mixed ? owned : '/lib/littlefs/lfs2_util.c.o'));
     assert(map.includes(core ? ownedSmallint : '/py/smallint.c.o'));
+    assert(map.includes(vm ? ownedRadix : '/py/parsenumbase.c.o'));
+    assert(map.includes(vm ? ownedUnicode : '/py/unicode.c.o'));
+    assert(map.includes(vm ? ownedTimeutils : '/shared/timeutils/timeutils.c.o'));
+    if (vm) {
+        assert.match(map, /\.text\.utf8_get_char\s+[^\n]+\n[^\n]*unicode-owned\.o|\.text\.utf8_get_char\s+[^\n]*unicode-owned\.o/);
+        assert.match(map, /\.text\.timeutils_mktime_1970\s+[^\n]+\n[^\n]*timeutils-owned\.o|\.text\.timeutils_mktime_1970\s+[^\n]*timeutils-owned\.o/);
+    }
     const crc = crcSymbol(path.join(directory, 'firmware.elf')).bytes;
     const bytes = fs.statSync(path.join(directory, 'firmware.bin')).size;
     const uf2 = fs.statSync(path.join(directory, 'firmware.uf2')).size;
@@ -65,18 +83,61 @@ function firmware(name, board, mixed = false, core = false) {
     return { directory, bytes, uf2, crc };
 }
 
-function compileSmallint(controlDirectory) {
+function compileStockModule(controlDirectory, source, object) {
     const db = JSON.parse(fs.readFileSync(path.join(controlDirectory, 'compile_commands.json'), 'utf8'));
-    const stem = path.join(build, 'smallint-stock');
-    preprocessStock(db, smallint, `${stem}.i`, run);
-    // O0 keeps LLVM optimization out of this route; disabling optnone lets badge-opt promote locals.
-    run(process.env.LLVM_CLANG ?? 'clang',
-        ['--target=arm-none-eabi', ...arm, '-mfloat-abi=softfp', '-std=gnu23', '-O0', '-fno-discard-value-names',
-            '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-Xclang', '-disable-O0-optnone',
-            '-S', '-emit-llvm', '-x', 'c', `${stem}.i`, '-o', `${stem}.ll`]);
-    run(path.join(tools, 'badge-opt'), [`${stem}.ll`, '-o', `${stem}.opt.ll`]);
-    run(path.join(tools, 'badge-codegen'), [`${stem}.opt.ll`, '-o', `${stem}.s`]);
-    run(path.join(tools, 'badge-asm'), [`${stem}.s`, '-o', ownedSmallint]);
+    const stem = path.join(build, `${path.basename(source, '.c')}-stock`);
+    preprocessStock(db, source, `${stem}.i`, run);
+    for (const [, tool, args] of bridgeStages(stem, object, tools))
+        run(tool, args);
+}
+
+function calendarOracle(controlDirectory, vmDirectory) {
+    const stockObject = path.join(controlDirectory, 'CMakeFiles/firmware.dir', `${timeutils}.o`);
+    const control = path.join(build, 'calendar-control.o');
+    const names = ['timeutils_seconds_since_1970_to_struct_time', 'timeutils_mktime_1970'];
+    const renames = new Map([[names[0], 'gcc_calendar_from_seconds'], [names[1], 'gcc_calendar_to_seconds']]);
+    const exports = run('llvm-nm', ['--defined-only', '--extern-only', stockObject], { capture: true });
+    const stockNames = [...exports.matchAll(/^[\da-f]+ T (timeutils_\w+)$/gm)].map(m => m[1]);
+    for (const name of names) assert(stockNames.includes(name));
+    run('arm-none-eabi-objcopy', [...stockNames.map(name => `--redefine-sym=${name}=${renames.get(name) ?? `gcc_${name}`}`),
+        stockObject, control]);
+    const oracle = path.join(build, 'calendar-oracle.o'), elf = path.join(build, 'calendar-oracle.elf');
+    run(gcc, [...arm, '-Os', '-ffreestanding', '-c', path.join(here, 'calendar-oracle.c'), '-o', oracle]);
+    run('ld.lld', ['--gc-sections', '-T', path.join(fixture, 'codegen_fixture.ld'),
+        path.join(build, 'crc-start.o'), oracle, ownedTimeutils, control, '-o', elf]);
+    run(qemu, [...emulator, '-kernel', elf], { timeout: 20000 });
+    const sizes = directory => {
+        const symbols = run('llvm-nm', ['--defined-only', '--print-size', path.join(directory, 'firmware.elf')], { capture: true });
+        return Object.fromEntries(names.map(name => {
+            const m = symbols.match(new RegExp(`^[\\da-f]+ ([\\da-f]+) T ${name}$`, 'm'));
+            assert(m, `Missing linked ${name} in ${directory}`);
+            return [name, Number.parseInt(m[1], 16)];
+        }));
+    };
+    const linked = { gcc: sizes(controlDirectory), owned: sizes(vmDirectory) };
+    console.log('Calendar oracle: 2,048 timestamps passed; linked symbol sizes:', linked);
+    return { oracleCases: 2048, sizes: linked };
+}
+
+function radixOracle(controlDirectory, vmDirectory) {
+    const stockObject = path.join(controlDirectory, 'CMakeFiles/firmware.dir', `${radix}.o`);
+    const control = path.join(build, 'radix-control.o');
+    const oracle = path.join(build, 'radix-oracle.o'), elf = path.join(build, 'radix-oracle.elf');
+    run('arm-none-eabi-objcopy', ['--redefine-sym=mp_parse_num_base=gcc_parse_num_base',
+        stockObject, control]);
+    run(gcc, [...arm, '-Os', '-ffreestanding', '-c', path.join(here, 'radix-oracle.c'), '-o', oracle]);
+    run('ld.lld', ['--gc-sections', '-T', path.join(fixture, 'codegen_fixture.ld'),
+        path.join(build, 'crc-start.o'), oracle, ownedRadix, control, '-o', elf]);
+    run(qemu, [...emulator, '-kernel', elf], { timeout: 20000 });
+    const bytes = directory => {
+        const symbols = run('llvm-nm', ['--defined-only', '--print-size', path.join(directory, 'firmware.elf')], { capture: true });
+        const symbol = symbols.match(/^[\da-f]+ ([\da-f]+) T mp_parse_num_base$/m);
+        assert(symbol, `mp_parse_num_base missing from ${directory}`);
+        return Number.parseInt(symbol[1], 16);
+    };
+    const sizes = { gcc: bytes(controlDirectory), owned: bytes(vmDirectory) };
+    console.log('Radix oracle: 12,288 input/base cases passed; linked symbol sizes:', sizes);
+    return { oracleCases: 12288, sizes };
 }
 
 function smallintOracle(controlDirectory, coreDirectory) {
@@ -88,7 +149,9 @@ function smallintOracle(controlDirectory, coreDirectory) {
     run(gcc, [...arm, '-mfloat-abi=softfp', '-Os', '-ffreestanding', '-c', path.join(here, 'smallint-oracle.c'), '-o', oracle]);
     run('ld.lld', ['--gc-sections', '-T', path.join(fixture, 'codegen_fixture.ld'),
         path.join(build, 'crc-start.o'), oracle, ownedSmallint, control, '-o', elf]);
-    run(qemu, [...emulator, '-kernel', elf], { timeout: 20000 });
+    const trace = path.join(build, 'smallint-oracle.trace');
+    run(qemu, [...emulator, '-kernel', elf, '-accel', 'tcg,one-insn-per-tb=on',
+        '-d', 'exec,nochain', '-D', trace], { timeout: 20000 });
     const symbolSizes = directory => {
         const symbols = run('llvm-nm', ['--defined-only', '--print-size', path.join(directory, 'firmware.elf')], { capture: true });
         return Object.fromEntries(smallintNames.map(n => {
@@ -98,8 +161,19 @@ function smallintOracle(controlDirectory, coreDirectory) {
         }));
     };
     const sizes = { gcc: symbolSizes(controlDirectory), owned: symbolSizes(coreDirectory) };
-    console.log('Smallint oracle: 182 signed pairs passed; linked symbol sizes:', sizes);
-    return { oraclePairs: 182, sizes };
+    const symbols = run('llvm-nm', ['--defined-only', '--print-size', elf], { capture: true });
+    const pcs = tracePcs(trace);
+    const qemuInstructions = Object.fromEntries([...smallintNames,
+        ...smallintNames.map(n => n.replace('mp_small_int_', 'gcc_'))].map(n => {
+        const m = symbols.match(new RegExp(`^([\\da-f]+) ([\\da-f]+) T ${n}$`, 'm'));
+        assert(m, `Missing oracle symbol ${n}`);
+        const count = countReached(pcs, Number.parseInt(m[1], 16), Number.parseInt(m[2], 16));
+        assert(count > 0, `Oracle did not reach ${n}`);
+        return [n, count];
+    }));
+    console.log('Smallint oracle: 182 signed pairs passed; linked symbol sizes:', sizes,
+        'QEMU helper instructions:', qemuInstructions);
+    return { oraclePairs: 182, sizes, qemuInstructions };
 }
 
 function compileOwned() {
@@ -149,13 +223,18 @@ function measureCrc(role, object, driver) {
     run(qemu, [...emulator, '-kernel', elf, '-accel', 'tcg,one-insn-per-tb=on',
         '-d', 'exec,nochain', '-D', trace], { timeout: 20000 });
     const { start, bytes } = crcSymbol(elf);
-    let instructions = 0;
-    for (const [, value] of fs.readFileSync(trace, 'utf8').matchAll(/^Trace .*?\[[\da-f]+\/([\da-f]+)\//gm)) {
-        const pc = Number.parseInt(value, 16);
-        if (pc >= start && pc < start + bytes) instructions++;
-    }
+    const instructions = countReached(tracePcs(trace), start, bytes);
     assert(instructions > 0);
     return { bytes, qemuInstructions: instructions };
+}
+
+function tracePcs(trace) {
+    return Array.from(fs.readFileSync(trace, 'utf8').matchAll(/^Trace .*?\[[\da-f]+\/([\da-f]+)\//gm),
+        m => Number.parseInt(m[1], 16));
+}
+
+function countReached(pcs, start, bytes) {
+    return pcs.reduce((count, pc) => count + (pc >= start && pc < start + bytes ? 1 : 0), 0);
 }
 
 function crcOracle(controlDirectory) {
@@ -187,13 +266,20 @@ try {
     compileOwned();
     const mixed = firmware('badge-mixed', 'BADGE_RP2350', true);
     crcOracle(stock.directory);
-    compileSmallint(stock.directory);
+    compileStockModule(stock.directory, smallint, ownedSmallint);
     const core = firmware('badge-core', 'BADGE_RP2350', true, true);
     const smallInteger = smallintOracle(stock.directory, core.directory);
+    compileStockModule(stock.directory, radix, ownedRadix);
+    compileStockModule(stock.directory, unicode, ownedUnicode);
+    compileStockModule(stock.directory, timeutils, ownedTimeutils);
+    const vm = firmware('badge-vm', 'BADGE_RP2350', true, true, true);
+    const radixParser = radixOracle(stock.directory, vm.directory);
+    const calendar = calendarOracle(stock.directory, vm.directory);
     const sameTokens = crcComparison();
     console.log('Same-token CRC comparison (1,024-byte input):', sameTokens);
     fs.writeFileSync(path.join(build, 'comparison.json'),
-        JSON.stringify({ revision, pico2, stock, mixed, core, smallInteger, sameTokens, oracleCases: 1028 }, null, 2) + '\n');
+        JSON.stringify({ revision, pico2, stock, mixed, core, vm, smallInteger, radixParser, calendar,
+            sameTokens, oracleCases: 1028 }, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython build: ${error.message}`);
     process.exitCode = 1;

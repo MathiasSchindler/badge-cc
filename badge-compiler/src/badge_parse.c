@@ -74,7 +74,8 @@ static int keyword(const char *s) {
         "float for goto if inline int long register restrict return short signed sizeof static "
         "struct switch typedef union unsigned void volatile while _Alignas _Alignof _Atomic "
         "_Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local "
-        "__attribute__ __asm__ __asm asm __volatile__ __alignof__ __alignof");
+        "__attribute__ __asm__ __asm asm __volatile__ __alignof__ __alignof "
+        "__typeof__ nullptr bool true false __inline__ __inline __extension__ __builtin_va_list");
 }
 
 static int at(parser_t *p, const char *s) { return strcmp(peek(p, 0)->text, s) == 0; }
@@ -131,12 +132,13 @@ static void bind(parser_t *p, const char *name, int is_type) {
 static int qualifier(const char *s) { return word_in(s, "const restrict volatile _Atomic"); }
 static int storage(const char *s) { return word_in(s, "typedef extern static auto register _Thread_local"); }
 static int type_word(const char *s) {
-    return word_in(s, "void char short int long float double signed unsigned _Bool _Complex _Imaginary");
+    return word_in(s, "void char short int long float double signed unsigned _Bool bool _Complex _Imaginary __builtin_va_list");
 }
 static int declaration_start(parser_t *p, size_t ahead) {
     const char *s = peek(p, ahead)->text;
     return qualifier(s) || storage(s) || type_word(s) || is_typedef(p, s) ||
-        word_in(s, "struct union enum inline _Noreturn _Alignas _Static_assert __attribute__");
+        word_in(s, "struct union enum inline __inline__ __inline __extension__ "
+                   "_Noreturn _Alignas _Static_assert __attribute__ __typeof__");
 }
 static int string_token(token_t *t) {
     if (t->kind != LITERAL) return 0;
@@ -223,8 +225,14 @@ static node_t *specifiers(parser_t *p, int allow_storage, int *is_type) {
     int has_type = 0;
     for (;;) {
         const char *s = peek(p, 0)->text;
+        if (accept(p, "__extension__")) continue;
         if (at(p, "__attribute__")) child(p, n, attributes(p));
-        else if (word_in(s, "struct union enum")) {
+        else if (at(p, "__typeof__")) {
+            node_t *t = node(p, "typeof", NULL);
+            ++p->position; expect(p, "(");
+            child(p, t, declaration_start(p, 0) ? type_name(p) : expression(p, 1));
+            expect(p, ")"); child(p, n, finish(p, t)); has_type = 1;
+        } else if (word_in(s, "struct union enum")) {
             child(p, n, record(p)); has_type = 1;
         } else if (at(p, "_Atomic") && strcmp(peek(p, 1)->text, "(") == 0) {
             node_t *a = node(p, "atomic_type", NULL);
@@ -242,7 +250,7 @@ static node_t *specifiers(parser_t *p, int allow_storage, int *is_type) {
         else if (allow_storage && storage(s)) {
             if (at(p, "typedef")) *is_type = 1;
             child(p, n, leaf(p, "storage_class"));
-        } else if (allow_storage && word_in(s, "inline _Noreturn")) {
+        } else if (allow_storage && word_in(s, "inline __inline__ __inline _Noreturn")) {
             child(p, n, leaf(p, "function_specifier"));
         } else if (!has_type && is_typedef(p, s)) {
             child(p, n, leaf(p, "typedef_name")); has_type = 1;
@@ -412,8 +420,11 @@ static node_t *unary(parser_t *p) {
         } else { child(p, n, unary(p)); finish(p, n); }
     } else {
         if (accept(p, "(")) {
-            n = node_at(p, "parenthesized_expression", NULL, p->position - 1);
-            child(p, n, expression(p, 1)); expect(p, ")"); finish(p, n);
+            int compound = at(p, "{");
+            n = node_at(p, compound ? "statement_expression" : "parenthesized_expression",
+                        NULL, p->position - 1);
+            child(p, n, compound ? block(p) : expression(p, 1));
+            expect(p, ")"); finish(p, n);
         } else if (accept(p, "_Generic")) {
             n = node_at(p, "generic_selection", NULL, p->position - 1);
             expect(p, "("); child(p, n, expression(p, 2)); expect(p, ",");
@@ -426,6 +437,8 @@ static node_t *unary(parser_t *p) {
             } while (accept(p, ","));
             expect(p, ")"); finish(p, n);
         } else if (string_token(peek(p, 0))) n = strings(p);
+        else if (at(p, "nullptr")) n = leaf(p, "nullptr_literal");
+        else if (at(p, "true") || at(p, "false")) n = leaf(p, "bool_literal");
         else if (peek(p, 0)->kind == NUMBER) n = leaf(p, "number");
         else if (peek(p, 0)->kind == LITERAL) n = leaf(p, "character");
         else {
@@ -596,11 +609,53 @@ static node_t *statement(parser_t *p) {
     enter(p);
     node_t *n;
     if (at(p, "{")) n = block(p);
-    else if (at(p, "if") || at(p, "while") || at(p, "switch")) {
+    else if (at(p, "if")) {
+        n = node(p, "if", NULL); ++p->position;
+        expect(p, "("); child(p, n, expression(p, 1)); expect(p, ")");
+        child(p, n, statement(p));
+        if (accept(p, "else")) {
+            if (!at(p, "if")) child(p, n, statement(p));
+            else {
+                node_t *chain = node_at(p, "if_chain", NULL, n->begin);
+                child(p, chain, finish(p, n));
+                do {
+                    node_t *arm = node(p, "if", NULL);
+                    expect(p, "if"); expect(p, "("); child(p, arm, expression(p, 1)); expect(p, ")");
+                    child(p, arm, statement(p)); child(p, chain, finish(p, arm));
+                    if (!accept(p, "else")) break;
+                    if (!at(p, "if")) {
+                        node_t *last = node(p, "else_arm", NULL);
+                        child(p, last, statement(p)); child(p, chain, finish(p, last));
+                        break;
+                    }
+                } while (1);
+                /* Preserve the ordinary AST for short chains. Long chains use
+                   a flat list so generated SDK tables do not consume recursion. */
+                node_t *arms[16];
+                size_t count = 0;
+                node_t *arm = chain->first;
+                for (; arm && count < sizeof(arms) / sizeof(*arms); arm = arm->next)
+                    arms[count++] = arm;
+                if (arm) n = chain;
+                else {
+                    n = NULL;
+                    while (count) {
+                        arm = arms[--count];
+                        arm->next = NULL;
+                        if (!strcmp(arm->kind, "else_arm")) n = arm->first;
+                        else {
+                            child(p, arm, n);
+                            n = finish(p, arm);
+                        }
+                    }
+                }
+            }
+        }
+        finish(p, n);
+    } else if (at(p, "while") || at(p, "switch")) {
         n = node(p, peek(p, 0)->text, NULL); ++p->position;
         expect(p, "("); child(p, n, expression(p, 1)); expect(p, ")");
         child(p, n, statement(p));
-        if (strcmp(n->kind, "if") == 0 && accept(p, "else")) child(p, n, statement(p));
         finish(p, n);
     } else if (accept(p, "do")) {
         n = node_at(p, "do", NULL, p->position - 1);

@@ -148,6 +148,13 @@ int main(void) {
         {"struct S{int x;};void f(volatile struct S *s){(void)*s;}","i32 4, i1 true"},
         {"struct S{int x;};void f(void){volatile struct S s={3};}","store volatile i32"},
         {"int f(void){int a[2]={1,2};return sizeof(a)+_Alignof(int);}","ret i32 12"},
+        {"typedef __typeof__(nullptr) N; _Static_assert(sizeof(N)==4,\"nullptr ABI\"); "
+         "N n=nullptr; int *f(N x){return x;} _Bool g(void){return nullptr;}", "define dso_local ptr"},
+        {"__extension__ typedef long long Acc; static __inline__ bool f(Acc x){return x?true:false;} "
+         "int g(int x){return f(x);}", "define internal zeroext i1"},
+        {"int f(int *p){({if(*p) *p=2;}); return ({int n=*p; n+3;});}", "ret i32"},
+        {"typedef __builtin_va_list V; _Static_assert(sizeof(V)==4 && _Alignof(V)==4,\"AAPCS32\"); "
+         "unsigned f(void){return sizeof(V);}", "ret i32 4"},
         {"struct A{char tag; short x __attribute__((__aligned__(__alignof__(long long))));}; "
          "struct A a={.x=1};", "[16 x i8]"},
         {"struct S{int x,y;}; struct S a[1]={[0].x=5,[0]={.y=7}};","c\"\\00\\00\\00\\00\\07"},
@@ -163,6 +170,15 @@ int main(void) {
             "i32 8, i1 true",NULL,1,path);
     global_storage_tests(path);
     for(size_t k=0;k<sizeof(positive)/sizeof(*positive);++k) fixture(positive[k].source,positive[k].fragment,1,path);
+    char chain[16384];
+    size_t written=(size_t)snprintf(chain,sizeof(chain),"int f(int x){");
+    for(unsigned k=0;k<320;++k) {
+        int n=snprintf(chain+written,sizeof(chain)-written,"%sif(x==%u)return %u;",k?"else ":"",k,k+1);
+        assert(n>0 && (size_t)n<sizeof(chain)-written); written+=(size_t)n;
+    }
+    assert(written+sizeof("else return -1;}")<sizeof(chain));
+    memcpy(chain+written,"else return -1;}",sizeof("else return -1;}"));
+    fixture(chain,"ret i32 320",1,path);
     const char *negative[]={
         "void f(int x){__asm__(\"nop\":\"=r\"(x));}",
         "void f(int x){__asm__(\"nop\"::\"r\"(x));}",
@@ -177,6 +193,11 @@ int main(void) {
         "int a; unsigned address=(unsigned)&a;",
         "struct A{long long x __attribute__((aligned(3)));};",
         "struct A{long long x __attribute__((aligned));};",
+        "int f(void){return nullptr;}",
+        "int f(void){return ({return 4; 1;});}",
+        "int f(void){({int scoped=1; scoped;});return scoped;}",
+        "int global=({1;});",
+        "void *f(void){__typeof__(nullptr) p=nullptr; return ++p;}",
         "union U{int x;char y;}; union U u={.x=4,.y=1};",
         "union U{int x;char y;};struct S{union U u;};struct S s={.u.x=4,.u.y=1};",
         "struct S; struct S f(void);",

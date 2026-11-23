@@ -109,7 +109,7 @@ typedef struct {
   unsigned block_count;
   unsigned *successors, successor_count, *predecessors, predecessor_count;
   unsigned *parameters, parameter_count;
-  ir_index type_index, global_index;
+  ir_index type_index, global_index, named_types;
   unsigned capacity;
 } ir_analysis;
 

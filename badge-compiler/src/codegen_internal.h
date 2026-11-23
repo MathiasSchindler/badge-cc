@@ -120,6 +120,7 @@ typedef struct {
   size_t memory;
   cg_token *tokens;
   unsigned count, pos, line;
+  struct cg_named_type *named_types;
   const char *file;
   char *out;
   size_t size, capacity;

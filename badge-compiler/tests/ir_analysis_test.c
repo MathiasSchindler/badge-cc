@@ -226,9 +226,17 @@ int main(void) {
   typed_collisions();
   static const char *positive[] = {
       graph,
+      TARGET "%outer = type { i8, %inner }\n"
+             "%inner = type { i16, ptr }\n"
+             FN("%p = alloca %outer, align 4\n"
+                "%q = getelementptr inbounds nuw %outer, ptr %p, i32 0, i32 1, i32 0\n"
+                "store i16 7, ptr %q, align 2\nret i32 %x"),
       TARGET FN("%v = freeze i32 undef\nret i32 %v"),
       TARGET FN("%v = sdiv exact i32 %x, 0\nret i32 %v"),
       TARGET FN("%v = shl i32 %x, 32\nret i32 %v"),
+      TARGET FN("%p = inttoptr i32 %x to ptr\n"
+                "%q = getelementptr inbounds nuw i8, ptr %p, i32 1\n"
+                "%v = ptrtoint ptr %q to i32\nret i32 %v"),
       TARGET FN("%p = inttoptr i32 %x to ptr\n%v = load i8, ptr %p, align "
                 "1\n%r = zext i8 %v to i32\nret i32 %r"),
       TARGET FN(
@@ -269,6 +277,12 @@ int main(void) {
     fixture(positive[k], 1);
   static const char *negative[] = {
       TARGET FN("ret i32 %missing"),
+      TARGET FN("%p = alloca %missing_type, align 4\nret i32 %x"),
+      TARGET "%cycle = type { %cycle }\n"
+             FN("%p = alloca %cycle, align 4\nret i32 %x"),
+      TARGET FN("%p = inttoptr i32 %x to ptr\n"
+                "%q = getelementptr nuw nuw i8, ptr %p, i32 1\n"
+                "%v = ptrtoint ptr %q to i32\nret i32 %v"),
       TARGET FN("%a = add i32 %later, 1\n%later = add i32 %x, 1\nret i32 %a"),
       TARGET FN("%x = add i32 1, 2\nret i32 %x"),
       TARGET FN("%a = add i32 %x, 1\n%\"\\61\" = add i32 %x, 2\nret i32 %a"),

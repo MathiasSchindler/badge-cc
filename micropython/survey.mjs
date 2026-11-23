@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { preprocessStock } from './stock-input.mjs';
+import { bridgeStages, preprocessStock } from './stock-input.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -29,17 +29,61 @@ function checked(tool, args, options) {
 const modules = ['py/ringbuf.c', 'py/smallint.c', 'py/parsenumbase.c', 'py/unicode.c',
     'py/sequence.c', 'shared/timeutils/timeutils.c'];
 
+function probeModule(db, module) {
+    const source = path.join(upstream, module);
+    const stem = path.join(work, `survey-${path.basename(module, '.c')}`);
+    const stages = [
+        ['frontend', 'badge-ir', '.i', '.ll'],
+        ['optimization', 'badge-opt', '.ll', '.opt.ll'],
+        ['codegen', 'badge-codegen', '.opt.ll', '.s'],
+        ['assembly', 'badge-asm', '.s', '.o'],
+    ];
+    for (const suffix of ['.i', '.ll', '.opt.ll', '.s', '.o'])
+        fs.rmSync(`${stem}${suffix}`, { force: true });
+    let failure;
+    try {
+        preprocessStock(db, source, `${stem}.i`, checked);
+    } catch (error) {
+        failure = { stage: 'preprocessing', diagnostic: error.message };
+    }
+    if (!failure)
+        for (const [stage, tool, input, output] of stages) {
+            const r = run(path.join(compiler, tool), [`${stem}${input}`, '-o', `${stem}${output}`]);
+            if (r.status !== 0) {
+                failure = { stage, diagnostic: r.stderr.trim() || `exit ${r.status}` };
+                break;
+            }
+        }
+    let bridge;
+    if (failure?.stage === 'frontend') {
+        const compatible = `${stem}-bridge`;
+        fs.copyFileSync(`${stem}.i`, `${compatible}.i`);
+        const object = `${compatible}.o`;
+        fs.rmSync(object, { force: true });
+        bridge = { stage: 'object-ready', diagnostic: null, link: 'not attempted by survey' };
+        for (const [stage, tool, args] of bridgeStages(compatible, object, compiler)) {
+            const r = run(tool, args);
+            if (r.status !== 0) {
+                bridge = { stage, diagnostic: r.stderr.trim() || `exit ${r.status}` };
+                break;
+            }
+        }
+    }
+    return {
+        module, mode: 'GCC preprocessing with stock headers; owned frontend through assembly',
+        ...(failure ?? { stage: 'object-ready', diagnostic: null, link: 'not attempted by survey' }), bridge,
+    };
+}
+
 try {
     const db = JSON.parse(fs.readFileSync(path.join(firmware, 'compile_commands.json'), 'utf8'));
     const results = [];
     for (const module of modules) {
-        const source = path.join(upstream, module);
-        const stem = path.join(work, `survey-${path.basename(module, '.c')}`);
-        preprocessStock(db, source, `${stem}.i`, checked);
-        const probe = run(path.join(compiler, 'badge-ir'), [`${stem}.i`, '-o', `${stem}.ll`]);
-        const diagnostic = probe.status === 0 ? null : probe.stderr.trim();
-        results.push({ module, mode: 'GCC preprocessing with stock headers; owned frontend', diagnostic });
-        console.log(`${module}: ${diagnostic ?? 'frontend accepted'}`);
+        const result = probeModule(db, module);
+        results.push(result);
+        console.log(`${module} [${result.stage}]: ${result.diagnostic ?? 'object generated'}`);
+        if (result.bridge)
+            console.log(`  bridge [${result.bridge.stage}]: ${result.bridge.diagnostic ?? 'object generated'}`);
     }
 
     const ringbuf = path.join(work, 'ringbuf-owned.o');

@@ -140,6 +140,27 @@ static unsigned type(reader *r) {
       r->a->field_count += n;
       id = intern(r, t);
     }
+  } else if (*text(r) == '%') {
+    const char *name = text(r);
+    const char *key = ir_name_key(r->c, name);
+    unsigned line = index_get(&r->a->named_types, key);
+    if (line == IR_NONE)
+      ir_error(r->c, "unknown IR named type");
+    id = index_get(&r->a->type_index, key);
+    if (id == IR_NONE) {
+      const ir_line *definition = &r->a->text->lines[line];
+      unsigned pos = r->p, end = r->end;
+      r->p = definition->first + 3;
+      r->end = definition->first + definition->count;
+      ir_type body = r->a->types[type(r)];
+      if (body.kind != IR_STRUCT || r->p != r->end)
+        ir_error(r->c, "named IR type requires a complete record definition");
+      body.key = key;
+      id = intern(r, body);
+      r->p = pos;
+      r->end = end;
+    }
+    r->p++;
   } else {
     id = scalar(r, text(r));
     r->p++;
@@ -159,7 +180,7 @@ static void kind(reader *r, unsigned t, ir_type_kind k) {
     ir_error(r->c, "invalid instruction operand type");
 }
 static int type_start(const char *s) {
-  return ir_bits(s) || !strcmp(s, "ptr") || !strcmp(s, "void") ||
+  return *s == '%' || ir_bits(s) || !strcmp(s, "ptr") || !strcmp(s, "void") ||
          !strcmp(s, "[") || !strcmp(s, "{") || !strcmp(s, "<");
 }
 static void parameter_attributes(reader *r) {
@@ -531,7 +552,15 @@ static void instruction(reader *r, unsigned line, unsigned end_line,
       in->type = t;
   } else if (!strcmp(in->operation, "getelementptr")) {
     in->opcode = IR_OP_GEP;
-    accept(r, "inbounds");
+    unsigned flags = 0;
+    for (;;) {
+      unsigned flag = !strcmp(text(r), "inbounds") ? 1u :
+                      !strcmp(text(r), "nuw") ? 2u : !strcmp(text(r), "nusw") ? 4u : 0u;
+      if (!flag) break;
+      if (flags & flag) ir_error(r->c, "duplicate getelementptr flag");
+      flags |= flag;
+      r->p++;
+    }
     unsigned element = type(r);
     if (a->types[element].kind == IR_VOID)
       ir_error(r->c, "void GEP element");
@@ -1117,6 +1146,17 @@ void ir_analyze(ir_context *c, ir_module *m, ir_analysis *a) {
 #undef ALLOC
   index_init(c, &a->type_index, a->capacity);
   index_init(c, &a->global_index, a->capacity);
+  for (unsigned l = 0; l < m->line_count; l++) {
+    const ir_line *line = &m->lines[l];
+    if (line->count < 4 || *ir_text(m, line->first) != '%' ||
+        strcmp(ir_text(m, line->first + 1), "=") ||
+        strcmp(ir_text(m, line->first + 2), "type"))
+      continue;
+    if (!a->named_types.capacity)
+      index_init(c, &a->named_types, a->capacity);
+    c->line = l + 1;
+    index_put(c, &a->named_types, ir_name_key(c, ir_text(m, line->first)), l);
+  }
   reader r = {.c = c, .a = a, .work = 20000000};
   for (unsigned l = 0; l < m->line_count; l++) {
     ir_line *line = &m->lines[l];

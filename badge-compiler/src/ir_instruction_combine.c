@@ -430,6 +430,45 @@ static const ir_instruction *from_operand(const ir_analysis *a, const ir_operand
   return i == IR_NONE ? NULL : &a->instructions[i];
 }
 
+static int signed_word_binary(const ir_analysis *a, const ir_instruction *i, const char *op) {
+  if (!i || i->opcode != IR_OP_BINARY || i->operand_count != 2 ||
+      a->types[i->type].bits != 32 || i->line != i->end_line || strcmp(i->operation, op))
+    return 0;
+  const ir_line *line = &a->text->lines[i->line - 1];
+  return !line->replacement && (line->count == 7 ||
+      (line->count == 8 && !strcmp(ir_text(a->text, line->op + 1), "nsw")));
+}
+
+static int fold_negated_bias(combining *p, const ir_instruction *bias) {
+  ir_analysis *a = &p->a;
+  int subtract = signed_word_binary(a, bias, "sub");
+  if (!subtract && !signed_word_binary(a, bias, "add"))
+    return 0;
+  const ir_operand *ops = &a->operands[bias->first_operand];
+  uint64_t one;
+  if (ops[1].kind != IR_OPERAND_LITERAL ||
+      !ir_integer(ir_text(a->text, ops[1].token), &one) || one != 1)
+    return 0;
+  const ir_instruction *neg = from_operand(a, ops);
+  if (!signed_word_binary(a, neg, "sub") || neg->block != bias->block ||
+      a->definitions[neg->definition].use_count != 1)
+    return 0;
+  const ir_operand *arg = &a->operands[neg->first_operand];
+  uint64_t zero;
+  if (arg->kind != IR_OPERAND_LITERAL || arg[1].kind != IR_OPERAND_LOCAL ||
+      !ir_integer(ir_text(a->text, arg->token), &zero) || zero)
+    return 0;
+  // The replacement matches the original modulo 2^32 wherever its nsw operations are defined.
+  const char *src = a->definitions[arg[1].definition].name;
+  const char *dst = a->definitions[bias->definition].name;
+  a->text->lines[bias->line - 1].replacement = subtract ?
+      ir_format(p->c, "  %s = xor i32 %s, -1\n", dst, src) :
+      ir_format(p->c, "  %s = sub i32 1, %s\n", dst, src);
+  a->text->lines[neg->line - 1].replacement = "";
+  ir_note(p->c, "transformed", "folded_word_negation_bias", 1);
+  return 1;
+}
+
 static int zero_extended_word(const ir_analysis *a, const ir_operand *o) {
   const ir_instruction *i = from_operand(a, o);
   return i && i->opcode == IR_OP_CAST && !strcmp(i->operation, "zext") &&
@@ -540,6 +579,8 @@ void ir_linear_bias(ir_context *c, ir_module *m) {
   for (unsigned i = 0; i < a->instruction_count; i++) {
     spend(&p);
     const ir_instruction *add = &a->instructions[i];
+    if (fold_negated_bias(&p, add))
+      continue;
     if (!plain_i32_binary(a, add, "add"))
       continue;
     const ir_instruction *sub[2];

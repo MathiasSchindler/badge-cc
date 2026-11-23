@@ -196,10 +196,42 @@ static int cg_return_hint(cg_context *c, const char *s) {
          !strcmp(s, "nonnull") || !strcmp(s, "noalias") ||
          !strcmp(s, "dereferenceable") || !strcmp(s, "dereferenceable_or_null");
 }
+typedef struct cg_named_type {
+  const char *name;
+  unsigned begin, end;
+  cg_type *type;
+  struct cg_named_type *next;
+} cg_named_type;
+
+static cg_named_type *cg_named_type_find(cg_context *c, const char *name) {
+  for (cg_named_type *type = c->named_types; type; type = type->next) {
+    cg_register_work(c);
+    if (!strcmp(type->name, name))
+      return type;
+  }
+  return NULL;
+}
+
 static cg_type *cg_type_parse(cg_context *c, unsigned depth) {
   if (depth > 64)
     cg_error(c, "IR type nesting limit");
   char *s = cg_take(c);
+  if (*s == '%') {
+    cg_named_type *named = cg_named_type_find(c, s);
+    if (!named)
+      cg_error(c, "unknown IR named type");
+    if (!named->type) {
+      unsigned pos = c->pos, line = c->line;
+      c->pos = named->begin;
+      cg_type *body = cg_type_parse(c, depth + 1);
+      if (!body->fields || c->pos != named->end)
+        cg_error(c, "named IR type requires a complete record definition");
+      c->pos = pos;
+      c->line = line;
+      named->type = body;
+    }
+    return named->type;
+  }
   cg_type *t = cg_alloc(c, sizeof(*t));
   if (!strcmp(s, "void")) {
     t->align = 1;
@@ -268,7 +300,7 @@ static cg_type *cg_type_parse(cg_context *c, unsigned depth) {
 static int cg_type_start(cg_context *c) {
   const char *s = c->pos < c->count ? c->tokens[c->pos].text : "";
   return !strcmp(s, "ptr") || !strcmp(s, "void") || !strcmp(s, "[") ||
-         !strcmp(s, "{") || !strcmp(s, "<") ||
+         !strcmp(s, "{") || !strcmp(s, "<") || *s == '%' ||
          (s[0] == 'i' && isdigit((unsigned char)s[1]));
 }
 static void cg_to_type(cg_context *c) {
@@ -3067,6 +3099,23 @@ static void cg_generate_admission(cg_context *c, cg_function *f, const char *sou
 static void cg_process(cg_context *c, const char *source, size_t size,
                        struct badge_codegen_admission_cache *cache) {
   cg_lex(c, source, size);
+  for (unsigned k = 0; k + 3 < c->count; k++) {
+    if (c->tokens[k].text[0] != '%' ||
+        (k && c->tokens[k - 1].line == c->tokens[k].line) ||
+        strcmp(c->tokens[k + 1].text, "=") || strcmp(c->tokens[k + 2].text, "type"))
+      continue;
+    c->line = c->tokens[k].line;
+    if (cg_named_type_find(c, c->tokens[k].text))
+      cg_error(c, "duplicate IR named type");
+    unsigned end = k + 3;
+    while (end < c->count && c->tokens[end].line == c->line)
+      end++;
+    cg_named_type *type = cg_alloc(c, sizeof(*type));
+    *type = (cg_named_type){.name = c->tokens[k].text, .begin = k + 3,
+                            .end = end, .next = c->named_types};
+    c->named_types = type;
+    k = end - 1;
+  }
   cg_emit(c, ".syntax unified\n.cpu cortex-m33\n.thumb\n.eabi_attribute 18, "
              "4\n.eabi_attribute 24, 1\n.eabi_attribute 25, 1\n.eabi_attribute "
              "28, 0\n");
@@ -3092,7 +3141,8 @@ static void cg_process(cg_context *c, const char *source, size_t size,
       } else if (!strcmp(kind, "datalayout") && strcmp(value, BADGE_IR_LAYOUT))
         cg_error(c, "unsupported data layout");
       cg_skip_line(c, line);
-    } else if (!strcmp(s, "declare") || !strcmp(s, "attributes") ||
+    } else if ((*s == '%' && cg_named_type_find(c, s)) ||
+               !strcmp(s, "declare") || !strcmp(s, "attributes") ||
                !strcmp(s, "source_filename") || *s == '!')
       cg_skip_line(c, line);
     else
@@ -3102,7 +3152,7 @@ static void cg_process(cg_context *c, const char *source, size_t size,
     cg_error(c, "missing target triple");
   cg_prepare_cfg(c);
   for (cg_function *f = c->functions; f; f = f->next)
-    if (cache)
+    if (cache && !c->named_types)
       cg_generate_admission(c, f, source, cache);
     else
       cg_generate_function(c, f);
