@@ -647,6 +647,92 @@ median timer ticks (-9.3%). The reached frame fell from 149,102-149,105 to
 sample ranges across repetitions; the other phases did not resolve a
 change.
 
+### Faster host compilation without changing firmware
+
+Profitability checks still require the same final code bytes, frames,
+register saves, and spills. The owned compiler now does less work to get
+those facts:
+
+1. Check assembly record prefixes before parsing allocation and frame facts.
+2. Reuse exact whole-module costs by IR text and scalar policy. The cache
+   is local to one optimizer invocation and capped at 64 entries and 8 MiB.
+3. On a whole-module miss, reuse emitted code for unchanged functions
+   when their local label namespace matches. Callers are always regenerated
+   against the current module's callee facts. The function cache is capped
+   at 4 MiB of input and assembly text. Final assembly and relaxation still
+   run over the complete module.
+4. Validate the assembly and ELF layout for size-only admission without
+   materializing the ELF or its relocation payload.
+5. Keep the parsed, verified module between passes that emit identical IR,
+   and discard their scratch edits. Changed IR is still verified. The shell
+   driver also avoids redundant path-helper subprocesses; the separate
+   inspection stages and their output files remain available.
+
+The pass order, backend policies, and supported IR contract are unchanged.
+
+Paired macOS measurements on an Apple M4 Max used the existing compiler
+executables (host tools were not rebuilt inside the timed intervals).
+Five samples per optimizer and three independent builds per configuration
+gave these medians:
+
+| Host workload | Before | After |
+| --- | ---: | ---: |
+| Optimize Display | 56 ms | 26 ms |
+| Optimize IMU Demo | 685 ms | 244 ms |
+| Optimize Tilt Maze | 929 ms | 235 ms |
+| Optimize Diagnostics | 2,598 ms | 429 ms |
+| Clean Maze + IMU + Diagnostics (`-j5`) | 2.97 s | 0.78 s |
+| Rebuild after a Maze-only change (`-j5`) | 1.12 s | 0.39 s |
+
+The old and new compilers emitted byte-identical optimized IR for all
+129 archived inputs and byte-identical UF2s for the three measured
+firmwares. No badge timing or firmware change is implied.
+
+The next host-speed round indexes helper references once per IR revision,
+walks only the body of each reachable function for recursion checks, and
+reuses the analysis after rejected trials. The paired fixed-input replay
+remains byte-identical across all 129 modules and reduces aggregate
+optimizer CLI time from 7.72 s to 7.40 s (-4.1%). The Maze median falls
+from 222 ms to 210 ms and Diagnostics from 425 ms to 414 ms. These are
+host compilation times, not firmware execution times.
+
+During backend admission and ordinary codegen, frame and instruction
+rewrites now append unchanged assembly spans directly. Frame base
+substitution copies spans rather than formatting each character, and
+operand peepholes check the opcode prefix before scanning operands.
+Common load/store scans use a line-sized buffer instead of handing the
+scanner the remaining function text. Policies, instruction selection,
+and output limits are unchanged.
+
+Against the preceding host-speed round, the 129-input replay emitted
+identical optimized IR and cut aggregate optimizer CLI time from
+7.68 s to 6.68 s (-13.0%). Standalone codegen medians fell from 13.31
+to 9.76 ms for IMU, 20.54 to 14.87 ms for Maze, and 24.33 to 17.76 ms
+for Diagnostics. The corresponding optimizer medians fell from
+260 to 208 ms, 225 to 183 ms, and 449 to 377 ms.
+All 129 saved optimized inputs also emitted byte-identical assembly.
+Five paired `-j5` builds of Maze, IMU, and Diagnostics went from 785
+to 700 ms median wall time, with nonoverlapping clean-build samples and
+byte-identical UF2 payloads.
+
+The next round replaces exhaustive Thumb modified-immediate search with
+direct encoding. It also skips expression-cache construction for plain
+decimal literals, fast-paths ordinary register spellings, looks up
+mnemonics by binary search, and reuses static section directives across
+relaxation passes. Relocations, conditional instruction checks, and
+layout-dependent expressions still use the full assembler.
+
+The native oracle checks all 4,096 encodings plus one-bit perturbations
+against the exhaustive result. All 129 archived optimizer inputs and 129
+archived assembler inputs produced byte-identical IR and ELF objects.
+Aggregate optimizer CLI time fell from 6.83 s to 6.56 s (-4.1%).
+Diagnostics optimization fell from 371 to 347 ms; standalone assembly
+for that module fell from 7.29 to 6.36 ms. Aggregate assembler CLI time
+was effectively flat across the archive.
+The three fresh firmware images were again byte-identical. Clean
+parallel build medians were 689 and 662 ms; the ranges overlap, so
+this round does not establish an end-to-end build speedup.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

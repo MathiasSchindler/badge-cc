@@ -14,17 +14,58 @@ static void preserved(const char *path) {
     assert(fread(text,1,sizeof(text),f)==9 && memcmp(text,"preserved",9)==0); assert(fclose(f)==0);
 }
 
-static assembler_t *fixture(const char *source) {
+static assembler_t *fixture_mode(const char *source, int serialize) {
     assembler_t *s=calloc(1,sizeof(*s)); assert(s!=NULL);
     s->input="fixture.s"; s->output="build/asm-fixture.o";
     assert(setjmp(s->failure)==0);
     size_t n=strlen(source); unsigned char *input=as_allocate(s,n+1); memcpy(input,source,n+1);
-    as_assemble(s,input,n,&s->result,&s->result_size);
+    as_assemble(s,input,n,serialize ? &s->result : NULL,serialize ? &s->result_size : NULL);
     return s;
 }
+static assembler_t *fixture(const char *source) { return fixture_mode(source,1); }
 
 static void release(assembler_t *s) { free(s->result); as_destroy(s); }
 
+static void check_size_only(void) {
+    const char *source=".thumb\n.section .text.f,\"ax\"\nf: b far\n.space 4096\n"
+        "far: bl external\nbx lr\n.balign 16\n.addrsig\n.addrsig_sym external\n";
+    assembler_t *encoded=fixture(source), *sized=fixture_mode(source,0);
+    assert(encoded->result_size>0 && !sized->result && !sized->result_size);
+    assert(encoded->section_count==sized->section_count && encoded->relocation_count>0 &&
+           encoded->relocation_count==sized->relocation_count);
+    for(uint32_t k=1;k<=encoded->section_count;k++) {
+        const bo_section_t *a=&encoded->sections[k].out, *b=&sized->sections[k].out;
+        assert(a->size==b->size && a->flags==b->flags && !strcmp(a->name,b->name));
+    }
+    release(encoded); release(sized);
+}
+
+static uint32_t expand_immediate(unsigned code) {
+    uint32_t byte=code&255u;
+    if(code<1024) {
+        static const uint32_t repeat[]={1,0x00010001u,0x01000100u,0x01010101u};
+        return byte*repeat[code>>8];
+    }
+    byte=128u|(code&127u);
+    unsigned rotate=code>>7;
+    return (byte>>rotate)|(byte<<(32-rotate));
+}
+static void check_modified_immediates(void) {
+    uint32_t values[4096];
+    for(unsigned code=0;code<4096;++code) {
+        values[code]=expand_immediate(code);
+        assert(thumb_modified(values[code])==(values[code]?(int)code:0));
+    }
+    uint32_t state=UINT32_C(0x584be48d);
+    for(unsigned k=0;k<4096;++k) {
+        state=state*UINT32_C(1664525)+UINT32_C(1013904223);
+        uint32_t value=values[k]^(UINT32_C(1)<<(state>>27));
+        int expected=-1;
+        for(unsigned code=0;code<4096;++code)
+            if(values[code]==value) { expected=(int)code; break; }
+        assert(thumb_modified(value)==expected);
+    }
+}
 static uint32_t read_word(const unsigned char *bytes, unsigned width) {
     uint32_t value=0;
     for(unsigned k=0;k<width;++k) value|=(uint32_t)bytes[k]<<(k*8);
@@ -139,6 +180,11 @@ static void check_expression_cache(void) {
     assert(as_absolute(s,"~(-1)")==0 && as_absolute(s,"~(-1)")==0);
     assert(as_absolute(s,"((8<<2)>>1)==16")==1 && as_absolute(s,"((8<<2)>>1)==16")==1);
     assert(as_absolute(s,"((7&3)^1)|8") ==10 && as_absolute(s,"((7&3)^1)|8")==10);
+    assert(as_absolute(s," # 76800 ")==76800);
+    assert(as_absolute(s,"9223372036854775807")==INT64_MAX);
+    assert(as_absolute(s,"010")==8 && as_absolute(s,"0x10")==16);
+    expression_error(s,"9223372036854775808");
+    expression_error(s,"08");
     s->sections[1].out.size=0;
     assert(as_absolute(s,"9223372036854775807+(.-start)")==INT64_MAX);
     s->sections[1].out.size=1;
@@ -165,6 +211,8 @@ static void check_expression_cache(void) {
 }
 
 int main(void) {
+    check_modified_immediates();
+    check_size_only();
     check_mov_relocations();
     check_directive_layout();
     check_ergonomics();
@@ -184,6 +232,7 @@ int main(void) {
         ".word ((16 >> 2) | 3) ^ 1\n",
         ".section .bss.x,\"aw\",%nobits\n.long 0\n.zero 16\n",
         ".section .rodata.s,\"aMS\",%progbits,1\n.asciz \"hello\"\n",
+        ".section \".data.x\",\"aw\"\n.byte 1\n.text\n.section .data.x,\"aw\"\n.byte 2\n",
         ".section .data,\"aw\"\na:.word b\nb:.word a\n",
         "a:nop\n.equ here,.\nnop\n.word here\n",
         ".equ a,b+1\n.equ b,42\n.word a\n",
@@ -246,6 +295,7 @@ int main(void) {
         ".section .bss.x,\"aw\",%nobits\n.ascii \"nonzero\"\n",
         ".section .bss.x,\"aw\",%nobits\n.long 1\n",
         ".section .data.x,\"aw\"\nnop\n",
+        ".section .data.x,\"aw\"\n.section \".data.x\",\"a\"\n",
         ".p2align 17\n",".balign 3\n",".ascii \"unterminated\n",
         ".type x,%object\n.thumb_func\nx:nop\n.size x,-1\n",
         ".endif\n",".if 1\n.error \"expected failure\"\n.endif\n",

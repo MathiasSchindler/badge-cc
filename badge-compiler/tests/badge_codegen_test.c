@@ -9,6 +9,37 @@
 
 #define TARGET "target triple = \"thumbv8m.main-unknown-none-eabi\"\n"
 #define FN(body) "define i32 @f(i32 %x) {\nentry:\n" body "\n}\n"
+static void admission_cache_tests(void) {
+  const char *leaf =
+      "define internal i32 @leaf(i32 %x) {\nentry:\n"
+      "%y = add i32 %x, 7\nret i32 %y\n}\n";
+  const char *caller =
+      "define i32 @caller(i32 %x) {\nentry:\n"
+      "%y = call i32 @leaf(i32 %x)\nret i32 %y\n}\n";
+  struct badge_codegen_admission_cache *cache = NULL;
+  for (unsigned i = 0; i < 7; i++) {
+    char ir[1024], *expected = NULL, *actual = NULL;
+    size_t expected_size, actual_size;
+    const char *other = i == 2 ? "define i32 @extra() {\nentry:\nret i32 0\n}\n" : "";
+    const char *callee = i == 1 ?
+        "define internal i32 @leaf(i32 %x) {\nentry:\n"
+        "%y = udiv i32 %x, 17\nret i32 %y\n}\n" : leaf;
+    int length = snprintf(ir, sizeof(ir), "%s%s%s%s", TARGET, other, callee, caller);
+    assert(length > 0 && (size_t)length < sizeof(ir));
+    badge_scalar_selection selection = i == 4 ? BADGE_SELECTION_THUMB_OPERANDS :
+        i == 6 ? BADGE_SELECTION_THUMB_SCHEDULE : BADGE_SELECTION_THUMB_CONSTANTS;
+    assert(badge_codegen_compile_with_selections(
+        ir, (size_t)length, "admission.ll",
+        (badge_codegen_options){BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL_COMPACT},
+        selection, BADGE_MEMORY_WORD, &expected, &expected_size));
+    assert(badge_codegen_compile_for_admission(ir, (size_t)length, "admission.ll",
+        selection, &cache, &actual, &actual_size));
+    assert(expected_size == actual_size && !memcmp(expected, actual, expected_size));
+    free(expected);
+    free(actual);
+  }
+  free(cache);
+}
 static void fixture_mode(const char *source, const char *fragment, int accepted,
                          const char *path, badge_frame_addressing mode,
                          badge_register_residency residency,
@@ -865,6 +896,10 @@ static void host_tests(void) {
   assert(!strcmp(c->out + strlen(prefix) + 20000, ":00abcdef"));
   cg_emit(c, "%s", body);
   assert(strlen(c->out) == c->size && c->capacity > 32768);
+  const char raw[] = {'%', 's', '\n', '!'};
+  size_t start = c->size;
+  cg_append(c, raw, 3);
+  assert(c->size == start + 3 && !strcmp(c->out + start, "%s\n"));
   if (!setjmp(c->failure)) {
     cg_emit(c, "%*s", 64 * 1024 * 1024 + 1, "");
     assert(!"output limit must fail before growing the buffer");
@@ -896,9 +931,11 @@ int main(int argc, char **argv) {
   if (argc == 1 || !strcmp(argv[1], "--host"))
     host_tests();
   if (argc == 2 && !strcmp(argv[1], "--host")) {
+    admission_cache_tests();
     puts("badge-codegen: indexed lookups, buffered formatting and resource limits PASS");
     return 0;
   }
+  admission_cache_tests();
   if (argc == 2 && !strcmp(argv[1], "--residency")) {
     residency_tests();
     global_tests();

@@ -341,13 +341,25 @@ static unsigned thumb_system_register(assembler_t *s, const char *name, int writ
     as_error(s,"unsupported named system register '%s'",name);
 }
 
-static unsigned as_instruction(assembler_t *s, as_line_t *l) {
+static const char *thumb_mnemonic(const char *name) {
     static const char *const bases[]={
         "adc","adcs","add","adds","addw","adr","and","ands","asr","asrs","b","bfc","bfi","bic","bics","bkpt","bl","blx","bx","cbnz","cbz","clrex","clz","cmn","cmp","cpsid","cpsie","dmb","dsb","eor","eors","isb",
-        "lda","ldab","ldah","ldaex","ldaexb","ldaexh","ldm","ldr","ldrb","ldrd","ldrex","ldrexb","ldrexh","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mla","mls","mov","movs","movt","movw","mrs","msr","mul","muls","mvn","mvns","nop","orn","orr","orrs",
-        "pop","push","rev","rev16","ror","rors","rsb","rsbs","sbc","sbcs","sdiv","sev","smlabb","smlal","smulbb","smull","stm","str","strb","strd","strh","sub","subs","subw",
-        "stl","stlb","stlh","stlex","stlexb","stlexh","strex","strexb","strexh","svc","sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtah","uxtb","uxth","wfe","wfi","yield"
+        "lda","ldab","ldaex","ldaexb","ldaexh","ldah","ldm","ldr","ldrb","ldrd","ldrex","ldrexb","ldrexh","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mla","mls","mov","movs","movt","movw","mrs","msr","mul","muls","mvn","mvns","nop","orn","orr","orrs",
+        "pop","push","rev","rev16","ror","rors","rsb","rsbs","sbc","sbcs","sdiv","sev","smlabb","smlal","smulbb","smull",
+        "stl","stlb","stlex","stlexb","stlexh","stlh","stm","str","strb","strd","strex","strexb","strexh","strh","sub","subs","subw",
+        "svc","sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtah","uxtb","uxth","wfe","wfi","yield"
     };
+    size_t lo=0,hi=sizeof(bases)/sizeof(*bases);
+    while(lo<hi) {
+        size_t mid=lo+(hi-lo)/2;
+        int order=strcmp(name,bases[mid]);
+        if(!order) return bases[mid];
+        if(order<0) hi=mid; else lo=mid+1;
+    }
+    return NULL;
+}
+
+static unsigned as_instruction(assembler_t *s, as_line_t *l) {
     if(!l->encoding) {
         char mnemonic[32]; size_t len=strlen(l->op);
         if(len>=sizeof(mnemonic)) as_error(s,"instruction name too long");
@@ -358,14 +370,12 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
         if(strncmp(mnemonic,"it",2)==0) {
             l->encoding|=8; l->mnemonic=as_copy(s,mnemonic);
         } else {
-            for(size_t k=0;k<sizeof(bases)/sizeof(*bases);++k)
-                if(strcmp(mnemonic,bases[k])==0) { l->mnemonic=bases[k]; break; }
+            l->mnemonic=thumb_mnemonic(mnemonic);
             if(l->mnemonic==NULL && len>2) {
                 l->condition=as_condition(mnemonic+len-2);
                 if(l->condition>=0) {
                     mnemonic[len-2]=0;
-                    for(size_t k=0;k<sizeof(bases)/sizeof(*bases);++k)
-                        if(strcmp(mnemonic,bases[k])==0) { l->mnemonic=bases[k]; break; }
+                    l->mnemonic=thumb_mnemonic(mnemonic);
                 }
             }
             if(l->mnemonic==NULL) as_error(s,"unsupported instruction '%s'",l->op);

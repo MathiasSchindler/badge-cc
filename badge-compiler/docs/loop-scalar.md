@@ -49,7 +49,7 @@ Failure rejects every proposal in that function; it does not repeatedly search
 or recompile alternative candidates. Backend/assembler failures diagnose and
 fail the optimizer rather than silently masquerading as a rejected proposal.
 
-This adds host compilation cost only to the explicit pass. Loop analysis keeps
+This adds host compilation cost when the pass runs. Loop analysis keeps
 its 50-million work budget; final admission additionally caps cumulative
 original/proposed input at 64 MiB and uses the backend/assembler's existing
 limits. Exhaustion fails explicitly and preserves an existing optimizer output.
@@ -94,6 +94,14 @@ pixel is verified:
 These count single-instruction QEMU trace entries, **not cycles or elapsed
 badge time**. The fill batch includes verification loops and startup, not just
 the clear function. Semihosting termination can vary a trace count by one.
+The fill comparison deliberately stops the control pipeline before
+`loop-scalar`. The first repository import (`5547b4a`) already included
+the pass in its default pipeline. Using that default as the control
+had already replaced the per-pixel byte-offset multiply with an
+induction value, so rerunning the pass produced identical IR and could
+not satisfy a strict instruction-count improvement. The six-pass
+control restores the original comparison without changing the default
+compiler or the graphics code.
 The earlier 141-fixture loop-invariant/loop-cost suite also passes. Two static
 evidence tests reject fabricated policy, savings, allocation and artifact facts.
 Retained optimizer API/mutation tests and three existing metrics/default

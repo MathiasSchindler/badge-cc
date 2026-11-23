@@ -73,7 +73,7 @@ typedef struct {
     const char *decision;
     int64_t displacement, reach_min, reach_max;
     unsigned pc_base, has_reach, alignment, padding, padding_skipped;
-    uint32_t label_symbol, numeric, label_number, literal_symbol;
+    uint32_t label_symbol, numeric, label_number, literal_symbol, section_id;
     size_t pool_next, pool_match, pool_hash_next;
     unsigned pool_generation, pool_section;
     as_value_t pool_value;
@@ -88,7 +88,7 @@ typedef struct as_listing_range {
 typedef struct {
     bo_section_t out;
     size_t capacity;
-    uint32_t section_symbol;
+    uint32_t section_symbol, next;
     int mapping;
     unsigned fallthrough;
     size_t pool_first, pool_last;
@@ -115,6 +115,7 @@ typedef struct {
     as_symbol_t *symbols;
     bo_relocation_t *relocations;
     uint32_t buckets[8192];
+    uint32_t section_buckets[1024];
     as_expression_cache_t *expressions[8192];
     size_t pools[8192];
     uint32_t section_count, symbol_count, relocation_count, current, line;
@@ -198,7 +199,8 @@ static uint32_t as_symbol(assembler_t *s, const char *name) {
 
 static uint32_t as_section(assembler_t *s, const char *name, uint32_t type,
                            uint32_t flags, uint32_t entry) {
-    for(uint32_t k=1;k<=s->section_count;++k) {
+    uint32_t bucket=as_hash(name)%1024;
+    for(uint32_t k=s->section_buckets[bucket];k;k=s->sections[k].next) {
         as_section_t *v=&s->sections[k];
         if(strcmp(v->out.name,name)!=0) continue;
         if(v->out.type!=type || v->out.flags!=flags || v->out.entry_size!=entry)
@@ -209,6 +211,8 @@ static uint32_t as_section(assembler_t *s, const char *name, uint32_t type,
     uint32_t id=++s->section_count;
     s->sections[id].out=(bo_section_t){.name=as_copy(s,name),.type=type,.flags=flags,
         .alignment=1,.entry_size=entry};
+    s->sections[id].next=s->section_buckets[bucket];
+    s->section_buckets[bucket]=id;
     return id;
 }
 
@@ -509,7 +513,25 @@ static as_value_t as_expression_level(assembler_t *s, const char **p, unsigned l
     }
 }
 
+static int as_decimal_literal(const char *p, int64_t *value) {
+    as_skip(&p);
+    if(*p=='#') { ++p; as_skip(&p); }
+    if(*p<'0' || *p>'9' || (*p=='0' && isdigit((unsigned char)p[1]))) return 0;
+    uint64_t n=0;
+    do {
+        unsigned digit=(unsigned char)*p++-'0';
+        if(n>((uint64_t)INT64_MAX-digit)/10) return 0;
+        n=n*10+digit;
+    } while(*p>='0' && *p<='9');
+    as_skip(&p);
+    if(*p) return 0;
+    *value=(int64_t)n;
+    return 1;
+}
+
 static as_value_t as_expression(assembler_t *s, const char *text) {
+    int64_t literal;
+    if(as_decimal_literal(text,&literal)) return (as_value_t){.value=literal};
     uint32_t bucket=as_hash(text);
     as_expression_cache_t *c=s->expressions[bucket];
     for(;c;c=c->next) if(strcmp(c->text,text)==0) break;
@@ -568,11 +590,14 @@ static uint32_t as_bounded(assembler_t *s, const char *text, uint32_t max) {
 }
 
 static int as_register(assembler_t *s, const char *text) {
-    if(strcmp(text,"sp")==0) return 13; if(strcmp(text,"lr")==0) return 14;
-    if(strcmp(text,"pc")==0) return 15; if(strcmp(text,"ip")==0) return 12;
     if(text[0]=='r' && isdigit((unsigned char)text[1])) {
+        unsigned digit=(unsigned char)text[1]-'0';
+        if(digit<=9 && !text[2]) return (int)digit;
+        if(digit==1 && text[2]>='0' && text[2]<='5' && !text[3]) return 10+text[2]-'0';
         char *end; long n=strtol(text+1,&end,10); if(*end==0 && n>=0 && n<=15) return (int)n;
     }
+    if(strcmp(text,"sp")==0) return 13; if(strcmp(text,"lr")==0) return 14;
+    if(strcmp(text,"pc")==0) return 15; if(strcmp(text,"ip")==0) return 12;
     as_error(s,"invalid register '%s'",text);
 }
 
@@ -825,6 +850,7 @@ static void as_directive(assembler_t *s, as_line_t *l) {
         if(s->pending_thumb) { v->thumb=1; v->out.type=2; s->pending_thumb=0; }
     } else if(d==AS_D_SECTION) {
         if(n<1 || n>4 || s->it_count) as_error(s,"invalid section operands or interrupted IT");
+        if(l->section_id) { s->current=l->section_id; return; }
         uint32_t flags=0,type=BO_PROGBITS,entry=0;
         if(n>=2) {
             size_t len; unsigned char *f=as_string(s,l->arg[1],&len);
@@ -846,10 +872,13 @@ static void as_directive(assembler_t *s, as_line_t *l) {
             name=(char *)decoded;
         }
         s->current=as_section(s,name,type,flags,entry);
+        /* A merge-entry expression can depend on the current layout. */
+        if(n<4) l->section_id=s->current;
     } else if(d==AS_D_TEXT || d==AS_D_DATA || d==AS_D_BSS) {
         if(n!=0 || s->it_count) as_error(s,"invalid section switch");
         uint32_t type=d==AS_D_BSS?BO_NOBITS:BO_PROGBITS;
-        s->current=as_section(s,op,type,d==AS_D_TEXT?6:3,0);
+        if(!l->section_id) l->section_id=as_section(s,op,type,d==AS_D_TEXT?6:3,0);
+        s->current=l->section_id;
     } else if(d==AS_D_P2ALIGN || d==AS_D_BALIGN) as_alignment(s,l,d==AS_D_P2ALIGN);
     else if(d==AS_D_LTORG || d==AS_D_POOL) as_literal_pool(s,l);
     else if(d==AS_D_WORD || d==AS_D_LONG) as_data(s,l,4);
@@ -1104,7 +1133,9 @@ static void as_assemble(assembler_t *s, unsigned char *input, size_t length,
     bo_section_t *sections=as_allocate(s,s->section_count*sizeof(*sections));
     for(uint32_t k=1;k<=s->section_count;++k) sections[k-1]=s->sections[k].out;
     bo_object_t object={sections,s->section_count,symbols,s->symbol_count,s->relocations,s->relocation_count};
-    if(!badge_object_write(&object,output,output_size)) as_error(s,"object serialization failed");
+    if(output ? !badge_object_write(&object,output,output_size)
+              : !badge_object_check_layout(&object))
+        as_error(s,output ? "object serialization failed" : "invalid object layout");
 }
 
 #include "badge_thumb.h"

@@ -15,7 +15,7 @@ _Noreturn void cg_error(cg_context *c, const char *message) {
   longjmp(c->failure, 1);
 }
 void *cg_alloc(cg_context *c, size_t n) {
-  if (n > 128u * 1024u * 1024u - c->memory)
+  if (n > CG_ALLOCATION_LIMIT - c->memory)
     cg_error(c, "backend allocation limit exceeded");
   cg_allocation *a = calloc(1, sizeof(*a) + n);
   if (!a)
@@ -30,18 +30,38 @@ static char *cg_copy(cg_context *c, const char *p, size_t n) {
   memcpy(s, p, n);
   return s;
 }
-void cg_emit(cg_context *c, const char *format, ...) {
+static void cg_flush_output(cg_context *c) {
   if (cg_schedule_selection(c) && !c->schedule_flushing) {
     if (c->schedule_active)
       c->schedule_barriers++;
     cg_schedule_flush(c);
   }
-  if (!c->capacity) {
-    c->out = malloc(4096);
-    if (!c->out)
-      cg_error(c, "out of memory");
-    c->capacity = 4096;
-  }
+}
+static void cg_reserve_output(cg_context *c, size_t n) {
+  size_t needed = c->size + n + 1;
+  if (needed <= c->capacity)
+    return;
+  size_t cap = c->capacity ? c->capacity : 4096;
+  while (cap < needed)
+    cap *= 2;
+  char *p = realloc(c->out, cap);
+  if (!p)
+    cg_error(c, "out of memory");
+  c->out = p;
+  c->capacity = cap;
+}
+void cg_append(cg_context *c, const char *text, size_t n) {
+  cg_flush_output(c);
+  if (n > 64u * 1024u * 1024u - c->size)
+    cg_error(c, "assembly output limit exceeded");
+  cg_reserve_output(c, n);
+  memcpy(c->out + c->size, text, n);
+  c->size += n;
+  c->out[c->size] = 0;
+}
+void cg_emit(cg_context *c, const char *format, ...) {
+  cg_flush_output(c);
+  cg_reserve_output(c, 0);
   va_list ap, copy;
   va_start(ap, format);
   va_copy(copy, ap);
@@ -49,16 +69,8 @@ void cg_emit(cg_context *c, const char *format, ...) {
   va_end(copy);
   if (n < 0 || (size_t)n > 64u * 1024u * 1024u - c->size)
     cg_error(c, "assembly output limit exceeded");
-  size_t needed = c->size + (size_t)n + 1;
-  if (needed > c->capacity) {
-    size_t cap = c->capacity ? c->capacity : 4096;
-    while (cap < needed)
-      cap *= 2;
-    char *p = realloc(c->out, cap);
-    if (!p)
-      cg_error(c, "out of memory");
-    c->out = p;
-    c->capacity = cap;
+  if ((size_t)n >= c->capacity - c->size) {
+    cg_reserve_output(c, (size_t)n);
     vsnprintf(c->out + c->size, (size_t)n + 1, format, ap);
   }
   va_end(ap);
@@ -141,7 +153,7 @@ static void cg_lex(cg_context *c, const char *source, size_t length) {
     if (c->count == 1000000)
       cg_error(c, "IR token limit exceeded");
     c->tokens[c->count++] =
-        (cg_token){cg_copy(c, source + start, k - start), line};
+        (cg_token){cg_copy(c, source + start, k - start), line, (unsigned)start};
   }
 }
 char *cg_name(cg_context *c, const char *s) {
@@ -629,6 +641,7 @@ static void cg_function_parse(cg_context *c) {
   cg_function *f = cg_alloc(c, sizeof(*f));
   c->fn = f;
   f->id = ++c->unique;
+  f->source_begin = c->tokens[c->pos - 1].offset;
   f->alignment = 4;
   int fast = 0;
   while (!cg_type_start(c)) {
@@ -817,6 +830,7 @@ static void cg_function_parse(cg_context *c) {
   else
     c->functions = f;
   c->last = f;
+  f->source_end = c->tokens[c->pos - 1].offset + 1;
   c->fn = NULL;
 }
 
@@ -1487,6 +1501,7 @@ static int cg_tail_eligible(cg_context *c, cg_inst *i, cg_type *ret,
 }
 
 static void cg_call(cg_context *c, cg_inst *i) {
+  c->admission_dependent = 1;
   int fast = 0;
   while (!cg_type_start(c)) {
     char *s = cg_take(c);
@@ -2871,7 +2886,64 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
   if (t->size == 8)
     cg_save(c, i->result, 1, 1);
 }
-static void cg_process(cg_context *c, const char *source, size_t size) {
+enum { ADMISSION_FUNCTIONS = 256, ADMISSION_FUNCTION_BYTES = 4 * 1024 * 1024 };
+typedef struct {
+  const char *source, *assembly;
+  size_t source_size, assembly_size, memory;
+  unsigned work, id, unique, next_unique, mentions;
+  int known;
+  badge_scalar_selection selection;
+} cg_cached_function;
+struct badge_codegen_admission_cache {
+  size_t used;
+  cg_cached_function functions[ADMISSION_FUNCTIONS];
+  char bytes[ADMISSION_FUNCTION_BYTES];
+};
+
+static void cg_generate_admission(cg_context *c, cg_function *f, const char *source,
+                                  struct badge_codegen_admission_cache *cache) {
+  size_t n = f->source_end - f->source_begin;
+  const char *text = source + f->source_begin;
+  unsigned slot = (f->id * 2u + (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS)) %
+                  ADMISSION_FUNCTIONS;
+  cg_cached_function *entry = &cache->functions[slot];
+  if (entry->source && entry->id == f->id && entry->unique == c->unique &&
+      entry->selection == c->scalar_selection && entry->source_size == n &&
+      entry->work <= CG_REGISTER_WORK_LIMIT - c->register_work &&
+      entry->memory <= CG_ALLOCATION_LIMIT - c->memory &&
+      !memcmp(entry->source, text, n)) {
+    cg_append(c, entry->assembly, entry->assembly_size);
+    c->unique = entry->next_unique;
+    c->register_work += entry->work;
+    c->memory += entry->memory;
+    f->machine_register_mentions = entry->mentions;
+    f->machine_registers_known = entry->known;
+    return;
+  }
+  size_t start = c->size, memory = c->memory;
+  unsigned work = c->register_work, unique = c->unique;
+  c->admission_dependent = 0;
+  cg_generate_function(c, f);
+  size_t emitted = c->size - start;
+  /* Calls can consult finalized register summaries or internal linkage.
+     Always regenerate callers, and keep final assembly module-wide. */
+  if (!entry->source && !c->admission_dependent &&
+      n + emitted <= sizeof(cache->bytes) - cache->used) {
+    char *storage = cache->bytes + cache->used;
+    memcpy(storage, text, n);
+    memcpy(storage + n, c->out + start, emitted);
+    *entry = (cg_cached_function){
+        .source = storage, .assembly = storage + n, .source_size = n,
+        .assembly_size = emitted, .memory = c->memory - memory,
+        .work = c->register_work - work, .id = f->id, .unique = unique,
+        .next_unique = c->unique, .mentions = f->machine_register_mentions,
+        .known = f->machine_registers_known, .selection = c->scalar_selection};
+    cache->used += n + emitted;
+  }
+}
+
+static void cg_process(cg_context *c, const char *source, size_t size,
+                       struct badge_codegen_admission_cache *cache) {
   cg_lex(c, source, size);
   cg_emit(c, ".syntax unified\n.cpu cortex-m33\n.thumb\n.eabi_attribute 18, "
              "4\n.eabi_attribute 24, 1\n.eabi_attribute 25, 1\n.eabi_attribute "
@@ -2908,7 +2980,10 @@ static void cg_process(cg_context *c, const char *source, size_t size) {
     cg_error(c, "missing target triple");
   cg_prepare_cfg(c);
   for (cg_function *f = c->functions; f; f = f->next)
-    cg_generate_function(c, f);
+    if (cache)
+      cg_generate_admission(c, f, source, cache);
+    else
+      cg_generate_function(c, f);
   cg_emit(c, ".section .note.GNU-stack,\"\",%%progbits\n");
 }
 int badge_codegen_compile(const char *source, size_t length,
@@ -2945,11 +3020,11 @@ int badge_codegen_compile_with_scalar_selection(
       source, length, filename, options, selection, BADGE_DEFAULT_MEMORY_SELECTION, assembly,
       assembly_size);
 }
-int badge_codegen_compile_with_selections(
+static int cg_compile(
     const char *source, size_t length, const char *filename,
     badge_codegen_options options, badge_scalar_selection selection,
     badge_memory_selection memory_selection, char **assembly,
-    size_t *assembly_size) {
+    size_t *assembly_size, struct badge_codegen_admission_cache *cache) {
   if (assembly)
     *assembly = NULL;
   if (assembly_size)
@@ -3014,7 +3089,7 @@ int badge_codegen_compile_with_selections(
     c->memory = length + 1;
     if (memchr(source, 0, length))
       cg_error(c, "NUL byte in IR");
-    cg_process(c, source, length);
+    cg_process(c, source, length, cache);
     *assembly = c->out;
     *assembly_size = c->size;
     c->out = NULL;
@@ -3028,4 +3103,35 @@ int badge_codegen_compile_with_selections(
   free(c->out);
   free(c);
   return result;
+}
+int badge_codegen_compile_with_selections(
+    const char *source, size_t length, const char *filename,
+    badge_codegen_options options, badge_scalar_selection selection,
+    badge_memory_selection memory_selection, char **assembly,
+    size_t *assembly_size) {
+  return cg_compile(source, length, filename, options, selection,
+                    memory_selection, assembly, assembly_size, NULL);
+}
+int badge_codegen_compile_for_admission(
+    const char *source, size_t length, const char *filename,
+    badge_scalar_selection selection, struct badge_codegen_admission_cache **cache,
+    char **assembly, size_t *assembly_size) {
+  const badge_codegen_options options = {BADGE_FRAME_DIRECT, BADGE_RESIDENCY_GLOBAL_COMPACT};
+#ifdef CG_ATTRIBUTION_TRACE
+  cache = NULL;
+#endif
+  if (selection != BADGE_SELECTION_THUMB_OPERANDS &&
+      selection != BADGE_SELECTION_THUMB_CONSTANTS)
+    cache = NULL;
+  if (cache && !*cache) {
+    *cache = calloc(1, sizeof(**cache));
+    if (!*cache) {
+      if (assembly) *assembly = NULL;
+      if (assembly_size) *assembly_size = 0;
+      fputs("badge-codegen: out of memory caching admission functions\n", stderr);
+      return 0;
+    }
+  }
+  return cg_compile(source, length, filename, options, selection,
+                    BADGE_MEMORY_WORD, assembly, assembly_size, cache ? *cache : NULL);
 }

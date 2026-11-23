@@ -304,7 +304,11 @@ int main(void) {
 }`);
   run(tool('badge-cpp'), ['-I../src/shared', file('source.c'), '-o', file('source.i')]);
   run(tool('badge-ir'), ['--expression-lowering=ssa', file('source.i'), '-o', file('raw.ll')]);
-  run(tool('badge-opt'), [file('raw.ll'), '-o', file('input.ll')]);
+  // The default pipeline already runs loop-scalar.
+  run(tool('badge-opt'), [
+    '--passes=mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory',
+    file('raw.ll'), '-o', file('input.ll')
+  ]);
   run(tool('badge-opt-sanitize'), ['--passes=loop-scalar', file('input.ll'), '-o', file('candidate.ll')]);
   run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
   const before = execute(file, file('input.ll'), 'control', true);

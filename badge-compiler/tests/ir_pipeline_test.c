@@ -7,12 +7,19 @@
 
 static unsigned calls[3], order;
 static void optimization(ir_context *c, ir_module *m) {
-  (void)m;
   if (!order)
     order = 1;
   calls[0]++;
   unsigned char *scratch = ir_allocate(c, 16u * 1024u * 1024u);
   scratch[0] = 1;
+  for (unsigned k = 0; k < m->line_count; k++) {
+    ir_line *line = &m->lines[k];
+    if (!strcmp(ir_text(m, line->op), "ret")) {
+      assert(!line->replacement && !m->tokens[line->op].replacement);
+      m->tokens[line->op].replacement = ir_copy(c, "ret", 3);
+      line->replacement = ir_copy(c, m->source + line->begin, line->end - line->begin);
+    }
+  }
 }
 static void legalization(ir_context *c, ir_module *m) {
   (void)c;

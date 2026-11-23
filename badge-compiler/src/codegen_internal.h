@@ -14,7 +14,7 @@ struct cg_type {
 };
 typedef struct cg_token {
   char *text;
-  unsigned line;
+  unsigned line, offset;
 } cg_token;
 typedef struct cg_value {
   char *name;
@@ -58,6 +58,7 @@ typedef struct cg_function {
   unsigned argc, frame, byval[256], arg_align[256];
   cg_block *blocks, *last;
   unsigned id, alignment;
+  unsigned source_begin, source_end;
   unsigned machine_register_mentions;
   int machine_registers_known;
   int internal, return_ext;
@@ -92,6 +93,10 @@ typedef struct {
   unsigned reads, writes;
 } cg_machine_instruction;
 #define CG_SCHEDULE_WINDOW 8
+#ifndef CG_REGISTER_WORK_LIMIT
+#define CG_REGISTER_WORK_LIMIT (32u * 1024u * 1024u)
+#endif
+#define CG_ALLOCATION_LIMIT (128u * 1024u * 1024u)
 #ifndef CG_SCHEDULE_WORK_LIMIT
 #define CG_SCHEDULE_WORK_LIMIT 16000000u
 #endif
@@ -137,6 +142,7 @@ typedef struct {
   int allocate_r6;
   int scalar_stream_selection;
   int scalar_stream_retry;
+  int admission_dependent;
 } cg_context;
 
 #define CG_GLOBAL_REGISTER_COUNT 7
@@ -250,6 +256,7 @@ static inline int cg_narrow_memory_selection(const cg_context *c) {
 
 _Noreturn void cg_error(cg_context *c, const char *message);
 void *cg_alloc(cg_context *c, size_t n);
+void cg_append(cg_context *c, const char *text, size_t n);
 void cg_emit(cg_context *c, const char *format, ...);
 unsigned cg_round(unsigned n, unsigned a);
 char *cg_name(cg_context *c, const char *s);

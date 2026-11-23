@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-tools=$(cd "$(dirname "$0")/../build" && pwd)
-source "$(dirname "$0")/owned-pipeline.sh"
+case "$0" in
+    */*) scripts=${0%/*} ;;
+    *) scripts=. ;;
+esac
+tools=$(cd "$scripts/../build" && pwd)
+source "$scripts/owned-pipeline.sh"
 source=
 output=
 compile=0

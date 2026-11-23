@@ -35,6 +35,7 @@ typedef struct {
   char *suffix;
   ir_map names;
 } ir_module;
+enum { IR_ADMISSION_CACHE_ENTRIES = 64 };
 typedef struct {
   jmp_buf failure;
   ir_allocation *allocations;
@@ -46,6 +47,9 @@ typedef struct {
   size_t size, capacity;
   char *pipeline_source;
   size_t pipeline_capacity;
+  void *admission_cache[IR_ADMISSION_CACHE_ENTRIES];
+  size_t admission_cache_bytes;
+  struct badge_codegen_admission_cache *admission_functions;
   void (*observe)(void *, unsigned, const char *, const char *, const char *,
                   uint64_t);
   void *observation_context;

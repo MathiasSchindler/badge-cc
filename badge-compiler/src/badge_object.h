@@ -47,6 +47,7 @@ typedef struct {
 /* Input storage remains caller-owned. Success returns a malloc-owned buffer;
  * failure prints a diagnostic and returns NULL/zero through the outputs. */
 int badge_object_write(const bo_object_t *object, unsigned char **bytes, size_t *length);
+int badge_object_check_layout(const bo_object_t *object);
 
 /* Decode the supported ET_REL subset into independent owned storage.
  * Failure prints a diagnostic. Release successful results with object_free. */

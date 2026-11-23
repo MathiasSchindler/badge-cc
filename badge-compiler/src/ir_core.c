@@ -401,6 +401,9 @@ void ir_destroy(ir_context *c) {
   }
   free(c->output);
   free(c->pipeline_source);
+  for (unsigned i = 0; i < IR_ADMISSION_CACHE_ENTRIES; i++)
+    free(c->admission_cache[i]);
+  free(c->admission_functions);
 }
 static void ir_source_copy(ir_context *c, const char *source, size_t size) {
   if (size > 16u * 1024u * 1024u)
@@ -448,6 +451,9 @@ void ir_pipeline(ir_context *c, const char *source, size_t size,
   if (selection && !*selection)
     ir_error(c, "empty IR pass selection");
   ir_source_copy(c, source, size);
+  ir_allocation *mark = c->allocations, *parsed_mark = NULL;
+  ir_module parsed = {0};
+  unsigned parsed_line = 0;
   for (unsigned pass = 0; pass < (selection ? 16 : badge_ir_default_pass_count);
        pass++) {
     const ir_pass *p = NULL;
@@ -468,10 +474,14 @@ void ir_pipeline(ir_context *c, const char *source, size_t size,
       if (!p)
         ir_error(c, "unregistered default IR pass");
     }
-    ir_allocation *mark = c->allocations;
-    ir_module m = {0};
-    ir_parse(c, &m, c->pipeline_source, size);
-    ir_verify(c, &m);
+    if (!parsed.source) {
+      ir_parse(c, &parsed, c->pipeline_source, size);
+      ir_verify(c, &parsed);
+      parsed_mark = c->allocations;
+      parsed_line = c->line;
+    }
+    ir_module m = parsed;
+    c->line = parsed_line;
     c->size = 0;
     c->current_step = pass;
     c->current_pass = p->name;
@@ -479,16 +489,26 @@ void ir_pipeline(ir_context *c, const char *source, size_t size,
     p->run(c, &m);
     ir_note(c, "pass", "completed", 1);
     ir_write(c, &m);
-    ir_source_copy(c, c->output, c->size);
-    size = c->size;
-    ir_release_to(c, mark);
+    if (c->size == size && !memcmp(c->output, c->pipeline_source, size)) {
+      /* Only the verified original survives; discard pass-local edits and names. */
+      for (unsigned k = 0; k < parsed.count; k++)
+        parsed.tokens[k].replacement = NULL;
+      for (unsigned k = 0; k < parsed.line_count; k++)
+        parsed.lines[k].replacement = NULL;
+      ir_release_to(c, parsed_mark);
+    } else {
+      ir_source_copy(c, c->output, c->size);
+      size = c->size;
+      ir_release_to(c, mark);
+      parsed = (ir_module){0};
+    }
   }
   if (selection && *next)
     ir_error(c, "pass selection exceeds pipeline bound");
   c->current_pass = NULL;
-  ir_allocation *mark = c->allocations;
-  ir_module final = {0};
-  ir_parse(c, &final, c->pipeline_source, size);
-  ir_verify(c, &final);
+  if (!parsed.source) {
+    ir_parse(c, &parsed, c->pipeline_source, size);
+    ir_verify(c, &parsed);
+  }
   ir_release_to(c, mark);
 }

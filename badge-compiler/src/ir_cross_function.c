@@ -24,12 +24,18 @@ typedef struct {
   function_cost *functions;
 } module_cost;
 typedef struct {
+  badge_scalar_selection selection;
+  size_t size;
+  module_cost cost;
+  function_cost functions[];
+} cached_cost;
+typedef struct {
   ir_context *c;
   ir_module *m;
   ir_analysis a;
   uint64_t work;
   unsigned *call_at_token, *attribute_lines, attribute_count,
-      *function_at_token;
+      *first_reference, *next_reference;
   badge_scalar_selection selection;
 } cross;
 typedef enum { CROSS_SIZE, CROSS_HOT, CROSS_COMPACT } cross_policy;
@@ -80,20 +86,28 @@ static int attribute(cross *p, unsigned f, const char *name) {
 static void analyze(cross *p) {
   ir_analyze(p->c, p->m, &p->a);
   p->call_at_token = ir_allocate(p->c, p->m->count * sizeof(*p->call_at_token));
-  p->function_at_token =
-      ir_allocate(p->c, p->m->count * sizeof(*p->function_at_token));
+  p->first_reference =
+      ir_allocate(p->c, p->a.function_count * sizeof(*p->first_reference));
+  p->next_reference =
+      ir_allocate(p->c, p->m->count * sizeof(*p->next_reference));
   for (unsigned k = 0; k < p->m->count; k++)
     p->call_at_token[k] = IR_NONE;
   ir_map functions = {0};
   ir_map_init(p->c, &functions, p->a.function_count + 1);
-  for (unsigned f = 0; f < p->a.function_count; f++)
+  for (unsigned f = 0; f < p->a.function_count; f++) {
+    p->first_reference[f] = IR_NONE;
     ir_map_put(p->c, &functions, ir_name_key(p->c, p->a.functions[f].name),
                ir_format(p->c, "%u", f));
-  for (unsigned k = 0; k < p->m->count; k++) {
+  }
+  for (unsigned k = p->m->count; k-- > 0;) {
     const char *s = ir_text(p->m, k);
     const char *f =
         *s == '@' ? ir_map_get(&functions, ir_name_key(p->c, s)) : NULL;
-    p->function_at_token[k] = f ? (unsigned)strtoul(f, NULL, 10) : IR_NONE;
+    if (f) {
+      unsigned target = (unsigned)strtoul(f, NULL, 10);
+      p->next_reference[k] = p->first_reference[target];
+      p->first_reference[target] = k;
+    }
   }
   for (unsigned i = 0; i < p->a.instruction_count; i++) {
     const ir_instruction *in = &p->a.instructions[i];
@@ -145,16 +159,51 @@ static int symbolic_assembly(cross *p) {
   }
   return 0;
 }
+static void remember_cost(cross *p, unsigned slot, const char *source,
+                          size_t size, module_cost cost) {
+  const size_t limit = 8u * 1024 * 1024;
+  if (slot == IR_ADMISSION_CACHE_ENTRIES || size > limit)
+    return;
+  size_t total = sizeof(cached_cost) + cost.count * sizeof(function_cost) + size;
+  for (unsigned k = 0; k < cost.count; k++)
+    total += strlen(cost.functions[k].name) + 1;
+  if (total > limit - p->c->admission_cache_bytes)
+    return;
+  cached_cost *entry = malloc(total);
+  if (!entry)
+    ir_error(p->c, "out of memory caching cross-function admission");
+  *entry = (cached_cost){.selection = p->selection, .size = size, .cost = cost};
+  entry->cost.functions = entry->functions;
+  char *text = (char *)(entry->functions + cost.count);
+  memcpy(text, source, size);
+  text += size;
+  for (unsigned k = 0; k < cost.count; k++) {
+    size_t n = strlen(cost.functions[k].name) + 1;
+    memcpy(text, cost.functions[k].name, n);
+    entry->functions[k] = cost.functions[k];
+    entry->functions[k].name = text;
+    text += n;
+  }
+  p->c->admission_cache[slot] = entry;
+  p->c->admission_cache_bytes += total;
+}
 static module_cost measure(cross *p, const char *source, size_t size) {
   spend(p, size);
+  unsigned slot = 0;
+  for (; slot < IR_ADMISSION_CACHE_ENTRIES; slot++) {
+    const cached_cost *entry = p->c->admission_cache[slot];
+    if (!entry)
+      break;
+    if (entry->selection == p->selection && entry->size == size &&
+        entry->cost.count <= p->a.function_count + 1 &&
+        !memcmp(entry->functions + entry->cost.count, source, size))
+      return entry->cost;
+  }
   char *assembly = NULL;
   size_t length = 0;
-  if (!badge_codegen_compile_with_selections(
-          source, size, p->c->file,
-          (badge_codegen_options){BADGE_FRAME_DIRECT,
-                                  BADGE_RESIDENCY_GLOBAL_COMPACT},
-          p->selection, BADGE_MEMORY_WORD, &assembly,
-          &length))
+  if (!badge_codegen_compile_for_admission(
+          source, size, p->c->file, p->selection, &p->c->admission_functions,
+          &assembly, &length))
     ir_error(p->c, "cross-function backend admission failed");
   module_cost result = {0};
   result.functions =
@@ -163,13 +212,16 @@ static module_cost measure(cross *p, const char *source, size_t size) {
   int have_frame = 0, have_spills = 0;
   for (char *line = assembly; *line;) {
     char name[256], kind[32];
-    if (sscanf(line, "@ global-allocation: allocated %u spilled %u", &allocated,
+    if (!strncmp(line, "@ global-allocation:", sizeof("@ global-allocation:") - 1) &&
+        sscanf(line, "@ global-allocation: allocated %u spilled %u", &allocated,
                &spills) == 2)
       have_spills = 1;
-    if (sscanf(line, "@ stack-frame: %u + %u saved-register bytes", &frame,
+    if (!strncmp(line, "@ stack-frame:", sizeof("@ stack-frame:") - 1) &&
+        sscanf(line, "@ stack-frame: %u + %u saved-register bytes", &frame,
                &saves) == 2)
       have_frame = 1;
-    if (sscanf(line, ".type %255[^,], %31s", name, kind) == 2 &&
+    if (!strncmp(line, ".type", sizeof(".type") - 1) &&
+        sscanf(line, ".type %255[^,], %31s", name, kind) == 2 &&
         !strcmp(kind, "%function")) {
       if (!have_frame || !have_spills ||
           result.count == p->a.function_count + 1) {
@@ -191,6 +243,7 @@ static module_cost measure(cross *p, const char *source, size_t size) {
   free(assembly);
   if (!ok)
     ir_error(p->c, "cross-function final-encoding admission failed");
+  remember_cost(p, slot, source, size, result);
   return result;
 }
 static const char *assembly_name(cross *p, const char *name) {
@@ -262,11 +315,15 @@ static int recursive(cross *p, unsigned root) {
   queue[0] = root;
   seen[root] = 1;
   for (unsigned at = 0; at < count; at++) {
-    for (unsigned i = 0; i < p->a.instruction_count; i++) {
+    const ir_function *fn = &p->a.functions[queue[at]];
+    if (!fn->block_count)
+      continue;
+    const ir_block *last = &p->a.blocks[fn->first_block + fn->block_count - 1];
+    unsigned end = last->first_instruction + last->instruction_count;
+    for (unsigned i = p->a.blocks[fn->first_block].first_instruction; i < end; i++) {
       spend(p, 1);
       const ir_instruction *in = &p->a.instructions[i];
-      if (p->a.blocks[in->block].function != queue[at] ||
-          in->opcode != IR_OP_CALL || in->callee == IR_NONE)
+      if (in->opcode != IR_OP_CALL || in->callee == IR_NONE)
         continue;
       const ir_operand *op = &p->a.operands[in->callee];
       if (op->kind != IR_OPERAND_GLOBAL)
@@ -319,9 +376,9 @@ static int eligible(cross *p, unsigned f, unsigned *calls, unsigned *count) {
   for (unsigned k = header->first; k < header->first + header->count; k++)
     if (!strcmp(ir_text(p->m, k), fn->name))
       name_token = k;
-  for (unsigned k = 0; k < p->m->count; k++) {
+  for (unsigned k = p->first_reference[f]; k != IR_NONE; k = p->next_reference[k]) {
     spend(p, 1);
-    if (k == name_token || p->function_at_token[k] != f)
+    if (k == name_token)
       continue;
     unsigned found = p->call_at_token[k];
     if (found == IR_NONE) {
@@ -1348,6 +1405,10 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
   const int compact_inline = policy == CROSS_COMPACT;
   cross p = {.c = c, .m = m, .work = IR_CROSS_FUNCTION_WORK_LIMIT,
              .selection = compact_inline ? BADGE_SELECTION_THUMB_CONSTANTS : BADGE_SELECTION_THUMB_OPERANDS};
+  ir_map attempted = {0};
+  ir_map_init(c, &attempted, CROSS_ATTEMPTS * 2);
+  char attempted_names[CROSS_ATTEMPTS][256];
+  ir_allocation *analysis_mark = c->allocations;
   analyze(&p);
   for (unsigned k = 0; k < m->count; k++)
     if (!strcmp(ir_text(m, k), "musttail"))
@@ -1368,14 +1429,11 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
     ir_note(c, "skipped", "already_costed_module", 1);
     return;
   }
-  ir_map attempted = {0};
-  ir_map_init(c, &attempted, CROSS_ATTEMPTS * 2);
   unsigned changes = 0, attempts = 0;
   int tiny_budget = 1;
   while (attempts < CROSS_ATTEMPTS) {
     ir_allocation *mark = c->allocations;
     ir_map original_names = m->names;
-    analyze(&p);
     unsigned *calls = ir_allocate(c, p.a.instruction_count * sizeof(*calls));
     unsigned *other_calls = hot_inline ?
         ir_allocate(c, p.a.instruction_count * sizeof(*other_calls)) : calls;
@@ -1403,12 +1461,9 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
       ir_release_to(c, mark);
       break;
     }
-    const char *name = ir_copy(c, p.a.functions[chosen].name,
-                               strlen(p.a.functions[chosen].name));
-    /* Keep attempted names across reparsing without retaining analysis storage.
-     */
-    char name_buffer[256];
-    if (strlen(name) >= sizeof(name_buffer))
+    const char *name = p.a.functions[chosen].name;
+    char *name_buffer = attempted_names[attempts];
+    if (strlen(name) >= sizeof(attempted_names[0]))
       ir_error(c, "cross-function helper name limit exceeded");
     strcpy(name_buffer, name);
     attempts++;
@@ -1446,15 +1501,18 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
       if (best_bytes < before.bytes)
         ir_note(c, "transformed", "whole_module_code_bytes_saved",
                 before.bytes - best_bytes);
-      ir_reparse(c, m, mark);
+      ir_reparse(c, m, analysis_mark);
+      if (attempts < CROSS_ATTEMPTS) {
+        analysis_mark = c->allocations;
+        analyze(&p);
+      }
       changes++;
     } else {
       ir_note(c, "skipped", kind, 1);
       ir_release_to(c, mark);
       m->names = original_names;
     }
-    ir_map_put(c, &attempted, ir_copy(c, name_buffer, strlen(name_buffer)),
-               "attempted");
+    ir_map_put(c, &attempted, name_buffer, "attempted");
   }
   if (attempts == CROSS_ATTEMPTS)
     ir_note(c, "skipped", "module_attempt_budget", 1);

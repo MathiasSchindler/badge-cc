@@ -192,6 +192,8 @@ the remaining runtime, size, and stack trade-offs.
 The [IMU and Maze follow-up](docs/current-promotion.md#imu-labels-and-automatic-maze-guard-splitting)
 caches labels in the IMU firmware and qualifies the explicit `guard-split`
 pass on Maze.
+See [host compile-time improvements](docs/current-promotion.md#faster-host-compilation-without-changing-firmware)
+for cheaper optimizer admission with the same final code and stack checks.
 The earlier `thumb-widths`/eight-pass profile remains explicitly selectable.
 Target-costed optimizer defaults require the
 badge backend's supported IR contract; the earlier explicit six-pass

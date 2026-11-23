@@ -20,11 +20,11 @@ int badge_assembly_code_bytes(const char *source, size_t length,
     memcpy(input,source,length); input[length]=0; s->input=filename;
     int ok=0;
     if(setjmp(s->failure)==0) {
-        as_assemble(s,input,length,&s->result,&s->result_size);
+        as_assemble(s,input,length,NULL,NULL);
         for(uint32_t k=1;k<=s->section_count;++k)
             if(s->sections[k].out.flags&4) *bytes+=s->sections[k].out.size;
         ok=1;
     }
-    free(s->result); as_destroy(s); free(input);
+    as_destroy(s); free(input);
     return ok;
 }

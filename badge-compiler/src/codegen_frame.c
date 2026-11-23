@@ -95,6 +95,7 @@ static unsigned mentioned_registers(cg_context *c, const char *line) {
   return mask;
 }
 int cg_internal_call_mentions(cg_context *c, const char *name, unsigned *mask) {
+  c->admission_dependent = 1;
   for (cg_function *f = c->functions; f; f = f->next) {
     cg_register_work(c);
     if (!strcmp(f->name, name)) {
@@ -550,19 +551,27 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
     char *end = strchr(p, '\n');
     *end = 0;
     unsigned reg, offset;
-    if (sscanf(p, "@ frame-incoming: %u %u", &reg, &offset) == 2)
+    if (!strncmp(p, "@ frame-incoming:", 17) &&
+        sscanf(p, "@ frame-incoming: %u %u", &reg, &offset) == 2) {
       cg_stack(c, 0, reg, f->frame + c->register_saved_bytes + offset);
-    else if (!based && *p != '@' && *p != '.') {
-      for (char *q = p; *q; q++) {
-        if (q[0] == 'r' && q[1] == '7' &&
-            (q == p || (!isalnum((unsigned char)q[-1]) && q[-1] != '_')) &&
-            !isalnum((unsigned char)q[2]) && q[2] != '_') {
-          cg_emit(c, "sp");
-          q++;
-        } else cg_emit(c, "%c", *q);
+      *end = '\n';
+    } else {
+      const char *start = p;
+      if (!based && *p != '@' && *p != '.') {
+        for (char *q = p; *q; q++) {
+          if (q[0] == 'r' && q[1] == '7' &&
+              (q == p || (!isalnum((unsigned char)q[-1]) && q[-1] != '_')) &&
+              !isalnum((unsigned char)q[2]) && q[2] != '_') {
+            cg_append(c, start, (size_t)(q - start));
+            cg_append(c, "sp", 2);
+            q++;
+            start = q + 1;
+          }
+        }
       }
-      cg_emit(c, "\n");
-    } else cg_emit(c, "%s\n", p);
+      *end = '\n';
+      cg_append(c, start, (size_t)(end + 1 - start));
+    }
     p = end + 1;
   }
   cg_emit(c, ".Lcg_return%u:\n", f->id);

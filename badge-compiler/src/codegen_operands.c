@@ -19,17 +19,25 @@ static char *line(char *text) {
   if (end) *end = 0;
   return end ? end + 1 : text + strlen(text);
 }
+static const char *first_nonspace(const char *text) {
+  while (*text != '\n' && isspace((unsigned char)*text))
+    text++;
+  return text;
+}
 static int immediate(const char *text, const char *op, unsigned *reg,
                      uint32_t *number) {
   char instruction[16];
   int end = 0;
+  if (*first_nonspace(text) != 'm')
+    return 0;
   return sscanf(text, "%15s r%u, #%" SCNu32 "%n", instruction, reg, number, &end) == 3 &&
          !strcmp(op, instruction) && !text[end] && *reg <= 12 && *number <= 65535;
 }
 static char *symbol(const char *text, const char *op, unsigned *reg) {
   char instruction[16], part[16];
   int start = 0;
-  if (sscanf(text, "%15s r%u, #:%15[^:]:%n", instruction, reg, part, &start) != 3 ||
+  if (*first_nonspace(text) != 'm' ||
+      sscanf(text, "%15s r%u, #:%15[^:]:%n", instruction, reg, part, &start) != 3 ||
       strcmp(instruction, op) || *reg > 12 ||
       strcmp(part, !strcmp(op, "movw") ? "lower16" : "upper16") ||
       text[start] != '(')
@@ -238,7 +246,8 @@ void cg_reduce_branches(cg_context *c, size_t body_start) {
     if (assembly_lines) assembly_lines--;
     else if (!strncmp(p, "@ constant-assembly-lines:", 26))
       sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
-    else if (sscanf(p, "%11s %127s%n", opcode, edge, &consumed) == 2 &&
+    else if (*first_nonspace(p) == 'b' &&
+             sscanf(p, "%11s %127s%n", opcode, edge, &consumed) == 2 &&
              p + consumed == end && opcode[0] == 'b' &&
              cg_inverse_condition(opcode + 1) && !strncmp(edge, ".Lcg_edge", 9)) {
       const char *jump = end + 1, *jump_end = strchr(jump, '\n');
@@ -265,7 +274,7 @@ void cg_reduce_branches(cg_context *c, size_t body_start) {
         }
       }
     }
-    cg_emit(c, "%.*s\n", (int)(end - p), p);
+    cg_append(c, p, (size_t)(end + 1 - p));
     p = end + 1;
   }
 }
@@ -322,7 +331,7 @@ void cg_share_return_tails(cg_context *c, size_t body_start) {
     }
     if (p == last && label)
       cg_emit(c, ".Lcg_shared_return%u:\n", label);
-    cg_emit(c, "%.*s\n", (int)(end - p), p);
+    cg_append(c, p, (size_t)(end + 1 - p));
     p = end + 1;
   }
   c->out[c->size] = 0;
@@ -409,7 +418,8 @@ void cg_fold_zero_branches(cg_context *c, size_t body_start) {
     if (assembly_lines) assembly_lines--;
     else if (!strncmp(p, "@ constant-assembly-lines:", 26))
       sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
-    else if (sscanf(p, "cmp.n r%u, #0%n", &reg, &consumed) == 1 &&
+    else if (!strncmp(p, "cmp.n", 5) &&
+             sscanf(p, "cmp.n r%u, #0%n", &reg, &consumed) == 1 &&
              p + consumed == end && reg < 8) {
       const char *branch = end + 1, *branch_end = strchr(branch, '\n');
       char opcode[12], target[128];
@@ -446,7 +456,7 @@ void cg_fold_zero_branches(cg_context *c, size_t body_start) {
         }
       }
     }
-    cg_emit(c, "%.*s\n", (int)(end - p), p);
+    cg_append(c, p, (size_t)(end + 1 - p));
     p = end + 1;
   }
 }
@@ -505,6 +515,17 @@ typedef struct {
 } scalar_transfer;
 
 static int parse_transfer(const char *p, const char *end, scalar_transfer *m) {
+  const char *opcode = first_nonspace(p);
+  if (opcode >= end || (strncmp(opcode, "ldr", 3) && strncmp(opcode, "str", 3)))
+    return 0;
+  char text[128];
+  size_t length = (size_t)(end - p);
+  if (length < sizeof(text)) {
+    memcpy(text, p, length);
+    text[length] = 0;
+    p = text;
+    end = text + length;
+  }
   int at = 0, used = 0;
   char base[8];
   *m = (scalar_transfer){.index = -1};
@@ -575,7 +596,8 @@ static void emit_transfer(cg_context *c, const scalar_transfer *m, int narrow) {
 static int parse_move(const char *p, const char *end, unsigned *dst,
                       unsigned *src) {
   int used = 0;
-  return sscanf(p, "mov r%u, r%u%n", dst, src, &used) == 2 &&
+  return !strncmp(p, "mov", 3) &&
+         sscanf(p, "mov r%u, r%u%n", dst, src, &used) == 2 &&
          p + used == end && *dst <= 12 && *src <= 12 && *dst != *src;
 }
 
@@ -660,17 +682,20 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
         p = after;
         continue;
       }
-      indexed = (sscanf(p, "add.w r%u, r%u, r%u, lsl #%u%n",
-                        &dst, &base, &index, &shift, &consumed) == 4 &&
-                 p + consumed == end) ||
-                (sscanf(p, "add.w r%u, r%u, r%u%n",
-                        &dst, &base, &index, &consumed) == 3 &&
-                 p + consumed == end);
-      if (!indexed)
-        immediate = (sscanf(p, "addw r%u, r%u, #%u%n",
-                            &dst, &base, &offset, &consumed) == 3 ||
-                     sscanf(p, "add.w r%u, r%u, #%u%n",
-                            &dst, &base, &offset, &consumed) == 3) &&
+      if (!strncmp(p, "add.w", 5)) {
+        indexed = (sscanf(p, "add.w r%u, r%u, r%u, lsl #%u%n",
+                          &dst, &base, &index, &shift, &consumed) == 4 &&
+                   p + consumed == end) ||
+                  (sscanf(p, "add.w r%u, r%u, r%u%n",
+                          &dst, &base, &index, &consumed) == 3 &&
+                   p + consumed == end);
+        if (!indexed)
+          immediate = sscanf(p, "add.w r%u, r%u, #%u%n",
+                             &dst, &base, &offset, &consumed) == 3 &&
+                      p + consumed == end && offset <= 4095;
+      } else if (!strncmp(p, "addw", 4))
+        immediate = sscanf(p, "addw r%u, r%u, #%u%n",
+                           &dst, &base, &offset, &consumed) == 3 &&
                     p + consumed == end && offset <= 4095;
     }
     if ((indexed || immediate) && dst <= 12 && base <= 12 && (!indexed || dst != base) &&
@@ -691,7 +716,7 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
           m.shift = shift;
           m.offset = (int)offset;
           int short_form = !m.sign && narrow_transfer(&m);
-          cg_emit(c, "%.*s", (int)(memory - end - 1), end + 1);
+          cg_append(c, end + 1, (size_t)(memory - end - 1));
           emit_transfer(c, &m, short_form);
           cg_emit(c, "@ memory-address-fold: saved %u\n",
                   4u + (m.narrow ? 2u : 4u) - (short_form ? 2u : 4u));
@@ -714,7 +739,7 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
       }
       if (p > end) continue;
     }
-    cg_emit(c, "%.*s\n", (int)(end - p), p);
+    cg_append(c, p, (size_t)(end + 1 - p));
     p = end + 1;
   }
 }
@@ -959,7 +984,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
         } else {
           cg_emit(c, "%s\n", current);
           if (old_bytes == 8)
-            cg_emit(c, "%.*s\n", (int)(after - next_line - 1), next_line);
+            cg_append(c, next_line, (size_t)(after - next_line));
         }
         if (folded_copy) cg_emit(c, "@ constant-copy-fold: saved 2\n");
       }

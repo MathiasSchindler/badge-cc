@@ -4,38 +4,20 @@
 #include <stdint.h>
 
 static inline int thumb_modified(uint32_t value) {
-  for (unsigned code = 0; code < 4096; ++code) {
-    uint32_t v;
-    if (code < 1024) {
-      uint32_t byte = code & 255;
-      switch (code >> 8) {
-      case 0:
-        v = byte;
-        break;
-      case 1:
-        if (!byte)
-          continue;
-        v = byte | (byte << 16);
-        break;
-      case 2:
-        if (!byte)
-          continue;
-        v = (byte << 8) | (byte << 24);
-        break;
-      default:
-        if (!byte)
-          continue;
-        v = byte * 0x01010101u;
-        break;
-      }
-    } else {
-      uint32_t byte = 128 | (code & 127);
-      unsigned rotate = code >> 7;
-      v = (byte >> rotate) | (byte << (32 - rotate));
-    }
-    if (v == value)
-      return (int)code;
-  }
-  return -1;
+  if (value <= 255)
+    return (int)value;
+  uint32_t low = value & 255u, high = (value >> 8) & 255u;
+  if (value == low * UINT32_C(0x00010001))
+    return (int)(256 + low);
+  if (value == high * UINT32_C(0x01000100))
+    return (int)(512 + high);
+  if (value == low * UINT32_C(0x01010101))
+    return (int)(768 + low);
+
+  /* Rotations 8..31 shift the byte left without wrapping its bits. */
+  unsigned shift = 24u - (unsigned)__builtin_clz(value);
+  if (value & ((UINT32_C(1) << shift) - 1))
+    return -1;
+  return (int)(((32 - shift) << 7) | ((value >> shift) & 127u));
 }
 #endif

@@ -1,10 +1,6 @@
 #include "codegen_internal.h"
 #include <string.h>
 
-#ifndef CG_REGISTER_WORK_LIMIT
-#define CG_REGISTER_WORK_LIMIT (32u * 1024u * 1024u)
-#endif
-
 int cg_register_eligible(const cg_context *c, const cg_value *v) {
   return c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT
              ? v->type->size <= 4 && v->type->bits && v->type->bits <= 32

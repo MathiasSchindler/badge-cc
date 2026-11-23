@@ -87,4 +87,11 @@ int badge_codegen_compile_with_frame_addressing(
     badge_frame_addressing frame_addressing, char **assembly,
     size_t *assembly_size);
 
+struct badge_codegen_admission_cache;
+/* The cache belongs to one optimizer invocation; free it after the last call. */
+int badge_codegen_compile_for_admission(
+    const char *source, size_t length, const char *filename,
+    badge_scalar_selection selection, struct badge_codegen_admission_cache **cache,
+    char **assembly, size_t *assembly_size);
+
 #endif

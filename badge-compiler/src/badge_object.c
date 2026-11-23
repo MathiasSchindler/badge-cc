@@ -176,9 +176,7 @@ static int bo_validate(const bo_object_t *o) {
     return 1;
 }
 
-int badge_object_write(const bo_object_t *o, unsigned char **bytes, size_t *length) {
-    if (bytes == NULL || length == NULL) return bo_error("missing output buffer parameters");
-    *bytes = NULL; *length = 0;
+static int bo_build(const bo_object_t *o, unsigned char **bytes, size_t *length) {
     if (!bo_validate(o)) return 0;
     size_t capacity = o->section_count * 2 + 4;
     bo_output_section_t *out = calloc(capacity, sizeof(*out));
@@ -208,8 +206,8 @@ int badge_object_write(const bo_object_t *o, unsigned char **bytes, size_t *leng
         if (rel_counts[k] == 0) continue;
         size_t n = strlen(out[k].name);
         char *name = malloc(n + 5);
-        unsigned char *data = calloc(rel_counts[k], 8);
-        if (name == NULL || data == NULL) {
+        unsigned char *data = bytes ? calloc(rel_counts[k], 8) : NULL;
+        if (name == NULL || (bytes && data == NULL)) {
             free(name); free(data); bo_error("out of memory constructing relocations"); goto done;
         }
         memcpy(name, ".rel", 4); memcpy(name + 4, out[k].name, n + 1);
@@ -223,7 +221,7 @@ int badge_object_write(const bo_object_t *o, unsigned char **bytes, size_t *leng
     uint32_t symtab_index = (uint32_t)count;
     uint32_t strtab_index = symtab_index + 1, shstrtab_index = symtab_index + 2;
     for (size_t k = o->section_count + 1; k < symtab_index; ++k) out[k].link = symtab_index;
-    for (size_t k = 0; k < o->relocation_count; ++k) {
+    for (size_t k = 0; bytes && k < o->relocation_count; ++k) {
         const bo_relocation_t *r = &o->relocations[k];
         bo_output_section_t *s = &out[rel_counts[r->section]];
         bo_put32(s->owned+s->written, r->offset);
@@ -259,15 +257,18 @@ int badge_object_write(const bo_object_t *o, unsigned char **bytes, size_t *leng
         if ((uint64_t)s->size * 3 > BO_MAX_FILE) {
             bo_error("address-significance output exceeds limit"); goto done;
         }
-        out[k].owned = malloc((size_t)s->size * 3 + 1);
-        if (out[k].owned == NULL) { bo_error("out of memory remapping address significance"); goto done; }
+        if (bytes) {
+            out[k].owned = malloc((size_t)s->size * 3 + 1);
+            if (out[k].owned == NULL) { bo_error("out of memory remapping address significance"); goto done; }
+        }
         while (at < s->size) {
             uint32_t id;
             if (!bo_uleb(s->data, s->size, &at, &id)) goto done;
             uint32_t value = symbol_map[id];
             do {
                 unsigned byte = value & 127; value >>= 7;
-                out[k].owned[written++] = (unsigned char)(byte | (value != 0 ? 128 : 0));
+                if (bytes) out[k].owned[written] = (unsigned char)(byte | (value != 0 ? 128 : 0));
+                written++;
             } while (value != 0);
         }
         out[k].data = out[k].owned; out[k].size = (uint32_t)written; out[k].link = symtab_index;
@@ -284,6 +285,7 @@ int badge_object_write(const bo_object_t *o, unsigned char **bytes, size_t *leng
     uint32_t shoff = (uint32_t)offset;
     offset += count * 40;
     if (offset > BO_MAX_FILE) { bo_error("object exceeds output limit"); goto done; }
+    if (!bytes) { ok = 1; goto done; }
     result = calloc((size_t)offset, 1);
     if (result == NULL) { bo_error("out of memory allocating ELF"); goto done; }
     memcpy(result, "\177ELF\1\1\1", 7);
@@ -321,6 +323,14 @@ done:
     }
     free(result); free(out); free(symbol_map); free(rel_counts);
     return ok;
+}
+int badge_object_write(const bo_object_t *o, unsigned char **bytes, size_t *length) {
+    if (bytes == NULL || length == NULL) return bo_error("missing output buffer parameters");
+    *bytes = NULL; *length = 0;
+    return bo_build(o, bytes, length);
+}
+int badge_object_check_layout(const bo_object_t *o) {
+    return bo_build(o, NULL, NULL);
 }
 
 typedef struct {
