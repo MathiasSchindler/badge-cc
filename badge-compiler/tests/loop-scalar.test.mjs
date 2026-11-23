@@ -55,6 +55,30 @@ function execute(file, ir, role, trace = false, selection = 'thumb-operands') {
   }
   return { frames, count };
 }
+test('rounded constant-table recurrence narrows only with a proven signed range', t => {
+  const file = files(t);
+  const source = fs.readFileSync(path.resolve(root, '../src/tools/compiler_micro/filter-update.c'), 'utf8');
+  const variants = [
+    ['bounded', source, true],
+    ['gain', source.replace('& 4095u', '& 8191u'), false],
+    ['sample', source.replace('samples[i] * 32', 'samples[i] * 256'), false],
+    ['bias', source.replace('? 2048 : -2048', '? 2048 : -2047'), false],
+    ['volatile', source.replace('const int16_t samples', 'const volatile int16_t samples'), false],
+  ];
+  for (const [name, body, narrows] of variants) {
+    fs.writeFileSync(file('filter.c'), body);
+    run(tool('badge-cpp'), ['-I../src/shared', file('filter.c'), '-o', file('filter.i')]);
+    run(tool('badge-ir'), [file('filter.i'), '-o', file('filter.ll')]);
+    run(tool('badge-opt-sanitize'), [
+      '--passes=mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division',
+      file('filter.ll'), '-o', file('candidate.ll')]);
+    run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
+    const result = fs.readFileSync(file('candidate.ll'), 'utf8');
+    assert.equal(!result.includes('sdiv i64'), narrows, name);
+    if (narrows) assert.match(result, /ashr i32 [^,\n]+, 12/);
+  }
+});
+
 test('loop bounds distinguish proven internal writes from aliases, volatility and external calls', t => {
   const file = files(t);
   const check = (name, call, qualifier = '') => `

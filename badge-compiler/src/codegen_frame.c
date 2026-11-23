@@ -863,10 +863,12 @@ static int leaf_branch(const char *line, char target[128]) {
 
 static void compact_leaf_registers(cg_context *c, size_t start) {
   cg_function *f = c->fn;
+  int two_args = f->argc == 2 && f->args[1]->type->bits == 32 && !f->byval[1];
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
       c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT ||
-      f->frame || f->argc != 1 || f->byval[0] ||
-      f->args[0]->type->bits != 32 || f->ret->bits != 32)
+      f->frame || (f->argc != 1 && !two_args) || f->byval[0] ||
+      f->args[0]->type->bits != 32 ||
+      (f->ret->bits != 32 && !(two_args && (f->ret->bits == 8 || f->ret->bits == 16))))
     return;
   size_t length = c->size - start;
   char *body = cg_alloc(c, length + 1);
@@ -874,7 +876,7 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
   if (strstr(body, "@ assembly-effects:") || strstr(body, "@ constant-assembly-lines:"))
     return;
   unsigned touched = 0, skip = 0, entry = 0, narrowed = 0, branches = 0;
-  char *first = NULL, *last = NULL;
+  char *first = NULL, *second = NULL, *last = NULL;
   for (char *p = body; p < body + length;) {
     cg_register_work(c);
     char *end = strchr(p, '\n');
@@ -907,18 +909,27 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
       if ((!mentioned && !branch) || (mentioned & ~0x1fffu))
         return;
       if (!first) first = p;
-      else if (last != first) touched |= mentioned_registers(c, last);
+      else if (two_args && !second) second = p;
+      else if (last != first && last != second) touched |= mentioned_registers(c, last);
       last = p;
     }
     p = end + 1;
   }
-  unsigned dst, src;
+  unsigned dst, src, entry2 = 0, second_src;
   /* r0 can name the incoming value for the whole body only if the two ABI
      copies are its only existing mentions. */
   if (!first || first == last ||
       !leaf_register_move(first, &entry, &src) || src != 0 || !entry ||
       !leaf_register_move(last, &dst, &src) || dst != 0 || !src)
     return;
+  if (two_args) {
+    if (branches || !second || second == last || entry < 2 ||
+        !leaf_register_move(second, &entry2, &second_src) ||
+        second_src != 1 || entry2 < 2 || entry == entry2)
+      return;
+    if (touched & 3)
+      return;
+  }
   int swap_entry = 0;
   if (!branches && (touched & 1) && entry < 4 && src == entry) {
     int shifted_chain = 0;
@@ -962,10 +973,15 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
   for (unsigned r = 0; r <= 12; r++) map[r] = r;
   if (merge_entry) map[entry] = 0;
   if (swap_entry) map[0] = entry;
+  if (two_args) map[entry2] = 1;
   unsigned occupied = touched & 0x7eu;
   if (merge_entry && !swap_entry && entry < 8) occupied &= ~(1u << entry);
+  if (two_args) {
+    occupied |= 1u << 1;
+    if (entry2 < 8) occupied &= ~(1u << entry2);
+  }
   for (unsigned r = 4; r < 12; r++) {
-    if (!(touched & (1u << r)) || (merge_entry && r == entry))
+    if (!(touched & (1u << r)) || (merge_entry && r == entry) || r == entry2)
       continue;
     unsigned free = 14u & ~occupied;
     if (!free) {
@@ -988,11 +1004,34 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
     original = cg_alloc(c, length + 1);
     memcpy(original, c->out + start, length);
   }
+  const char *result = NULL;
+  unsigned left = 0, right = 0;
+  char result_op[5];
+  if (two_args && map[src]) {
+    const char *previous = second;
+    for (const char *p = second + strlen(second) + 1; p < last; p += strlen(p) + 1)
+      if (*p && *p != '@' && *p != '.')
+        previous = p;
+    int end = 0;
+    if (sscanf(previous, "%4[a-z].w r%u, r%u, r%u%n", result_op, &dst, &left, &right, &end) == 4 &&
+        end && !previous[end] && dst == src && left <= 12 && right <= 12 &&
+        (!strcmp(result_op, "and") || !strcmp(result_op, "orr") ||
+         !strcmp(result_op, "eor") || !strcmp(result_op, "add")))
+      result = previous;
+  }
   c->size = start;
   c->out[start] = 0;
   for (char *p = body; p < body + length;) {
     char *next = p + strlen(p) + 1;
-    if ((p == first && merge_entry) || (p == last && !map[src])) skip++;
+    if ((p == first && merge_entry) || p == second || (p == last && (!map[src] || result))) skip++;
+    else if (p == result) {
+      const char *op = !strcmp(result_op, "orr") ? "or" :
+                       !strcmp(result_op, "eor") ? "xor" : result_op;
+      if (cg_narrow_flag_binary(c, op, 0, map[left], map[right]))
+        narrowed++;
+      else
+        cg_emit(c, "%s.w r0, r%u, r%u\n", result_op, map[left], map[right]);
+    }
     else if (!*p || *p == '@' || *p == '.')
       cg_emit(c, "%s\n", p);
     /* The complete whitelist excludes flag consumers and IT, not just the

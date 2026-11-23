@@ -603,6 +603,10 @@ void cg_global_prepare(cg_context *c) {
              li->use, b, 0, b->loop_depth);
         uses(c, i->shifted_other, i->shifted_other + 1,
              li->use, b, 0, b->loop_depth);
+      } else if (i->forwarded_call_argument) {
+        unsigned argument = i->forwarded_call_argument;
+        uses(c, op + 1, argument, li->use, b, 0, b->loop_depth);
+        uses(c, argument + 1, i->end, li->use, b, 0, b->loop_depth);
       } else if (!i->folded_operand)
         uses(c, op + 1, i->end, li->use, b, 0, b->loop_depth);
       if (li->result && (!strcmp(c->tokens[op].text, "freeze") ||

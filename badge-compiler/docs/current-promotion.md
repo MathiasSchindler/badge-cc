@@ -986,6 +986,44 @@ uniformly lower: some production functions trade up to 8 bytes of additional
 local or saved-register stack for smaller code. Blend's frames are unchanged
 and the filter's local frame drops from 56 to 48 B.
 
+### Closing the LLVM gap with signed range proofs
+
+The backend forwards a single-use indexed word load directly to the first
+scalar call argument. A small additive index used only by an aligned store
+after a call can be folded into the byte displacement instead of spilled.
+Two-argument, straight-line leaves can retain their ABI inputs in low
+registers and write their last arithmetic result directly to `r0`. A narrow
+truncation is omitted only when its input is already known to have zero upper
+bits. Read-only table bases are proposed at a dominating preheader and
+encoded before admission; the blend proposal was rejected for spill growth.
+
+The wide-division pass recognizes a bounded signed update from a read-only
+little-endian table. It proves the guarded table index, input interval,
+loop-carried state range, and maximum product before replacing the sign
+diamond and wide division. For a power-of-two divisor `D` and product `p`,
+the signed round-to-nearest result is the arithmetic shift of
+`p + D/2 - (p < 0)`. Other gain ranges, biases, mutable or volatile tables,
+and unproven loops retain the original arithmetic.
+
+| Kernel | Previous owned flash | New owned flash | LLVM `-Oz` flash | QEMU instructions, owned / LLVM | Badge ticks, owned / LLVM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| RGB565 blend span | 428 B | **396 B** | 384 B | 947 / 851 | **3,215** / 3,319 |
+| Fixed-point filter | 320 B | **256 B** | 276 B | **545** / 895 | **478** / 640 |
+
+This time the badge A/B/B/A comparison used the exact LLVM objects as the
+control, with identical harnesses, inputs, and clocks. Blend took 3.1% less
+time and the filter 25.3% less time than LLVM. LLVM remained faster on the
+other four timed kernels. All 21 kernels matched native results for 256
+inputs. Sixteen of 48 verified firmware images shrank by 252 loaded bytes
+total; none grew. No matched object's executable bytes or measured function
+stack use grew, and all nine production IMU digests matched.
+
+A separate source-level experiment streamed blended pixels into the
+checksum instead of storing a span. It matched every effective length and
+alpha combination and loaded **332 B** with the same boot objects. This is
+evidence for a future loop-fusion pass, not a change to the benchmark or a
+transformation the compiler performs automatically.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

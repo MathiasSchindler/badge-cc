@@ -1666,6 +1666,8 @@ static void cg_call(cg_context *c, cg_inst *i) {
   if (outgoing)
     cg_adjust_stack(c, 0, outgoing);
   for (unsigned k = 0; k < count; k++) {
+    if (!k && i->forwarded_call_argument == args[k].start)
+      continue;
     unsigned words =
         cg_round(args[k].byval ? args[k].byval : args[k].type->size, 4) / 4;
     const char *name = c->tokens[args[k].start].text;
@@ -1818,12 +1820,14 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
         pos++;
       }
       if (pos + 1 == i->end && !strcmp(c->tokens[pos].text, ")")) {
-        if (!narrow && c->tokens[callee].text[0] == '@')
-          i->scalar_call_arguments_plus_one = arguments + 1;
+        if (c->tokens[callee].text[0] == '@') {
+          if (!narrow)
+            i->scalar_call_arguments_plus_one = arguments + 1;
+          if (arguments)
+            i->direct_first_scalar_argument = callee + 3;
+        }
         return 1u << 3;
       }
-      if (i->indexed_source)
-        return 0;
     }
     return CG_SCRATCH_R4 | CG_SCRATCH_R5 | (cg_light_frames(c) ? 1u << 3 : 0);
   }
@@ -2395,7 +2399,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       }
       cg_inst *extension = store ? NULL : cg_selection_extended_load(c, i);
       cg_value *result = extension ? extension->result : i->result;
-      unsigned reg = cg_global_register(c, store ? c->tokens[value].text : result->name);
+      unsigned reg = i->feeds_call_argument ? 0 :
+          cg_global_register(c, store ? c->tokens[value].text : result->name);
       if (store && i->indexed_call_result)
         reg = 0;
       else if (store && !reg) {
@@ -2404,6 +2409,15 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       }
       int sign = extension && !strcmp(c->tokens[extension->begin + 2].text, "sext");
       const char *suffix = t->size == 1 ? "b" : t->size == 2 ? "h" : "";
+      if (i->indexed_displacement) {
+        unsigned address = reg == 1 ? 2 : 1;
+        cg_emit(c, "add.w r%u, r%u, r%u, lsl #%u\nstr%s.%c r%u, [r%u, #%u]\n",
+                address, base, index, i->indexed_scale, suffix,
+                reg < 8 && i->indexed_displacement < t->size * 32 &&
+                    i->indexed_displacement % t->size == 0 ? 'n' : 'w',
+                reg, address, i->indexed_displacement);
+        return;
+      }
       cg_emit(c, "%s%s%s.%c r%u, [r%u, r%u", store ? "str" : "ldr",
               sign ? "s" : "", suffix,
               !i->indexed_scale && reg < 8 && base < 8 && index < 8 ? 'n' : 'w',
@@ -2411,7 +2425,7 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       if (i->indexed_scale)
         cg_emit(c, ", lsl #%u", i->indexed_scale);
       cg_emit(c, "]\n");
-      if (!store)
+      if (!store && !i->feeds_call_argument)
         cg_save_normalized(c, result, reg);
       return;
     }
@@ -2602,6 +2616,15 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
         c->tokens[at].text[0] == '%' && cg_global_residency(c)) {
       unsigned src = cg_global_register(c, c->tokens[at].text);
       unsigned dst = cg_global_register(c, i->result->name);
+      if (!strcmp(op, "trunc") && from->bits == 32 && (to_bits == 8 || to_bits == 16)) {
+        uint32_t upper = UINT32_MAX << to_bits;
+        if ((cg_register_lookup(c, c->tokens[at].text)->known_zero & upper) == upper) {
+          if (!src)
+            cg_value_read(c, from, dst, 0);
+          cg_save_normalized(c, i->result, src ? src : dst);
+          return;
+        }
+      }
       if (!strcmp(op, "trunc") && (to_bits == 8 || to_bits == 16) &&
           (src || dst)) {
         unsigned input = src ? src : dst;

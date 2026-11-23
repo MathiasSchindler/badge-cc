@@ -774,8 +774,8 @@ static unsigned indexed_access(cg_context *c, cg_inst *i, const char *address,
 
 static void plan_indexed_memory(cg_context *c) {
   for (cg_block *b = c->fn->blocks; b; b = b->next) {
-    cg_inst *previous = NULL;
-    for (cg_inst *i = b->first; i; previous = i, i = i->next) {
+    cg_inst *previous = NULL, *before_previous = NULL;
+    for (cg_inst *i = b->first; i; before_previous = previous, previous = i, i = i->next) {
       cg_register_work(c);
       unsigned at = i->begin;
       if (!i->result || i->end - at != 10 ||
@@ -797,11 +797,25 @@ static void plan_indexed_memory(cg_context *c) {
         shift = (unsigned)__builtin_ctz(factor);
       }
       unsigned distance = 0;
+      int after_call = 0;
       for (cg_inst *use = i->next; use && distance < 10; use = use->next, distance++) {
         cg_register_work(c);
-        if (!indexed_access(c, use, i->result->name, 1) &&
-            !(shift && !distance && indexed_access(c, use, i->result->name, 0)))
+        int store = indexed_access(c, use, i->result->name, 1);
+        if (!store && !(shift && !distance && indexed_access(c, use, i->result->name, 0))) {
+          unsigned op = use->begin + (use->result ? 2 : 0);
+          after_call |= !strcmp(c->tokens[op].text, "call");
           continue;
+        }
+        uint32_t bias;
+        if (store && after_call && shift && scalar32(c, before_previous, "add") &&
+            single_use(c, before_previous) &&
+            !strcmp(c->tokens[source].text, before_previous->result->name) &&
+            commutative_literal(c, before_previous, &input, &bias) && bias && bias < 8 &&
+            c->tokens[before_previous->begin + input].text[0] == '%') {
+          source = before_previous->begin + input;
+          use->indexed_displacement = bias << shift;
+          before_previous->folded_operand = 1;
+        }
         use->indexed_address = i;
         use->indexed_source = source;
         use->indexed_scale = shift;
@@ -826,6 +840,17 @@ void cg_plan_operands(cg_context *c) {
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i && i->next; i = i->next) {
       cg_register_work(c);
+      if (i->indexed_source && i->result && i->result->type->bits == 32 &&
+          single_use(c, i)) {
+        cg_inst *call = i->next;
+        (void)cg_instruction_scratch(c, call);
+        unsigned argument = call->direct_first_scalar_argument;
+        if (argument && !strcmp(c->tokens[argument - 1].text, "i32") &&
+            !strcmp(c->tokens[argument].text, i->result->name)) {
+          i->feeds_call_argument = 1;
+          call->forwarded_call_argument = argument;
+        }
+      }
       if (i->folded_operand || i->shifted_producer ||
           !(scalar32(c, i, "shl") || scalar32(c, i, "lshr") ||
             scalar32(c, i, "ashr")) || !single_use(c, i))
@@ -901,6 +926,25 @@ int cg_truncated_sdiv(cg_context *c, cg_inst *i, cg_inst *next) {
          cast_from(c, next, i, "trunc", "i64", "i32") && single_use(c, i);
 }
 
+static uint32_t zero_bits(cg_context *c, const char *text) {
+  uint32_t value;
+  if (*text == '%')
+    return cg_register_lookup(c, text)->known_zero;
+  return number(text, &value) ? ~value : 0;
+}
+
+static void record_zero_bits(cg_context *c, cg_inst *i) {
+  if (!i->result || i->result->type->bits != 32 || i->end - i->begin != 7)
+    return;
+  const char *op = c->tokens[i->begin + 2].text;
+  int mask = !strcmp(op, "and");
+  if ((!mask && strcmp(op, "or") && strcmp(op, "xor")) || !scalar(c, i))
+    return;
+  uint32_t left = zero_bits(c, c->tokens[i->begin + 4].text);
+  uint32_t right = zero_bits(c, c->tokens[i->begin + 6].text);
+  cg_register_lookup(c, i->result->name)->known_zero = mask ? left | right : left & right;
+}
+
 void cg_selection_prepare(cg_context *c) {
   c->selection = NULL;
   if (c->scalar_selection == BADGE_SELECTION_LEGACY)
@@ -918,6 +962,8 @@ void cg_selection_prepare(cg_context *c) {
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i; i = i->next) {
       instructions++;
+      if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && cg_global_residency(c))
+        record_zero_bits(c, i);
       for (unsigned k = i->begin + (i->result ? 3 : 1); k < i->end; k++) {
         cg_register_work(c);
         if (!strcmp(c->tokens[k].text, "asm")) assembly = 1;

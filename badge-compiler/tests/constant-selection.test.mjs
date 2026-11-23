@@ -757,6 +757,18 @@ entry:
   store i16 %v, ptr %dest, align 2
   ret void
 }
+define internal void @relay(ptr %base, ptr %table, i32 %index) {
+entry:
+  %next = add i32 %index, 1
+  %out = mul i32 %next, 2
+  %dest = getelementptr i8, ptr %base, i32 %out
+  %off = mul i32 %index, 4
+  %p = getelementptr i8, ptr %table, i32 %off
+  %value = load i32, ptr %p, align 4
+  %v = call zeroext i16 @narrow(i32 %value)
+  store i16 %v, ptr %dest, align 2
+  ret void
+}
 define internal void @unaligned_store(ptr %base, i32 %index, i16 %value) {
 entry:
   %off = mul i32 %index, 2
@@ -795,10 +807,15 @@ entry:
   %half = load volatile i16, ptr %h, align 2
   %check = xor i16 %half, 4464
   %z = zext i16 %check to i32
+  call void @relay(ptr @halves, ptr @words, i32 1)
+  %relayed = load volatile i16, ptr %bases, align 2
+  %r = zext i16 %relayed to i32
+  %relaycheck = xor i32 %r, 20
   %x = xor i32 %a, 20
   %y = xor i32 %b, 1241
   %sum = or i32 %x, %y
-  %status = or i32 %sum, %z
+  %partial = or i32 %sum, %z
+  %status = or i32 %partial, %relaycheck
   ret i32 %status
 }`);
   run(tool('badge-codegen-sanitize'), ['--scalar-selection=thumb-constants',
@@ -807,6 +824,7 @@ entry:
   const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
   assert.match(body('indexed'), /add\.w r\d+, r(?:[3-6]|8|10|11), r\d+, lsl #2/);
   assert.match(body('indexed_store'), /bl narrow[\s\S]*strh\.w r0, \[r\d+, r\d+, lsl #1\]/);
+  assert.match(body('relay'), /ldr\.w r0, \[r\d+, r\d+, lsl #2\]\nbl narrow\nadd\.w [^\n]+\nstrh\.n r0, \[r\d+, #2\]/);
   assert.doesNotMatch(body('unaligned_store'), /^strh[. ]/m);
   assert.match(assembly, /addw r\d+, (?:r7|sp), #1024\b/);
   run(tool('badge-asm'), [file('address.s'), '-o', file('owned.o')]);
@@ -822,6 +840,42 @@ entry:
       '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
       '-kernel', file('address.elf')]);
   }
+});
+
+test('known upper-zero bits remove narrow-return truncation only when proved', t => {
+  const file = files(t);
+  const f = (name, mask) => `define zeroext i16 @${name}(i32 %a, i32 %b) {
+entry:
+  %l = and i32 %a, ${mask}
+  %r = and i32 %b, 2016
+  %merged = or i32 %l, %r
+  %narrow = trunc i32 %merged to i16
+  ret i16 %narrow
+}`;
+  fs.writeFileSync(file('bits.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+${f('clear', 63519)}
+${f('unknown', 129055)}
+define i32 @main() {
+entry:
+  %a = call zeroext i16 @clear(i32 -1, i32 -1)
+  %b = call zeroext i16 @unknown(i32 -1, i32 -1)
+  %ab = and i16 %a, %b
+  %status = xor i16 %ab, -1
+  %v = zext i16 %status to i32
+  ret i32 %v
+}`);
+  run(tool('badge-codegen-sanitize'), [file('bits.ll'), '-o', file('bits.s')]);
+  const assembly = fs.readFileSync(file('bits.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  assert.doesNotMatch(body('clear'), /^uxth[. ]/m);
+  assert.match(body('unknown'), /^uxth[. ]/m);
+  run(tool('badge-asm'), [file('bits.s'), '-o', file('bits.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('bits.o'), '-o', file('bits.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('bits.elf')]);
 });
 
 test('signed offset folds and stack-free wrapping absolute-value leaves preserve sign boundaries', t => {

@@ -33,11 +33,14 @@ typedef struct cg_inst {
   struct cg_assembly *assembly;
   int assembly_checked;
   unsigned scalar_call_arguments_plus_one;
+  unsigned direct_first_scalar_argument;
+  unsigned forwarded_call_argument;
+  int feeds_call_argument;
   unsigned forwarded_store_register_plus_one;
   int forwarded_return;
   int ephemeral_address;
   struct cg_inst *indexed_address;
-  unsigned indexed_scale, indexed_source;
+  unsigned indexed_scale, indexed_source, indexed_displacement;
   int indexed_call_result;
   struct cg_inst *shifted_producer;
   unsigned shifted_source, shifted_other;
@@ -82,6 +85,7 @@ typedef struct {
   unsigned high_reg;
   int wide_pair;
   unsigned selection_uses;
+  uint32_t known_zero;
   int assembly_home;
   unsigned forbidden, degree;
   unsigned home_color;

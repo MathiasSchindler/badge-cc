@@ -100,6 +100,8 @@ and remaining flash bytes (read-only data and alignment). Reached instruction
 counts exclude the common test harness and are **not physical timing**.
 The [indexed-memory and wide-arithmetic results](../badge-compiler/docs/current-promotion.md#indexed-memory-call-residency-and-wide-arithmetic)
 compare these counts and loaded flash with elapsed time measured on the badge.
+The [signed range proof and LLVM badge comparison](../badge-compiler/docs/current-promotion.md#closing-the-llvm-gap-with-signed-range-proofs)
+also report elapsed time against LLVM's exact kernel objects.
 In the firmware, the shared harness uses `0x12345678` and writes the result
 at `0x20000000`, then the completion word `0x444f4e45` at `0x20000004`.
 There is deliberately no screen or USB output. Physical boot is not part
