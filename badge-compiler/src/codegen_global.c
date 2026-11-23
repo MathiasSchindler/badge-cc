@@ -371,6 +371,31 @@ static void plan_wide_pairs(cg_context *c) {
     }
 }
 
+static int spare_neighborhood_register(cg_context *c) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT)
+    return 0;
+  unsigned loads = 0;
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i; i = i->next) {
+      cg_register_work(c);
+      unsigned op = i->begin + (i->result ? 2 : 0);
+      const char *name = c->tokens[op].text;
+      loads += i->immediate_address != 0;
+      if ((!strcmp(name, "call") && !cg_abs_operand(c, i)) ||
+          !strcmp(name, "tail") || !strcmp(name, "notail"))
+        return 0;
+      /* Other calls and constant expressions can use r6 as scratch. */
+      if (!cg_abs_operand(c, i))
+        for (unsigned k = op + 1; k < i->end; k++) {
+          cg_register_work(c);
+          if (!strcmp(c->tokens[k].text, "("))
+            return 0;
+        }
+    }
+  return loads >= 3;
+}
+
 static void compact_frame(cg_context *c, cg_register_value **order) {
   struct cg_global *g = c->global;
   uint64_t *occupied = bits(c);
@@ -460,6 +485,7 @@ void cg_global_prepare(cg_context *c) {
   struct cg_global *g = cg_alloc(c, sizeof(*g));
   c->global = g;
   c->allocate_r6 = 0;
+  c->neighbor_selection = 0;
   c->scalar_stream_selection = 0;
   plan_wide_pairs(c);
   g->registers = cg_flexible_residency(c)
@@ -517,6 +543,12 @@ void cg_global_prepare(cg_context *c) {
       c->allocate_r6 = 1;
     } else c->scalar_stream_selection = 0;
   }
+  if (g->registers == 6 && spare_neighborhood_register(c)) {
+    g->registers = 7;
+    c->allocate_r6 = 1;
+    c->neighbor_selection = 1;
+    cg_plan_resident_loads(c);
+  }
   for (unsigned n = 0; n < c->register_capacity; n++) {
     cg_register_value *v = &c->register_table[n];
     if (v->value)
@@ -551,7 +583,8 @@ void cg_global_prepare(cg_context *c) {
       g->instruction[in].instruction = i;
       g->instruction[in].use = bits(c);
       if (i->result) {
-        cg_register_value *v = cg_register_lookup(c, i->result->name);
+        cg_value *result = i->resident_extension ? i->resident_extension->result : i->result;
+        cg_register_value *v = cg_register_lookup(c, result->name);
         if (v->value && !i->folded_operand)
           g->instruction[in].result = v;
       }
@@ -589,6 +622,9 @@ void cg_global_prepare(cg_context *c) {
         phi_uses(c, i, b);
         if (li->result)
           li->result->score += 16;
+      } else if (i->immediate_address) {
+        uses(c, i->immediate_address, i->immediate_address + 1,
+             li->use, b, b->loop_depth && c->neighbor_selection ? 6 : 0, b->loop_depth);
       } else if (i->indexed_source) {
         /* Operands of a folded address are live at the access, not at the GEP. */
         unsigned value = op + 2;

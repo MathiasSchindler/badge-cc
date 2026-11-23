@@ -41,6 +41,8 @@ typedef struct cg_inst {
   int ephemeral_address;
   struct cg_inst *indexed_address;
   unsigned indexed_scale, indexed_source, indexed_displacement;
+  unsigned immediate_address;
+  struct cg_inst *resident_extension;
   int indexed_call_result;
   struct cg_inst *shifted_producer;
   unsigned shifted_source, shifted_other;
@@ -152,6 +154,7 @@ typedef struct {
   int frame_sp_relative;
   const char *tail_target;
   int allocate_r6;
+  int neighbor_selection;
   int scalar_stream_selection;
   int scalar_stream_retry;
   int admission_dependent;
@@ -327,6 +330,7 @@ void cg_global_after_instruction(cg_context *c);
 unsigned cg_global_register(cg_context *c, const char *name);
 void cg_selection_prepare(cg_context *c);
 void cg_plan_operands(cg_context *c);
+void cg_plan_resident_loads(cg_context *c);
 int cg_truncated_sdiv(cg_context *c, cg_inst *i, cg_inst *next);
 const char *cg_abs_operand(cg_context *c, cg_inst *i);
 int cg_selection_forward_argument(cg_context *c);

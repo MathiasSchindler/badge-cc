@@ -696,8 +696,7 @@ static int extended_load(cg_context *c, cg_inst *i, cg_inst *next) {
       strcmp(c->tokens[next->begin + 4].text, i->result->name) ||
       strcmp(c->tokens[next->begin + 5].text, "to") ||
       strcmp(c->tokens[next->begin + 6].text, "i32") ||
-      cg_register_lookup(c, i->result->name)->selection_uses != 1 ||
-      pair(c, i)->instruction || pair(c, next)->instruction)
+      cg_register_lookup(c, i->result->name)->selection_uses != 1)
     return 0;
   unsigned at = i->begin + 3;
   if (!strcmp(c->tokens[at].text, "volatile")) at++;
@@ -716,6 +715,18 @@ static int extended_load(cg_context *c, cg_inst *i, cg_inst *next) {
      !strcmp(c->tokens[at + 5].text, "align") &&
      c->tokens[at + 6].text[0] != '-' &&
      number(c->tokens[at + 6].text, &align) && align >= i->result->type->size);
+}
+
+void cg_plan_resident_loads(cg_context *c) {
+  for (cg_block *b = c->fn->blocks; b; b = b->next)
+    for (cg_inst *i = b->first; i && i->next; i = i->next) {
+      cg_register_work(c);
+      if (!i->feeds_call_argument && !i->folded_operand && !i->next->folded_operand &&
+          extended_load(c, i, i->next)) {
+        i->resident_extension = i->next;
+        i->next->folded_operand = 1;
+      }
+    }
 }
 
 static int select_dual_product(cg_context *c, cg_inst *xor) {
@@ -829,6 +840,26 @@ static void plan_indexed_memory(cg_context *c) {
   }
 }
 
+static void plan_immediate_load(cg_context *c, cg_inst *i) {
+  unsigned at = i->begin;
+  uint32_t offset;
+  if (!i->result || i->end - at != 10 || i->folded_operand ||
+      strcmp(c->tokens[at + 2].text, "getelementptr") ||
+      strcmp(c->tokens[at + 3].text, "i8") ||
+      strcmp(c->tokens[at + 5].text, "ptr") ||
+      c->tokens[at + 6].text[0] != '%' ||
+      strcmp(c->tokens[at + 8].text, "i32") ||
+      !number(c->tokens[at + 9].text, &offset) || offset > 31 ||
+      !single_use(c, i) ||
+      cg_register_lookup(c, c->tokens[at + 6].text)->selection_uses < 3 ||
+      !indexed_access(c, i->next, i->result->name, 0) ||
+      i->next->result->type->bits != 8)
+    return;
+  i->next->immediate_address = at + 6;
+  i->next->indexed_displacement = offset;
+  i->folded_operand = 1;
+}
+
 void cg_plan_operands(cg_context *c) {
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i; i = i->next)
@@ -841,6 +872,7 @@ void cg_plan_operands(cg_context *c) {
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i && i->next; i = i->next) {
       cg_register_work(c);
+      plan_immediate_load(c, i);
       if (i->indexed_source && i->result && i->result->type->bits == 32 &&
           single_use(c, i)) {
         cg_inst *call = i->next;
@@ -1030,7 +1062,8 @@ void cg_selection_prepare(cg_context *c) {
         }
       }
       forward_adjacent_address(c, i, next);
-      if (extended_load(c, i, next)) {
+      if (i->resident_extension || (!pair(c, i)->instruction &&
+          !pair(c, next)->instruction && extended_load(c, i, next))) {
         *pair(c, i) = (cg_selected_pair){.instruction = i, .producer = next, .kind = SELECT_EXTENDED_LOAD};
         *pair(c, next) = (cg_selected_pair){.instruction = next, .kind = SELECT_SKIP};
         continue;

@@ -1069,6 +1069,46 @@ UF2s verified. Among 48 existing images, only blend changed, saving 64
 bytes. None of the matched objects or measured function stack frames grew.
 All nine production IMU digests matched.
 
+### Shared neighbor addresses and loop register residency
+
+The loop-scalar pipeline finds groups of at least three nearby nonvolatile
+byte loads whose addresses use one base and one index plus small constants.
+It anchors the shared pointer at the lowest offset and leaves the loads in
+their original order. Code generation models the shared pointer as live at
+each load, prioritizes that pointer inside loops, and encodes the remaining
+offsets directly. When the function's calls and operands do not require
+`r6` as scratch, the allocator can use it and account for a folded load
+extension as a single register value. The existing final-byte, local-frame,
+save-area, and spill admission checks still apply.
+
+| Stencil tile stage | Loaded bytes | QEMU reached instructions | Static frame accesses |
+| --- | ---: | ---: | ---: |
+| Previous owned default | 456 | 14,795 | 37 |
+| Address sharing with spare register | 424 | 14,380 | 29 |
+| Shared-base priority and accurate scratch masks | 404 | 12,255 | 20 |
+| LLVM `-Oz` | 344 | 7,300 | 0 on the same owned IR |
+
+Accounting for the folded extensions before allocation further reduces
+the number of spilled values, from 16 to 12, with the same linked size and
+reached instruction count. The stencil local frame drops from 104 to 88 B
+without changing its 24-byte save area. The other 23 kernel measurements,
+including record dispatch, are unchanged. Dispatch instead needs improved
+handling of live ranges across calls and a multiway branch.
+
+On the badge, the exact old and new owned objects took 8,961 and 7,194
+median timer ticks respectively for the stencil (-19.7%). The five
+unchanged control objects showed shifts of at most 0.6% in the linked
+harness. Those are not changes to their generated code. All six Maze
+replay workload timing ranges overlap, including reached frame
+(144,282 versus 144,274 median ticks), and their correctness results match.
+
+Of 51 verified firmware images, 14 shrank by 696 loaded bytes in total and
+none grew. Diagnostics drops from 26,680 to 26,640 B; the normal Tilt Maze
+image is unchanged. The separate Maze application replay image saves 24 B.
+None of the 147 matched objects increased in executable size or per-function
+local-plus-save stack. All 24 exact kernel objects match native outputs on
+256 inputs each, and all nine production IMU digests match.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

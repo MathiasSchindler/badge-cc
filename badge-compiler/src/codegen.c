@@ -1783,6 +1783,8 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
   if (cg_light_frames(c) && (!strcmp(c->tokens[at].text, "tail") || !strcmp(c->tokens[at].text, "notail")))
     at++;
   const char *op = c->tokens[at].text;
+  if (i->immediate_address)
+    return 0;
   if (!strcmp(op, "call")) {
     if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && cg_abs_operand(c, i))
       return 0;
@@ -1857,9 +1859,11 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
         }
       }
       mask = cg_memory_scratch(t, align);
-      if (c->scalar_stream_selection &&
+      if ((c->scalar_stream_selection || c->neighbor_selection) &&
           !strcmp(op, "load") && (t->size == 1 || t->size == 2 || t->size == 4) &&
           align >= t->size)
+        mask = 0;
+      if (c->neighbor_selection && i->indexed_source)
         mask = 0;
     } else if (t->size > 4)
       mask = i->wide_pair_safe ? 0 : CG_SCRATCH_R4 | CG_SCRATCH_R5;
@@ -2384,6 +2388,20 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       cg_expect(c, ",");
     (void)cg_type_parse(c, 0);
     unsigned pointer = c->pos;
+    if (i->immediate_address) {
+      c->pos = i->immediate_address;
+      unsigned base = cg_global_register(c, c->tokens[c->pos].text);
+      if (!base)
+        cg_value_read(c, NULL, 0, 0);
+      cg_inst *extension = cg_selection_extended_load(c, i);
+      cg_value *result = extension ? extension->result : i->result;
+      unsigned reg = cg_global_register(c, result->name);
+      int sign = extension && !strcmp(c->tokens[extension->begin + 2].text, "sext");
+      cg_emit(c, "ldr%sb.%c r%u, [r%u, #%u]\n", sign ? "s" : "",
+              !sign && (reg | base) < 8 ? 'n' : 'w', reg, base, i->indexed_displacement);
+      cg_save_normalized(c, result, reg);
+      return;
+    }
     if (i->indexed_address) {
       unsigned at = i->indexed_address->begin;
       unsigned source = i->indexed_source ? i->indexed_source : at + 9;

@@ -55,6 +55,35 @@ function execute(file, ir, role, trace = false, selection = 'thumb-operands') {
   }
   return { frames, count };
 }
+test('neighboring byte loads share one base without moving their accesses', t => {
+  const file = files(t);
+  const source = fs.readFileSync(path.resolve(root, '../src/tools/compiler_micro/stencil-tile.c'), 'utf8');
+  for (const ordered of [false, true]) {
+    fs.writeFileSync(file('neighbors.c'), (ordered ? source.replace('uint8_t tile', 'volatile uint8_t tile') : source) + `
+int main(void) {
+    return (micro_kernel(0u) != 0x240d6e70u) |
+           (micro_kernel(0xffffffffu) != 0x200d7a9fu);
+}`);
+    run(tool('badge-cpp'), ['-I../src/shared', file('neighbors.c'), '-o', file('neighbors.i')]);
+    run(tool('badge-ir'), [file('neighbors.i'), '-o', file('neighbors.ll')]);
+    run(tool('badge-ir-metrics'), [
+      '--passes=mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar',
+      `--emit-ir=${file('candidate.ll')}`, file('neighbors.ll'), '-o', file('metrics.json')]);
+    run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('candidate.ll')]);
+    const reasons = JSON.parse(fs.readFileSync(file('metrics.json'), 'utf8')).events.map(e => e.reason);
+    assert.equal(reasons.includes('shared_neighbor_load_base'), !ordered);
+    const ir = fs.readFileSync(file('candidate.ll'), 'utf8');
+    if (ordered) {
+      assert.equal((ir.match(/load volatile i8/g) ?? []).length, 6);
+      continue;
+    }
+    execute(file, file('candidate.ll'), 'neighbors', false, 'thumb-constants');
+    const assembly = fs.readFileSync(file('neighbors.s'), 'utf8');
+    for (const offset of [0, 7, 9, 16])
+      assert.match(assembly, new RegExp(`ldrb\\.[nw] r\\d+, \\[r\\d+, #${offset}\\]`));
+  }
+});
+
 test('span fusion preserves zero and odd trips and rerolls only equivalent producer lanes', t => {
   const file = files(t);
   const source = fs.readFileSync(path.resolve(root, '../src/tools/compiler_micro/blend-span.c'), 'utf8');

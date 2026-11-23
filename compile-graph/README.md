@@ -108,6 +108,8 @@ The [signed range proof and LLVM badge comparison](../badge-compiler/docs/curren
 also report elapsed time against LLVM's exact kernel objects.
 The [private-span and larger-kernel comparison](../badge-compiler/docs/current-promotion.md#private-span-fusion-and-larger-kernels)
 includes the three new kernels and real badge application image sizes.
+The [shared-address comparison](../badge-compiler/docs/current-promotion.md#shared-neighbor-addresses-and-loop-register-residency)
+tracks the stencil's frame accesses and the effect on the firmware corpus.
 In the firmware, the shared harness uses `0x12345678` and writes the result
 at `0x20000000`, then the completion word `0x444f4e45` at `0x20000004`.
 There is deliberately no screen or USB output. Physical boot is not part

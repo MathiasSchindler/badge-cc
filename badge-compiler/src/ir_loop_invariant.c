@@ -2,6 +2,7 @@
 #include "ir_integer.h"
 #include "target_cost.h"
 #include "ir_loop_admission.h"
+#include <inttypes.h>
 #include <string.h>
 
 #ifndef IR_LOOP_WORK_LIMIT
@@ -902,11 +903,144 @@ static void run(ir_context *c, ir_module *m, int cost_gated) {
 void ir_loop_invariant(ir_context *c, ir_module *m) { run(c, m, 0); }
 void ir_loop_cost(ir_context *c, ir_module *m) { run(c, m, 1); }
 void ir_span_fusion(ir_context *, ir_module *);
+
+typedef struct {
+  const ir_instruction *gep, *offset;
+  const ir_operand *base, *index;
+  int32_t shift;
+} neighboring_load;
+
+static int affine_load(loops *p, unsigned i, neighboring_load *out) {
+  ir_analysis *a = &p->a;
+  const ir_instruction *gep = &a->instructions[i];
+  if (gep->opcode != IR_OP_GEP || gep->operand_count != 2 ||
+      a->text->lines[gep->line - 1].count != 10 ||
+      strcmp(ir_text(a->text, a->text->lines[gep->line - 1].op + 1), "i8"))
+    return 0;
+  const ir_definition *d = &a->definitions[gep->definition];
+  if (d->use_count != 1)
+    return 0;
+  const ir_instruction *load = &a->instructions[a->operands[d->first_use].instruction];
+  if (load->opcode != IR_OP_LOAD || load->block != gep->block ||
+      load->effects != (IR_EFFECT_READ | IR_EFFECT_TRAP) ||
+      a->types[load->type].bits != 8)
+    return 0;
+  const ir_operand *base = &a->operands[gep->first_operand], *index = base + 1;
+  if (base->kind != IR_OPERAND_LOCAL || index->kind != IR_OPERAND_LOCAL ||
+      a->types[index->type].bits != 32)
+    return 0;
+  unsigned n = a->definitions[index->definition].instruction;
+  if (n == IR_NONE)
+    return 0;
+  const ir_instruction *offset = &a->instructions[n];
+  int subtract = !strcmp(offset->operation, "sub");
+  if ((!subtract && strcmp(offset->operation, "add")) || offset->opcode != IR_OP_BINARY ||
+      offset->block != gep->block || offset->operand_count != 2 ||
+      a->text->lines[offset->line - 1].count != 7 ||
+      a->definitions[offset->definition].use_count != 1)
+    return 0;
+  const ir_operand *args = &a->operands[offset->first_operand];
+  uint64_t value;
+  if (args->kind != IR_OPERAND_LOCAL || !literal(p, args + 1, &value))
+    return 0;
+  uint32_t bits = (uint32_t)value;
+  if (subtract) bits = 0u - bits;
+  if (bits > 31 && bits < UINT32_MAX - 30)
+    return 0;
+  int32_t shift = bits <= 31 ? (int32_t)bits : -(int32_t)(0u - bits);
+  *out = (neighboring_load){gep, offset, base, args, shift};
+  return 1;
+}
+
+static int share_neighbors(loops *p, const ir_block *block) {
+  ir_analysis *a = &p->a;
+  ir_module *m = a->text;
+  unsigned end = block->first_instruction + block->instruction_count;
+  for (unsigned i = block->first_instruction; i < end; i++) {
+    spend(p, 1);
+    neighboring_load group[8];
+    if (!affine_load(p, i, &group[0]))
+      continue;
+    unsigned count = 1;
+    int32_t low = group[0].shift, high = low;
+    for (unsigned j = i + 1; j < end && j - i <= 24 && count < 8; j++) {
+      spend(p, 1);
+      if (a->instructions[j].effects & (IR_EFFECT_OPAQUE | IR_EFFECT_CALL))
+        break;
+      neighboring_load load;
+      if (!affine_load(p, j, &load) ||
+          load.base->definition != group[0].base->definition ||
+          load.index->definition != group[0].index->definition)
+        continue;
+      if (load.shift < low) low = load.shift;
+      if (load.shift > high) high = load.shift;
+      group[count++] = load;
+    }
+    if (count < 3 || high - low > 31)
+      continue;
+    const char *shared = ir_fresh(p->c, m, '%');
+    const char *base = ir_text(m, group[0].base->token);
+    const char *index = ir_text(m, group[0].index->token);
+    /* A low anchor keeps all loads within the unsigned Thumb byte offset. */
+    const char *biased = low ? ir_fresh(p->c, m, '%') : base;
+    const char *prefix = low ? ir_format(p->c, "  %s = getelementptr i8, ptr %s, i32 %" PRId32 "\n",
+                                         biased, base, low) : "";
+    const char *setup = ir_format(p->c, "%s  %s = getelementptr i8, ptr %s, i32 %s\n",
+                                  prefix, shared, biased, index);
+    for (unsigned j = 0; j < count; j++) {
+      neighboring_load *load = &group[j];
+      m->lines[load->offset->line - 1].replacement = "";
+      m->lines[load->gep->line - 1].replacement = ir_format(p->c,
+          "%s  %s = getelementptr i8, ptr %s, i32 %" PRId32 "\n", j ? "" : setup,
+          a->definitions[load->gep->definition].name, shared, load->shift - low);
+    }
+    p->c->line = group[0].gep->line;
+    ir_note(p->c, "proposed", "shared_neighbor_load_base", 1);
+    return 1;
+  }
+  return 0;
+}
+
+static void neighboring_addresses(ir_context *c, ir_module *m) {
+  if (!strstr(m->source, "load i8, ptr %"))
+    return;
+  unsigned line = 0;
+  for (; line < m->line_count; line++) {
+    const ir_line *row = &m->lines[line];
+    if (row->count == 4 && !strcmp(ir_text(m, row->first), "target") &&
+        !strcmp(ir_text(m, row->first + 1), "datalayout")) {
+      if (strcmp(ir_text(m, row->first + 3),
+                 "\"e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64\""))
+        return;
+      break;
+    }
+  }
+  if (line == m->line_count)
+    return;
+  ir_allocation *mark = c->allocations;
+  loops p = {.c = c, .work = IR_LOOP_WORK_LIMIT, .scalar_gated = 1};
+  ir_analyze(c, m, &p.a);
+  for (unsigned f = 0; f < p.a.function_count; f++) {
+    const ir_function *fn = &p.a.functions[f];
+    for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++)
+      if (p.a.blocks[b].rpo != IR_NONE && share_neighbors(&p, &p.a.blocks[b])) {
+        p.moves++;
+        break;
+      }
+  }
+  if (p.moves) {
+    ir_function_admission(c, m, &p.a, BADGE_SELECTION_THUMB_CONSTANTS);
+    ir_reparse(c, m, mark);
+  } else
+    ir_release_to(c, mark);
+}
+
 void ir_loop_scalar(ir_context *c, ir_module *m) {
   ir_span_fusion(c, m);
   run(c, m, 2);
   if (strstr(m->source, "getelementptr i8, ptr @") && strstr(m->source, "constant ["))
     run(c, m, 5);
+  neighboring_addresses(c, m);
 }
 void ir_loop_bounds(ir_context *c, ir_module *m) { run(c, m, 3); }
 void ir_pointer_induction(ir_context *c, ir_module *m) { run(c, m, 4); }
