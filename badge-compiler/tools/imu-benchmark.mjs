@@ -56,9 +56,12 @@ function build(directory, inputs, names = roles) {
     fs.mkdirSync(dir);
     const object = path.join(dir, 'imu.o'), input = path.resolve(inputs[index]);
     const before = decodeElf(fs.readFileSync(input));
-    for (const symbol of symbols) assert(before.symbols.some(s => s.name === symbol), `${name}: ${symbol} missing`);
+    const hasSymbol = name => before.symbols.some(s => s.name === name);
+    for (const symbol of symbols) assert(hasSymbol(symbol), `${name}: ${symbol} missing`);
+    const prepareLabels = hasSymbol('prepare_screen_labels');
+    const globals = prepareLabels ? [...symbols, 'prepare_screen_labels'] : symbols;
     execute(process.env.LLVM_OBJCOPY ?? 'llvm-objcopy', [
-      '--redefine-sym=bare_main=imu_demo_bare_main', ...symbols.map(x => `--globalize-symbol=${x}`), input, object]);
+      '--redefine-sym=bare_main=imu_demo_bare_main', ...globals.map(x => `--globalize-symbol=${x}`), input, object]);
     const after = decodeElf(fs.readFileSync(object));
     for (const section of before.sections.filter(s => s.flags & 4)) {
       const linked = after.sections.find(s => s.name === section.name);
@@ -66,7 +69,8 @@ function build(directory, inputs, names = roles) {
     }
     const uf2 = pathIn(dir, 'universe26/uf2/compiler_test.uf2');
     const collector = pathIn(dir, 'host-tools/compiler_test_host');
-    execute('make', ['-j5', `BUILD_DIR=${dir}`, `COMPILER_TEST_IMU_OBJECT=${object}`, uf2, collector], 120000);
+    execute('make', ['-j5', `BUILD_DIR=${dir}`, `COMPILER_TEST_IMU_OBJECT=${object}`,
+      `COMPILER_TEST_IMU_PREPARE_LABELS=${Number(prepareLabels)}`, uf2, collector], 120000);
     const oracleElf = pathIn(dir, 'oracle.elf');
     execute(process.env.LLVM_LLD ?? 'ld.lld', ['--gc-sections', '-T', pathIn(out, 'oracle.ld'),
       pathIn(dir, 'universe26/firmware/start.o'), pathIn(dir, 'universe26/firmware/compiler_imu_application.o'),
@@ -78,11 +82,12 @@ function build(directory, inputs, names = roles) {
     assert.ifError(verified.error);
     assert.equal(verified.status, 0, verified.stderr);
     const observed = verified.stderr.trim().split('\n');
-    assert.equal(observed.length, 6);
+    assert.equal(observed.length, 9);
     assert(observed.every(x => /^[0-9a-f]{8}$/.test(x)));
     if (digests) assert.deepEqual(observed, digests, `${name}: offline outputs differ`);
     else digests = observed;
-    results.push({ ...imageFiles(dir, name), objectSha256: sha(object), digests });
+    results.push({ ...imageFiles(dir, name), objectSha256: sha(object), digests: observed.slice(0, 6),
+      refreshedDigests: observed.slice(6) });
   }
   const manifest = { schema: 1, images: results };
   write(pathIn(out, 'manifest.json'), manifest);
@@ -90,19 +95,23 @@ function build(directory, inputs, names = roles) {
 }
 function measure(directory, capture, serial, mazeDirectory) {
   assert(/^[0-9A-F]{16}$/.test(serial), 'one explicit BOOTSEL serial is required');
-  const dir = buildPath(directory), out = buildPath(capture);
-  const manifest = parse(pathIn(dir, 'manifest.json'));
-  assert.equal(manifest.schema, 1);
-  assert.deepEqual(manifest.images.map(x => x.name), mazeDirectory ? ['owned', 'candidate'] : roles);
+  const out = buildPath(capture), plans = [];
   const alternate = (a, b) => [a, b, b, a];
-  const plans = [{
-    name: 'imu', images: manifest.images, decode: decodeImu, applications: imuApplications, id: imuSuiteId,
-    order: mazeDirectory ? alternate('owned', 'candidate') : [...roles, ...[...roles].reverse()],
-  }];
+  if (directory) {
+    const manifest = parse(pathIn(buildPath(directory), 'manifest.json'));
+    assert.equal(manifest.schema, 1);
+    const pair = manifest.images[0]?.name === 'owned';
+    assert.deepEqual(manifest.images.map(x => x.name), pair ? ['owned', 'candidate'] : roles);
+    assert(!mazeDirectory || pair, 'a combined campaign requires an IMU pair');
+    plans.push({
+      name: 'imu', images: manifest.images, decode: decodeImu, applications: imuApplications, id: imuSuiteId,
+      order: pair ? alternate('owned', 'candidate') : [...roles, ...[...roles].reverse()],
+    });
+  }
   if (mazeDirectory) {
-    const dir = buildPath(mazeDirectory);
-    plans.push({ name: 'maze', images: ['llvm', 'owned'].map(name => imageFiles(pathIn(dir, name), name)),
-      decode: decodeApplication, applications, id: applicationSuiteId, order: alternate('llvm', 'owned') });
+    const dir = buildPath(mazeDirectory), names = directory ? ['llvm', 'owned'] : ['owned', 'candidate'];
+    plans.push({ name: 'maze', images: names.map(name => imageFiles(pathIn(dir, name), name)),
+      decode: decodeApplication, applications, id: applicationSuiteId, order: alternate(...names) });
   }
   for (const image of plans.flatMap(plan => plan.images)) {
     assert.equal(sha(image.uf2), image.sha256, 'image drift');
@@ -177,7 +186,8 @@ try {
   else if (mode === 'build-pair' && args.length === 3) build(args[0], args.slice(1), ['owned', 'candidate']);
   else if (mode === 'measure' && args.length === 3) measure(...args);
   else if (mode === 'measure-followup' && args.length === 4) measure(...args);
-  else throw new Error('Usage: imu-benchmark.mjs build NEW_DIR LLVM.o OWNED.o LITERAL.o FLASH_THUNK.o SRAM_THUNK.o | build-pair NEW_DIR BASELINE.o CANDIDATE.o | measure BUILD_DIR NEW_CAPTURE_DIR SERIAL | measure-followup IMU_DIR NEW_CAPTURE_DIR SERIAL MAZE_DIR');
+  else if (mode === 'measure-maze-pair' && args.length === 3) measure(null, args[1], args[2], args[0]);
+  else throw new Error('Usage: imu-benchmark.mjs build NEW_DIR LLVM.o OWNED.o LITERAL.o FLASH_THUNK.o SRAM_THUNK.o | build-pair NEW_DIR BASELINE.o CANDIDATE.o | measure BUILD_DIR NEW_CAPTURE_DIR SERIAL | measure-followup IMU_DIR NEW_CAPTURE_DIR SERIAL MAZE_DIR | measure-maze-pair MAZE_DIR NEW_CAPTURE_DIR SERIAL');
 } catch (error) {
   console.error(`IMU benchmark: ${error.message}`);
   process.exitCode = 1;

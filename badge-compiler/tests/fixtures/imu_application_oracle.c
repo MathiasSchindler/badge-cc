@@ -28,11 +28,13 @@ static void print(uint32_t value) {
     __asm__ volatile("bkpt #0xab" : "+r"(op) : "r"(arg) : "memory");
 }
 void bare_main(void) {
-    for (uint32_t module = 0u; module < 6u; module++) {
+    const uint8_t modules[] = {0, 1, 2, 3, 4, 5, 1, 2, 3};
+    for (uint32_t i = 0u; i < sizeof(modules); i++) {
+        uint32_t module = modules[i];
         compiler_result_t result;
         writes = 0;
         digest = 2166136261u;
-        compiler_application_prepare(module, 123456789u);
+        compiler_application_prepare(module, i < 6u ? 123456789u : 42u);
         compiler_application_run(module);
         if (!compiler_application_result(module, &result)) failed = 1;
         else {

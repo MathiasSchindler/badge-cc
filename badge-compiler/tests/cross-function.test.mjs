@@ -81,6 +81,78 @@ yes:\nret i32 0\nno:\nret i32 1\n}`;
   assert(b.count < a.count);
   console.log(`PO16 encoder oracle: ${a.count} -> ${b.count} reached instructions`);
 });
+const guardedLoop = `@position = internal global i32 6, align 4
+@last = global i32 0, align 4
+define void @record(ptr %slot, i32 %value) {
+entry:
+ %old = load i32, ptr %slot, align 4
+ %next = add i32 %old, %value
+ store i32 %next, ptr @last, align 4
+ ret void
+}
+define internal void @resolve(i32 %lo, i32 %width) {
+entry:
+ %hi = add i32 %lo, %width
+ %x = load i32, ptr @position, align 4
+ %low = icmp sle i32 %x, %lo
+ br i1 %low, label %miss, label %upper
+miss:
+ br label %check
+upper:
+ %high = icmp sge i32 %x, %hi
+ br label %check
+check:
+ %no = phi i1 [true, %miss], [%high, %upper]
+ br i1 %no, label %reject, label %body
+reject:
+ ret void
+body:
+ %slot = alloca [32 x i8], align 4
+ store i32 %lo, ptr %slot, align 4
+ call void @record(ptr %slot, i32 %hi)
+ ret void
+}
+define i32 @main() {
+entry:
+ br label %loop
+loop:
+ %i = phi i32 [0, %entry], [%next, %after]
+ %width = add i32 %i, 3
+ call void @resolve(i32 %i, i32 %width)
+ br label %after
+after:
+ %previous = phi i32 [%i, %loop]
+ %saved_width = phi i32 [%width, %loop]
+ store volatile i32 %saved_width, ptr @position, align 4
+ %next = add i32 %previous, 1
+ %more = icmp ult i32 %next, 10
+ br i1 %more, label %loop, label %done
+done:
+ %seen = load i32, ptr @last, align 4
+ %status = sub i32 %seen, 30
+ ret i32 %status
+}
+`;
+test('loop guard splitting preserves short-circuit edges, live bounds, and successor PHIs', t => {
+  const file = files(t);
+  const result = optimize(file, guardedLoop, 'guard-split');
+  const [helper, caller] = result.split('define i32 @main()');
+  assert.doesNotMatch(helper, /icmp s[lg]e/);
+  assert.match(caller, /icmp sle/);
+  assert.equal([...caller.matchAll(/call void @resolve/g)].length, 1);
+  assert.doesNotMatch(caller, /phi i32 \[%i, %loop\]/);
+  const a = execute(file, 'control', true, 'thumb-constants');
+  const b = execute(file, 'candidate', true, 'thumb-constants');
+  assert(b.bytes < a.bytes && b.count < a.count);
+});
+test('loop guard splitting leaves observable reads and externally callable helpers intact', t => {
+  for (const source of [
+    guardedLoop.replace('load i32, ptr @position', 'load volatile i32, ptr @position'),
+    guardedLoop.replace('define internal void @resolve', 'define void @resolve'),
+    guardedLoop.replace('call void @resolve(i32 %i,', 'call void @resolve(i32 noundef %i,'),
+  ])
+    assert.equal(optimize(files(t), source, 'guard-split'), target + source);
+});
 test('compact helper folding removes different literal calls but retains dynamic calls', t => {
   const file = files(t);
   const result = optimize(file, `@seed = global i32 4
@@ -289,6 +361,43 @@ test('equal-size leaf-read inlining keeps the production frame timer out of the 
   assert(frame && frame.calls.length === 0);
   const wait = assembly.slice(assembly.indexOf('\nwait_frame:\n'), assembly.indexOf('.size wait_frame,'));
   assert.equal([...wait.matchAll(/^ldr\.n .* \[r\d+\]$/gm)].length, 1);
+});
+
+test('specialization can prefer a repeated literal shared by distinct call sites', t => {
+  const file = files(t);
+  const calls = Array.from({ length: 12 }, (_, n) =>
+    `  %r${n} = call i32 @group(i32 %x, i32 0, i32 ${n})\n` +
+    `  store volatile i32 %r${n}, ptr @sink, align 4`).join('\n');
+  const candidate = optimize(file, `@sink = global i32 0, align 4
+define internal i32 @group(i32 %x, i32 %mode, i32 %offset) {
+entry:
+  %selected = icmp eq i32 %mode, 0
+  br i1 %selected, label %simple, label %other
+simple:
+  %result = add i32 %x, %offset
+  ret i32 %result
+other:
+  %mix = xor i32 %x, %mode
+  %wide = mul i32 %mix, 16777619
+  %last = add i32 %wide, %offset
+  ret i32 %last
+}
+define i32 @main() {
+entry:
+  %x = load volatile i32, ptr @sink, align 4
+${calls}
+  br label %end
+end:
+  %u = load volatile i32, ptr @sink, align 4
+  %g = call i32 @group(i32 0, i32 %u, i32 1)
+  %status = xor i32 %g, 184553810
+  ret i32 %status
+}`);
+  assert.match(candidate, /constant_specialization group/);
+  assert.equal([...candidate.matchAll(/call i32 @"?\.badge\.opt\.\d+"?\s*\(\s*i32 %x\s*,\s*i32 \d+\s*\)/g)].length, 12);
+  assert.match(candidate, /call i32 @group\(i32 0, i32 %u, i32 1\)/);
+  const control = execute(file, 'control'), selected = execute(file, 'candidate');
+  assert(selected.bytes < control.bytes);
 });
 
 test('identical non-address-taken helpers share one body without changing call multiplicity', t => {

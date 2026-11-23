@@ -202,6 +202,25 @@ test('global allocator saves are balanced, counted and matched to restores', () 
     asm('root', 80).replace('pop.w {r4-r8, pc}', 'pop.w {r4-r8, r10, r11, pc}'),
   ]) assert.equal(stackGraph(nodes(mismatch), 0x10000011).entry.bound_bytes, null);
 });
+test('a restored sibling call uses the larger frame, not the sum of both frames', () => {
+  const source = `@ stack-frame: 80 + 8 saved-register bytes
+.global root
+.type root, %function
+.thumb_func
+root:
+@ lightweight-frame: mask 48 base sp calls 0
+push.n {r4, r5}
+sub.n sp, sp, #80
+.Lcg_return1:
+add.n sp, sp, #80
+pop.n {r4, r5}
+@ sibling-call: frame restored
+b.w leaf
+.size root, .-root
+`;
+  const graph = stackGraph(nodes(source + asm('leaf', 144)), 0x10000011);
+  assert.equal(graph.entry.bound_bytes, 168);
+});
 test('immediate stack adjustments model the same frame and outgoing bounds', () => {
   const root = asm('root', 512, `sub.n sp, sp, #16
 bl leaf

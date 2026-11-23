@@ -12,6 +12,7 @@
 #define CROSS_ATTEMPTS 8u
 #define CROSS_PARAMETERS 8u
 #define CROSS_INSTRUCTIONS 256u
+#define GUARD_CALLER_SPILL_ALLOWANCE 4u
 
 typedef struct {
   const char *name;
@@ -205,7 +206,8 @@ static function_cost *find_cost(module_cost *cost, const char *name) {
   return NULL;
 }
 static int fits_allocation(cross *p, module_cost *before, module_cost *after,
-                           unsigned f, const char *clone) {
+                           unsigned f, const char *clone,
+                           const char *guard_caller) {
   function_cost *generic =
       find_cost(before, assembly_name(p, p->a.functions[f].name));
   if (!generic)
@@ -216,9 +218,12 @@ static int fits_allocation(cross *p, module_cost *before, module_cost *after,
       a = generic;
     if (!a)
       ir_error(p->c, "cross-function unexpected function inventory");
+    unsigned spill_allowance = guard_caller && !strcmp(b->name, guard_caller)
+                                   ? GUARD_CALLER_SPILL_ALLOWANCE
+                                   : 0;
     const char *reason = b->frame > a->frame     ? "final_frame_growth"
                          : b->saves > a->saves   ? "final_save_growth"
-                         : b->spills > a->spills ? "final_spill_growth"
+                         : b->spills > a->spills + spill_allowance ? "final_spill_growth"
                                                  : NULL;
     if (reason) {
       ir_note(p->c, "skipped", reason, 1);
@@ -229,7 +234,7 @@ static int fits_allocation(cross *p, module_cost *before, module_cost *after,
 }
 static int admit(cross *p, module_cost *before, module_cost *after, unsigned f,
                  const char *clone) {
-  if (!fits_allocation(p, before, after, f, clone))
+  if (!fits_allocation(p, before, after, f, clone, NULL))
     return 0;
   if (after->bytes >= before->bytes) {
     ir_note(p->c, "skipped", "whole_module_not_smaller", 1);
@@ -583,43 +588,12 @@ static int fold_constant_calls(cross *p, unsigned f, const unsigned *calls,
   reset(p);
   return accepted;
 }
-static int specialize(cross *p, unsigned f, const unsigned *calls,
-                      unsigned count, module_cost *baseline, char **best,
-                      uint32_t *best_bytes, const char **best_clone) {
+static int specialize_values(cross *p, unsigned f, const unsigned *calls,
+                             unsigned count, const char **values,
+                             module_cost *baseline, char **best,
+                             uint32_t *best_bytes, const char **best_clone,
+                             int check_default) {
   const ir_function *fn = &p->a.functions[f];
-  for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++)
-    for (unsigned i = p->a.blocks[b].first_instruction;
-         i <
-         p->a.blocks[b].first_instruction + p->a.blocks[b].instruction_count;
-         i++)
-      if (p->a.instructions[i].effects & IR_EFFECT_OPAQUE) {
-        ir_note(p->c, "skipped", "opaque_specialization_contract", 1);
-        return 0;
-      }
-  const char *values[CROSS_PARAMETERS] = {0};
-  unsigned literals = 0;
-  for (unsigned i = 0; i < count; i++) {
-    const ir_instruction *call = &p->a.instructions[calls[i]];
-    const char *candidate[CROSS_PARAMETERS] = {0};
-    unsigned known = 0;
-    for (unsigned k = 0; k < fn->parameter_count; k++) {
-      spend(p, 1);
-      const ir_operand *op = &p->a.operands[call->first_operand + 1 + k];
-      uint64_t unused;
-      const char *text = ir_text(p->m, op->token);
-      if (op->kind == IR_OPERAND_LITERAL &&
-          (ir_integer(text, &unused) || !strcmp(text, "null"))) {
-        candidate[k] = text;
-        known++;
-      }
-    }
-    if (known > literals) {
-      memcpy(values, candidate, sizeof(values));
-      literals = known;
-    }
-  }
-  if (!literals)
-    return 0;
   unsigned char *selected = ir_allocate(p->c, count);
   unsigned matches = 0;
   for (unsigned i = 0; i < count; i++) {
@@ -658,12 +632,97 @@ static int specialize(cross *p, unsigned f, const unsigned *calls,
           1);
   int accepted =
       admit(p, baseline, &cost, f, clone) && cost.bytes < *best_bytes;
+  if (accepted && check_default) {
+    badge_scalar_selection previous = p->selection;
+    p->selection = BADGE_DEFAULT_SCALAR_SELECTION;
+    module_cost current_before = measure(p, p->m->source, p->m->size);
+    module_cost current_after = measure(p, candidate, size);
+    p->selection = previous;
+    accepted = admit(p, &current_before, &current_after, f, clone);
+  }
   if (accepted) {
     *best = candidate;
     *best_bytes = cost.bytes;
     *best_clone = clone;
   }
   reset(p);
+  return accepted;
+}
+
+static int specialize(cross *p, unsigned f, const unsigned *calls,
+                      unsigned count, module_cost *baseline, char **best,
+                      uint32_t *best_bytes, const char **best_clone) {
+  const ir_function *fn = &p->a.functions[f];
+  for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++)
+    for (unsigned i = p->a.blocks[b].first_instruction;
+         i < p->a.blocks[b].first_instruction + p->a.blocks[b].instruction_count;
+         i++)
+      if (p->a.instructions[i].effects & IR_EFFECT_OPAQUE) {
+        ir_note(p->c, "skipped", "opaque_specialization_contract", 1);
+        return 0;
+      }
+  const char *values[CROSS_PARAMETERS] = {0};
+  unsigned literals = 0;
+  for (unsigned i = 0; i < count; i++) {
+    const ir_instruction *call = &p->a.instructions[calls[i]];
+    const char *candidate[CROSS_PARAMETERS] = {0};
+    unsigned known = 0;
+    for (unsigned k = 0; k < fn->parameter_count; k++) {
+      spend(p, 1);
+      const ir_operand *op = &p->a.operands[call->first_operand + 1 + k];
+      uint64_t unused;
+      const char *text = ir_text(p->m, op->token);
+      if (op->kind == IR_OPERAND_LITERAL &&
+          (ir_integer(text, &unused) || !strcmp(text, "null"))) {
+        candidate[k] = text;
+        known++;
+      }
+    }
+    if (known > literals) {
+      memcpy(values, candidate, sizeof(values));
+      literals = known;
+    }
+  }
+  if (!literals)
+    return 0;
+  int accepted = specialize_values(p, f, calls, count, values, baseline, best,
+                                    best_bytes, best_clone, 0);
+  if (literals == 1 || count < 3 || count > 32)
+    return accepted;
+  unsigned shared = 1, parameter = 0;
+  const char *value = NULL;
+  for (unsigned k = 0; k < fn->parameter_count; k++) {
+    for (unsigned i = 0; i < count; i++) {
+      const ir_instruction *call = &p->a.instructions[calls[i]];
+      const ir_operand *op = &p->a.operands[call->first_operand + 1 + k];
+      const char *text = ir_text(p->m, op->token);
+      uint64_t unused;
+      if (op->kind != IR_OPERAND_LITERAL || !ir_integer(text, &unused))
+        continue;
+      unsigned matches = 1;
+      for (unsigned j = i + 1; j < count; j++) {
+        spend(p, 1);
+        const ir_instruction *other = &p->a.instructions[calls[j]];
+        const ir_operand *arg = &p->a.operands[other->first_operand + 1 + k];
+        matches += arg->kind == IR_OPERAND_LITERAL &&
+            !strcmp(text, ir_text(p->m, arg->token));
+      }
+      if (matches > shared) {
+        shared = matches;
+        parameter = k;
+        value = text;
+      }
+    }
+  }
+  if (!value)
+    return accepted;
+  const char *group[CROSS_PARAMETERS] = {0};
+  group[parameter] = value;
+  if (specialize_values(p, f, calls, count, group, baseline, best,
+                        best_bytes, best_clone, 1)) {
+    ir_note(p->c, "transformed", "repeated_argument_group", shared);
+    return 1;
+  }
   return accepted;
 }
 static int share_helper(cross *p, unsigned f, const unsigned *calls,
@@ -883,7 +942,7 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
           forward ? "tail_forwarder_inline_with_helper_removed"
                   : "straight_line_inline_with_helper_removed",
           1);
-  int fits = fits_allocation(p, baseline, &cost, f, NULL);
+  int fits = fits_allocation(p, baseline, &cost, f, NULL, NULL);
   /* A tiny pure integer leaf may spend one halfword per removed call,
      capped at four. Leaf reads still need a size tie. */
   unsigned allowance = count >= 4 ? 8 : count * 2;
@@ -907,6 +966,345 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
   reset(p);
   return accepted;
 }
+
+enum { GUARD_BLOCK_LIMIT = 16, GUARD_INSTRUCTION_LIMIT = 32, GUARD_ARGS = 4 };
+
+static int guard_i32(cross *p, unsigned type) {
+  return p->a.types[type].kind == IR_INT && p->a.types[type].bits == 32;
+}
+static int guard_load(cross *p, const ir_instruction *in, const ir_line *row) {
+  const ir_operand *addr = &p->a.operands[in->first_operand];
+  if (in->effects != (IR_EFFECT_READ | IR_EFFECT_TRAP) ||
+      row->count != 10 || !guard_i32(p, in->type) ||
+      addr->kind != IR_OPERAND_GLOBAL ||
+      strcmp(ir_text(p->m, row->first + 8), "align"))
+    return 0;
+  const ir_global *g = &p->a.globals[addr->definition];
+  if (g->storage_type == IR_NONE)
+    return 0;
+  const ir_type *storage = &p->a.types[g->storage_type];
+  unsigned l = g->line - 1;
+  uint64_t alignment;
+  if (!ir_integer(ir_text(p->m, row->first + 9), &alignment) ||
+      alignment != 4 ||
+      (!guard_i32(p, g->storage_type) &&
+       (storage->kind != IR_ARRAY || storage->count != 4 ||
+        p->a.types[storage->element].kind != IR_INT ||
+        p->a.types[storage->element].bits != 8)))
+    return 0;
+  return (token(p, l, "internal") || token(p, l, "private")) &&
+         !token(p, l, "section") && !token(p, l, "thread_local") &&
+         !token(p, l, "externally_initialized");
+}
+static int guard_instruction(cross *p, const ir_instruction *in) {
+  const ir_line *row = &p->m->lines[in->line - 1];
+  if (in->end_line != in->line)
+    return 0;
+  for (unsigned k = row->first; k < row->first + row->count; k++)
+    if (*ir_text(p->m, k) == '!')
+      return 0;
+  switch (in->opcode) {
+  case IR_OP_LOAD:
+    return guard_load(p, in, row);
+  case IR_OP_BINARY:
+    return row->count == 7 && guard_i32(p, in->type) &&
+           (!strcmp(in->operation, "add") || !strcmp(in->operation, "sub"));
+  case IR_OP_COMPARE:
+    return row->count == 8 &&
+           guard_i32(p, p->a.operands[in->first_operand].type);
+  case IR_OP_PHI:
+    return p->a.types[in->type].bits == 1;
+  case IR_OP_BR:
+    return 1;
+  case IR_OP_RET:
+    return row->count == 2 && !in->operand_count;
+  default:
+    return 0;
+  }
+}
+static int named_function(cross *p, const ir_function *fn) {
+  for (unsigned k = 0; k < fn->definition_count; k++) {
+    const char *name = p->a.definitions[fn->first_definition + k].name + 1;
+    if (*name >= '0' && *name <= '9')
+      return 0;
+  }
+  for (unsigned k = 0; k < fn->block_count; k++) {
+    const char *name = p->a.blocks[fn->first_block + k].name;
+    if (*name >= '0' && *name <= '9')
+      return 0;
+  }
+  return 1;
+}
+static int guard_loop_call(cross *p, unsigned block, const ir_function *fn) {
+  for (unsigned b = fn->first_block; b < fn->first_block + fn->block_count; b++) {
+    const ir_block *latch = &p->a.blocks[b];
+    spend(p, 1);
+    if (!ir_dominates(&p->a, block, b))
+      continue;
+    for (unsigned k = 0; k < latch->successor_count; k++)
+      if (ir_dominates(&p->a, p->a.successors[latch->first_successor + k], block))
+        return 1;
+  }
+  return 0;
+}
+static void guard_emit_row(cross *p, const ir_line *row) {
+  for (unsigned k = row->first; k < row->first + row->count; k++) {
+    const ir_token *t = &p->m->tokens[k];
+    ir_emit(p->c, "%s%s", k == row->first ? "  " : " ",
+            t->replacement ? t->replacement : t->text);
+  }
+  ir_emit(p->c, "\n");
+}
+static void guard_emit_instruction(cross *p, const ir_instruction *in,
+                                   unsigned def_start, unsigned first,
+                                   const char **names, const char **labels) {
+  const ir_line *row = &p->m->lines[in->line - 1];
+  if (in->definition != IR_NONE)
+    p->m->tokens[row->first].replacement = names[in->definition - def_start];
+  for (unsigned u = in->first_operand; u < in->first_operand + in->operand_count; u++) {
+    const ir_operand *op = &p->a.operands[u];
+    if (op->kind == IR_OPERAND_LOCAL)
+      p->m->tokens[op->token].replacement = names[op->definition - def_start];
+    else if (op->kind == IR_OPERAND_BLOCK)
+      p->m->tokens[op->token].replacement = labels[op->block - first];
+  }
+  guard_emit_row(p, row);
+}
+static const char *guard_label(cross *p, const ir_function *caller) {
+  for (;;) {
+    const char *name = ir_fresh(p->c, p->m, '%');
+    unsigned k = 0;
+    for (; k < caller->block_count; k++) {
+      spend(p, 1);
+      if (!strcmp(name + 1, p->a.blocks[caller->first_block + k].name))
+        break;
+    }
+    if (k == caller->block_count)
+      return name;
+  }
+}
+static char *split_guard(cross *p, unsigned f, const ir_instruction *call,
+                         size_t *size) {
+  const ir_function *fn = &p->a.functions[f];
+  const ir_block *at = &p->a.blocks[call->block];
+  const ir_function *caller = &p->a.functions[at->function];
+  unsigned argc = fn->parameter_count, first = fn->first_block;
+  const ir_line *head = &p->m->lines[fn->line - 1],
+                *site = &p->m->lines[call->line - 1];
+  if (p->a.types[fn->return_type].kind != IR_VOID || argc > GUARD_ARGS ||
+      fn->block_count < 3 || call->definition != IR_NONE ||
+      call->operand_count != argc + 1 ||
+      strcmp(ir_text(p->m, site->first), "call") ||
+      strcmp(ir_text(p->m, head->first + 2), "void") ||
+      strcmp(ir_text(p->m, site->first + 1), "void") ||
+      site->count != 5 + (argc ? 3 * argc - 1 : 0) ||
+      !named_function(p, fn) || !named_function(p, caller) ||
+      !guard_loop_call(p, call->block, caller))
+    return NULL;
+  unsigned arg_tokens[GUARD_ARGS], recompute[GUARD_ARGS], sink[GUARD_ARGS],
+      recompute_count = 0;
+  for (unsigned k = 0; k < argc; k++) {
+    unsigned h = head->first + 5 + 3 * k;
+    const ir_operand *arg = &p->a.operands[call->first_operand + 1 + k];
+    if (strcmp(ir_text(p->m, h), "i32") ||
+        strcmp(ir_text(p->m, h + 1), p->a.definitions[fn->first_definition + k].name) ||
+        strcmp(ir_text(p->m, h + 2), k + 1 < argc ? "," : ")") ||
+        arg->kind != IR_OPERAND_LOCAL || arg->token != site->first + 5 + 3 * k)
+      return NULL;
+    arg_tokens[k] = arg->token;
+  }
+  unsigned end = first + fn->block_count, body = first, instructions = 0, checks = 0, exits = 0;
+  for (; body < end && body - first < GUARD_BLOCK_LIMIT; body++) {
+    const ir_block *b = &p->a.blocks[body];
+    unsigned i = 0;
+    for (; i < b->instruction_count; i++) {
+      spend(p, 1);
+      if (!guard_instruction(p, &p->a.instructions[b->first_instruction + i]))
+        break;
+    }
+    if (i != b->instruction_count)
+      break;
+    instructions += i;
+    checks += b->successor_count == 2;
+    exits += p->a.instructions[b->first_instruction + i - 1].opcode == IR_OP_RET;
+  }
+  if (!exits || !checks || body == end || body - first == GUARD_BLOCK_LIMIT ||
+      instructions > GUARD_INSTRUCTION_LIMIT || p->a.blocks[body].predecessor_count != 1 ||
+      p->a.instructions[p->a.blocks[body].first_instruction].opcode == IR_OP_PHI)
+    return NULL;
+  for (unsigned b = first; b < end; b++) {
+    const ir_block *block = &p->a.blocks[b];
+    for (unsigned k = 0; k < block->successor_count; k++) {
+      unsigned s = p->a.successors[block->first_successor + k];
+      if (b < body ? (s <= b || s > body) : s <= body)
+        return NULL;
+    }
+  }
+  for (unsigned k = argc; k < fn->definition_count; k++) {
+    const ir_definition *d = &p->a.definitions[fn->first_definition + k];
+    if (d->block >= body)
+      continue;
+    unsigned use = IR_NONE;
+    int single_use = 1, live_out = 0;
+    for (unsigned u = d->first_use; u != IR_NONE; u = p->a.operands[u].next_use) {
+      spend(p, 1);
+      unsigned i = p->a.operands[u].instruction;
+      if (p->a.instructions[i].block >= body)
+        live_out = 1;
+      else {
+        single_use &= use == IR_NONE || use == i;
+        use = i;
+      }
+    }
+    if (!live_out)
+      continue;
+    const ir_instruction *in = &p->a.instructions[d->instruction];
+    if (in->opcode != IR_OP_BINARY || recompute_count == GUARD_ARGS)
+      return NULL;
+    for (unsigned j = in->first_operand; j < in->first_operand + in->operand_count; j++) {
+      const ir_operand *op = &p->a.operands[j];
+      if (op->kind == IR_OPERAND_LOCAL &&
+          op->definition >= fn->first_definition + argc)
+        return NULL;
+    }
+    recompute[recompute_count] = d->instruction;
+    sink[recompute_count++] = single_use && use != IR_NONE &&
+        p->a.instructions[use].opcode != IR_OP_PHI ? use : IR_NONE;
+  }
+  const char **names = ir_allocate(p->c, fn->definition_count * sizeof(*names));
+  const char *labels[GUARD_BLOCK_LIMIT + 1], *resume = guard_label(p, caller);
+  labels[0] = ir_format(p->c, "%%%s", at->name);
+  for (unsigned b = first + 1; b <= body; b++)
+    labels[b - first] = guard_label(p, caller);
+  for (unsigned k = 0; k < argc; k++)
+    names[k] = ir_text(p->m, arg_tokens[k]);
+  for (unsigned k = argc; k < fn->definition_count; k++)
+    if (p->a.definitions[fn->first_definition + k].block < body)
+      names[k] = ir_fresh(p->c, p->m, '%');
+  const ir_instruction *loads[GUARD_INSTRUCTION_LIMIT];
+  unsigned load_count = 0;
+  if (recompute_count) {
+    const ir_line *label = &p->m->lines[p->a.blocks[body].line - 1];
+    p->c->size = 0;
+    ir_append(p->c, p->m->source + label->begin, label->end - label->begin);
+    for (unsigned k = 0; k < recompute_count; k++) {
+      const ir_line *row = &p->m->lines[p->a.instructions[recompute[k]].line - 1];
+      ir_append(p->c, p->m->source + row->begin, row->end - row->begin);
+    }
+    p->m->lines[p->a.blocks[body].line - 1].replacement =
+        ir_copy(p->c, p->c->output, p->c->size);
+  }
+  /* Move the guard CFG; only the continuation calls the original symbol. */
+  p->c->size = 0;
+  for (unsigned b = first; b < body; b++) {
+    const ir_block *block = &p->a.blocks[b];
+    if (b != first)
+      ir_emit(p->c, "%s:\n", labels[b - first] + 1);
+    for (unsigned k = 0; k < block->instruction_count; k++) {
+      unsigned index = block->first_instruction + k;
+      int delayed = 0;
+      for (unsigned j = 0; j < recompute_count; j++)
+        delayed |= recompute[j] == index && sink[j] != IR_NONE;
+      if (delayed)
+        continue;
+      const ir_instruction *in = &p->a.instructions[index];
+      if (in->opcode == IR_OP_RET) {
+        ir_emit(p->c, "  br label %s\n", resume);
+        continue;
+      }
+      if (in->opcode == IR_OP_LOAD) {
+        const ir_operand *addr = &p->a.operands[in->first_operand];
+        for (unsigned j = 0; j < load_count; j++)
+          if (p->a.operands[loads[j]->first_operand].definition == addr->definition &&
+              ir_dominates(&p->a, loads[j]->block, in->block)) {
+            names[in->definition - fn->first_definition] =
+                names[loads[j]->definition - fn->first_definition];
+            delayed = 1;
+            break;
+          }
+        if (delayed)
+          continue;
+        loads[load_count++] = in;
+      }
+      for (unsigned j = 0; j < recompute_count; j++) {
+        if (sink[j] == index)
+          guard_emit_instruction(p, &p->a.instructions[recompute[j]],
+                                 fn->first_definition, first, names, labels);
+      }
+      guard_emit_instruction(p, in, fn->first_definition, first, names, labels);
+    }
+  }
+  ir_emit(p->c, "%s:\n", labels[body - first] + 1);
+  guard_emit_row(p, site);
+  ir_emit(p->c, "  br label %s\n%s:\n", resume, resume + 1);
+  p->m->lines[call->line - 1].replacement = ir_copy(p->c, p->c->output, p->c->size);
+  for (unsigned l = fn->line; l < p->a.blocks[body].line - 1; l++)
+    p->m->lines[l].replacement = "";
+  for (unsigned s = 0; s < at->successor_count; s++) {
+    const ir_block *next = &p->a.blocks[p->a.successors[at->first_successor + s]];
+    for (unsigned i = 0; i < next->instruction_count; i++) {
+      const ir_instruction *phi = &p->a.instructions[next->first_instruction + i];
+      if (phi->opcode != IR_OP_PHI)
+        break;
+      for (unsigned u = phi->first_operand; u < phi->first_operand + phi->operand_count; u++) {
+        const ir_operand *op = &p->a.operands[u];
+        if (op->kind == IR_OPERAND_BLOCK && op->block == call->block)
+          p->m->tokens[op->token].replacement = resume;
+      }
+    }
+  }
+  char *candidate = write_module(p, size);
+  reset(p);
+  return candidate;
+}
+
+void ir_guard_split(ir_context *c, ir_module *m) {
+  cross p = {.c = c, .m = m, .work = IR_CROSS_FUNCTION_WORK_LIMIT,
+             .selection = BADGE_DEFAULT_SCALAR_SELECTION};
+  analyze(&p);
+  if (symbolic_assembly(&p))
+    return;
+  unsigned *calls = ir_allocate(c, p.a.instruction_count * sizeof(*calls));
+  for (unsigned f = 0, attempts = 0; f < p.a.function_count && attempts < 2; f++) {
+    const ir_function *fn = &p.a.functions[f];
+    unsigned count;
+    if (p.a.types[fn->return_type].kind != IR_VOID || fn->block_count < 3 ||
+        !eligible(&p, f, calls, &count) || count != 1)
+      continue;
+    ir_allocation *mark = c->allocations;
+    ir_map names = m->names;
+    size_t size;
+    char *candidate = split_guard(&p, f, &p.a.instructions[calls[0]], &size);
+    if (candidate) {
+      attempts++;
+      ir_note(c, "candidate", "loop_entry_guard", 1);
+      ir_module checked = {0};
+      ir_parse(c, &checked, candidate, size);
+      ir_verify(c, &checked);
+      module_cost before = measure(&p, m->source, m->size);
+      module_cost after = measure(&p, candidate, size);
+      const char *caller = assembly_name(&p,
+          p.a.functions[p.a.blocks[p.a.instructions[calls[0]].block].function].name);
+      if (after.bytes >= before.bytes)
+        ir_note(c, "skipped", "whole_module_not_smaller", 1);
+      else if (
+          fits_allocation(&p, &before, &after, f, NULL, caller)) {
+        ir_note(c, "transformed", "loop_entry_guard", 1);
+        ir_note(c, "transformed", "whole_module_code_bytes_saved", before.bytes - after.bytes);
+        for (unsigned l = 0; l < m->line_count; l++)
+          m->lines[l].replacement = "";
+        m->lines[0].replacement = candidate;
+        ir_reparse(c, m, mark);
+        c->size = 0;
+        return;
+      }
+    }
+    ir_release_to(c, mark);
+    m->names = names;
+  }
+  c->size = 0;
+}
+
 static uint64_t *entry_counts(cross *p) {
   ir_map profiles = {0};
   ir_map_init(p->c, &profiles, p->m->line_count);

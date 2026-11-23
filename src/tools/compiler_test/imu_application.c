@@ -4,6 +4,9 @@
 
 extern void render_visual(void);
 extern uint16_t screen_pixel(uint32_t x, uint32_t y);
+#ifdef COMPILER_TEST_IMU_PREPARE_LABELS
+extern void prepare_screen_labels(void);
+#endif
 extern int32_t filtered_x, filtered_y, filtered_z, retained_sin_roll, retained_cos_roll;
 extern uint8_t identity;
 extern int read_ok;
@@ -60,6 +63,9 @@ void compiler_application_prepare(uint32_t module, uint32_t seed) {
     }
 }
 void compiler_application_run(uint32_t module) {
+#ifdef COMPILER_TEST_IMU_PREPARE_LABELS
+    if (module >= 1u && module <= 3u) prepare_screen_labels();
+#endif
     if (module == 0u) {
         for (uint32_t i = 0u; i < counts[0]; i++) {
             filtered_x = (int32_t)((input_seed + i * 251u) % 2049u) - 1024;

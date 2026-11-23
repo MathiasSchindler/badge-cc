@@ -76,6 +76,7 @@ typedef struct {
   int assembly_home;
   unsigned forbidden, degree;
   unsigned home_color;
+  cg_inst *split_call;
 } cg_register_value;
 typedef enum {
   CG_M_MOVW, CG_M_MOVT, CG_M_MOV, CG_M_ADD, CG_M_SUB,
@@ -132,6 +133,7 @@ typedef struct {
   unsigned schedule_hazards, schedule_unfilled, schedule_barriers;
   int schedule_active, schedule_flushing;
   int frame_sp_relative;
+  const char *tail_target;
   int allocate_r6;
   int scalar_stream_selection;
   int scalar_stream_retry;
@@ -163,6 +165,7 @@ static inline int cg_operand_selection(const cg_context *c) {
 void cg_reuse_constants(cg_context *c, size_t body_start);
 void cg_pool_literals(cg_context *c, size_t start);
 void cg_reduce_branches(cg_context *c, size_t body_start);
+void cg_share_return_tails(cg_context *c, size_t body_start);
 void cg_forward_byte_arguments(cg_context *c, size_t body_start);
 void cg_fold_zero_branches(cg_context *c, size_t body_start);
 void cg_fold_memory_addresses(cg_context *c, size_t body_start);

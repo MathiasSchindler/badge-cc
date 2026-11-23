@@ -186,6 +186,12 @@ The [call and return follow-up](docs/current-promotion.md#call-and-return-frame-
 keeps returned results in ABI registers and simplifies safe call frames.
 The [comparison and branch follow-up](docs/current-promotion.md#comparison-and-branch-lowering)
 uses shorter boolean results and feeds 64-bit comparisons directly into branches.
+The [ten follow-up experiments](docs/current-promotion.md#ten-follow-up-experiments-text-loops-and-control-flow)
+qualify repeated-argument specialization and shared return tails, and record
+the remaining runtime, size, and stack trade-offs.
+The [IMU and Maze follow-up](docs/current-promotion.md#imu-labels-and-automatic-maze-guard-splitting)
+caches labels in the IMU firmware and qualifies the explicit `guard-split`
+pass on Maze.
 The earlier `thumb-widths`/eight-pass profile remains explicitly selectable.
 Target-costed optimizer defaults require the
 badge backend's supported IR contract; the earlier explicit six-pass

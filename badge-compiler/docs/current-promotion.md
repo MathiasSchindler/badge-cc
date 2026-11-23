@@ -563,6 +563,90 @@ LLVM encoding checks exercise signed and unsigned predicates across word
 boundaries. Mixed AAPCS, branch/PHI, and Maze gameplay oracles passed.
 These are Cortex-M33 QEMU results; no badge was reflashed or timed.
 
+### Ten follow-up experiments: text, loops, and control flow
+
+The control was the comparison-and-branch default above. The standalone
+backend ablation reproduced all 129 control object sizes. The application
+prototypes deliberately change the shape of temporary source copies, not
+the checked-in firmware; they measure the opportunity before attempting
+a reusable transform.
+
+| Opportunity | Checked result and disposition |
+| --- | --- |
+| Repeated text scale | Cloning the IMU helper for scales 1, 2, and 3 reached 64,567,943 instead of 69,841,948 full-screen production instructions, at +248 executable bytes. Default `cross-function` now tries a bounded repeated-literal group and checks its bytes, frames, saves and spills with the current backend as well as the original cost profile. It admitted 31 calls in Diagnostics, but did not admit the IMU specialization. |
+| Hoist formatting | A source-shape prototype prepared text once before the pixel loops. The complete live-screen replay, including preparation and its harness, reached 41,062,609 instead of 70,650,997 instructions; the error-screen and dirty-region digests also matched. The prototype uses 45 extra BSS bytes. No compiler hoist is enabled: the transform needs a proof that display calls and escaped sensor pointers cannot invalidate the snapshot. |
+| Bounded decimal quotient/remainder | `bounded-decimal` applies an exact reciprocal only when an unsigned bound and matching quotient/remainder pair are proved. Boundary and exhaustive 16-bit target checks passed. The final exact IMU object grew eight executable bytes and the live screen reached 72,204,259 instructions instead of 69,841,948, so the pass stays explicit. |
+| Split an interval at a call | The build-time `BADGE_EXPERIMENT_CALL_SPLIT=1` candidate saved 14 bytes in one object, and its exact report fixture reached 218 fewer instructions out of about 1.48 million. It added eight local-frame bytes and did not qualify as a default. |
+| Private record return | A packed register-return prototype for the Maze fire rectangle grew the application object by 212 executable bytes and reached 21,009,892 instead of 20,981,843 instructions. All four digests matched. No compiler ABI change is enabled. |
+| Pointer induction | A source-shape hazard scan reached 95,722 fewer instructions in the four-level replay but nearly doubled that function's stack traffic (105,426 to 198,706 accesses). The explicit `pointer-induction` pass checks final code, frame, saves and spills. It proposed six Maze recurrences but admitted none, and produced no changes across the 129-module replay. |
+| Split collision rejection from the resolver | A source-shape prototype passed all four Maze digests and reached 20,094,649 instead of 20,981,843 instructions, saving 32 executable bytes in its application object. Generic automatic partial inlining is not enabled; the compiler still needs call-site CFG/PHI and memory-effect proofs. |
+| Sibling branch | Unrestricted selection increased 13 objects in the isolated replay. Direct tail branches now require an explicit IR `tail` marker, register-only arguments with no use of r3, a single return and no escaping local object. Mixed-compiler execution and stack reporting passed. Ordinary C calls do not change ABI. |
+| Dense switch table | The aggressive version selected 15 tables and grew executable code by 328 bytes across 14 modules. The default only selects a table if its worst-case veneers and guard fit the estimate for the already-folded comparison chain. No production switch qualified in this corpus; the dense shared-target fixture passes for holes, defaults and PHI edges. |
+| Identical return tails | The default shares only a matching return-value move that falls through to the epilogue. This avoids adding an executed branch. The fixed-IR replay saved 166 bytes in 31 modules at 45 sites, with no growth. |
+
+The two explicit IR experiments can be applied to saved optimized IR with
+`badge-opt --passes=bounded-decimal` or `--passes=pointer-induction`; do not
+append either to the already full sixteen-pass default.
+
+The final default saved **352 loaded flash bytes across 18 of 33 verified
+images** and 290 executable object bytes, without image, object, or
+measured local frame/save-area growth. Maze was 14,952 to 14,944 bytes;
+Diagnostics was 27,012 to 26,916 bytes. The final Maze, IMU pixel and Nametag
+probes matched their prior outputs and instruction counts. The broader
+test selection passed 84 of 85 cases; the graphics-clear instruction-count
+assertion also failed on a freshly built, unchanged HEAD. Focused new
+tests, native optimizer checks, mixed ABI, and Maze gameplay checks passed.
+No badge was flashed or physically timed for these experiments.
+
+### IMU labels and automatic Maze guard splitting
+
+The control is the final owned default from the preceding round. IMU Demo
+now prepares the ID and six formatted readings once before the initial
+full redraw or the six dirty rectangles. This is a firmware change, not a
+compiler hoist across sensor or display calls. The renderer-only and
+transfer-only paths do not prepare labels. The exact-object Cortex-M33
+oracle compares nine digests, including fresh samples, read failures,
+and dirty rectangles. Both owned and Clang firmware build successfully.
+
+The single-badge owned/new/new/owned comparison includes label preparation
+inside the pixel timing window. Clock and output records match, and the
+seven-sample ranges from both repetitions do not overlap for these phases:
+
+| IMU phase | Baseline median (timer ticks) | Cached median (timer ticks) | Reduction |
+| --- | ---: | ---: | ---: |
+| Full live screen | 1,053,367 | 622,688-622,689 | 40.89% |
+| Pixel replay with failed read | 259,601 | 187,973-187,974 | 27.59% |
+| Six dirty rectangles | 72,905 | 45,047-45,048 | 38.21% |
+
+Renderer-only and display-transfer timings do not show a resolved change.
+The production fatal-error screen uses a separate, unchanged draw path.
+Loaded flash grows from 11,000 to 11,160 bytes; the label arrays use 45
+bytes (48 bytes of linked BSS including alignment). The pixel function's
+local frame and saved-register area shrink from 24 + 32 to 0 + 24 bytes.
+
+The new explicit `guard-split` pass moves an acyclic, read-only entry guard
+from a private helper with one direct register-only call in a loop. It
+repairs successor PHIs, recomputes live argument-only bounds in the
+resolver, and leaves the expensive body out of line. It requires smaller
+final code and no frame or save-area growth. It allows up to four
+additional statically spilled values in the caller only, so it is **not
+part of the default pipeline**. Apply it to saved optimized IR with
+`badge-opt --passes=guard-split input.ll -o output.ll`.
+
+Only Maze changed among 129 archived optimized modules. Its production
+UF2 payload shrinks from 14,944 to 14,912 bytes. The four-level Cortex-M33
+replay matches every digest, reaches 20,094,652 instead of 20,981,843
+instructions (-4.23%), and makes 2,088,389 instead of 2,258,296 stack
+accesses (-7.52%). The caller has four statically spilled values instead
+of one; its local frame and save area remain 8 + 24 bytes.
+
+On the badge, the same owned/new/new/owned order gave matching outputs and
+clocks. The physics/input phase fell from 24,925-24,928 to 22,608-22,611
+median timer ticks (-9.3%). The reached frame fell from 149,102-149,105 to
+148,392-148,397 ticks (-0.47%). Both improvements have nonoverlapping
+sample ranges across repetitions; the other phases did not resolve a
+change.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

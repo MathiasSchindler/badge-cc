@@ -424,9 +424,20 @@ entry:
   fs.writeFileSync(file('calls.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
 declare i32 @mutate(ptr)
 declare i32 @callee5(i32, i32, i32, i32, i32)
+declare i32 @callee2(i32, i32)
 declare i64 @callee_wide(i64, i64, i32)
 ${local('stable', '')}
 ${local('fenced', 'call void asm sideeffect "nop", "~{memory}"()')}
+define i32 @sibling(i32 %x) {
+entry:
+  %r = tail call i32 @callee2(i32 %x, i32 5)
+  ret i32 %r
+}
+define i32 @nosibling(i32 %x) {
+entry:
+  %r = notail call i32 @callee2(i32 %x, i32 5)
+  ret i32 %r
+}
 define i32 @return_word(i32 %x) {
 entry:
   %r = call i32 @callee5(i32 1, i32 2, i32 3, i32 4, i32 %x)
@@ -447,10 +458,12 @@ entry:
 typedef unsigned long long u64;
 extern unsigned stable(unsigned), fenced(unsigned), return_word(unsigned), continued(unsigned);
 extern u64 return_wide(u64, u64);
+extern unsigned sibling(unsigned), nosibling(unsigned);
 unsigned mutate(unsigned *p) { unsigned x = *p; *p ^= 0xdeadbeefu; return x + 1; }
 unsigned callee5(unsigned a, unsigned b, unsigned c, unsigned d, unsigned e) {
   return a + b + c + d + e;
 }
+unsigned callee2(unsigned a, unsigned b) { return a + b; }
 u64 callee_wide(u64 a, u64 b, unsigned salt) {
   return a ^ (b + salt);
 }
@@ -458,7 +471,8 @@ int main(void) {
   unsigned x = 0xffffffffu;
   u64 a = 0x0123456789abcdefull, b = 0xfffffffffffffffaull;
   return stable(x) != (x ^ 0xdeadbeefu) || fenced(x) != stable(x) ||
-         return_word(x) != 9 || continued(x) != 8 || return_wide(a,b) != (a ^ 3ull);
+         return_word(x) != 9 || continued(x) != 8 || return_wide(a,b) != (a ^ 3ull) ||
+         sibling(x) != 4 || nosibling(x) != 4;
 }
 `);
   run(tool('badge-codegen-sanitize'), [file('calls.ll'), '-o', file('calls.s')]);
@@ -468,6 +482,9 @@ int main(void) {
   assert.equal(frames.get('stable').frame_base, 'sp');
   assert.equal(frames.get('fenced').frame_base, 'r7');
   assert.match(body('fenced'), /^mov sp, r7$/m);
+  assert.match(body('sibling'), /^b\.w callee2$/m);
+  assert.match(body('nosibling'), /^bl callee2$/m);
+  assert.deepEqual(frames.get('sibling').calls, [{ target: 'callee2', outgoing_bytes: 0, sibling: true }]);
   assert.match(body('return_word'), /^str\.w r(?:8|9|10|11|12), \[sp, #0\]$/m);
   assert.match(body('return_wide'), /^str\.n r[0-7], \[sp, #0\]$/m);
   for (const name of ['return_word', 'return_wide']) {
@@ -1290,6 +1307,51 @@ entry:
   run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
     '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
     '-kernel', file('shift.elf')]);
+});
+
+test('dense Thumb switch tables preserve holes, defaults, and PHI edge copies', t => {
+  const file = files(t);
+  const cases = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
+  const group = n => n === 8 ? 8 : n % 2;
+  const target = n => `case${group(n)}`;
+  const blocks = [...new Set(cases.map(group))];
+  fs.writeFileSync(file('switch.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define i32 @table(i32 %x, i32 %y) {
+entry:
+  switch i32 %x, label %missing [
+${cases.map(n => `    i32 ${n}, label %${target(n)}`).join('\n')}
+  ]
+${blocks.map(n => `case${n}:\n  %v${n} = phi i32 ${cases.filter(k => group(k) === n).map(() => '[ %y, %entry ]').join(', ')}\n  %r${n} = add i32 %v${n}, ${n + 3}\n  ret i32 %r${n}`).join('\n')}
+missing:
+  %fallback = phi i32 [ %y, %entry ]
+  %result = sub i32 %fallback, 9
+  ret i32 %result
+}`);
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned table(unsigned, unsigned);
+int main(void) {
+  for (unsigned i = 0; i < 20; i++) {
+    unsigned n = i < 16 ? i : ~i, x = 0xfffffffau + i;
+    unsigned expected = n <= 12 && n != 7 ? x + (n == 8 ? 8 : n % 2) + 3 : x - 9;
+    if (table(n, x) != expected) return 1;
+  }
+  return 0;
+}`);
+  run(tool('badge-codegen-sanitize'), [file('switch.ll'), '-o', file('table.s')]);
+  assert.match(fs.readFileSync(file('table.s'), 'utf8'), /^tbb \[pc, r\d+\]$/m);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const targetFlags = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-asm'), [file('table.s'), '-o', file('table.o')]);
+  run(clang, [...targetFlags, '-c', file('table.s'), '-o', file('llvm.o')]);
+  run(clang, [...targetFlags, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const role of ['table', 'llvm']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file('caller.o'), file(`${role}.o`), '-o', file(`${role}.elf`)]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file(`${role}.elf`)]);
+  }
 });
 
 test('compact switches preserve PHI edges and fold indexed narrow loads only when aligned', t => {

@@ -19,12 +19,15 @@ void ir_loop_invariant(ir_context *, ir_module *);
 void ir_loop_cost(ir_context *, ir_module *);
 void ir_loop_scalar(ir_context *, ir_module *);
 void ir_loop_bounds(ir_context *, ir_module *);
+void ir_pointer_induction(ir_context *, ir_module *);
 void ir_cross_function(ir_context *, ir_module *);
 void ir_hot_inline(ir_context *, ir_module *);
 void ir_compact_inline(ir_context *, ir_module *);
+void ir_guard_split(ir_context *, ir_module *);
 void ir_target_strength_reduce(ir_context *, ir_module *);
 void ir_exact_pow2(ir_context *, ir_module *);
 void ir_divrem_pairs(ir_context *, ir_module *);
+void ir_bounded_decimal(ir_context *, ir_module *);
 void ir_local_memory(ir_context *, ir_module *);
 void ir_global_memory(ir_context *, ir_module *);
 
@@ -38,12 +41,18 @@ const ir_pass badge_ir_passes[] = {
     {"compact-inline",
      "Inline bounded internal helpers using thumb-constants final bytes and stack admission",
      ir_compact_inline, IR_PASS_OPTIMIZATION},
+    {"guard-split",
+     "Move bounded private helper rejection guards into a loop under final byte and stack gates",
+     ir_guard_split, IR_PASS_OPTIMIZATION},
     {"loop-scalar",
      "Bounded unflagged scalar motion and modular induction with conservative loop-pressure budgets",
      ir_loop_scalar, IR_PASS_OPTIMIZATION},
     {"loop-bounds",
      "Hoist proven private global bounds out of simple loop headers",
      ir_loop_bounds, IR_PASS_OPTIMIZATION},
+    {"pointer-induction",
+     "Try bounded byte pointer recurrences under final code and spill gates",
+     ir_pointer_induction, IR_PASS_OPTIMIZATION},
     {"local-memory",
      "Reuse exact-pointer scalar loads within bounded same-block windows",
      ir_local_memory, IR_PASS_OPTIMIZATION},
@@ -118,6 +127,9 @@ const ir_pass badge_ir_passes[] = {
     {"divrem-pairs",
      "Share bounded quotient/remainder pairs, lower proven exact signed divisions, and strength-reduce profitable unsigned powers of two",
      ir_divrem_pairs, IR_PASS_OPTIMIZATION},
+    {"bounded-decimal",
+     "Use an exact reciprocal for proven bounded unsigned decimal quotient/remainder pairs",
+     ir_bounded_decimal, IR_PASS_OPTIMIZATION},
 };
 const unsigned badge_ir_pass_count =
     sizeof(badge_ir_passes) / sizeof(*badge_ir_passes);

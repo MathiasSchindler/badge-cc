@@ -71,7 +71,7 @@ export function parseAssembly(text, module) {
   };
   let frame = null, fn = null, immediate = null, active = 0, prologue = false, returning = false;
   let pushed = false, based = false, restored = false, popped = false, savedBytes = 0;
-  let lightweight = null;
+  let lightweight = null, siblingPending = false;
   const registerMask = list => list.split(/,\s*/).reduce((mask, reg) => {
     const n = reg === 'lr' || reg === 'pc' ? 14 : /^r(?:[0-9]|1[0-2])$/.test(reg) ? Number(reg.slice(1)) : -1;
     requireCondition(n >= 0 && !(mask & 2 ** n), `${module}: invalid save register`);
@@ -84,6 +84,8 @@ export function parseAssembly(text, module) {
     (_, reg, id) => `ldr.w ${reg}, .Lcg_lit${id}\nb.w .Lcg_after${id}\n.Lcg_after${id}:`);
   for (const original of modeled.split('\n')) {
     const line = original.trim();
+    const siblingMarker = siblingPending;
+    siblingPending = false;
     let m;
     if ((m = line.match(/^@ stack-frame: (\d+) \+ (\d+) saved-register bytes$/))) {
       frame = { local: Number(m[1]), saves: Number(m[2]) };
@@ -209,6 +211,18 @@ export function parseAssembly(text, module) {
     }
     // The backend's unreachable trap has no software stack effect; faults are excluded.
     if (line === '.short 0xde00') continue;
+    if (line === '@ sibling-call: frame restored') {
+      if (!returning || !restored || !popped || active !== 0 || !lightweight ||
+          lightweight.calls || (lightweight.mask & (1 << 14)))
+        unknown('unverified_sibling_frame');
+      else siblingPending = true;
+      continue;
+    }
+    if (siblingMarker && (m = line.match(/^b\.w ([\w.$]+)$/)) &&
+        !m[1].startsWith('.L')) {
+      fn.calls.push({ target: m[1], outgoing_bytes: 0, sibling: true });
+      continue;
+    }
     if ((m = line.match(/^bl(?:\.w)? ([\w.$]+)$/))) {
       fn.calls.push({ target: m[1], outgoing_bytes: active });
       immediate = null;
@@ -319,12 +333,14 @@ export function stackGraph(nodes, entry) {
     for (const i of members) {
       const n = nodes[i];
       let suffix = n.max_outgoing_bytes ?? 0;
+      let sibling = 0;
       for (const call of calls[i]) {
         const child = call.index !== null && component.get(call.index) !== g
           ? results.get(call.index).known_prefix_bytes : 0;
-        suffix = Math.max(suffix, (call.outgoing_bytes ?? 0) + child);
+        if (call.sibling) sibling = Math.max(sibling, child);
+        else suffix = Math.max(suffix, (call.outgoing_bytes ?? 0) + child);
       }
-      const prefix = (n.frame_bytes ?? 0) + (n.saves_bytes ?? 0) + suffix;
+      const prefix = Math.max((n.frame_bytes ?? 0) + (n.saves_bytes ?? 0) + suffix, sibling);
       results.set(i, { bound_bytes: reasons.size ? null : prefix,
         known_prefix_bytes: prefix, reasons: [...reasons].sort() });
     }

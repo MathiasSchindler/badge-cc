@@ -133,6 +133,47 @@ entry:
       '-kernel', file(`${name}.elf`)]);
   }
 });
+test('pointer induction preserves zero-trip and strided byte access results', t => {
+  const file = files(t);
+  const source = `@data = internal global [160 x i8] zeroinitializer, align 4
+define i32 @walk(i32 %count) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [0, %entry], [%next, %body]
+  %sum = phi i32 [0, %entry], [%updated, %body]
+  %go = icmp ult i32 %i, %count
+  br i1 %go, label %body, label %done
+body:
+  %offset = mul i32 %i, 37
+  %address = getelementptr i8, ptr @data, i32 %offset
+  %x = load volatile i8, ptr %address, align 1
+  %word = zext i8 %x to i32
+  %updated = add i32 %sum, %word
+  %next = add i32 %i, 1
+  br label %head
+done:
+  ret i32 %sum
+}
+define i32 @main() {
+entry:
+  %p = getelementptr i8, ptr @data, i32 37
+  store volatile i8 9, ptr %p, align 1
+  %a = call i32 @walk(i32 0)
+  %b = call i32 @walk(i32 4)
+  %diff = xor i32 %b, 9
+  %status = or i32 %a, %diff
+  ret i32 %status
+}
+`;
+  optimize(file, source, 'pointer-induction');
+  run(tool('badge-ir-metrics'), ['--passes=pointer-induction', file('input.ll'), '-o', file('events.json')]);
+  const { events } = JSON.parse(fs.readFileSync(file('events.json'), 'utf8'));
+  assert(events.some(e => e.reason === 'byte_pointer_recurrence'));
+  execute(file, file('input.ll'), 'control', false, 'thumb-constants');
+  execute(file, file('candidate.ll'), 'candidate', false, 'thumb-constants');
+});
+
 test('two private dimensions and their wrapping product move as one bound', t => {
   const file = files(t);
   const text = optimize(file, `@width = internal global i32 2, align 4

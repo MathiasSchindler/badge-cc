@@ -48,6 +48,8 @@ static int32_t retained_sin_roll;
 static int32_t retained_cos_roll = FIXED_ONE;
 static uint16_t visual[VISUAL_WIDTH * VISUAL_HEIGHT];
 static uint16_t previous_visual[VISUAL_WIDTH * VISUAL_HEIGHT];
+static char screen_id[3];
+static char screen_values[6][7];
 
 typedef struct {
     int32_t x;
@@ -319,6 +321,19 @@ static void render_visual(void) {
     visual_arrow(project_vector(axis_z, 43), blue, 'Z');
 }
 
+static void prepare_screen_labels(void) {
+    screen_id[0] = hex_digit(identity >> 4u);
+    screen_id[1] = hex_digit(identity);
+    screen_id[2] = '\0';
+    if (!read_ok) return;
+    signed_decimal(screen_values[0], accel_mg(sample.accel_x));
+    signed_decimal(screen_values[1], accel_mg(sample.accel_y));
+    signed_decimal(screen_values[2], accel_mg(sample.accel_z));
+    signed_decimal(screen_values[3], sample.gyro_x);
+    signed_decimal(screen_values[4], sample.gyro_y);
+    signed_decimal(screen_values[5], sample.gyro_z);
+}
+
 static uint16_t screen_pixel(uint32_t x, uint32_t y) {
     uint16_t background = rgb565(9u, 22u, 42u);
     uint16_t white = rgb565(248u, 250u, 252u);
@@ -326,9 +341,6 @@ static uint16_t screen_pixel(uint32_t x, uint32_t y) {
     uint16_t blue = rgb565(9u, 105u, 218u);
     uint16_t yellow = rgb565(210u, 153u, 34u);
     uint16_t red = rgb565(207u, 34u, 46u);
-    char value[7];
-    char id[3] = {hex_digit(identity >> 4u), hex_digit(identity), '\0'};
-
     if (x < 5u || x >= BADGER_DISPLAY_WIDTH - 5u ||
         y < 5u || y >= BADGER_DISPLAY_HEIGHT - 5u) return blue;
     if (x >= VISUAL_X && x < VISUAL_X + VISUAL_WIDTH &&
@@ -337,7 +349,7 @@ static uint16_t screen_pixel(uint32_t x, uint32_t y) {
     }
     if (text_pixel("LSM6DS3TR C", x, y, 61u, 12u, 3u)) return white;
     if (text_pixel("ID", x, y, 126u, 39u, 1u) ||
-        text_pixel(id, x, y, 144u, 39u, 1u)) return green;
+        text_pixel(screen_id, x, y, 144u, 39u, 1u)) return green;
 
     if (!read_ok) {
         if (text_pixel("SENSOR READ ERROR", x, y, 58u, 105u, 2u)) return red;
@@ -345,31 +357,26 @@ static uint16_t screen_pixel(uint32_t x, uint32_t y) {
     }
 
     if (text_pixel("ACCEL MG", x, y, 19u, 58u, 2u)) return yellow;
-    signed_decimal(value, accel_mg(sample.accel_x));
     if (text_pixel("X", x, y, 15u, 82u, 2u) ||
-        text_pixel(value, x, y, 39u, 82u, 2u)) return white;
-    signed_decimal(value, accel_mg(sample.accel_y));
+        text_pixel(screen_values[0], x, y, 39u, 82u, 2u)) return white;
     if (text_pixel("Y", x, y, 15u, 103u, 2u) ||
-        text_pixel(value, x, y, 39u, 103u, 2u)) return white;
-    signed_decimal(value, accel_mg(sample.accel_z));
+        text_pixel(screen_values[1], x, y, 39u, 103u, 2u)) return white;
     if (text_pixel("Z", x, y, 15u, 124u, 2u) ||
-        text_pixel(value, x, y, 39u, 124u, 2u)) return white;
+        text_pixel(screen_values[2], x, y, 39u, 124u, 2u)) return white;
 
     if (text_pixel("GYRO RAW", x, y, 15u, 162u, 1u)) return yellow;
-    signed_decimal(value, sample.gyro_x);
     if (text_pixel("X", x, y, 15u, 180u, 1u) ||
-        text_pixel(value, x, y, 27u, 180u, 1u)) return white;
-    signed_decimal(value, sample.gyro_y);
+        text_pixel(screen_values[3], x, y, 27u, 180u, 1u)) return white;
     if (text_pixel("Y", x, y, 15u, 195u, 1u) ||
-        text_pixel(value, x, y, 27u, 195u, 1u)) return white;
-    signed_decimal(value, sample.gyro_z);
+        text_pixel(screen_values[4], x, y, 27u, 195u, 1u)) return white;
     if (text_pixel("Z", x, y, 15u, 210u, 1u) ||
-        text_pixel(value, x, y, 27u, 210u, 1u)) return white;
+        text_pixel(screen_values[5], x, y, 27u, 210u, 1u)) return white;
     if (text_pixel("TILT", x, y, 226u, 108u, 1u)) return yellow;
     return background;
 }
 
 static void draw_full_screen(void) {
+    prepare_screen_labels();
     badger_display_begin();
     for (uint32_t x = 0; x < BADGER_DISPLAY_WIDTH; ++x) {
         for (uint32_t y = 0; y < BADGER_DISPLAY_HEIGHT; ++y) {
@@ -391,6 +398,7 @@ static void draw_region(uint32_t x_start, uint32_t y_start,
 }
 
 static void draw_values(void) {
+    prepare_screen_labels();
     draw_region(39u, 82u, 72u, 14u);
     draw_region(39u, 103u, 72u, 14u);
     draw_region(39u, 124u, 72u, 14u);

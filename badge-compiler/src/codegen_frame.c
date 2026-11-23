@@ -531,7 +531,7 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   unsigned count = (unsigned)__builtin_popcount(mask);
   int alignment_word = (count & 1u) &&
       (calls || f->frame || (count == 1 && (mask & 0xff00u)));
-  int fused_return = alignment_word && !calls &&
+  int fused_return = alignment_word && !calls && !c->tail_target &&
       c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
   if (alignment_word)
     mask |= 1u << (fused_return ? 14 : 3);
@@ -571,7 +571,10 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   if (f->frame)
     cg_adjust_stack(c, 1, f->frame);
   if (mask) register_list(c, mask, 1);
-  if (!calls && !fused_return) cg_emit(c, "bx lr\n");
+  if (c->tail_target)
+    cg_emit(c, "@ sibling-call: frame restored\nb.w %s\n", c->tail_target);
+  else if (!calls && !fused_return)
+    cg_emit(c, "bx lr\n");
   c->frame_sp_relative = 0;
 }
 
@@ -771,6 +774,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   c->schedule_moves = c->schedule_windows = c->schedule_hazards = 0;
   c->schedule_unfilled = c->schedule_barriers = 0;
   c->fn = f;
+  c->tail_target = NULL;
   c->scalar_stream_retry = 0;
   c->frame_sp_relative = 0;
   c->call_entry_copies = c->call_stack_addresses = 0;
@@ -937,6 +941,7 @@ void cg_generate_function(cg_context *c, cg_function *f) {
   if (cg_operand_selection(c)) cg_reuse_constants(c, body_start);
   if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS) {
     cg_reduce_branches(c, body_start);
+    cg_share_return_tails(c, body_start);
     cg_fold_zero_branches(c, body_start);
   }
   finish_function(c, header, body_start);

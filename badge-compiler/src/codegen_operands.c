@@ -269,6 +269,64 @@ void cg_reduce_branches(cg_context *c, size_t body_start) {
     p = end + 1;
   }
 }
+void cg_share_return_tails(cg_context *c, size_t body_start) {
+  const char *original = c->out + body_start;
+  if (strstr(original, "@ constant-assembly-lines:"))
+    return;
+  const char *last = NULL, *last_end = NULL;
+  for (const char *p = original; *p;) {
+    cg_register_work(c);
+    const char *end = strchr(p, '\n');
+    if (!end)
+      cg_error(c, "unterminated return-tail instruction");
+    if (*p != '@' && *p != '\n' && end[-1] != ':') {
+      last = p;
+      last_end = end;
+    }
+    p = end + 1;
+  }
+  unsigned value;
+  int at = 0;
+  if (!last || !((sscanf(last, "mov r0, r%u%n", &value, &at) == 1 ||
+                  sscanf(last, "movw r0, #%u%n", &value, &at) == 1 ||
+                  sscanf(last, "movs.n r0, #%u%n", &value, &at) == 1) &&
+                 at && last + at == last_end))
+    return;
+  size_t length = c->size - body_start;
+  char *body = cg_alloc(c, length + 1);
+  memcpy(body, original, length + 1);
+  last_end = body + (last_end - original);
+  last = body + (last - original);
+  unsigned label = 0;
+  c->size = body_start;
+  for (const char *p = body; *p;) {
+    cg_register_work(c);
+    const char *end = strchr(p, '\n');
+    if (!end)
+      cg_error(c, "unterminated return-tail instruction");
+    unsigned b;
+    int move = p < last && end - p == last_end - last &&
+               !memcmp(p, last, (size_t)(end - p));
+    const char *jump = end + 1, *finish = move ? strchr(jump, '\n') : NULL;
+    at = 0;
+    if (finish &&
+        (sscanf(jump, "b .Lcg_return%u%n", &b, &at) == 1 ||
+         sscanf(jump, "b.w .Lcg_return%u%n", &b, &at) == 1) &&
+        at && jump + at == finish && b == c->fn->id &&
+        branch_span(c, p, last, 2000)) {
+      if (!label)
+        label = ++c->unique;
+      cg_emit(c, "b.n .Lcg_shared_return%u\n", label);
+      p = finish + 1;
+      continue;
+    }
+    if (p == last && label)
+      cg_emit(c, ".Lcg_shared_return%u:\n", label);
+    cg_emit(c, "%.*s\n", (int)(end - p), p);
+    p = end + 1;
+  }
+  c->out[c->size] = 0;
+}
 void cg_forward_byte_arguments(cg_context *c, size_t body_start) {
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);

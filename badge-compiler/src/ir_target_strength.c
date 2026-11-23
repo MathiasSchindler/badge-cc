@@ -300,3 +300,134 @@ void ir_target_strength_reduce(ir_context *c, ir_module *m) {
   ir_analyze(c, m, &p.a);
   reduce_unsigned(&p, 0);
 }
+
+static int uint_literal(const ir_analysis *a, const ir_operand *op,
+                        uint32_t *value) {
+  uint64_t n;
+  if (op->kind != IR_OPERAND_LITERAL ||
+      !ir_integer(ir_text(a->text, op->token), &n))
+    return 0;
+  *value = (uint32_t)n;
+  return 1;
+}
+
+static uint32_t edge_upper_bound(strength *p, const ir_operand *value,
+                                 unsigned predecessor, unsigned target) {
+  const ir_analysis *a = &p->a;
+  const ir_block *b = &a->blocks[predecessor];
+  if (!b->instruction_count || b->successor_count != 2 ||
+      value->kind != IR_OPERAND_LOCAL)
+    return UINT32_MAX;
+  const ir_instruction *branch = &a->instructions[b->first_instruction + b->instruction_count - 1];
+  if (branch->opcode != IR_OP_BR || branch->operand_count != 3)
+    return UINT32_MAX;
+  const ir_operand *cond = &a->operands[branch->first_operand];
+  const ir_operand *yes = cond + 1, *no = cond + 2;
+  if (yes->block == no->block || (yes->block != target && no->block != target) ||
+      cond->kind != IR_OPERAND_LOCAL)
+    return UINT32_MAX;
+  unsigned def = a->definitions[cond->definition].instruction;
+  if (def == IR_NONE)
+    return UINT32_MAX;
+  const ir_instruction *cmp = &a->instructions[def];
+  if (cmp->opcode != IR_OP_COMPARE || cmp->operand_count != 2)
+    return UINT32_MAX;
+  const ir_operand *lhs = &a->operands[cmp->first_operand], *rhs = lhs + 1;
+  uint32_t limit;
+  if (lhs->kind != IR_OPERAND_LOCAL || lhs->definition != value->definition ||
+      !uint_literal(a, rhs, &limit))
+    return UINT32_MAX;
+  const char *pred = ir_text(a->text, a->text->lines[cmp->line - 1].op + 1);
+  if (yes->block == target)
+    return !strcmp(pred, "ule") ? limit :
+           !strcmp(pred, "ult") && limit ? limit - 1 : UINT32_MAX;
+  return !strcmp(pred, "ugt") ? limit :
+         !strcmp(pred, "uge") && limit ? limit - 1 : UINT32_MAX;
+}
+
+static uint32_t upper_bound(strength *p, const ir_operand *value, unsigned depth) {
+  const ir_analysis *a = &p->a;
+  uint32_t n;
+  spend(p);
+  if (uint_literal(a, value, &n))
+    return n;
+  if (!depth || value->kind != IR_OPERAND_LOCAL)
+    return UINT32_MAX;
+  unsigned def = a->definitions[value->definition].instruction;
+  if (def == IR_NONE)
+    return UINT32_MAX;
+  const ir_instruction *in = &a->instructions[def];
+  if (in->opcode == IR_OP_CAST && !strcmp(in->operation, "zext")) {
+    unsigned bits = a->types[a->operands[in->first_operand].type].bits;
+    if (bits && bits < 32)
+      return (UINT32_C(1) << bits) - 1;
+  }
+  if (in->opcode == IR_OP_BINARY && !strcmp(in->operation, "and") &&
+      uint_literal(a, &a->operands[in->first_operand + 1], &n))
+    return n;
+  if (in->opcode != IR_OP_PHI || in->operand_count > 8)
+    return UINT32_MAX;
+  uint32_t max = 0;
+  int seeded = 0;
+  for (unsigned k = 0; k < in->operand_count; k += 2) {
+    const ir_operand *input = &a->operands[in->first_operand + k], *label = input + 1;
+    spend(p);
+    if (input->kind == IR_OPERAND_LOCAL) {
+      unsigned other = a->definitions[input->definition].instruction;
+      if (other != IR_NONE) {
+        const ir_instruction *next = &a->instructions[other];
+        const ir_operand *x = &a->operands[next->first_operand];
+        if (next->opcode == IR_OP_BINARY && !strcmp(next->operation, "udiv") &&
+            x->kind == IR_OPERAND_LOCAL && x->definition == value->definition &&
+            uint_literal(a, x + 1, &n) && n)
+          continue;
+      }
+    }
+    seeded = 1;
+    uint32_t guarded = edge_upper_bound(p, input, label->block, in->block);
+    uint32_t limit = upper_bound(p, input, depth - 1);
+    if (guarded < limit)
+      limit = guarded;
+    if (limit > max)
+      max = limit;
+  }
+  return seeded ? max : UINT32_MAX;
+}
+
+void ir_bounded_decimal(ir_context *c, ir_module *m) {
+  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
+  ir_analyze(c, m, &p.a);
+  for (unsigned i = 0; i + 1 < p.a.instruction_count; i++) {
+    spend(&p);
+    const ir_instruction *first = &p.a.instructions[i], *second = first + 1;
+    if (first->block != second->block || !unsigned_division(first) ||
+        !unsigned_division(second) || !strcmp(first->operation, second->operation))
+      continue;
+    uint32_t divisora, divisorb;
+    if (plain_divrem(&p, i, &divisora) || divisora != 10 ||
+        plain_divrem(&p, i + 1, &divisorb) || divisorb != 10)
+      continue;
+    const ir_operand *a = &p.a.operands[first->first_operand];
+    const ir_operand *b = &p.a.operands[second->first_operand];
+    if (a->definition != b->definition || upper_bound(&p, a, 5) > 99999)
+      continue;
+    const char *input = p.a.definitions[a->definition].name;
+    const ir_instruction *div = !strcmp(first->operation, "udiv") ? first : second;
+    const ir_instruction *rem = div == first ? second : first;
+    const char *q = p.a.definitions[div->definition].name;
+    const char *r = p.a.definitions[rem->definition].name;
+    const char *frozen = ir_fresh(c, m, '%');
+    const char *half = ir_fresh(c, m, '%'), *mul = ir_fresh(c, m, '%');
+    const char *product = ir_fresh(c, m, '%');
+    /* floor(x/10) = floor(floor(x/2) * ceil(2^18/5) / 2^18)
+       on this domain; the product is below 2^32. */
+    m->lines[first->line - 1].replacement = ir_format(c,
+        "  %s = freeze i32 %s\n  %s = lshr i32 %s, 1\n  %s = mul i32 %s, 52429\n"
+        "  %s = lshr i32 %s, 18\n  %s = mul i32 %s, 10\n"
+        "  %s = sub i32 %s, %s\n", frozen, input, half, frozen,
+        mul, half, q, mul, product, q, r, frozen, product);
+    m->lines[second->line - 1].replacement = "";
+    ir_note(c, "transformed", "bounded_decimal_divrem", 1);
+    i++;
+  }
+}

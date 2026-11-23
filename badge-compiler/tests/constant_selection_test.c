@@ -5,7 +5,7 @@
 #include <string.h>
 
 static char *select(const char *source) {
-  cg_function fn = {0};
+  cg_function fn = {.id = 1};
   cg_context c = {.scalar_selection = BADGE_SELECTION_THUMB_CONSTANTS,
                   .frame_addressing = BADGE_FRAME_DIRECT,
                   .fn = &fn, .file = "constant-selection"};
@@ -15,6 +15,7 @@ static char *select(const char *source) {
   cg_forward_byte_arguments(&c, 0);
   cg_reuse_constants(&c, 0);
   cg_reduce_branches(&c, 0);
+  cg_share_return_tails(&c, 0);
   while (c.allocations) {
     cg_allocation *next = c.allocations->next;
     free(c.allocations);
@@ -55,6 +56,10 @@ static void capture_flags(unsigned reg, unsigned id, unsigned phase) {
 }
 int main(int argc, char **argv) {
   int runtime = argc == 2 && !strcmp(argv[1], "--runtime");
+  expect("movw r0, #55\nb .Lcg_return1\n.Lcg_last:\nmovw r0, #55\n",
+         "b.n .Lcg_shared_return", "b .Lcg_return1");
+  expect("movw r0, #55\nb .Lcg_return1\n.Lcg_last:\nmovw r0, #56\n",
+         "b .Lcg_return1", "shared_return");
   expect("movw r0, #0\nmovt r0, #3072\n", "mov.w r0, #201326592", "movt");
   expect("movw r1, #41\ncmp r0, r1\n", "movs.n r1, #41", "movw");
   expect("movw r1, #41\nuxtb.w r8, r1\ncmp r0, r8\n",

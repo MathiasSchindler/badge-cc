@@ -1013,6 +1013,76 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
   else
     cg_emit(c, "b%s .Lcg_%u_%s\n", cg_branch_width(c), c->fn->id, target);
 }
+
+static int cg_dense_switch(cg_context *c, cg_block *from, cg_inst *i,
+                           cg_type *type, unsigned condition,
+                           const char *fallback) {
+  enum { LIMIT = 32 };
+  unsigned start = c->pos, count = 0, low = UINT32_MAX, high = 0;
+  unsigned keys[LIMIT], slots[LIMIT] = {0}, choices[LIMIT];
+  const char *destinations[LIMIT + 1] = {cg_name(c, fallback)};
+  unsigned ndest = 1;
+  while (!cg_is(c, "]")) {
+    if (count == LIMIT || c->pos + 4 >= i->end)
+      goto fallback_path;
+    cg_type *key_type = cg_type_parse(c, 0);
+    const char *token = cg_take(c);
+    if (key_type->bits != type->bits ||
+        (!isdigit((unsigned char)*token) && *token != '-'))
+      goto fallback_path;
+    uint32_t key = (uint32_t)cg_number(c, token);
+    if (type->bits < 32)
+      key &= (UINT32_C(1) << type->bits) - 1;
+    cg_expect(c, ",");
+    cg_expect(c, "label");
+    const char *target = cg_name(c, cg_take(c));
+    unsigned at = 0;
+    while (at < ndest && strcmp(destinations[at], target))
+      at++;
+    if (at == ndest)
+      destinations[ndest++] = target;
+    keys[count] = key;
+    choices[count++] = at;
+    low = key < low ? key : low;
+    high = key > high ? key : high;
+  }
+  if (count < 6 || high - low >= LIMIT || low > 4095)
+    goto fallback_path;
+  unsigned span = high - low + 1, padded = cg_round(span, 2);
+  /* The compare chain can already fold to a CMP/Bcc per case. */
+  if ((low ? 4u : condition >= 8 ? 2u : 0u) + 10 + padded + 4 * ndest > 4 * count - 2)
+    goto fallback_path;
+  for (unsigned n = 0; n < count; n++)
+    slots[keys[n] - low] = choices[n];
+  unsigned id = ++c->unique;
+  if (low) {
+    cg_emit(c, "subw r0, r%u, #%u\n", condition, low);
+    condition = 0;
+  }
+  cg_emit(c, "cmp.%c r%u, #%u\nbhi.n .Lcg_table%u_v0\n"
+             ".p2align 2\ntbb [pc, r%u]\n.Lcg_table%u_base:\n",
+          condition < 8 ? 'n' : 'w', condition, span - 1, id, condition, id);
+  for (unsigned n = 0; n < padded; n++)
+    cg_emit(c, ".byte (.Lcg_table%u_v%u-.Lcg_table%u_base)/2\n", id, slots[n], id);
+  for (unsigned n = 0; n < ndest; n++) {
+    cg_emit(c, ".Lcg_table%u_v%u:\n", id, n);
+    if (cg_target_has_phi(c, destinations[n]))
+      cg_emit(c, "b .Lcg_table%u_e%u\n", id, n);
+    else
+      cg_emit(c, "b .Lcg_%u_%s\n", c->fn->id, destinations[n]);
+  }
+  for (unsigned n = 0; n < ndest; n++)
+    if (cg_target_has_phi(c, destinations[n])) {
+      cg_emit(c, ".Lcg_table%u_e%u:\n", id, n);
+      cg_edge(c, from, destinations[n], 0);
+    }
+  return 1;
+
+fallback_path:
+  c->pos = start;
+  return 0;
+}
+
 typedef struct {
   cg_type *type;
   unsigned start, byval, align;
@@ -1380,6 +1450,42 @@ static int cg_direct_record_memory(cg_context *c, cg_inst *i, int store,
       cg_save(c, i->result, w, w);
   return 1;
 }
+static int cg_tail_eligible(cg_context *c, cg_inst *i, cg_type *ret,
+                            unsigned cursor) {
+  const cg_function *fn = c->fn;
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      cursor > 3 || !i->next || i->next != fn->last->last || fn->return_ext ||
+      strcmp(c->tokens[i->begin + (i->result ? 2 : 0)].text, "tail") ||
+      strcmp(c->tokens[i->next->begin].text, "ret") ||
+      fn->ret->size != ret->size || fn->ret->bits != ret->bits)
+    return 0;
+  if (i->result) {
+    if ((ret->bits != 32 && ret->bits != 64) ||
+        i->next->end - i->next->begin != 3 ||
+        strcmp(c->tokens[i->next->begin + 2].text, i->result->name))
+      return 0;
+  } else if (ret->size || i->next->end - i->next->begin != 2)
+    return 0;
+  for (const cg_value *v = fn->values; v; v = v->next)
+    if (v->object_size)
+      return 0;
+  for (unsigned k = 0; k < fn->argc; k++)
+    if (fn->byval[k])
+      return 0;
+  for (const cg_block *b = fn->blocks; b; b = b->next)
+    for (const cg_inst *j = b->first; j; j = j->next) {
+      cg_register_work(c);
+      if (j == i || j == i->next)
+        continue;
+      unsigned at = j->begin + (j->result ? 2 : 0);
+      if (!strcmp(c->tokens[at].text, "tail") || !strcmp(c->tokens[at].text, "notail"))
+        at++;
+      if (!strcmp(c->tokens[at].text, "call") || !strcmp(c->tokens[at].text, "ret"))
+        return 0;
+    }
+  return 1;
+}
+
 static void cg_call(cg_context *c, cg_inst *i) {
   int fast = 0;
   while (!cg_type_start(c)) {
@@ -1596,6 +1702,12 @@ static void cg_call(cg_context *c, cg_inst *i) {
     }
   }
   if (*callee == '@') {
+    if (!fast && cg_tail_eligible(c, i, ret, cursor)) {
+      c->tail_target = cg_name(c, callee);
+      i->next->forwarded_return = 1;
+      c->pos = after;
+      return;
+    }
     cg_emit(c, "bl %s\n", cg_name(c, callee));
     if (c->scalar_stream_selection && i->scalar_call_arguments_plus_one == 2)
       cg_emit(c, "@ scalar-call: arguments 1\n");
@@ -2157,6 +2269,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_expect(c, "label");
     char *fallback = cg_take(c);
     cg_expect(c, "[");
+    if (compact && t->bits && cg_dense_switch(c, block, i, t, condition, fallback))
+      return;
     while (!cg_accept(c, "]")) {
       (void)cg_type_parse(c, 0);
       const char *constant = c->tokens[c->pos].text;

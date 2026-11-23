@@ -290,6 +290,48 @@ int main(void) {
   }
 });
 
+test('decimal reciprocal requires a bound and shares the quotient with the remainder', t => {
+  const file = fixture(t);
+  const divrem = (name, source, prefix = '') => `define i32 @${name}(i32 %x) {
+entry:
+${prefix}  %q = udiv i32 ${source}, 10
+  %r = urem i32 ${source}, 10
+  %high = shl i32 %q, 4
+  %result = or i32 %high, %r
+  ret i32 %result
+}
+`;
+  fs.writeFileSync(file('input.ll'), irTarget +
+    divrem('bounded', '%n', '  %n = and i32 %x, 65535\n') +
+    divrem('unbounded', '%x') + divrem('too_wide', '%n', '  %n = and i32 %x, 131071\n'));
+  invoke(tool('badge-opt-sanitize'), ['--passes=bounded-decimal', file('input.ll'), '-o', file('out.ll')]);
+  const out = fs.readFileSync(file('out.ll'), 'utf8');
+  assert.match(out, /define i32 @bounded\b[^}]*mul i32 .*52429/);
+  assert.doesNotMatch(out, /define i32 @bounded\b[^}]*[ur](?:div|rem) i32/);
+  assert.match(out, /define i32 @unbounded\b[^}]*udiv i32 %x, 10/);
+  assert.match(out, /define i32 @too_wide\b[^}]*urem i32 %n, 10/);
+  if (!oracle) return;
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned bounded(unsigned);
+int main(void) {
+  for (unsigned x = 0; x <= 65535; x++) {
+    unsigned expected = ((x / 10u) << 4) | (x % 10u);
+    if (bounded(x) != expected || bounded(x | 0xa5000000u) != expected) return 1;
+  }
+  return 0;
+}`);
+  invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('out.ll')]);
+  invoke(tool('badge-codegen'), [file('out.ll'), '-o', file('out.s')]);
+  invoke(tool('badge-asm'), [file('out.s'), '-o', file('out.o')]);
+  invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
+  invoke(clang, [...target, '-ffreestanding', '-O2', '-c', file('caller.c'), '-o', file('caller.o')]);
+  invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+    file('start.o'), file('caller.o'), file('out.o'), '-o', file('out.elf')]);
+  invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('out.elf')]);
+});
+
 test('power-of-two matrix removes divider work and executes across all residency policies', t => {
   const file = fixture(t), { ir, caller } = matrix();
   fs.writeFileSync(file('input.ll'), ir);

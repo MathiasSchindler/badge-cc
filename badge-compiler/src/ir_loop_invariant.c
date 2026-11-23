@@ -23,6 +23,7 @@ typedef struct {
   int cost_gated;
   int scalar_gated;
   int bounds_gated;
+  int pointer_gated;
   char **extra, **phis;
   unsigned char *removed;
 } loops;
@@ -30,6 +31,7 @@ typedef struct {
 static void spend(loops *p, uint64_t n) {
   if (n > p->work)
     ir_error(p->c, p->bounds_gated ? "loop-bounds work limit exceeded" :
+                   p->pointer_gated ? "pointer-induction work limit exceeded" :
                    p->scalar_gated ? "loop-scalar work limit exceeded" :
                    p->cost_gated ? "loop-cost work limit exceeded"
                               : "loop-invariant work limit exceeded");
@@ -557,6 +559,92 @@ static void scalar_loop(loops *p, const ir_function *f, unsigned header,
   } else if (!calls) induction(p, f, header, preheader);
   else ir_note(p->c, "skipped", "call_crossing_induction_budget", 1);
 }
+static void pointer_induction(loops *p, const ir_function *f, unsigned header,
+                              unsigned preheader) {
+  ir_analysis *a = &p->a;
+  const ir_block *h = &a->blocks[header];
+  if (h->predecessor_count != 2)
+    return;
+  unsigned latch = a->predecessors[h->first_predecessor];
+  if (latch == preheader)
+    latch = a->predecessors[h->first_predecessor + 1];
+  if (!p->member[latch])
+    return;
+  for (unsigned b = f->first_block; b < f->first_block + f->block_count; b++) {
+    if (!p->member[b])
+      continue;
+    const ir_block *block = &a->blocks[b];
+    for (unsigned i = block->first_instruction;
+         i < block->first_instruction + block->instruction_count; i++) {
+      spend(p, 1);
+      const ir_instruction *gep = &a->instructions[i];
+      const ir_line *line = &a->text->lines[gep->line - 1];
+      if (gep->opcode != IR_OP_GEP || p->removed[i] || gep->operand_count != 2 ||
+          gep->end_line != gep->line || line->count != 10 ||
+          strcmp(ir_text(a->text, line->op + 1), "i8") ||
+          !dominates(p, b, latch))
+        continue;
+      const ir_operand *base = &a->operands[gep->first_operand], *index = base + 1;
+      if (base->kind != IR_OPERAND_GLOBAL || index->kind != IR_OPERAND_LOCAL ||
+          a->types[index->type].bits != 32)
+        continue;
+      unsigned scale_instruction = a->definitions[index->definition].instruction;
+      const ir_operand *iv = index;
+      uint64_t scale = 1;
+      if (scale_instruction != IR_NONE) {
+        const ir_instruction *expr = &a->instructions[scale_instruction];
+        if (expr->opcode == IR_OP_BINARY && !strcmp(expr->operation, "mul") &&
+            eligible(p, expr) && literal(p, &a->operands[expr->first_operand + 1], &scale))
+          iv = &a->operands[expr->first_operand];
+      }
+      if (!scale || scale > 64 || iv->kind != IR_OPERAND_LOCAL)
+        continue;
+      const ir_definition *def = &a->definitions[iv->definition];
+      if (def->block != header || def->instruction == IR_NONE)
+        continue;
+      const ir_instruction *phi = &a->instructions[def->instruction];
+      if (phi->opcode != IR_OP_PHI || phi->operand_count != 4)
+        continue;
+      const ir_operand *seed = NULL, *back = NULL;
+      for (unsigned k = 0; k < 4; k += 2) {
+        const ir_operand *op = &a->operands[phi->first_operand + k];
+        if (op[1].block == preheader) seed = op;
+        if (op[1].block == latch) back = op;
+      }
+      uint64_t zero;
+      if (!seed || !literal(p, seed, &zero) || zero || !back ||
+          back->kind != IR_OPERAND_LOCAL)
+        continue;
+      unsigned update = a->definitions[back->definition].instruction;
+      if (update == IR_NONE)
+        continue;
+      const ir_instruction *step = &a->instructions[update];
+      if (step->block != latch || step->opcode != IR_OP_BINARY ||
+          strcmp(step->operation, "add") || !eligible(p, step))
+        continue;
+      const ir_operand *left = &a->operands[step->first_operand];
+      uint64_t delta;
+      if (left->kind != IR_OPERAND_LOCAL || left->definition != iv->definition ||
+          !literal(p, left + 1, &delta) || delta != 1)
+        continue;
+      const char *next = ir_fresh(p->c, a->text, '%');
+      const char *name = a->definitions[gep->definition].name;
+      append_text(p, &p->phis[header], ir_format(p->c,
+          "  %s = phi ptr [%s, %%%s], [%s, %%%s]\n", name,
+          ir_text(a->text, base->token), a->blocks[preheader].name,
+          next, a->blocks[latch].name));
+      append_text(p, &p->extra[latch], ir_format(p->c,
+          "  %s = getelementptr i8, ptr %s, i32 %u\n", next, name, (unsigned)scale));
+      p->removed[i] = 1;
+      if (iv != index && a->definitions[index->definition].use_count == 1)
+        p->removed[scale_instruction] = 1;
+      p->moves++;
+      ir_note(p->c, "proposed", "byte_pointer_recurrence", 1);
+      return;
+    }
+  }
+}
+
 static void loop(loops *p, unsigned header) {
   ir_analysis *a = &p->a;
   const ir_block *h = &a->blocks[header];
@@ -626,6 +714,10 @@ static void loop(loops *p, unsigned header) {
     bound_loop(p, f, header, preheader);
     return;
   }
+  if (p->pointer_gated) {
+    pointer_induction(p, f, header, preheader);
+    return;
+  }
   if (p->scalar_gated) {
     scalar_loop(p, f, header, preheader);
     return;
@@ -658,7 +750,9 @@ static void loop(loops *p, unsigned header) {
 static void run(ir_context *c, ir_module *m, int cost_gated) {
   ir_allocation *mark = c->allocations;
   loops p = {.c = c, .work = IR_LOOP_WORK_LIMIT, .cost_gated = cost_gated == 1,
-             .scalar_gated = cost_gated == 2, .bounds_gated = cost_gated == 3};
+             .scalar_gated = cost_gated == 2, .bounds_gated = cost_gated == 3,
+             .pointer_gated = cost_gated == 4};
+  int recurrences = p.scalar_gated || p.pointer_gated;
   ir_analyze(c, m, &p.a);
   ir_analysis *a = &p.a;
   p.order = ir_allocate(c, a->block_count * sizeof(*p.order));
@@ -667,7 +761,7 @@ static void run(ir_context *c, ir_module *m, int cost_gated) {
   p.member = ir_allocate(c, a->block_count);
   p.first = ir_allocate(c, a->block_count * sizeof(*p.first));
   p.last = ir_allocate(c, a->block_count * sizeof(*p.last));
-  if (p.scalar_gated) {
+  if (recurrences) {
     p.extra = ir_allocate(c, a->block_count * sizeof(*p.extra));
     p.phis = ir_allocate(c, a->block_count * sizeof(*p.phis));
     p.removed = ir_allocate(c, a->instruction_count);
@@ -701,7 +795,7 @@ static void run(ir_context *c, ir_module *m, int cost_gated) {
       spend(&p, moved->end - moved->begin);
       ir_append(c, m->source + moved->begin, moved->end - moved->begin);
     }
-    if (p.scalar_gated && p.extra[b])
+    if (recurrences && p.extra[b])
       ir_append(c, p.extra[b], strlen(p.extra[b]));
     if (c->size) {
       ir_append(c, m->source + line->begin, line->end - line->begin);
@@ -709,9 +803,9 @@ static void run(ir_context *c, ir_module *m, int cost_gated) {
     }
   }
   for (unsigned i = 0; i < a->instruction_count; i++)
-    if (p.location[i] != a->instructions[i].block || (p.scalar_gated && p.removed[i]))
+    if (p.location[i] != a->instructions[i].block || (recurrences && p.removed[i]))
       m->lines[a->instructions[i].line - 1].replacement = "";
-  if (p.scalar_gated)
+  if (recurrences)
     for (unsigned b = 0; b < a->block_count; b++) {
       if (!p.phis[b]) continue;
       const ir_block *block = &a->blocks[b];
@@ -723,10 +817,12 @@ static void run(ir_context *c, ir_module *m, int cost_gated) {
       line->replacement = ir_format(c, "%s%s", p.phis[b], original);
     }
   if (p.scalar_gated) ir_loop_admission(c, m, a);
-  if (p.bounds_gated) ir_function_admission(c, m, a, BADGE_SELECTION_THUMB_CONSTANTS);
+  if (p.bounds_gated || p.pointer_gated)
+    ir_function_admission(c, m, a, BADGE_SELECTION_THUMB_CONSTANTS);
   ir_reparse(c, m, mark);
 }
 void ir_loop_invariant(ir_context *c, ir_module *m) { run(c, m, 0); }
 void ir_loop_cost(ir_context *c, ir_module *m) { run(c, m, 1); }
 void ir_loop_scalar(ir_context *c, ir_module *m) { run(c, m, 2); }
 void ir_loop_bounds(ir_context *c, ir_module *m) { run(c, m, 3); }
+void ir_pointer_induction(ir_context *c, ir_module *m) { run(c, m, 4); }

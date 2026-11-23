@@ -140,6 +140,7 @@ COMPILER_TEST_MODULES := suite arithmetic strings memory control abi abi_helpers
 COMPILER_TEST_TIMING ?= 0
 COMPILER_TEST_APPLICATION ?= 0
 COMPILER_TEST_IMU_OBJECT ?=
+COMPILER_TEST_IMU_PREPARE_LABELS ?= 0
 ifneq ($(filter $(COMPILER_TEST_APPLICATION),0 1),$(COMPILER_TEST_APPLICATION))
 $(error COMPILER_TEST_APPLICATION must be 0 or 1)
 endif
@@ -159,7 +160,8 @@ endif
 endif
 COMPILER_TEST_FLAGS := $(if $(filter 1,$(COMPILER_TEST_TIMING)),-DCOMPILER_TEST_TIMING) \
 	$(if $(filter 1,$(COMPILER_TEST_APPLICATION)),-DCOMPILER_TEST_APPLICATION -I$(PLATFORM_DIR) -I$(TOOLS_DIR)) \
-	$(if $(COMPILER_TEST_IMU_OBJECT),-DCOMPILER_TEST_IMU)
+	$(if $(COMPILER_TEST_IMU_OBJECT),-DCOMPILER_TEST_IMU) \
+	$(if $(filter 1,$(COMPILER_TEST_IMU_PREPARE_LABELS)),-DCOMPILER_TEST_IMU_PREPARE_LABELS)
 COMPILER_TEST_SOURCES := $(addprefix $(COMPILER_TEST_DIR)/,$(addsuffix .c,$(COMPILER_TEST_MODULES)))
 COMPILER_TEST_OBJS := $(addprefix $(FIRMWARE_DIR)/compiler_,$(addsuffix .o,$(COMPILER_TEST_MODULES))) \
 	$(addprefix $(FIRMWARE_DIR)/,compiler_badge.o compiler_usb_control.o live_usb_hw.o display.o graphics.o diagnostics_logic.o usb_report.o bootrom_reboot.o) \
