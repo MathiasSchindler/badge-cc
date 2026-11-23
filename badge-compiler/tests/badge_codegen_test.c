@@ -26,7 +26,7 @@ static void admission_cache_tests(void) {
         "%y = udiv i32 %x, 17\nret i32 %y\n}\n" : leaf;
     int length = snprintf(ir, sizeof(ir), "%s%s%s%s", TARGET, other, callee, caller);
     assert(length > 0 && (size_t)length < sizeof(ir));
-    badge_scalar_selection selection = i == 4 ? BADGE_SELECTION_THUMB_OPERANDS :
+    badge_scalar_selection selection = i == 4 || i == 5 ? BADGE_SELECTION_THUMB_OPERANDS :
         i == 6 ? BADGE_SELECTION_THUMB_SCHEDULE : BADGE_SELECTION_THUMB_CONSTANTS;
     assert(badge_codegen_compile_with_selections(
         ir, (size_t)length, "admission.ll",
@@ -37,6 +37,27 @@ static void admission_cache_tests(void) {
     assert(expected_size == actual_size && !memcmp(expected, actual, expected_size));
     free(expected);
     free(actual);
+  }
+  free(cache);
+  cache = NULL;
+  const char *fast =
+      "define i32 @caller(i32 %x) {\nentry:\n"
+      "%y = call fastcc i32 @leaf(i32 %x)\nret i32 %y\n}\n";
+  char ir[512], *output = NULL;
+  size_t size;
+  for (unsigned i = 0; i < 2; i++) {
+    const char *definition = i ? leaf + strlen("define internal ") : leaf;
+    int length = snprintf(ir, sizeof(ir), "%s%s%s%s", TARGET, i ? "define " : "",
+                          definition, fast);
+    assert(length > 0 && (size_t)length < sizeof(ir));
+    int ok = badge_codegen_compile_for_admission(ir, (size_t)length, "fastcc.ll",
+        BADGE_SELECTION_THUMB_OPERANDS, &cache, &output, &size);
+    assert(ok == !i);
+    if (ok) {
+      free(output);
+      output = NULL;
+    } else
+      assert(!output && !size);
   }
   free(cache);
 }

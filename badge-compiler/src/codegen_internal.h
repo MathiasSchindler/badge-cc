@@ -300,7 +300,11 @@ void cg_register_loaded(cg_context *c, cg_value *value, unsigned r,
                         unsigned word);
 int cg_register_save(cg_context *c, cg_value *value, unsigned r, unsigned word);
 int cg_register_copy(cg_context *c, cg_value *dst, cg_value *src);
-void cg_register_work(cg_context *c);
+_Noreturn void cg_register_work_exceeded(cg_context *c);
+static inline void cg_register_work(cg_context *c) {
+  if (++c->register_work > CG_REGISTER_WORK_LIMIT)
+    cg_register_work_exceeded(c);
+}
 cg_register_value *cg_register_lookup(cg_context *c, const char *name);
 void cg_global_prepare(cg_context *c);
 void cg_global_instruction(cg_context *c, cg_inst *instruction);

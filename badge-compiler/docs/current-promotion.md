@@ -657,10 +657,10 @@ those facts:
 2. Reuse exact whole-module costs by IR text and scalar policy. The cache
    is local to one optimizer invocation and capped at 64 entries and 8 MiB.
 3. On a whole-module miss, reuse emitted code for unchanged functions
-   when their local label namespace matches. Callers are always regenerated
-   against the current module's callee facts. The function cache is capped
-   at 4 MiB of input and assembly text. Final assembly and relaxation still
-   run over the complete module.
+   when their local label namespace matches. Callers that consult other
+   functions are regenerated against the current module's callee facts. The
+   function cache is capped at 4 MiB of input and assembly text. Final
+   assembly and relaxation still run over the complete module.
 4. Validate the assembly and ELF layout for size-only admission without
    materializing the ELF or its relocation payload.
 5. Keep the parsed, verified module between passes that emit identical IR,
@@ -732,6 +732,24 @@ was effectively flat across the archive.
 The three fresh firmware images were again byte-identical. Clean
 parallel build medians were 689 and 662 ms; the ranges overlap, so
 this round does not establish an end-to-end build speedup.
+
+The following round gates constant and scalar-width scans on the actual
+mnemonic, parses each candidate immediate once, and inlines the
+register-analysis work counter while retaining the same limit and error.
+Admission now reuses functions with calls when their codegen did not
+consult another function's linkage or finalized register summary.
+`fastcc` linkage checks and register-summary dependencies still force
+regeneration. A separate assembler operand-cache experiment did not
+resolve a gain and was not retained.
+
+All 129 archived optimizer, codegen, and assembler inputs still produce
+byte-identical IR, assembly, and ELF objects. Aggregate optimizer CLI
+time drops from 6.36 s to 6.00 s (-5.6%). Optimizer medians drop from
+193 to 183 ms for IMU, 178 to 163 ms for Maze, and 343 to 323 ms for
+Diagnostics. These are host timings, not runtime changes.
+Fresh Maze, IMU, and Diagnostics UF2s were byte-identical. The clean
+parallel build medians were 652 and 621 ms, with overlapping ranges;
+the one-file rebuild also had no resolved change.
 
 ## PO18: historical cached qualification and default promotion
 

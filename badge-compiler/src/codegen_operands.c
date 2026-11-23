@@ -24,25 +24,29 @@ static const char *first_nonspace(const char *text) {
     text++;
   return text;
 }
+static int opcode_prefix(const char *p, const char *opcode, size_t n) {
+  return !strncmp(p, opcode, n) && isspace((unsigned char)p[n]);
+}
 static int immediate(const char *text, const char *op, unsigned *reg,
                      uint32_t *number) {
-  char instruction[16];
+  const char *p = first_nonspace(text);
   int end = 0;
-  if (*first_nonspace(text) != 'm')
+  if (!opcode_prefix(p, op, 4))
     return 0;
-  return sscanf(text, "%15s r%u, #%" SCNu32 "%n", instruction, reg, number, &end) == 3 &&
-         !strcmp(op, instruction) && !text[end] && *reg <= 12 && *number <= 65535;
+  return sscanf(p + 4, " r%u, #%" SCNu32 "%n", reg, number, &end) == 2 &&
+         !p[4 + end] && *reg <= 12 && *number <= 65535;
 }
 static char *symbol(const char *text, const char *op, unsigned *reg) {
-  char instruction[16], part[16];
+  const char *p = first_nonspace(text);
+  char part[16];
   int start = 0;
-  if (*first_nonspace(text) != 'm' ||
-      sscanf(text, "%15s r%u, #:%15[^:]:%n", instruction, reg, part, &start) != 3 ||
-      strcmp(instruction, op) || *reg > 12 ||
+  if (!opcode_prefix(p, op, 4) ||
+      sscanf(p + 4, " r%u, #:%15[^:]:%n", reg, part, &start) != 2 ||
+      *reg > 12 ||
       strcmp(part, !strcmp(op, "movw") ? "lower16" : "upper16") ||
-      text[start] != '(')
+      p[4 + start] != '(')
     return NULL;
-  return (char *)text + start + 1;
+  return (char *)p + 4 + start + 1;
 }
 static int same_base(cg_constant a, cg_constant b) {
   return a.known && b.known && ((!a.symbol && !b.symbol) ||
@@ -759,6 +763,15 @@ static int sole_label_entry(cg_context *c, const char *body, const char *name,
   return 1;
 }
 
+static void copy_line(cg_context *c, char *text, char *next) {
+  if (next > text && !next[-1]) {
+    next[-1] = '\n';
+    cg_append(c, text, (size_t)(next - text));
+    next[-1] = 0;
+  } else
+    cg_emit(c, "%s\n", text);
+}
+
 void cg_reuse_constants(cg_context *c, size_t body_start) {
   int synthesis = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
   int cfg = synthesis && c->size - body_start <= 32768;
@@ -787,7 +800,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
     }
     if (assembly_lines) {
       effects(current, facts);
-      cg_emit(c, "%s\n", current);
+      copy_line(c, current, next_line);
       assembly_lines--;
       current = next_line;
       continue;
@@ -797,7 +810,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
       if (sscanf(current, "@ constant-assembly-lines: %u%n", &assembly_lines, &end) != 1 ||
           current[end] || !assembly_lines)
         cg_error(c, "invalid constant selection assembly boundary");
-      cg_emit(c, "%s\n", current);
+      copy_line(c, current, next_line);
       current = next_line;
       continue;
     }
@@ -805,20 +818,22 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
       char name[128];
       int consumed = 0, operand = 0;
       if (current == carried_label) {
-        cg_emit(c, "%s\n", current);
+        copy_line(c, current, next_line);
         carried_label = NULL;
         current = next_line;
         continue;
       }
-      if (sscanf(current, "%127[.a-zA-Z0-9_]:%n", name, &consumed) == 1 &&
+      if (!strncmp(current, ".Lcg_", 5) &&
+          sscanf(current, "%127[.a-zA-Z0-9_]:%n", name, &consumed) == 1 &&
           consumed && !current[consumed] && !strncmp(name, ".Lcg_", 5) &&
           sole_label_entry(c, original, name, original + (current - body), NULL)) {
-        cg_emit(c, "%s\n", current);
+        copy_line(c, current, next_line);
         current = next_line;
         continue;
       }
       consumed = 0;
-      if (sscanf(current, "b %n%127s%n", &operand, name, &consumed) == 1 &&
+      if (opcode_prefix(current, "b", 1) &&
+          sscanf(current, "b %n%127s%n", &operand, name, &consumed) == 1 &&
           consumed && !current[consumed] && !strncmp(name, ".Lcg_", 5)) {
         size_t n = strlen(name);
         if (!strncmp(next_line, name, n) && next_line[n] == ':' &&
@@ -826,67 +841,62 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
             sole_label_entry(c, original, name, original + (next_line - body),
                              original + (current - body) + operand)) {
           carried_label = next_line;
-          cg_emit(c, "%s\n", current);
+          copy_line(c, current, next_line);
           current = next_line;
           continue;
         }
       }
     }
     if (synthesis) {
-      char opcode[12];
+      const char *op = first_nonspace(current);
+      int extract = opcode_prefix(op, "and.w", 5);
+      int shift = opcode_prefix(op, "lsl.w", 5) || opcode_prefix(op, "lsr.w", 5) ||
+                  opcode_prefix(op, "asr.w", 5);
+      int arithmetic = opcode_prefix(op, "add.w", 5) || opcode_prefix(op, "sub.w", 5);
+      int sets_flags = opcode_prefix(op, "adds.w", 6) || opcode_prefix(op, "subs.w", 6);
       unsigned dst, src, number;
       int consumed = 0;
-      if (sscanf(current, "%11s r%u, r%u, #%u%n",
-                 opcode, &dst, &src, &number, &consumed) == 4 &&
-          !current[consumed] && dst < 7 && src < 7) {
-        if (!strcmp(opcode, "and.w") && (number == 255 || number == 65535)) {
+      if ((extract || shift || arithmetic || sets_flags) &&
+          sscanf(op + (sets_flags ? 6 : 5), " r%u, r%u, #%u%n",
+                 &dst, &src, &number, &consumed) == 3 &&
+          !op[(sets_flags ? 6 : 5) + consumed] && dst < 7 && src < 7) {
+        if (extract && (number == 255 || number == 65535)) {
           cg_emit(c, "%s.n r%u, r%u\n@ scalar-extract: saved 2\n",
                   number == 255 ? "uxtb" : "uxth", dst, src);
           facts[dst].known = 0;
           current = next_line;
           continue;
         }
-        if (((!strcmp(opcode, "lsr.w") || !strcmp(opcode, "asr.w")) &&
-             number >= 1 && number <= 32) ||
-            (!strcmp(opcode, "lsl.w") && number <= 31)) {
+        if (shift && (op[2] == 'l' ? number <= 31 : number >= 1 && number <= 32)) {
           if (flags_overwritten(c, original, original + (next_line - body))) {
             cg_emit(c, "%.*ss.n r%u, r%u, #%u\n@ scalar-shift: saved 2\n",
-                    3, opcode, dst, src, number);
+                    3, op, dst, src, number);
             facts[dst].known = 0;
             current = next_line;
             continue;
           }
         }
-      }
-      consumed = 0;
-      /* Frame finalization may replace r7 with sp. */
-      unsigned right;
-      if (sscanf(current, "%11s r%u, r%u, r%u%n",
-                 opcode, &dst, &src, &right, &consumed) == 4 &&
-          !current[consumed] && dst < 7 && src < 7 && right < 7 &&
-          (!strcmp(opcode, "add.w") || !strcmp(opcode, "sub.w")) &&
-          flags_overwritten(c, original, original + (next_line - body))) {
-        cg_emit(c, "%ss.n r%u, r%u, r%u\n@ scalar-width: saved 2\n",
-                opcode[0] == 'a' ? "add" : "sub", dst, src, right);
-        facts[dst].known = 0;
-        current = next_line;
-        continue;
-      }
-      consumed = 0;
-      if (sscanf(current, "%11s r%u, r%u, #%u%n",
-                 opcode, &dst, &src, &number, &consumed) == 4 &&
-          !current[consumed] && dst < 7 && src < 7 &&
-          (number <= 7 || (dst == src && number <= 255)) &&
-          (!strcmp(opcode, "add.w") || !strcmp(opcode, "sub.w") ||
-           !strcmp(opcode, "adds.w") || !strcmp(opcode, "subs.w"))) {
-        int sets_flags = !strcmp(opcode, "adds.w") || !strcmp(opcode, "subs.w");
-        if (sets_flags || flags_overwritten(c, original, original + (next_line - body))) {
+        if ((arithmetic || sets_flags) && (number <= 7 || (dst == src && number <= 255)) &&
+            (sets_flags || flags_overwritten(c, original, original + (next_line - body)))) {
           cg_emit(c, "%ss.n r%u, r%u, #%u\n@ scalar-width: saved 2\n",
-                  opcode[0] == 'a' ? "add" : "sub", dst, src, number);
+                  op[0] == 'a' ? "add" : "sub", dst, src, number);
           facts[dst].known = 0;
           current = next_line;
           continue;
         }
+      }
+      consumed = 0;
+      /* Frame finalization may replace r7 with sp. */
+      unsigned right;
+      if (arithmetic &&
+          sscanf(op + 5, " r%u, r%u, r%u%n", &dst, &src, &right, &consumed) == 3 &&
+          !op[5 + consumed] && dst < 7 && src < 7 && right < 7 &&
+          flags_overwritten(c, original, original + (next_line - body))) {
+        cg_emit(c, "%ss.n r%u, r%u, r%u\n@ scalar-width: saved 2\n",
+                op[0] == 'a' ? "add" : "sub", dst, src, right);
+        facts[dst].known = 0;
+        current = next_line;
+        continue;
       }
     }
     unsigned dst, upper_dst;
@@ -982,7 +992,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
           if (old_bytes == 8)
             cg_emit(c, "movt r%u, #%" PRIu32 "\n", dst, next.number >> 16);
         } else {
-          cg_emit(c, "%s\n", current);
+          copy_line(c, current, next_line);
           if (old_bytes == 8)
             cg_append(c, next_line, (size_t)(after - next_line));
         }
@@ -995,7 +1005,7 @@ void cg_reuse_constants(cg_context *c, size_t body_start) {
         facts[12] = (cg_constant){0};
       } else
         effects(current, facts);
-      cg_emit(c, "%s\n", current);
+      copy_line(c, current, next_line);
     }
     current = after;
   }

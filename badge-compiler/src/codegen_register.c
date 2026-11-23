@@ -11,13 +11,12 @@ static int barrier(const char *op) {
          !strcmp(op, "br") || !strcmp(op, "switch") || !strcmp(op, "ret") ||
          !strcmp(op, "phi") || !strcmp(op, "unreachable");
 }
-void cg_register_work(cg_context *c) {
-  if (++c->register_work > CG_REGISTER_WORK_LIMIT)
-    cg_error(c, c->scalar_selection != BADGE_SELECTION_LEGACY
-                    ? "native scalar selection analysis work limit exceeded"
-                : cg_global_residency(c)
-                    ? "global register allocation work limit exceeded"
-                    : "local register residency work limit exceeded");
+_Noreturn void cg_register_work_exceeded(cg_context *c) {
+  cg_error(c, c->scalar_selection != BADGE_SELECTION_LEGACY
+                  ? "native scalar selection analysis work limit exceeded"
+              : cg_global_residency(c)
+                  ? "global register allocation work limit exceeded"
+                  : "local register residency work limit exceeded");
 }
 cg_register_value *cg_register_lookup(cg_context *c, const char *name) {
   uint32_t hash = 2166136261u;

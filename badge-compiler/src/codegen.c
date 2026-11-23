@@ -1501,7 +1501,6 @@ static int cg_tail_eligible(cg_context *c, cg_inst *i, cg_type *ret,
 }
 
 static void cg_call(cg_context *c, cg_inst *i) {
-  c->admission_dependent = 1;
   int fast = 0;
   while (!cg_type_start(c)) {
     char *s = cg_take(c);
@@ -1534,6 +1533,7 @@ static void cg_call(cg_context *c, cg_inst *i) {
   }
   char *callee = cg_take(c);
   if (fast) {
+    c->admission_dependent = 1;
     cg_function *f = c->functions;
     if (*callee != '@')
       cg_error(c, "indirect fastcc call unsupported");
@@ -2925,8 +2925,8 @@ static void cg_generate_admission(cg_context *c, cg_function *f, const char *sou
   c->admission_dependent = 0;
   cg_generate_function(c, f);
   size_t emitted = c->size - start;
-  /* Calls can consult finalized register summaries or internal linkage.
-     Always regenerate callers, and keep final assembly module-wide. */
+  /* Calls that consult module linkage or register summaries must be
+     regenerated. Final assembly still runs over the whole module. */
   if (!entry->source && !c->admission_dependent &&
       n + emitted <= sizeof(cache->bytes) - cache->used) {
     char *storage = cache->bytes + cache->used;
