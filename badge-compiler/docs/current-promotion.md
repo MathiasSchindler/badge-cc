@@ -412,6 +412,157 @@ Independent LLVM encoding and Cortex-M33 memory checks, mixed AAPCS,
 and Maze gameplay and collision oracles passed. No badge was reflashed
 or physically timed.
 
+### Immediate stack adjustments and paired stack transfers
+
+The default `thumb-constants` selector adjusts SP directly for local
+frames and outgoing arguments. It uses a 16-bit immediate through
+508 bytes, `ADDW`/`SUBW` through 4,092 bytes, and retains the register
+sequence outside those ranges. These forms preserve flags and stack
+alignment. The stack reporter models both new encodings, including
+outgoing bytes at each call site.
+
+The backend also combines adjacent, ascending word transfers to direct
+stack homes into `LDRD` or `STRD` when at least one original instruction
+was wide. It leaves pairs of narrow transfers alone, and does not pair
+non-stack accesses, accesses that straddle an unsupported displacement,
+or loads that overlap the base or each other's destinations.
+
+| Fixed-IR candidate | Executable bytes saved | Modules smaller / larger |
+| --- | ---: | ---: |
+| Narrow local frame adjustment | 7,440 | 112 / 0 |
+| Wide immediate local frame adjustment | 120 | 11 / 0 |
+| Narrow outgoing argument adjustment | 8,910 | 65 / 0 |
+| Wide immediate outgoing argument adjustment | 0 | 0 / 0 |
+| Adjacent stack loads | 204 | 25 / 0 |
+| Adjacent stack stores | 220 | 26 / 4 |
+| Combined | 16,888 | 112 / 0 |
+
+The exact-size control reproduced all 129 baseline object sizes. Large
+outgoing blocks did not occur in this corpus. Store pairing alone grew
+four objects slightly; the combined default grew none, both on identical
+IR and after rebuilding from source.
+
+**26 of 33 verified firmware images** shrank, saving **21,948 loaded
+flash bytes** total. All six microbenchmark payloads were byte-identical.
+No measured local frame or register-save area grew among 1,531 matched
+functions; this is not a worst-case call-chain stack bound.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 15,800 | 15,204 |
+| Tilt Breakout | 10,016 | 9,708 |
+| IMU Demo | 12,044 | 11,252 |
+| Diagnostics | 29,496 | 27,520 |
+
+Maze's four-level replay matched its digests, with 21,054,047 reached
+instructions instead of 21,095,461. IMU full-screen pixel generation
+matched its digest and reached 71,818,750 instead of 76,402,838
+instructions (6.0% fewer); the other pixel paths and renderer improved
+too. Nametag's blend and coverage oracles matched and did less work.
+Breakout passed 4,096 checked paddle updates with 24,116 fewer production
+instructions. LLVM encoding checks cover the stack immediate boundaries;
+stack-balance, memory, mixed AAPCS, and gameplay checks pass. These are
+Cortex-M33 QEMU results, not physical timings.
+
+### Call and return frame simplification
+
+Five backend changes are active under `thumb-constants`. Outgoing stack
+arguments use the narrow SP-relative store when the register and offset
+fit. A directly returned word or i64 call result can stay in the ABI
+return registers instead of making a round trip through a local register
+or stack home. This is not tail-call elimination: the callee still returns
+to the caller, and outgoing arguments and saved registers are restored.
+
+Functions with no outgoing stack adjustment can use SP for their frame
+when all their frame references have legal SP-relative forms. When a
+frame pointer is still needed, the explicit SP reset at return is omitted
+only for compiler-generated bodies; inline assembly retains the old path.
+
+| Fixed-IR candidate | Executable bytes saved | Modules smaller / larger |
+| --- | ---: | ---: |
+| Narrow outgoing argument stores | 1,970 | 62 / 0 |
+| Direct word return forwarding | 1,030 | 34 / 0 |
+| Direct i64 return forwarding | 8 | 1 / 0 |
+| SP-relative frames across calls | 1,144 | 94 / 0 |
+| Omit redundant epilogue SP reset | 872 | 101 / 0 |
+| Combined | 4,534 | 104 / 0 |
+
+The fixed-IR control reproduced all 129 baseline object sizes. In the first
+full rebuild, cheaper calls caused Nametag's color helper to stop inlining.
+For one tiny pure integer helper per module, `compact-inline` now allows one
+Thumb halfword per removed call, capped at eight bytes total, without
+relaxing the frame, save, or spill gates. Leaf reads still require an exact
+size tie. Only one measured module used more than the previous two-byte
+allowance; the fix restored both Nametag probes to their previous counts.
+
+The final build saved **6,188 loaded flash bytes** across **26 of 33
+verified images**. No image or object grew. Of 1,531 matched functions,
+214 had a smaller local frame or register-save total, and none grew.
+All six microbenchmark payloads were byte-identical.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 15,204 | 15,048 |
+| Tilt Breakout | 9,708 | 9,612 |
+| IMU Demo | 11,252 | 11,076 |
+| Diagnostics | 27,520 | 27,184 |
+
+With matching outputs, the four-level Maze replay used 54,206 fewer
+Cortex-M33 QEMU instructions (21,054,047 to 20,999,841). Full-screen IMU
+pixel generation used 1,976,802 fewer (2.75%); the other two pixel modes
+and the renderer improved as well. All 4,096 Breakout paddle updates
+matched, with 32,078 fewer instructions in the replay. Independent LLVM
+encoding, mixed-compiler AAPCS, and Maze gameplay and collision checks
+passed. No physical badge was flashed or timed.
+
+### Comparison and branch lowering
+
+The default `thumb-constants` selector uses two narrow moves under `ITE`
+when a materialized comparison result is in a low register. Standalone
+i32 equality with zero can instead use `CLZ` and a shift; masked comparisons
+retain their `TST` path. An i64 comparison whose result is already zero or
+one does not need another normalization.
+
+Signed i64 ordering uses low-word subtraction and high-word
+subtract-with-borrow. A branch can consume those flags directly rather
+than materializing a boolean. For signed comparisons against zero where
+only the sign matters, the fused branch compares only the high word.
+
+| Fixed-IR candidate | Executable bytes saved | Modules smaller / larger |
+| --- | ---: | ---: |
+| Narrow conditional moves for boolean results | 2,424 | 92 / 0 |
+| Signed wide subtract-with-borrow comparison | 192 | 1 / 0 |
+| Remove redundant wide boolean normalization | 8 | 2 / 0 |
+| Fuse a single-use wide comparison with its branch | 434 | 3 / 1 |
+| Direct zero equality with `CLZ` | 114 | 16 / 0 |
+| High-word-only sign test, incremental after combining | 32 | - |
+| Final combined | 2,962 | 92 / 0 |
+
+The control reproduced all 129 archived object sizes. A standalone i32
+sign-bit candidate saved no production code and was dropped. The initial
+wide branch cost one extra instruction per reached signed check in
+Breakout's divider. Using only the high word for that check removed the
+regression; the final combination grew no objects.
+
+**26 of 33 verified firmware images** shrank, saving **4,596 loaded flash
+bytes**. No image, object, or measured local frame or register-save area
+grew. All six microbenchmark payloads were byte-identical.
+
+| Firmware | Previous flash (bytes) | New flash (bytes) |
+| --- | ---: | ---: |
+| Tilt Maze | 15,048 | 14,952 |
+| Tilt Breakout | 9,612 | 9,524 |
+| IMU Demo | 11,076 | 11,000 |
+| Diagnostics | 27,184 | 27,012 |
+
+Matching four-level Maze replays reached 20,997,685 instructions instead
+of 20,999,841. Breakout matched its reference on all 4,096 paddle updates
+and reached 11,943 fewer instructions. IMU's renderer and three pixel
+modes and both Nametag probes had matching outputs and unchanged counts.
+LLVM encoding checks exercise signed and unsigned predicates across word
+boundaries. Mixed AAPCS, branch/PHI, and Maze gameplay oracles passed.
+These are Cortex-M33 QEMU results; no badge was reflashed or timed.
+
 ## PO18: historical cached qualification and default promotion
 
 PO18 promotes the independently measured **combined PO11-PO17 policy**.

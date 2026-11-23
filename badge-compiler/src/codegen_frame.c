@@ -464,26 +464,61 @@ static int emit_abs_leaf(cg_context *c) {
   return 1;
 }
 
+static int sp_frame_access(const char *line) {
+  unsigned reg, second, offset;
+  int n = 0;
+  if ((sscanf(line, "mov r%u, r7%n", &reg, &n) == 1 ||
+       sscanf(line, "addw r%u, r7, #%u%n", &reg, &offset, &n) == 2) &&
+      n && !line[n] && reg != 7)
+    return 1;
+  char op[8];
+  n = 0;
+  if (sscanf(line, "%7s r%u, [r7%n", op, &reg, &n) == 2 && n &&
+      reg != 7 && (!strcmp(op, "ldr.n") || !strcmp(op, "str.n") ||
+                   !strcmp(op, "ldr.w") || !strcmp(op, "str.w")) &&
+      (line[n] == ']' || line[n] == ',')) {
+    if (!strcmp(line + n, "]"))
+      return 1;
+    int end = 0;
+    return sscanf(line + n, ", #%u]%n", &offset, &end) == 1 && end && !line[n + end];
+  }
+  n = 0;
+  return sscanf(line, "%7s r%u, r%u, [r7, #%u]%n", op, &reg, &second, &offset, &n) == 4 &&
+         n && !line[n] && reg != 7 && second != 7 &&
+         (!strcmp(op, "ldrd") || !strcmp(op, "strd"));
+}
+
 static void finalize_frame(cg_context *c, size_t header, size_t start) {
   cg_function *f = c->fn;
   char *body = cg_alloc(c, c->size - start + 1);
   memcpy(body, c->out + start, c->size - start);
   unsigned touched = 0;
-  int calls = 0, opaque = 0;
+  int calls = 0, opaque = 0, inline_asm = 0, sp_stable = 1;
+  int constants = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
   for (char *p = body; *p;) {
     char *end = strchr(p, '\n');
     if (!end) cg_error(c, "unterminated finalized frame instruction");
     *end = 0;
     if (!strncmp(p, "@ assembly-effects: known 0", 27)) opaque = 1;
+    if (!strncmp(p, "@ constant-assembly-lines:", 26)) inline_asm = 1;
     if (!strncmp(p, "@ frame-incoming:", 17)) touched |= 1u << 5 | 1u << 7;
     else if (*p != '@' && *p != '.' && !strchr(p, ':')) {
-      touched |= mentioned_registers(c, p);
+      unsigned mention = mentioned_registers(c, p);
+      touched |= mention;
       if (!strncmp(p, "bl ", 3) || !strncmp(p, "blx ", 4)) calls = 1;
+      if (constants && sp_stable &&
+          (((mention & (1u << 7)) && !sp_frame_access(p)) ||
+           strstr(p, " sp, sp,")))
+        sp_stable = 0;
     }
     *end = '\n';
     p = end + 1;
   }
   int based = (touched & (1u << 7)) && (calls || opaque);
+  /* Without an outgoing area, frame references can use the unchanged SP. */
+  if (constants && c->frame_addressing == BADGE_FRAME_DIRECT && !inline_asm &&
+      !opaque && sp_stable)
+    based = 0;
   if (!based) touched &= ~(1u << 7);
   unsigned mask = touched & 0x0ff0u;
   if (opaque) {
@@ -507,10 +542,8 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
   cg_emit(c, "@ lightweight-frame: mask %u base %s calls %d\n", mask, based ? "r7" : "sp", calls);
   emit_entry_guards(c, f->frame + c->register_saved_bytes, calls, opaque);
   if (mask) register_list(c, mask, 0);
-  if (f->frame) {
-    cg_immediate(c, 12, f->frame);
-    cg_emit(c, "sub.w sp, sp, r12\n");
-  }
+  if (f->frame)
+    cg_adjust_stack(c, 0, f->frame);
   if (based) cg_emit(c, "mov r7, sp\n");
   c->frame_sp_relative = !based;
   for (char *p = body; *p;) {
@@ -533,11 +566,10 @@ static void finalize_frame(cg_context *c, size_t header, size_t start) {
     p = end + 1;
   }
   cg_emit(c, ".Lcg_return%u:\n", f->id);
-  if (based) cg_emit(c, "mov sp, r7\n");
-  if (f->frame) {
-    cg_immediate(c, 12, f->frame);
-    cg_emit(c, "add.w sp, sp, r12\n");
-  }
+  /* Generated call sequences balance SP; inline assembly is not rewritten. */
+  if (based && (!constants || inline_asm || opaque)) cg_emit(c, "mov sp, r7\n");
+  if (f->frame)
+    cg_adjust_stack(c, 1, f->frame);
   if (mask) register_list(c, mask, 1);
   if (!calls && !fused_return) cg_emit(c, "bx lr\n");
   c->frame_sp_relative = 0;
@@ -613,7 +645,7 @@ static void compact_leaf_registers(cg_context *c, size_t start) {
           "orr", "orrs", "eor", "eors", "lsl", "lsls", "lsr", "lsrs",
           "asr", "asrs", "mul", "muls", "mla", "mls", "ubfx", "uxtb", "uxth",
           "sxtb", "sxth", "sdiv", "udiv", "rsb", "rsbs", "cmp", "cmn",
-          "bic", "tst", "orn"};
+          "bic", "tst", "orn", "clz"};
       int supported = 0;
       for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); i++)
         supported |= !strcmp(opcode, allowed[i]);

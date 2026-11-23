@@ -656,7 +656,8 @@ void cg_selection_prepare(cg_context *c) {
           cg_comparison_condition(c->tokens[i->begin + 3].text) &&
           (!strcmp(c->tokens[i->begin + 4].text, "i32") ||
            (cg_control_selection(c) &&
-            (!strcmp(c->tokens[i->begin + 4].text, "i8") ||
+            ((constants && !strcmp(c->tokens[i->begin + 4].text, "i64")) ||
+             !strcmp(c->tokens[i->begin + 4].text, "i8") ||
              !strcmp(c->tokens[i->begin + 4].text, "i16") ||
              (!strcmp(c->tokens[i->begin + 4].text, "ptr") &&
               c->tokens[i->begin + 3].text[0] != 's')))) &&
@@ -675,6 +676,8 @@ void cg_selection_prepare(cg_context *c) {
           const char *s = c->tokens[i->begin + k].text;
           uint32_t unused;
           if (*s != '%' && !number(s, &unused) &&
+              !(constants && !strcmp(c->tokens[i->begin + 4].text, "i64") &&
+                (*s == '-' || (*s >= '0' && *s <= '9'))) &&
               !(cg_control_selection(c) && !strcmp(s, "null"))) operands = 0;
         }
         if (operands) {
@@ -877,6 +880,26 @@ static unsigned operand(cg_context *c, cg_inst *i, unsigned at,
 static unsigned destination(cg_context *c, cg_inst *i) {
   unsigned reg = cg_global_register(c, i->result->name);
   return reg ? reg : 0;
+}
+int cg_selection_boolean(cg_context *c, cg_inst *i, cg_type *type) {
+  if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      !register_operands(c) || i->end - i->begin != 8 ||
+      strcmp(c->tokens[i->begin + 4].text, "i32") ||
+      strcmp(c->tokens[i->begin + 6].text, ",") ||
+      pair(c, i)->kind == SELECT_MASK_TEST)
+    return 0;
+  const char *pred = c->tokens[i->begin + 3].text;
+  const char *a = c->tokens[i->begin + 5].text, *b = c->tokens[i->begin + 7].text;
+  unsigned at = !strcmp(b, "0") && *a == '%' ? 5 :
+                !strcmp(a, "0") && *b == '%' ? 7 : 0;
+  if (!at)
+    return 0;
+  if (strcmp(pred, "eq"))
+    return 0;
+  unsigned src = typed_operand(c, i, at, 0, type), dst = destination(c, i);
+  cg_emit(c, "clz r%u, r%u\nlsr.w r%u, r%u, #5\n", dst, src, dst, dst);
+  cg_save_normalized(c, i->result, dst);
+  return 1;
 }
 int cg_selection_compare_operands(cg_context *c, cg_inst *i, cg_type *type) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||

@@ -34,6 +34,7 @@ typedef struct cg_inst {
   int assembly_checked;
   unsigned scalar_call_arguments_plus_one;
   unsigned forwarded_store_register_plus_one;
+  int forwarded_return;
   int ephemeral_address;
   struct cg_inst *indexed_address;
 } cg_inst;
@@ -266,6 +267,7 @@ int cg_narrow_flag_binary(cg_context *c, const char *op, unsigned dst,
 int cg_compact_binary(cg_context *c, const char *op, unsigned dst,
                       unsigned left, unsigned right);
 void cg_address(cg_context *c, unsigned r, unsigned offset);
+void cg_adjust_stack(cg_context *c, int release, unsigned bytes);
 void cg_stack(cg_context *c, int store, unsigned r, unsigned offset);
 int cg_stack_pair(cg_context *c, int store, unsigned low, unsigned high,
                   unsigned offset);
@@ -301,6 +303,7 @@ int cg_selection_barrier(cg_context *c, cg_inst *i);
 int cg_selection_instruction(cg_context *c, cg_inst *i);
 cg_inst *cg_selection_branch_compare(cg_context *c, cg_inst *i);
 int cg_selection_compare_operands(cg_context *c, cg_inst *i, cg_type *type);
+int cg_selection_boolean(cg_context *c, cg_inst *i, cg_type *type);
 void cg_add_offset(cg_context *c, unsigned dst, unsigned base, uint32_t offset);
 const char *cg_comparison_condition(const char *predicate);
 int cg_selection_offset(cg_context *c, uint32_t offset);

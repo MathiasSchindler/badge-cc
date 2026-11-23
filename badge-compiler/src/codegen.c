@@ -1540,10 +1540,8 @@ static void cg_call(cg_context *c, cg_inst *i) {
   unsigned positions[256];
   unsigned cursor = cg_argument_positions(c, args, count, positions);
   unsigned outgoing = cursor > 4 ? cg_round((cursor - 4) * 4, 8) : 0;
-  if (outgoing) {
-    cg_immediate(c, 12, outgoing);
-    cg_emit(c, "sub.w sp, sp, r12\n");
-  }
+  if (outgoing)
+    cg_adjust_stack(c, 0, outgoing);
   for (unsigned k = 0; k < count; k++) {
     unsigned words =
         cg_round(args[k].byval ? args[k].byval : args[k].type->size, 4) / 4;
@@ -1585,7 +1583,10 @@ static void cg_call(cg_context *c, cg_inst *i) {
       if (position >= 4) {
         unsigned offset = (position - 4) * 4;
         if (cg_call_selection(c) && offset <= 4095) {
-          cg_emit(c, "str.w r%u, [sp, #%u]\n", r, offset);
+          cg_emit(c, "str.%c r%u, [sp, #%u]\n",
+                  c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+                          r < 8 && offset <= 1020 ? 'n' : 'w',
+                  r, offset);
           c->call_stack_addresses++;
         } else {
           cg_immediate(c, 12, offset);
@@ -1612,11 +1613,20 @@ static void cg_call(cg_context *c, cg_inst *i) {
     cg_emit(c, "blx r12\n");
   } else
     cg_error(c, "invalid callee");
-  if (outgoing) {
-    cg_immediate(c, 12, outgoing);
-    cg_emit(c, "add.w sp, sp, r12\n");
+  if (outgoing)
+    cg_adjust_stack(c, 1, outgoing);
+  int return_forwarded = 0;
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT && i->result &&
+      (ret->bits == 32 || ret->bits == 64) && !c->fn->return_ext &&
+      i->next && i->next->end - i->next->begin == 3 &&
+      !strcmp(c->tokens[i->next->begin].text, "ret") &&
+      !strcmp(c->tokens[i->next->begin + 2].text, i->result->name) &&
+      cg_register_lookup(c, i->result->name)->selection_uses == 1) {
+    return_forwarded = i->next->forwarded_return = 1;
+    cg_emit(c, "@ call-result: ABI registers forwarded to return\n");
   }
-  if (i->result)
+  if (i->result && !return_forwarded)
     for (unsigned w = 0; w < cg_round(ret->size, 4) / 4; w++) {
       if (w >= 4)
         cg_error(c, "unsupported direct aggregate return");
@@ -1740,6 +1750,47 @@ static void cg_conditional_edge(cg_context *c, cg_block *block, cg_inst *i,
   cg_emit(c, ".Lcg_edge%u:\n", id);
   cg_edge(c, block, invert ? yes : no, i == block->last);
   c->layout_inversions += invert;
+}
+
+static void cg_boolean_result(cg_context *c, unsigned dst, const char *cond) {
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && dst < 8)
+    cg_emit(c, "ite %s\nmov%s.n r%u, #1\nmov%s.n r%u, #0\n",
+            cond, cond, dst, cg_inverse_condition(cond), dst);
+  else
+    cg_emit(c, "mov.w r%u, #0\nit %s\nmov%s r%u, #1\n", dst, cond, cond, dst);
+}
+
+static int cg_zero_rhs(const cg_context *c, const cg_inst *i) {
+  return i->end - c->pos == 3 &&
+         !strcmp(c->tokens[c->pos + 1].text, ",") &&
+         !strcmp(c->tokens[c->pos + 2].text, "0");
+}
+static const char *cg_wide_flags(cg_context *c, cg_inst *i,
+                                 const char *pred, cg_type *t) {
+  if ((!strcmp(pred, "slt") || !strcmp(pred, "sge")) && cg_zero_rhs(c, i)) {
+    cg_value_read(c, t, 0, 1);
+    cg_emit(c, "cmp.n r0, #0\n");
+    return cg_comparison_condition(pred);
+  }
+  unsigned left = c->pos;
+  cg_value_read(c, t, 0, 0);
+  cg_expect(c, ",");
+  unsigned right = c->pos;
+  cg_value_read(c, t, 1, 0);
+  c->pos = left;
+  cg_value_read(c, t, 2, 1);
+  c->pos = right;
+  cg_value_read(c, t, 3, 1);
+  if (pred[0] == 's') {
+    /* A low-word borrow participates in the signed high-word subtraction. */
+    int reverse = !strcmp(pred, "sgt") || !strcmp(pred, "sle");
+    cg_emit(c, "subs.n r0, r%u, r%u\nsbcs.w r2, r%u, r%u\n",
+            reverse ? 1u : 0u, reverse ? 0u : 1u,
+            reverse ? 3u : 2u, reverse ? 2u : 3u);
+    return !strcmp(pred, "slt") || !strcmp(pred, "sgt") ? "lt" : "ge";
+  }
+  cg_emit(c, "cmp.n r2, r3\nit eq\ncmpeq.n r0, r1\n");
+  return cg_comparison_condition(pred);
 }
 
 static int cg_fill_tokens(cg_context *c, cg_inst *i, unsigned count,
@@ -2053,7 +2104,10 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       } else {
         c->pos = compare->begin + 4;
         cg_type *operand_type = cg_type_parse(c, 0);
-        if (!cg_selection_compare_operands(c, compare, operand_type)) {
+        condition = cg_comparison_condition(c->tokens[compare->begin + 3].text);
+        if (operand_type->bits == 64)
+          condition = cg_wide_flags(c, compare, c->tokens[compare->begin + 3].text, operand_type);
+        else if (!cg_selection_compare_operands(c, compare, operand_type)) {
           cg_value_read(c, operand_type, 0, 0);
           if (cg_control_selection(c)) cg_normalize(c, operand_type, 0);
           if (cg_control_selection(c) && c->tokens[compare->begin + 3].text[0] == 's')
@@ -2065,7 +2119,6 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
             cg_signed(c, operand_type, 1);
           cg_emit(c, "cmp r0, r1\n");
         }
-        condition = cg_comparison_condition(c->tokens[compare->begin + 3].text);
       }
     } else cg_emit(c, "cmp r0, #0\n");
     cg_conditional_edge(c, block, i, yes, no, condition);
@@ -2073,7 +2126,7 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
   }
   if (!strcmp(op, "ret")) {
     cg_type *t = cg_type_parse(c, 0);
-    if (t->size) {
+    if (t->size && !i->forwarded_return) {
       unsigned at = c->pos;
       for (unsigned w = 0; w < cg_round(t->size, 4) / 4; w++) {
         c->pos = at;
@@ -2502,19 +2555,25 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_type *t = cg_type_parse(c, 0);
     const char *condition = cg_comparison_condition(pred);
     if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && t->bits == 64 &&
-        !strcmp(pred, "slt") && i->end - c->pos == 3 &&
-        !strcmp(c->tokens[c->pos + 1].text, ",") &&
-        !strcmp(c->tokens[c->pos + 2].text, "0")) {
+        !strcmp(pred, "slt") && cg_zero_rhs(c, i)) {
       cg_value_read(c, t, 0, 1);
       cg_emit(c, "lsr.w r0, r0, #31\n");
       cg_save_normalized(c, i->result, 0);
       return;
     }
+    if (cg_selection_boolean(c, i, t))
+      return;
     if (condition && cg_selection_compare_operands(c, i, t)) {
       unsigned dst = cg_global_register(c, i->result->name);
-      cg_emit(c, "mov.w r%u, #0\nit %s\nmov%s r%u, #1\n",
-              dst, condition, condition, dst);
+      cg_boolean_result(c, dst, condition);
       cg_save_normalized(c, i->result, dst);
+      return;
+    }
+    if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && t->bits == 64 &&
+        condition) {
+      const char *flags = cg_wide_flags(c, i, pred, t);
+      cg_boolean_result(c, 0, flags);
+      cg_save_normalized(c, i->result, 0);
       return;
     }
     unsigned left = c->pos;
@@ -2527,13 +2586,7 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       cg_value_read(c, t, 2, 1);
       c->pos = right;
       cg_value_read(c, t, 3, 1);
-      if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && condition &&
-          (pred[0] == 'u' || !strcmp(pred, "eq") || !strcmp(pred, "ne"))) {
-        cg_emit(c,
-                "cmp.n r2, r3\nit eq\ncmpeq.n r0, r1\n"
-                "mov.w r0, #0\nit %s\nmov%s r0, #1\n",
-                condition, condition);
-      } else if (!strcmp(pred, "eq") || !strcmp(pred, "ne")) {
+      if (!strcmp(pred, "eq") || !strcmp(pred, "ne")) {
         cg_emit(c,
                 "eor.w r0, r0, r1\neor.w r2, r2, r3\norr.w r0, r0, r2\ncmp r0, "
                 "#0\nmov.w r0, #0\nit %s\nmov%s r0, #1\n",
@@ -2567,7 +2620,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     const char *cond = cg_comparison_condition(pred);
     if (!cond)
       cg_error(c, "unsupported comparison");
-    cg_emit(c, "cmp r0, r1\nmov.w r0, #0\nit %s\nmov%s r0, #1\n", cond, cond);
+    cg_emit(c, "cmp r0, r1\n");
+    cg_boolean_result(c, 0, cond);
     cg_save(c, i->result, 0, 0);
     return;
   }

@@ -180,6 +180,12 @@ also dispatches variable divisors to the word path when possible and
 bounds the wide loop by the number of possible quotient bits.
 The [address and register-copy follow-up](docs/current-promotion.md#address-and-register-copy-folding)
 folds temporary addresses and register moves into their memory transfers.
+The [stack instruction follow-up](docs/current-promotion.md#immediate-stack-adjustments-and-paired-stack-transfers)
+uses immediate stack adjustments and combines eligible stack transfers.
+The [call and return follow-up](docs/current-promotion.md#call-and-return-frame-simplification)
+keeps returned results in ABI registers and simplifies safe call frames.
+The [comparison and branch follow-up](docs/current-promotion.md#comparison-and-branch-lowering)
+uses shorter boolean results and feeds 64-bit comparisons directly into branches.
 The earlier `thumb-widths`/eight-pass profile remains explicitly selectable.
 Target-costed optimizer defaults require the
 badge backend's supported IR contract; the earlier explicit six-pass

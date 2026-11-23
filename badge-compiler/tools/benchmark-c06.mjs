@@ -169,13 +169,18 @@ export function parseAssembly(text, module) {
       based = true;
       continue;
     }
-    if (line === 'sub.w sp, sp, r12') {
+    const stack = line.match(/^(add|sub)(\.n|w) sp, sp, #(\d+)$/);
+    const adjustment = stack ? Number(stack[3]) : immediate;
+    if (stack)
+      requireCondition(adjustment % 4 === 0 && adjustment <= (stack[2] === '.n' ? 508 : 4092),
+        `${module}: invalid stack adjustment encoding`);
+    if (line === 'sub.w sp, sp, r12' || stack?.[1] === 'sub') {
       if (!prologue) {
-        if (immediate !== fn.frame_bytes) unknown('unverified_frame_allocation');
+        if (adjustment !== fn.frame_bytes) unknown('unverified_frame_allocation');
         prologue = true;
       } else {
-        if (immediate === null) { unknown('dynamic_stack_allocation'); active = null; }
-        else if (active !== null) active += immediate;
+        if (adjustment === null) { unknown('dynamic_stack_allocation'); active = null; }
+        else if (active !== null) active += adjustment;
         if (active !== null) fn.max_outgoing_bytes = Math.max(fn.max_outgoing_bytes, active);
       }
       continue;
@@ -185,14 +190,14 @@ export function parseAssembly(text, module) {
       returning = true;
       continue;
     }
-    if (line === 'add.w sp, sp, r12') {
+    if (line === 'add.w sp, sp, r12' || stack?.[1] === 'add') {
       if (returning) {
-        if (immediate !== fn.frame_bytes) unknown('unverified_frame_restore');
+        if (adjustment !== fn.frame_bytes) unknown('unverified_frame_restore');
         restored = true;
-      } else if (active === null || immediate === null || immediate > active) {
+      } else if (active === null || adjustment === null || adjustment > active) {
         unknown('unbalanced_outgoing_arguments');
         active = null;
-      } else active -= immediate;
+      } else active -= adjustment;
       continue;
     }
     if (line === 'pop.w {r4-r8, pc}' || line === 'pop.w {r4-r8, r10, r11, pc}') {

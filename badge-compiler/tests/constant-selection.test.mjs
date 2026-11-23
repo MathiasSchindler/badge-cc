@@ -240,7 +240,8 @@ int main(void) {
 
 test('direct casts and compact wide compares preserve signed and unsigned boundaries', t => {
   const file = files(t);
-  const compare = ['eq', 'ne', 'ult', 'ule', 'ugt', 'uge', 'slt', 'sge'];
+  const compare = ['eq', 'ne', 'ult', 'ule', 'ugt', 'uge', 'slt', 'sle', 'sgt', 'sge'];
+  const branches = ['eq', 'ult', 'sgt', 'sle'];
   const fn = (name, args, type, body) =>
     `define ${type} @${name}(${args}) {\nentry:\n${body}\n}\n`;
   const wide = 'i64 %x, i64 %y';
@@ -251,8 +252,15 @@ test('direct casts and compact wide compares preserve signed and unsigned bounda
     fn('zero_half', 'i8 %x', 'i16', '%r = zext i8 %x to i16\nret i16 %r') +
     fn('zero_wide', 'i32 %x', 'i64', '%r = zext i32 %x to i64\nret i64 %r') +
     fn('sign_wide', 'i16 %x', 'i64', '%r = sext i16 %x to i64\nret i64 %r') +
+    fn('zero_word', 'i32 %x', 'i32', '%c = icmp eq i32 0, %x\n%r = zext i1 %c to i32\nret i32 %r') +
+    fn('branch_negative', 'i64 %x', 'i32',
+      '%c = icmp slt i64 %x, 0\nbr i1 %c, label %yes, label %no\n' +
+      'yes:\nret i32 7\nno:\nret i32 3') +
     compare.map(op => fn(`is_${op}`, wide, 'i32',
-      `%c = icmp ${op} i64 %x, %y\n%r = zext i1 %c to i32\nret i32 %r`)).join(''));
+      `%c = icmp ${op} i64 %x, %y\n%r = zext i1 %c to i32\nret i32 %r`)).join('') +
+    branches.map(op => fn(`branch_${op}`, wide, 'i32',
+      `%c = icmp ${op} i64 %x, %y\nbr i1 %c, label %yes, label %no\n` +
+      'yes:\nret i32 7\nno:\nret i32 3')).join(''));
   fs.writeFileSync(file('caller.c'), `
 typedef unsigned long long u64;
 typedef long long s64;
@@ -261,26 +269,36 @@ extern unsigned char byte_low(unsigned);
 extern unsigned short half_low(unsigned), zero_half(unsigned char);
 extern u64 zero_wide(unsigned);
 extern s64 sign_wide(short);
+extern unsigned zero_word(unsigned), branch_negative(u64);
 ${compare.map(op => `extern unsigned is_${op}(u64, u64);`).join('\n')}
+${branches.map(op => `extern unsigned branch_${op}(u64, u64);`).join('\n')}
 int main(void) {
   static const u64 values[] = {
     0, 1, 0xfffffffeu, 0xffffffffu, 0x100000000ull, 0x7fffffffffffffffull,
     0x8000000000000000ull, 0x8000000000000001ull, 0xffffffff00000000ull, ~0ull,
-    0x123456789abcdef0ull, 0x12345678fedcba98ull
+    0x123456789abcdef0ull, 0x12345678fedcba98ull,
+    0x80000000ffffffffull, 0x7fffffff00000000ull, 0x1234567800000000ull
   };
   for (unsigned i = 0; i < sizeof(values) / sizeof(*values); i++) {
     u64 x = values[i];
     if (word_low(x) != (unsigned)x || byte_low((unsigned)x) != (unsigned char)x ||
         half_low((unsigned)x) != (unsigned short)x ||
         zero_half((unsigned char)x) != (unsigned char)x ||
-        zero_wide((unsigned)x) != (unsigned)x || sign_wide((short)x) != (short)x)
+        zero_wide((unsigned)x) != (unsigned)x || sign_wide((short)x) != (short)x ||
+        zero_word((unsigned)x) != ((unsigned)x == 0) ||
+        branch_negative(x) != ((s64)x < 0 ? 7u : 3u))
       return 1;
     for (unsigned j = 0; j < sizeof(values) / sizeof(*values); j++) {
       u64 y = values[j];
       if (is_eq(x,y) != (x == y) || is_ne(x,y) != (x != y) ||
           is_ult(x,y) != (x < y) || is_ule(x,y) != (x <= y) ||
           is_ugt(x,y) != (x > y) || is_uge(x,y) != (x >= y) ||
-          is_slt(x,y) != ((s64)x < (s64)y) || is_sge(x,y) != ((s64)x >= (s64)y))
+          is_slt(x,y) != ((s64)x < (s64)y) || is_sle(x,y) != ((s64)x <= (s64)y) ||
+          is_sgt(x,y) != ((s64)x > (s64)y) || is_sge(x,y) != ((s64)x >= (s64)y) ||
+          branch_eq(x,y) != (x == y ? 7u : 3u) ||
+          branch_ult(x,y) != (x < y ? 7u : 3u) ||
+          branch_sgt(x,y) != ((s64)x > (s64)y ? 7u : 3u) ||
+          branch_sle(x,y) != ((s64)x <= (s64)y ? 7u : 3u))
         return 2;
     }
   }
@@ -293,6 +311,13 @@ int main(void) {
   for (const op of compare.slice(0, 6))
     assert.match(body(`is_${op}`), /^cmp\.n r2, r3\nit eq\ncmpeq\.n r0, r1$/m);
   assert.doesNotMatch(body('is_slt'), /^cmpeq\.n /m);
+  assert.match(body('is_slt'), /^subs\.n r0, r0, r1\nsbcs\.w r2, r2, r3$/m);
+  assert.match(body('is_sgt'), /^subs\.n r0, r1, r0\nsbcs\.w r2, r3, r2$/m);
+  assert.match(body('is_eq'), /^ite eq\nmoveq\.n r0, #1\nmovne\.n r0, #0$/m);
+  assert.match(body('zero_word'), /^clz r\d+, r\d+$/m);
+  assert.match(body('branch_negative'), /^cmp\.n r0, #0$/m);
+  assert.doesNotMatch(body('branch_negative'), /^sbcs\.w/m);
+  for (const op of branches) assert.match(body(`branch_${op}`), /compare-branch: fused 1/);
   assert.doesNotMatch(body('zero_half'), /^uxth[. ]/m);
   assert.match(body('sign_wide'), /^sxth\.[nw] r0, r[3-9]\d*$/m);
   const clang = process.env.LLVM_CLANG ?? 'clang';
@@ -381,6 +406,91 @@ int main(void) {
   run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
     '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
     '-kernel', file('wide.elf')]);
+});
+
+test('direct result forwarding and stable SP frames preserve the mixed-call ABI', t => {
+  const file = files(t);
+  const local = (name, assembly) => `
+define i32 @${name}(i32 %x) {
+entry:
+  %home = alloca i32, align 4
+  store i32 %x, ptr %home, align 4
+  ${assembly}
+  %value = call i32 @mutate(ptr %home)
+  %updated = load i32, ptr %home, align 4
+  %out = xor i32 %value, %updated
+  ret i32 %out
+}`;
+  fs.writeFileSync(file('calls.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+declare i32 @mutate(ptr)
+declare i32 @callee5(i32, i32, i32, i32, i32)
+declare i64 @callee_wide(i64, i64, i32)
+${local('stable', '')}
+${local('fenced', 'call void asm sideeffect "nop", "~{memory}"()')}
+define i32 @return_word(i32 %x) {
+entry:
+  %r = call i32 @callee5(i32 1, i32 2, i32 3, i32 4, i32 %x)
+  ret i32 %r
+}
+define i64 @return_wide(i64 %x, i64 %y) {
+entry:
+  %r = call i64 @callee_wide(i64 %x, i64 %y, i32 9)
+  ret i64 %r
+}
+define i32 @continued(i32 %x) {
+entry:
+  %r = call i32 @callee5(i32 1, i32 2, i32 3, i32 4, i32 %x)
+  %adjusted = xor i32 %r, 1
+  ret i32 %adjusted
+}`);
+  fs.writeFileSync(file('caller.c'), `
+typedef unsigned long long u64;
+extern unsigned stable(unsigned), fenced(unsigned), return_word(unsigned), continued(unsigned);
+extern u64 return_wide(u64, u64);
+unsigned mutate(unsigned *p) { unsigned x = *p; *p ^= 0xdeadbeefu; return x + 1; }
+unsigned callee5(unsigned a, unsigned b, unsigned c, unsigned d, unsigned e) {
+  return a + b + c + d + e;
+}
+u64 callee_wide(u64 a, u64 b, unsigned salt) {
+  return a ^ (b + salt);
+}
+int main(void) {
+  unsigned x = 0xffffffffu;
+  u64 a = 0x0123456789abcdefull, b = 0xfffffffffffffffaull;
+  return stable(x) != (x ^ 0xdeadbeefu) || fenced(x) != stable(x) ||
+         return_word(x) != 9 || continued(x) != 8 || return_wide(a,b) != (a ^ 3ull);
+}
+`);
+  run(tool('badge-codegen-sanitize'), [file('calls.ll'), '-o', file('calls.s')]);
+  const assembly = fs.readFileSync(file('calls.s'), 'utf8');
+  const body = name => assembly.slice(assembly.indexOf(`\n${name}:`), assembly.indexOf(`.size ${name},`));
+  const frames = parseAssembly(assembly, 'call transport');
+  assert.equal(frames.get('stable').frame_base, 'sp');
+  assert.equal(frames.get('fenced').frame_base, 'r7');
+  assert.match(body('fenced'), /^mov sp, r7$/m);
+  assert.match(body('return_word'), /^str\.w r(?:8|9|10|11|12), \[sp, #0\]$/m);
+  assert.match(body('return_wide'), /^str\.n r[0-7], \[sp, #0\]$/m);
+  for (const name of ['return_word', 'return_wide']) {
+    assert.match(body(name), /@ call-result: ABI registers forwarded to return/);
+    assert.doesNotMatch(body(name), /^mov sp, r7$/m);
+    assert.equal(frames.get(name).max_outgoing_bytes, 8);
+  }
+  assert.doesNotMatch(body('continued'), /@ call-result:/);
+  assert([...frames.values()].every(f => !f.unknown.includes('unverified_frame_balance')));
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const target = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-asm'), [file('calls.s'), '-o', file('calls.o')]);
+  run(clang, [...target, '-c', file('calls.s'), '-o', file('llvm.o')]);
+  const text = name => decodeElf(fs.readFileSync(file(name))).sections
+    .filter(s => s.flags & 4).map(s => [s.name, s.data]);
+  assert.deepEqual(text('calls.o'), text('llvm.o'));
+  run(clang, [...target, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('caller.o'), file('calls.o'), '-o', file('calls.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('calls.elf')]);
 });
 
 test('direct scaled and frame addresses preserve indexed volatile accesses', t => {

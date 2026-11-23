@@ -259,7 +259,9 @@ test('a tiny integer helper can remove repeated calls without growing the caller
   run(tool('badge-ir'), [file('font.i'), '-o', file('font.ll')]);
   run(tool('badge-opt-sanitize'), [file('font.ll'), '-o', file('compact.ll')]);
   const compact = fs.readFileSync(file('compact.ll'), 'utf8');
-  assert.match(compact, /compact_helper_inlined badger_font_alpha_round/);
+  const decision = compact.match(/compact_helper_inlined badger_font_alpha_round - (\d+) (\d+)/);
+  assert(decision);
+  assert(Number(decision[2]) - Number(decision[1]) <= 8);
   assert.doesNotMatch(compact, /\b(?:define|call)\b[^\n]*@(?:"badger_font_alpha_round"|badger_font_alpha_round\b)/);
   run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('compact.ll')]);
   run(tool('badge-codegen-sanitize'), [file('compact.ll'), '-o', file('compact.s')]);

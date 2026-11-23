@@ -108,7 +108,7 @@ static void effects(const char *text, cg_constant facts[13]) {
   const char *writes[] = {"mov", "mov.w", "movs.n", "movw", "movt", "orn.w", "add.w", "add.n", "addw",
     "sub.w", "subw", "subs.w", "adds.n", "subs.n", "mul", "mla", "mls", "udiv", "sdiv",
     "and.w", "bic.w", "orr.w", "eor.w", "lsl.w", "lsr.w", "asr.w", "lsls.n", "lsrs.n", "asrs.n", "rsb.w",
-    "ubfx", "sxtb", "sxth", "sxtb.n", "sxtb.w", "sxth.n", "sxth.w",
+    "ubfx", "clz", "sxtb", "sxth", "sxtb.n", "sxtb.w", "sxth.n", "sxth.w",
     "uxtb.n", "uxtb.w", "uxth.n", "uxth.w",
     "ldr", "ldr.w", "ldr.n", "ldrb", "ldrb.w", "ldrb.n", "ldrh", "ldrh.w", "ldrh.n",
     "ldrsb", "ldrsh", "ldrsb.n", "ldrsh.n", "ldrsb.w", "ldrsh.w"};
@@ -169,7 +169,7 @@ static int flags_overwritten(cg_context *c, const char *body, const char *text) 
     const char *ops[] = {"mov.w", "addw", "subw", "add.w", "sub.w",
       "str", "str.n", "str.w", "strb", "strb.n", "strb.w", "strh", "strh.n", "strh.w",
       "ldr", "ldr.n", "ldr.w", "ldrb", "ldrb.n", "ldrb.w", "ldrh", "ldrh.n", "ldrh.w",
-      "ubfx", "uxtb.n", "uxtb.w", "uxth.n", "uxth.w", "and.w", "bic.w", "orr.w", "orn.w",
+      "ubfx", "clz", "uxtb.n", "uxtb.w", "uxth.n", "uxth.w", "and.w", "bic.w", "orr.w", "orn.w",
       "eor.w", "lsl.w", "lsr.w", "asr.w", "nop"};
     for (unsigned n = 0; n < sizeof(ops) / sizeof(*ops); n++)
       if (!strcmp(opcode, ops[n])) neutral = 1;
@@ -552,6 +552,32 @@ static const char *fold_transfer_move(cg_context *c, const char *p,
   return finish + 1;
 }
 
+static const char *fold_stack_pair(cg_context *c, const char *p,
+                                   const char *end) {
+  if (c->frame_addressing != BADGE_FRAME_DIRECT)
+    return NULL;
+  const char *next = end + 1, *finish = strchr(next, '\n');
+  scalar_transfer a, b;
+  if (!finish || !parse_transfer(p, end, &a) ||
+      !parse_transfer(next, finish, &b) || a.op[0] != b.op[0] ||
+      a.bytes != 4 || b.bytes != 4 || a.base != b.base ||
+      (a.base != 7 && a.base != 13) || a.index >= 0 || b.index >= 0 ||
+      a.offset % 4 || a.offset > 1020 || b.offset != a.offset + 4 ||
+      (a.narrow && b.narrow))
+    return NULL;
+  int load = a.op[0] == 'l';
+  if (load && (a.reg == b.reg || a.reg == a.base || b.reg == a.base))
+    return NULL;
+  cg_emit(c, "%s r%u, r%u, [", load ? "ldrd" : "strd", a.reg, b.reg);
+  if (a.base == 13)
+    cg_emit(c, "sp");
+  else
+    cg_emit(c, "r7");
+  cg_emit(c, ", #%d]\n@ stack-pair-fold: saved %u\n",
+          a.offset, a.narrow || b.narrow ? 2u : 4u);
+  return finish + 1;
+}
+
 void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
@@ -569,7 +595,9 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
     else if (!strncmp(p, "@ constant-assembly-lines:", 26))
       sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
     else {
-      const char *after = fold_transfer_move(c, p, end);
+      const char *after = fold_stack_pair(c, p, end);
+      if (!after)
+        after = fold_transfer_move(c, p, end);
       if (after) {
         p = after;
         continue;

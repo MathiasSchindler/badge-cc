@@ -7,6 +7,7 @@
 static char *select(const char *source) {
   cg_function fn = {0};
   cg_context c = {.scalar_selection = BADGE_SELECTION_THUMB_CONSTANTS,
+                  .frame_addressing = BADGE_FRAME_DIRECT,
                   .fn = &fn, .file = "constant-selection"};
   assert(!setjmp(c.failure));
   cg_emit(&c, "%s", source);
@@ -26,6 +27,24 @@ static void expect(const char *source, const char *needle, const char *absent) {
   assert(strstr(out, needle));
   if (absent) assert(!strstr(out, absent));
   free(out);
+}
+static void stack_adjustments(void) {
+  const unsigned frames[] = {508, 512, 4092, 4096};
+  const char *forms[] = {"sub.n sp, sp, #508", "subw sp, sp, #512",
+                         "subw sp, sp, #4092", "movw r12, #4096\nsub.w sp, sp, r12"};
+  for (unsigned i = 0; i < sizeof(frames) / sizeof(*frames); i++) {
+    cg_context *c = calloc(1, sizeof(*c));
+    assert(c);
+    c->scalar_selection = BADGE_SELECTION_THUMB_CONSTANTS;
+    c->file = "stack-adjustments";
+    assert(!setjmp(c->failure));
+    cg_adjust_stack(c, 0, frames[i]);
+    assert(strstr(c->out, forms[i]));
+    cg_adjust_stack(c, 1, frames[i]);
+    printf("%s", c->out);
+    free(c->out);
+    free(c);
+  }
 }
 static void capture_flags(unsigned reg, unsigned id, unsigned phase) {
   const char *conditions[] = {"pl", "ne", "cc", "vc"};
@@ -104,6 +123,15 @@ int main(int argc, char **argv) {
          "addw r2, r1, #62", "memory-address-fold");
   expect("addw r2, r1, #64\nldrh.n r2, [r2]\n",
          "ldrh.w r2, [r1, #64]", "addw");
+  expect("ldr.n r2, [sp]\nldr.w r8, [sp, #4]\n",
+         "ldrd r2, r8, [sp, #0]", "ldr.n");
+  expect("str.w r8, [r7, #1020]\nstr.w r4, [r7, #1024]\n",
+         "strd r8, r4, [r7, #1020]", "str.w");
+  expect("ldr.w r7, [r7]\nldr.w r8, [r7, #4]\n",
+         "ldr.w r7, [r7]", "ldrd");
+  expect("ldr.n r2, [sp, #4]\nldr.w r8, [sp]\n",
+         "ldr.n r2, [sp, #4]", "ldrd");
+  expect("str.w r8, [r4]\nstr.w r2, [r4, #4]\n", "str.w r8, [r4]", "strd");
   expect("add.w r1, r1, #3\nldrb.n r1, [r1]\n",
          "ldrb.n r1, [r1, #3]", "add.w");
   expect("add.w r2, r1, #12\nldr.n r0, [r2]\nstr.n r2, [r1]\n",
@@ -205,6 +233,15 @@ int main(int argc, char **argv) {
   if (runtime)
     puts(".global main\n.thumb_func\nmain:\npush.w {r4-r8, lr}");
   if (runtime) {
+    puts("mov r6, sp");
+    stack_adjustments();
+    puts("cmp r6, sp\nbne constant_failed");
+    char *stack = select("str.w r8, [sp]\nstr.n r1, [sp, #4]\n"
+                         "ldr.n r2, [sp]\nldr.w r8, [sp, #4]\n");
+    printf("sub.n sp, sp, #8\nmovw r8, #500\nmovw r1, #239\n%s"
+           "add.n sp, sp, #8\ncmp r2, #500\nbne constant_failed\n"
+           "cmp r8, #239\nbne constant_failed\n", stack);
+    free(stack);
     for (unsigned shift = 0; shift <= 3; shift++) {
       char source[256];
       printf("movw r1, #:lower16:memory_test\nmovt r1, #:upper16:memory_test\nmov.w r5, #1\n");

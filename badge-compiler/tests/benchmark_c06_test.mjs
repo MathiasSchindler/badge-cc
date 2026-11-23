@@ -202,6 +202,18 @@ test('global allocator saves are balanced, counted and matched to restores', () 
     asm('root', 80).replace('pop.w {r4-r8, pc}', 'pop.w {r4-r8, r10, r11, pc}'),
   ]) assert.equal(stackGraph(nodes(mismatch), 0x10000011).entry.bound_bytes, null);
 });
+test('immediate stack adjustments model the same frame and outgoing bounds', () => {
+  const root = asm('root', 512, `sub.n sp, sp, #16
+bl leaf
+add.n sp, sp, #16`, true)
+    .replace('movw r12, #512\nsub.w sp, sp, r12', 'subw sp, sp, #512')
+    .replace('movw r12, #512\nadd.w sp, sp, r12', 'addw sp, sp, #512');
+  const graph = stackGraph(nodes(root + asm('leaf', 56)), 0x10000011);
+  assert.equal(graph.entry.bound_bytes, 632);
+  assert.equal(graph.functions[0].max_outgoing_bytes, 16);
+  assert.throws(() => nodes(root.replace('sub.n sp, sp, #16', 'sub.n sp, sp, #512')),
+    /invalid stack adjustment encoding/);
+});
 test('reused numeric registers and nonflagging offsets prove outgoing sizes without hiding clobbers', () => {
   const body = `movw r2, #8
 addw r12, r2, #8

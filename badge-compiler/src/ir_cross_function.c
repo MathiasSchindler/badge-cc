@@ -884,13 +884,15 @@ static int inline_calls(cross *p, unsigned f, const unsigned *calls,
                   : "straight_line_inline_with_helper_removed",
           1);
   int fits = fits_allocation(p, baseline, &cost, f, NULL);
-  /* Prefer removing every call to a leaf read at equal size; a tiny pure
-     integer leaf may spend one Thumb halfword. Neither displaces a size win. */
+  /* A tiny pure integer leaf may spend one halfword per removed call,
+     capped at four. Leaf reads still need a size tie. */
+  unsigned allowance = count >= 4 ? 8 : count * 2;
   int equal_size_read = cost.bytes == baseline->bytes && leaf_read(p, fn, block);
   int tiny = policy == CROSS_COMPACT && tiny_budget && count >= 2 && !*best &&
       cost.bytes >= baseline->bytes &&
       (equal_size_read ||
-       (cost.bytes - baseline->bytes <= 2 && tiny_integer_leaf(p, fn, block)));
+       (cost.bytes - baseline->bytes <= allowance &&
+        tiny_integer_leaf(p, fn, block)));
   int accepted = fits && (cost.bytes < *best_bytes || tiny);
   if (accepted && tiny)
     ir_note(p->c, "transformed", equal_size_read ? "leaf_read_calls_removed" :

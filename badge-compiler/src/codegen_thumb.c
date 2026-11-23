@@ -49,6 +49,21 @@ void cg_immediate(cg_context *c, unsigned r, uint32_t n) {
   if (n >> 16)
     cg_machine(c, CG_M_MOVT, r, 0, 0, 0, n >> 16);
 }
+void cg_adjust_stack(cg_context *c, int release, unsigned bytes) {
+  const char *op = release ? "add" : "sub";
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS && bytes % 4 == 0) {
+    if (bytes <= 508) {
+      cg_emit(c, "%s.n sp, sp, #%u\n", op, bytes);
+      return;
+    }
+    if (bytes <= 4092) {
+      cg_emit(c, "%sw sp, sp, #%u\n", op, bytes);
+      return;
+    }
+  }
+  cg_immediate(c, 12, bytes);
+  cg_emit(c, "%s.w sp, sp, r12\n", op);
+}
 void cg_address(cg_context *c, unsigned r, unsigned offset) {
   if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
       c->frame_addressing == BADGE_FRAME_DIRECT && offset <= 4095) {
