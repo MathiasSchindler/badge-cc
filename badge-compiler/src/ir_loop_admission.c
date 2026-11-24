@@ -214,6 +214,7 @@ void ir_function_admission(ir_context *c, ir_module *m, const ir_analysis *a,
       ir_note(c, "skipped", "isolated_sibling_local_symbol", 1);
       continue;
     }
+    ir_allocation *mark = c->allocations;
     size_t before_size, after_size;
     char *before = function_text(c, m, a, begin, end, 0, &before_size);
     char *after = function_text(c, m, a, begin, end, 1, &after_size);
@@ -224,6 +225,7 @@ void ir_function_admission(ir_context *c, ir_module *m, const ir_analysis *a,
     cost_job after_job = {.file = c->file, .source = after, .size = after_size, .selection = selection};
     measure_pair(c, &before_job, &after_job);
     loop_cost original = before_job.cost, proposed = after_job.cost;
+    ir_release_to(c, mark);
     const char *reason = proposed.frame > original.frame ? "final_frame_growth" :
                          proposed.saves > original.saves ? "final_save_growth" :
                          proposed.spills > original.spills ? "final_spill_growth" :

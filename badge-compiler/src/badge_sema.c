@@ -55,6 +55,7 @@ typedef struct {
     uint32_t alignment;
     const char *section;
     const char *section_name;
+    int weak,naked;
 } declaration_flags_t;
 static void sem_decl_attributes(sema_t *, node_t *, declaration_flags_t *);
 static c_type_t *sem_type_name(sema_t *, node_t *);
@@ -216,6 +217,7 @@ static c_type_t *sem_value(sema_t *s, sem_info_t *i) {
 }
 static sem_info_t *sem_expression(sema_t *, node_t *);
 static unsigned char *sem_literal_bytes(sema_t *, node_t *, size_t *);
+static unsigned char *sem_string_bytes(sema_t *, node_t *, size_t *);
 static c_type_t *sem_specifiers(sema_t *, node_t *, declaration_flags_t *);
 enum { DECL_ORDINARY, DECL_PARAMETER, DECL_MEMBER };
 static c_type_t *sem_declarator(sema_t *, node_t *, c_type_t *, int);
@@ -257,6 +259,9 @@ static void sem_attributes(sema_t *s, node_t *n, declaration_flags_t *f) {
             if (a->first != NULL) sem_error(s, a, "attribute does not take arguments");
             if (word_in(a->text, "noreturn __noreturn__")) f->noreturn = 1;
             else f->used = 1;
+        } else if (word_in(a->text, "weak __weak__ naked __naked__")) {
+            if (a->first != NULL) sem_error(s, a, "attribute does not take arguments");
+            if (word_in(a->text, "weak __weak__")) f->weak = 1; else f->naked = 1;
         } else if (word_in(a->text, "always_inline __always_inline__")) {
             if (a->first != NULL) sem_error(s, a, "attribute does not take arguments");
             f->always_inline = 1;
@@ -269,6 +274,8 @@ static void sem_attributes(sema_t *s, node_t *n, declaration_flags_t *f) {
         } else if (word_in(a->text, "deprecated __deprecated__")) {
             if (a->first && (!sem_kind(a->first, "string_literal") || a->first->next))
                 sem_error(s, a, "deprecated takes at most one string");
+        } else if (word_in(a->text, "warn_unused_result __warn_unused_result__")) {
+            if (a->first) sem_error(s, a, "attribute does not take arguments");
         } else if (word_in(a->text, "format __format__ alloc_size __alloc_size__ alloc_align __alloc_align__ nonnull __nonnull__")) {
             node_t *arg = a->first;
             size_t min = 1, max = 1;
@@ -286,7 +293,7 @@ static void sem_attributes(sema_t *s, node_t *n, declaration_flags_t *f) {
             }
             if (count < min || count > max) sem_error(s, a, "wrong number of attribute arguments");
             f->optimization_hint = 1;
-        } else if (word_in(a->text, "pure __pure__ const __const__ warn_unused_result __warn_unused_result__ malloc __malloc__")) {
+        } else if (word_in(a->text, "pure __pure__ const __const__ malloc __malloc__")) {
             if (a->first != NULL) sem_error(s, a, "attribute arguments are unsupported");
             f->optimization_hint = 1;
         } else if (strcmp(a->text, "aligned") == 0 || strcmp(a->text, "__aligned__") == 0) {
@@ -297,12 +304,12 @@ static void sem_attributes(sema_t *s, node_t *n, declaration_flags_t *f) {
                 sem_error(s, a, "alignment must be a power of two no larger than 65536");
             if (value > f->alignment) f->alignment = (uint32_t)value;
         } else if (strcmp(a->text, "section") == 0) {
-            if (!sem_kind(a->first, "string_literal") || a->first->next != NULL ||
-                a->first->first->next != NULL) sem_error(s, a, "section requires one string segment");
+            if (!sem_kind(a->first, "string_literal") || a->first->next != NULL)
+                sem_error(s, a, "section requires one string");
             size_t length;
-            unsigned char *bytes = sem_literal_bytes(s, a->first->first, &length);
+            unsigned char *bytes = sem_string_bytes(s, a->first, &length);
             if (memchr(bytes, 0, length) != NULL) sem_error(s, a, "section name cannot contain NUL");
-            f->section = a->first->first->text;
+            f->section = a->first->first->next ? (const char *)bytes : a->first->first->text;
             f->section_name = (const char *)bytes;
         } else sem_error(s, a, "unsupported semantic attribute '%s'", a->text);
     }
@@ -312,6 +319,33 @@ static uint32_t sem_round(sema_t *s, node_t *n, uint64_t size, uint32_t alignmen
     if (value > UINT32_MAX) sem_error(s, n, "object layout exceeds 32-bit target size");
     return (uint32_t)value;
 }
+static c_field_t *sem_find_field(c_type_t *t, const char *name) {
+    t = sem_plain(t);
+    for (c_field_t *f = t->fields; f; f = f->next)
+        if (f->name && strcmp(f->name, name) == 0) return f;
+    for (c_field_t *f = t->promoted_fields; f; f = f->next)
+        if (strcmp(f->name, name) == 0) return f;
+    return NULL;
+}
+static void sem_append_field(c_type_t *t, c_field_t *field) {
+    if (t->last_field) t->last_field->next = field; else t->fields = field;
+    t->last_field = field;
+}
+static void sem_promote_fields(sema_t *s, node_t *n, c_type_t *owner,
+                               c_field_t *container, c_field_t *fields) {
+    for (c_field_t *f = fields; f; f = f->next) {
+        if (!f->name) continue;
+        if (sem_find_field(owner, f->name)) sem_error(s, n, "duplicate record member '%s'", f->name);
+        c_field_t *alias = sem_alloc(s, sizeof(*alias));
+        *alias = *f;
+        alias->type = sem_qualify(s, f->type, container->type->qualifiers & (Q_CONST | Q_VOLATILE));
+        alias->offset += container->offset;
+        alias->container = container;
+        alias->member = f;
+        alias->next = owner->promoted_fields;
+        owner->promoted_fields = alias;
+    }
+}
 static c_type_t *sem_record(sema_t *s, node_t *n) {
     type_kind_t kind = sem_kind(n, "struct") ? T_STRUCT : sem_kind(n, "union") ? T_UNION : T_ENUM;
     node_t *definition = NULL;
@@ -320,7 +354,7 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
         if (sem_kind(c, "attributes")) sem_attributes(s, c, &attrs);
         else definition = c;
     }
-    if (attrs.noreturn || attrs.used || attrs.section != NULL ||
+    if (attrs.noreturn || attrs.used || attrs.weak || attrs.naked || attrs.section != NULL ||
         attrs.always_inline || attrs.optimization_hint ||
         ((attrs.packed || attrs.alignment) && (!definition || kind == T_ENUM)))
         sem_error(s, n, "attribute does not apply to records/enums");
@@ -368,23 +402,46 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
                 if (sem_kind(member, "static_assert")) { sem_statement(s, member, 0); continue; }
                 declaration_flags_t flags = {0};
                 c_type_t *base = sem_specifiers(s, member->first, &flags);
-                if (flags.is_inline || flags.always_inline || flags.optimization_hint || flags.packed)
+                if (flags.is_inline || flags.always_inline || flags.optimization_hint ||
+                    flags.packed || flags.weak || flags.naked)
                     sem_error(s, member, "function attribute on record member");
-                if (member->first->next == NULL) sem_error(s, member, "anonymous record members are unsupported");
+                if (member->first->next == NULL) {
+                    node_t *record = member->first->first;
+                    while (record && !sem_kind(record, "struct") && !sem_kind(record, "union"))
+                        record = record->next;
+                    if (!record || record->text || !sem_plain(base)->complete ||
+                        (base->kind != T_STRUCT && base->kind != T_UNION))
+                        sem_error(s, member, "anonymous member requires an untagged record definition");
+                    uint32_t align = attrs.packed ? 1 : base->alignment;
+                    if (flags.alignment > align) align = flags.alignment;
+                    if (flags.alignment && flags.alignment < base->alignment)
+                        sem_error(s, member, "alignment weakens member alignment");
+                    c_field_t *field = sem_alloc(s, sizeof(*field));
+                    field->type = base;
+                    field->offset = kind == T_UNION ? 0 : sem_round(s, member, size, align);
+                    uint64_t end = (uint64_t)field->offset + base->size;
+                    if (end > size) size = end;
+                    bit_cursor = size * 8;
+                    if (align > t->alignment) t->alignment = align;
+                    sem_promote_fields(s, member, t, field, sem_plain(base)->fields);
+                    sem_promote_fields(s, member, t, field, sem_plain(base)->promoted_fields);
+                    sem_append_field(t, field);
+                    continue;
+                }
                 for (node_t *item = member->first->next; item != NULL; item = item->next) {
                     node_t *d = item->first;
                     c_type_t *ft = sem_declarator(s, d, base, DECL_MEMBER);
                     declaration_flags_t member_attrs = {0};
                     sem_decl_attributes(s, d, &member_attrs);
-                    if (member_attrs.noreturn || member_attrs.used || member_attrs.section ||
+                    if (member_attrs.noreturn || member_attrs.used || member_attrs.weak ||
+                        member_attrs.naked || member_attrs.section ||
                         member_attrs.always_inline || member_attrs.optimization_hint || member_attrs.packed)
                         sem_error(s, d, "declarator attributes on record members are unsupported");
                     sem_info_t *di = sem_info(s, d);
                     const char *name = NULL;
                     for (node_t *p = d; p != NULL; p = p->first) if (sem_kind(p, "name")) { name = p->text; break; }
-                    if (name == NULL) sem_error(s, d, "record member needs a name");
-                    for (c_field_t *f = t->fields; f != NULL; f = f->next)
-                        if (strcmp(f->name, name) == 0) sem_error(s, d, "duplicate record member");
+                    if (!name && !sem_kind(d->next, "bitfield_width")) sem_error(s, d, "record member needs a name");
+                    if (name && sem_find_field(t, name)) sem_error(s, d, "duplicate record member");
                     int flexible = ft->kind == T_ARRAY && ft->length == 0;
                     if (ft->kind == T_VOID || ft->kind == T_FUNCTION ||
                         (!sem_plain(ft)->complete && !flexible))
@@ -398,16 +455,26 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
                     c_field_t *field = sem_alloc(s, sizeof(*field));
                     field->name = name; field->type = ft;
                     if (d->next != NULL) {
-                        if (!sem_kind(d->next, "bitfield_width") || kind != T_STRUCT || attrs.packed ||
+                        if (!sem_kind(d->next, "bitfield_width") || kind != T_STRUCT ||
                             flags.alignment || member_attrs.alignment ||
-                            (ft->kind != T_UINT && ft->kind != T_ULONG))
-                            sem_error(s, d, "only structs of named unsigned 32-bit bit-fields are supported");
+                            (ft->kind != T_BOOL && ft->kind != T_UCHAR && ft->kind != T_USHORT &&
+                             ft->kind != T_UINT && ft->kind != T_ULONG))
+                            sem_error(s, d, "only structs of bool or unsigned 8/16/32-bit fields are supported");
+                        unsigned unit = ft->size * 8;
                         uint64_t width = sem_constant(s, d->next->first);
-                        if (!width || width > 32) sem_error(s, d, "invalid unsigned bit-field width");
-                        if (bit_cursor % 32 + width > 32) bit_cursor = (bit_cursor + 31) & ~UINT64_C(31);
-                        field->offset = sem_round(s, d, (bit_cursor / 32) * 4, 4);
+                        if ((!width && name) || width > (ft->kind == T_BOOL ? 1 : unit))
+                            sem_error(s, d, "invalid unsigned bit-field width");
+                        if (!width || (!attrs.packed && bit_cursor % unit + width > unit))
+                            bit_cursor = (bit_cursor + unit - 1) & ~(uint64_t)(unit - 1);
+                        if (!width && ft->alignment > align) align = ft->alignment;
+                        if (attrs.packed && bit_cursor % 8 + width > 32)
+                            sem_error(s, d, "packed bit-field spans more than four bytes");
+                        unsigned container = attrs.packed ? 8 : unit;
+                        uint32_t byte_align = attrs.packed ? 1 : ft->alignment;
+                        field->offset = sem_round(s, d, (bit_cursor / container) * (container / 8), byte_align);
                         field->bit_width = (unsigned)width;
-                        field->bit_offset = (unsigned)(bit_cursor % 32);
+                        field->bit_offset = (unsigned)(bit_cursor % container);
+                        field->bit_bytewise = attrs.packed;
                         bit_cursor += width;
                         size = (bit_cursor + 7) / 8;
                     } else {
@@ -416,8 +483,7 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
                         if (end > size) size = end;
                         bit_cursor = size * 8;
                     }
-                    if (t->last_field == NULL) t->fields = field; else t->last_field->next = field;
-                    t->last_field = field;
+                    if (name) sem_append_field(t, field);
                     if (align > t->alignment) t->alignment = align;
                     di->field_offset = field->offset;
                 }
@@ -429,7 +495,8 @@ static c_type_t *sem_record(sema_t *s, node_t *n) {
         t->complete = 1;
         for (c_type_t *q = s->types; q != NULL; q = q->next) if (q != t && q->unqualified == t) {
             q->size = t->size; q->alignment = t->alignment; q->complete = 1;
-            q->fields = t->fields; q->last_field = t->last_field; q->rank = t->rank; q->is_unsigned = t->is_unsigned;
+            q->fields = t->fields; q->last_field = t->last_field; q->promoted_fields = t->promoted_fields;
+            q->rank = t->rank; q->is_unsigned = t->is_unsigned;
         }
     }
     sem_info(s, n)->type = t; return t;
@@ -528,6 +595,7 @@ static c_type_t *sem_specifiers(sema_t *s, node_t *n, declaration_flags_t *f) {
 static c_type_t *sem_type_name(sema_t *s, node_t *n) {
     declaration_flags_t f = {0};
     c_type_t *t = sem_declarator(s, n->first->next, sem_specifiers(s, n->first, &f), 0);
+    if (f.weak || f.naked) sem_error(s, n, "weak/naked requires a symbol declaration");
     sem_info(s, n)->type = t; return t;
 }
 static c_type_t *sem_declarator(sema_t *s, node_t *n, c_type_t *base, int context) {
@@ -587,7 +655,8 @@ static c_type_t *sem_declarator(sema_t *s, node_t *n, c_type_t *base, int contex
             for (node_t *d = p->first->next; d != NULL; d = d->first)
                 if (sem_kind(d, "name")) { name = d->text; break; }
             if (f.is_typedef || f.is_static || f.is_extern || f.is_auto || f.is_inline || f.always_inline ||
-                f.optimization_hint || f.noreturn || f.used || f.section || f.alignment || f.packed)
+                f.optimization_hint || f.noreturn || f.used || f.weak || f.naked ||
+                f.section || f.alignment || f.packed)
                 sem_error(s, p, "invalid parameter specifiers");
             if (pt->kind == T_VOID) {
                 if (pt->qualifiers || name != NULL || count != 1) sem_error(s, p, "void must be the sole unnamed parameter");
@@ -666,7 +735,7 @@ static symbol_t *sem_bound_object(node_t *n) {
     if (!sem_kind(n, "identifier")) return NULL;
     symbol_t *v = ((sem_info_t *)n->semantic)->symbol;
     if (!v || v->kind != S_OBJECT || !v->static_storage || !v->type->size ||
-        v->asm_name || v->section)
+        v->asm_name || v->section || v->weak)
         return NULL;
     return v;
 }
@@ -712,6 +781,20 @@ static void sem_float_literal(sema_t *s,node_t *n,sem_info_t *i) {
     i->type=s->primitive[single?T_FLOAT:wide?T_LDOUBLE:T_DOUBLE];
     i->float_literal=1;
 }
+static uint64_t sem_float_bits(const sem_info_t *v,c_type_t *to) {
+    if(v->type->size==to->size) return v->value;
+    if(to->size==4) {
+        double d; memcpy(&d,&v->value,8);
+        float f=(float)d;
+        uint32_t bits; memcpy(&bits,&f,4);
+        return bits;
+    }
+    float f; uint32_t bits=(uint32_t)v->value;
+    memcpy(&f,&bits,4);
+    double d=f; uint64_t wide;
+    memcpy(&wide,&d,8);
+    return wide;
+}
 static void sem_number(sema_t *s, node_t *n, sem_info_t *i) {
     int hex = n->text[0] == '0' && (n->text[1] == 'x' || n->text[1] == 'X');
     if (strchr(n->text, '.') != NULL || strpbrk(n->text, hex ? "pP" : "eE") != NULL) {
@@ -719,7 +802,8 @@ static void sem_number(sema_t *s, node_t *n, sem_info_t *i) {
         return;
     }
     errno = 0; char *end;
-    uint64_t value = strtoull(n->text, &end, 0);
+    int binary = n->text[0] == '0' && (n->text[1] == 'b' || n->text[1] == 'B');
+    uint64_t value = strtoull(n->text + (binary ? 2 : 0), &end, binary ? 2 : 0);
     if (errno == ERANGE) sem_error(s, n, "integer constant exceeds 64 bits");
     int is_unsigned = strchr(end, 'u') != NULL || strchr(end, 'U') != NULL;
     unsigned longs = 0;
@@ -866,6 +950,39 @@ static void sem_pointer_arithmetic(sema_t *s, node_t *n, sem_info_t *out, sem_in
         }
     }
 }
+static symbol_t *sem_memory_builtin(sema_t *s, node_t *n, const char *name) {
+    int fill = strcmp(name, "memset") == 0, compare = strcmp(name, "memcmp") == 0;
+    c_type_t *void_type = s->primitive[T_VOID];
+    c_type_t *pointer = sem_pointer(s, void_type);
+    c_type_t *readonly = sem_pointer(s, sem_qualify(s, void_type, Q_CONST));
+    c_type_t *first = compare ? readonly : pointer;
+    c_type_t *param = fill ? s->primitive[T_INT] : readonly;
+    c_type_t *result = compare ? s->primitive[T_INT] : pointer;
+    symbol_t *existing = sem_lookup(s->file_scope, name, 1);
+    if (existing) {
+        c_type_t *f = existing->type;
+        if (existing->kind != S_FUNCTION || existing->linkage != 2 || existing->asm_name ||
+            !f->prototype || f->variadic || f->parameter_count != 3 ||
+            !sem_compatible(f->base, result, 0) || !sem_compatible(f->parameters[0], first, 0) ||
+            !sem_compatible(f->parameters[1], param, 0) ||
+            !sem_compatible(f->parameters[2], s->primitive[T_UINT], 0))
+            sem_error(s, n, "incompatible declaration of builtin library target '%s'", name);
+        return existing;
+    }
+    c_type_t *f = sem_new_type(s, T_FUNCTION);
+    f->base = result;
+    f->prototype = f->complete = 1;
+    f->parameter_count = 3;
+    f->parameters = sem_alloc(s, 3 * sizeof(*f->parameters));
+    f->parameters[0] = first; f->parameters[1] = param; f->parameters[2] = s->primitive[T_UINT];
+    symbol_t *symbol = sem_symbol(s, name, S_FUNCTION, f);
+    symbol->linkage = 2;
+    scope_t *saved = s->scope;
+    s->scope = s->file_scope;
+    sem_bind(s, symbol);
+    s->scope = saved;
+    return symbol;
+}
 static sem_info_t *sem_expression(sema_t *s, node_t *n) {
     sem_enter(s, n);
     sem_info_t *i = sem_info(s, n);
@@ -918,13 +1035,26 @@ static sem_info_t *sem_expression(sema_t *s, node_t *n) {
         c_type_t *t = sem_type_name(s, a);
         uint64_t offset = 0;
         for (node_t *member = b; member != NULL; member = member->next) {
+            if (sem_kind(member, "offsetof_index")) {
+                if (t->kind != T_ARRAY || !t->base->complete)
+                    sem_error(s, member, "offsetof subscript requires an array");
+                uint64_t index = sem_constant(s, member->first);
+                sem_info_t *v = sem_info(s, member->first);
+                if ((!v->type->is_unsigned && sem_signed(v->type, index) < 0) ||
+                    index > UINT32_MAX || (t->length && index >= t->length))
+                    sem_error(s, member, "offsetof subscript is out of bounds");
+                offset += index * t->base->size;
+                if (offset > UINT32_MAX) sem_error(s, member, "offsetof exceeds the target object size");
+                t = t->base;
+                continue;
+            }
             if ((t->kind != T_STRUCT && t->kind != T_UNION) || !sem_plain(t)->complete)
                 sem_error(s, member, "offsetof requires a complete record");
-            c_field_t *field = sem_plain(t)->fields;
-            while (field != NULL && strcmp(field->name, member->text) != 0) field = field->next;
+            c_field_t *field = sem_find_field(t, member->text);
             if (!field) sem_error(s, member, "unknown offsetof member '%s'", member->text);
             if (field->bit_width) sem_error(s, member, "offsetof cannot name a bit-field");
             offset += field->offset;
+            if (offset > UINT32_MAX) sem_error(s, member, "offsetof exceeds the target object size");
             t = field->type;
         }
         i->type = s->primitive[T_UINT]; i->constant = i->ice = 1; i->value = offset;
@@ -942,7 +1072,9 @@ static sem_info_t *sem_expression(sema_t *s, node_t *n) {
             (from->kind == T_POINTER && !sem_integer(to) && to->kind != T_POINTER)))
             sem_error(s, n, "invalid scalar cast");
         i->type = sem_plain(to); v->conversion = to;
-        if (sem_integer(to) && sem_integer(from)) {
+        if (v->float_literal && to->kind >= T_FLOAT && to->kind <= T_LDOUBLE) {
+            i->float_literal = 1; i->value = sem_float_bits(v, to);
+        } else if (sem_integer(to) && sem_integer(from)) {
             i->constant = v->constant; i->ice = v->ice; i->value = sem_convert_bits(from, to, v->value);
         } else if (to->kind == T_POINTER && ((from->kind == T_NULLPTR && v->constant) ||
                    (from->kind == T_POINTER && sem_address_value(v)) ||
@@ -950,10 +1082,14 @@ static sem_info_t *sem_expression(sema_t *s, node_t *n) {
             i->address = 1; i->symbol = v->symbol; i->addend = v->addend; i->value = v->value & UINT32_MAX;
             i->null_pointer_constant = to->base->kind == T_VOID && !to->base->qualifiers &&
                 sem_integer(from) && sem_null(v);
-        } else if (sem_integer(to) && from->kind == T_POINTER && sem_address_value(v) && v->symbol == NULL) {
-            i->constant = 1;
-            i->value = ((v->value + (uint64_t)v->addend) & UINT32_MAX) & sem_mask(to);
-            if (to->kind == T_BOOL) i->value = i->value != 0;
+        } else if (sem_integer(to) && from->kind == T_POINTER && sem_address_value(v)) {
+            if (!v->symbol) {
+                i->constant = 1;
+                i->value = ((v->value + (uint64_t)v->addend) & UINT32_MAX) & sem_mask(to);
+                if (to->kind == T_BOOL) i->value = i->value != 0;
+            } else if (to->size == 4) {
+                i->address = 1; i->symbol = v->symbol; i->addend = v->addend;
+            }
         }
 
     } else if (sem_kind(n, "unary") || sem_kind(n, "postfix")) {
@@ -989,7 +1125,11 @@ static sem_info_t *sem_expression(sema_t *s, node_t *n) {
                 if (!sem_arithmetic(t) || (strcmp(op, "~") == 0 && !sem_integer(t))) sem_error(s, n, "invalid unary arithmetic operand");
                 i->type = sem_promote_value(s, t, v); v->conversion = i->type;
                 i->ice = v->ice;
-                if (v->constant && sem_integer(i->type)) {
+                if (v->float_literal) {
+                    i->float_literal = 1;
+                    i->value = v->value;
+                    if (strcmp(op, "-") == 0) i->value ^= UINT64_C(1) << (i->type->size * 8 - 1);
+                } else if (v->constant && sem_integer(i->type)) {
                     uint64_t value = sem_convert_bits(v->type, i->type, v->value), mask = sem_mask(i->type);
                     if (strcmp(op, "-") != 0 || i->type->is_unsigned || value != (mask >> 1) + 1) {
                         i->constant = 1;
@@ -1017,14 +1157,18 @@ static sem_info_t *sem_expression(sema_t *s, node_t *n) {
             t = t->base;
         }
         if ((t->kind != T_STRUCT && t->kind != T_UNION) || !sem_plain(t)->complete) sem_error(s, n, "member access requires complete record");
-        c_field_t *field = sem_plain(t)->fields;
-        while (field != NULL && strcmp(field->name, b->text) != 0) field = field->next;
+        c_field_t *field = sem_find_field(t, b->text);
         if (field == NULL) sem_error(s, b, "unknown record member '%s'", b->text);
         i->type = sem_qualify(s, field->type, t->qualifiers & (Q_CONST | Q_VOLATILE));
         i->lvalue = strcmp(n->text, "->") == 0 || v->lvalue;
         i->field_offset = field->offset;
         i->bit_width = field->bit_width; i->bit_offset = field->bit_offset;
-        i->unaligned_member = t->alignment < i->type->alignment || field->offset % i->type->alignment != 0;
+        i->unaligned_member = t->alignment < i->type->alignment || field->offset % i->type->alignment != 0 ||
+            (i->type->alignment > 1 && strcmp(n->text, "->") != 0 && v->unaligned_member);
+        if (field->bit_width) {
+            i->bit_bytewise = field->bit_bytewise || i->unaligned_member;
+            i->unaligned_member = 0;
+        }
         int static_location = strcmp(n->text, "->") == 0 ? sem_address_value(v) :
             v->address || (v->symbol != NULL && v->symbol->static_storage && v->lvalue);
         if (static_location) {
@@ -1032,10 +1176,65 @@ static sem_info_t *sem_expression(sema_t *s, node_t *n) {
         }
         sem_info(s, b)->type = i->type; sem_info(s, b)->field_offset = field->offset;
     } else if (sem_kind(n, "call") && sem_kind(a, "identifier") &&
-               word_in(a->text, "__builtin_clz __builtin_ctz __builtin_mul_overflow __builtin_expect __builtin_alloca "
+               word_in(a->text, "__builtin_clz __builtin_ctz __builtin_popcount __builtin_mul_overflow "
+                               "__builtin_constant_p __builtin_expect __builtin_alloca __builtin_unreachable "
+                               "__builtin_memset __builtin_memcpy __builtin_memmove __builtin_memcmp "
+                               "__builtin_bswap16 __builtin_bswap32 __builtin_bswap64 "
+                               "__builtin_isnan __builtin_isfinite __builtin_isinf_sign "
+                               "__builtin_signbit __builtin_signbitf __builtin_signbitl "
+                               "__builtin_inf __builtin_inff __builtin_infl "
+                               "__builtin_huge_val __builtin_huge_valf __builtin_huge_vall "
                                "__builtin_va_start __builtin_c23_va_start __builtin_va_end") &&
                sem_lookup(s->scope, a->text, 0) == NULL) {
-        if (word_in(a->text, "__builtin_va_start __builtin_c23_va_start __builtin_va_end")) {
+        if (strcmp(a->text, "__builtin_unreachable") == 0) {
+            if (b) sem_error(s, n, "__builtin_unreachable takes no arguments");
+            i->type = s->primitive[T_VOID]; i->builtin = BUILTIN_UNREACHABLE;
+        } else if (strcmp(a->text, "__builtin_constant_p") == 0) {
+            if (!b || b->next) sem_error(s, n, "__builtin_constant_p requires one argument");
+            sem_info_t *value = sem_expression(s, b);
+            i->type = s->primitive[T_INT];
+            i->constant = i->ice = 1;
+            i->value = !value->lvalue && (value->constant || value->float_literal);
+            i->builtin = BUILTIN_CONSTANT_P;
+        } else if (word_in(a->text, "__builtin_memset __builtin_memcpy __builtin_memmove __builtin_memcmp")) {
+            if (!b || !b->next || !b->next->next || b->next->next->next)
+                sem_error(s, n, "memory builtin requires three arguments");
+            symbol_t *symbol = sem_memory_builtin(s, n, a->text + strlen("__builtin_"));
+            sem_info_t *callee = sem_info(s, a);
+            callee->type = symbol->type; callee->symbol = symbol; callee->address = 1;
+            size_t k = 0;
+            for (node_t *arg = b; arg; arg = arg->next)
+                sem_assign(s, arg, symbol->type->parameters[k++]);
+            i->type = symbol->type->base;
+        } else if (word_in(a->text, "__builtin_bswap16 __builtin_bswap32 __builtin_bswap64")) {
+            if (!b || b->next) sem_error(s, n, "byte-swap builtin requires one argument");
+            if (!sem_integer(sem_value(s, sem_expression(s, b))))
+                sem_error(s, b, "byte-swap builtin requires an integer");
+            char width = a->text[strlen("__builtin_bswap")];
+            i->type = s->primitive[width == '1' ? T_USHORT : width == '3' ? T_UINT : T_ULLONG];
+            sem_assign(s, b, i->type);
+            i->builtin = BUILTIN_BSWAP;
+        } else if (word_in(a->text, "__builtin_isnan __builtin_isfinite __builtin_isinf_sign "
+                                    "__builtin_signbit __builtin_signbitf __builtin_signbitl")) {
+            if (!b || b->next) sem_error(s, n, "floating classification builtin requires one argument");
+            c_type_t *type = sem_value(s, sem_expression(s, b));
+            if (type->kind < T_FLOAT || type->kind > T_LDOUBLE)
+                sem_error(s, b, "floating classification builtin requires a real floating argument");
+            if (!strcmp(a->text, "__builtin_signbitf")) sem_assign(s, b, s->primitive[T_FLOAT]);
+            if (!strcmp(a->text, "__builtin_signbitl")) sem_assign(s, b, s->primitive[T_LDOUBLE]);
+            i->type = s->primitive[T_INT];
+            i->builtin = !strcmp(a->text, "__builtin_isnan") ? BUILTIN_ISNAN :
+                !strcmp(a->text, "__builtin_isfinite") ? BUILTIN_ISFINITE :
+                !strcmp(a->text, "__builtin_isinf_sign") ? BUILTIN_ISINF_SIGN : BUILTIN_SIGNBIT;
+        } else if (word_in(a->text, "__builtin_inf __builtin_inff __builtin_infl "
+                                    "__builtin_huge_val __builtin_huge_valf __builtin_huge_vall")) {
+            if (b) sem_error(s, n, "infinity builtin takes no arguments");
+            char suffix = a->text[strlen(a->text) - 1];
+            i->type = s->primitive[word_in(a->text, "__builtin_inf __builtin_huge_val") ? T_DOUBLE :
+                                   suffix == 'f' ? T_FLOAT : T_LDOUBLE];
+            i->float_literal = 1;
+            i->value = i->type->size == 4 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+        } else if (word_in(a->text, "__builtin_va_start __builtin_c23_va_start __builtin_va_end")) {
             int end = strcmp(a->text, "__builtin_va_end") == 0;
             int c23 = strcmp(a->text, "__builtin_c23_va_start") == 0;
             if (!b || (end && b->next) || (!end && (!s->function || !s->function->type->variadic ||
@@ -1091,7 +1290,8 @@ static sem_info_t *sem_expression(sema_t *s, node_t *n) {
             if (!sem_integer(sem_value(s, sem_expression(s, b))))
                 sem_error(s, b, "bit count builtin requires an integer argument");
             sem_assign(s, b, s->primitive[T_UINT]);
-            i->builtin = strcmp(a->text, "__builtin_clz") == 0 ? BUILTIN_CLZ : BUILTIN_CTZ;
+            i->builtin = strcmp(a->text, "__builtin_clz") == 0 ? BUILTIN_CLZ :
+                strcmp(a->text, "__builtin_ctz") == 0 ? BUILTIN_CTZ : BUILTIN_POPCOUNT;
             i->type = s->primitive[T_INT];
         }
     } else if (sem_kind(n, "call")) {
@@ -1302,13 +1502,24 @@ static void sem_initialize_object(sema_t *s, c_type_t *type, node_t *n, int stat
         sem_assign(s, n, type);
         sem_info_t *value = sem_info(s, n);
         int address_value = sem_address_value(value);
-        if (static_storage && !value->constant && !address_value)
+        if (static_storage && address_value && value->symbol && sem_integer(type) && type->size != 4)
+            sem_error(s, n, "static address relocation requires a 32-bit integer");
+        if (static_storage && !value->constant && !address_value &&
+            !(value->float_literal && type->kind >= T_FLOAT && type->kind <= T_LDOUBLE))
             sem_error(s, n, "static initializer is not a supported constant/address expression");
         --s->depth; return;
     }
     sem_info(s, n)->type = type;
     int aggregate = type->kind == T_ARRAY || type->kind == T_STRUCT || type->kind == T_UNION;
     uint64_t index = 0, maximum = 0;
+    int promoted_designator = 0, positional_anonymous = 0;
+    struct union_choice {
+        c_type_t *type;
+        uint64_t offset;
+        c_field_t *member;
+        int anonymous;
+        struct union_choice *next;
+    } *choices = NULL;
     for (node_t *item = n->first; item != NULL; item = item->next) {
         c_type_t *target = type;
         node_t *value = item->first;
@@ -1317,6 +1528,8 @@ static void sem_initialize_object(sema_t *s, c_type_t *type, node_t *n, int stat
         uint64_t offset = 0;
         c_field_t *bit_field = NULL;
         int designated = sem_kind(value, "field_designator") || sem_kind(value, "index_designator");
+        if (!designated && promoted_designator)
+            sem_error(s, item, "positional initialization after an anonymous member designator is unsupported");
         if (!aggregate && (index != 0 || designated)) sem_error(s, item, "excess/designated scalar initializer");
         if (designated) {
             int outer = 1;
@@ -1333,11 +1546,43 @@ static void sem_initialize_object(sema_t *s, c_type_t *type, node_t *n, int stat
                     offset += k * target->base->size; target = target->base;
                 } else {
                     if (target->kind != T_STRUCT && target->kind != T_UNION) sem_error(s, value, "field designator needs a record");
-                    c_field_t *field = sem_plain(target)->fields; uint64_t k = 0;
-                    while (field != NULL && strcmp(field->name, value->text) != 0) { field = field->next; ++k; }
+                    c_field_t *field = sem_find_field(target, value->text);
                     if (field == NULL) sem_error(s, value, "unknown initializer field");
                     if (field->bit_width) bit_field = field;
-                    if (outer) index = k;
+                    if (outer) {
+                        c_field_t *physical = field->container ? field->container : field;
+                        index = 0;
+                        for (c_field_t *f = sem_plain(target)->fields; f != physical; f = f->next) ++index;
+                    }
+                    if (field->container || target->kind == T_UNION) {
+                        uint64_t base = offset;
+                        c_type_t *record = sem_plain(target);
+                        if (field->container) {
+                            if (positional_anonymous)
+                                sem_error(s, value, "designating a positionally initialized anonymous member is unsupported");
+                            promoted_designator = 1;
+                        }
+                        for (c_field_t *f = field; f; f = f->member) {
+                            c_field_t *physical = f->container ? f->container : f;
+                            if (record->kind == T_UNION) {
+                                struct union_choice *choice = choices;
+                                while (choice && (choice->type != record || choice->offset != base))
+                                    choice = choice->next;
+                                if (choice && choice->member != physical &&
+                                    (field->container || choice->anonymous))
+                                    sem_error(s, value, "overriding an initialized anonymous union member is unsupported");
+                                if (!choice) {
+                                    choice = sem_alloc(s, sizeof(*choice));
+                                    *choice = (struct union_choice){record, base, physical, 0, choices};
+                                    choices = choice;
+                                }
+                                choice->member = physical;
+                                choice->anonymous |= field->container != NULL;
+                            }
+                            base += physical->offset;
+                            record = sem_plain(physical->type);
+                        }
+                    }
                     offset += field->offset; target = field->type;
                 }
                 sem_info(s, value)->type = target;
@@ -1349,6 +1594,12 @@ static void sem_initialize_object(sema_t *s, c_type_t *type, node_t *n, int stat
         } else if (type->kind == T_STRUCT || type->kind == T_UNION) {
             c_field_t *field = sem_field_at(type, index);
             if (field == NULL || (type->kind == T_UNION && index != 0)) sem_error(s, item, "excess record initializer");
+            if (!field->name) positional_anonymous = 1;
+            if (type->kind == T_UNION) {
+                struct union_choice *choice = sem_alloc(s, sizeof(*choice));
+                *choice = (struct union_choice){sem_plain(type), 0, field, positional_anonymous, choices};
+                choices = choice;
+            }
             if (field->bit_width) bit_field = field;
             offset = field->offset; target = field->type;
         }
@@ -1363,7 +1614,12 @@ static void sem_initialize_object(sema_t *s, c_type_t *type, node_t *n, int stat
         if (offset > UINT32_MAX) sem_error(s, item, "initializer offset exceeds target size");
         sem_info_t *i = sem_info(s, item);
         i->type = target; i->field_offset = (uint32_t)offset;
-        if (bit_field) { i->bit_width = bit_field->bit_width; i->bit_offset = bit_field->bit_offset; }
+        if (bit_field) {
+            i->bit_width = bit_field->bit_width;
+            i->bit_offset = bit_field->bit_offset;
+            i->bit_bytewise = bit_field->bit_bytewise || type->alignment < target->alignment ||
+                offset % target->alignment != 0;
+        }
         sem_initialize(s, target, value, static_storage);
         if (extend_tail) {
             if (target->size > UINT32_MAX - type->size)
@@ -1431,6 +1687,8 @@ static void sem_declaration(sema_t *s, node_t *n) {
     int file = s->scope == s->file_scope;
     if (file && (flags.is_auto || flags.is_register)) sem_error(s, n, "invalid file-scope storage class");
     if (n->first->next == NULL) {
+        if (flags.weak || flags.naked)
+            sem_error(s, n, "weak/naked requires a symbol declaration");
         if (flags.is_inline || flags.always_inline || flags.optimization_hint)
             sem_error(s, n, "function attribute requires a function declaration");
         if (flags.packed) sem_error(s, n, "packed requires a record definition");
@@ -1460,7 +1718,9 @@ static void sem_declaration(sema_t *s, node_t *n) {
         symbol_kind_t kind = f.is_typedef ? S_TYPEDEF : type->kind == T_FUNCTION ? S_FUNCTION : S_OBJECT;
         int function_definition = sem_kind(n, "function_definition");
         if (f.packed) sem_error(s, d, "packed requires a record definition");
-        if (f.noreturn && (kind != S_FUNCTION)) sem_error(s, d, "noreturn requires a function declaration");
+        if (f.noreturn && kind != S_FUNCTION &&
+            !(kind == S_TYPEDEF && type->kind == T_POINTER && type->base->kind == T_FUNCTION))
+            sem_error(s, d, "noreturn requires a function declaration or function-pointer typedef");
         if (f.is_inline && kind != S_FUNCTION) sem_error(s, d, "inline requires a function declaration");
         if (f.optimization_hint && kind != S_FUNCTION)
             sem_error(s, d, "function attribute requires a function declaration");
@@ -1519,13 +1779,23 @@ static void sem_declaration(sema_t *s, node_t *n) {
         v->is_inline |= f.is_inline || f.always_inline;
         v->always_inline |= f.always_inline;
         v->noinline |= f.noinline;
+        if (f.weak && v->linkage != 2) sem_error(s, d, "weak requires external linkage");
+        v->weak |= f.weak;
+        if (v->weak && v->is_inline) sem_error(s, d, "weak inline functions are unsupported");
+        if (f.naked && kind != S_FUNCTION) sem_error(s, d, "naked requires a function");
+        if (f.naked && v->definition && !v->naked)
+            sem_error(s, d, "naked must be declared before or on the definition");
+        v->naked |= f.naked;
+        if (v->naked && (v->is_inline || type->variadic || !type->prototype))
+            sem_error(s, d, "naked requires a nonvariadic, non-inline prototype");
         if (v->always_inline && v->noinline) sem_error(s, d, "conflicting inline attributes");
-        v->noreturn |= f.noreturn;
+        if (kind == S_FUNCTION) v->noreturn |= f.noreturn;
         if ((f.section != NULL || f.used) && (kind == S_TYPEDEF || (kind == S_OBJECT && !v->static_storage)))
             sem_error(s, d, "section/used attributes require a function or static-storage object");
         v->used |= f.used;
         if (f.section != NULL) {
-            if (v->section != NULL && strcmp(v->section, f.section) != 0) sem_error(s, d, "conflicting section attributes");
+            if (v->section_name && strcmp(v->section_name, f.section_name) != 0)
+                sem_error(s, d, "conflicting section attributes");
             v->section = f.section;
             v->section_name = f.section_name;
         }
@@ -1558,6 +1828,18 @@ static void sem_declaration(sema_t *s, node_t *n) {
                 for (visible_symbol_t *p = s->scope->symbols; p != NULL; p = p->next)
                     if (p->symbol->kind == S_PARAMETER) ++named;
                 if (named != type->parameter_count) sem_error(s, d, "function definition requires parameter names");
+            }
+            if (v->naked) {
+                node_t *body = item->next;
+                if (!body->first) sem_error(s, body, "naked function needs a basic asm body");
+                for (node_t *stmt = body->first; stmt; stmt = stmt->next) {
+                    if (!sem_kind(stmt, "assembly"))
+                        sem_error(s, stmt, "naked functions support only basic asm statements");
+                    for (node_t *group = stmt->first; group; group = group->next)
+                        if (!sem_kind(group, "string_literal") &&
+                            !(sem_kind(group, "asm_qualifier") && strcmp(group->text, "goto") != 0))
+                            sem_error(s, stmt, "naked functions do not support asm operands or clobbers");
+                }
             }
             s->return_type = type->base; s->labels = NULL; v->defined = 1; v->definition = n; s->function = v;
             sem_statement(s, item->next, 1);
@@ -1614,6 +1896,8 @@ static void sem_statement(sema_t *s, node_t *n, int reuse_scope) {
         if (!reuse_scope) s->scope = sem_scope(s, saved);
         for (node_t *c = a; c != NULL; c = c->next) sem_statement(s, c, 0);
         s->scope = saved;
+    } else if (sem_kind(n, "fallthrough")) {
+        if (!s->switches) sem_error(s, n, "fallthrough annotation requires a switch");
     } else if (sem_kind(n, "expression_statement")) { if (a != NULL) (void)sem_value(s, sem_expression(s, a)); }
     else if (sem_kind(n, "static_assert")) {
         if (sem_constant(s, a) == 0) sem_error(s, n, "static assertion failed");
@@ -1752,7 +2036,8 @@ static void sem_output_types(sema_t *s) {
             output_text(p, ",\"fields\":[");
             for (c_field_t *f = t->fields; f != NULL; f = f->next) {
                 if (f != t->fields) output_text(p, ",");
-                output_text(p, "{\"name\":"); output_string(p, f->name);
+                output_text(p, "{\"name\":");
+                if (f->name) output_string(p, f->name); else output_text(p, "null");
                 output_text(p, ",\"type\":"); sem_output_number(p, f->type->id);
                 output_text(p, ",\"offset\":"); sem_output_number(p, f->offset);
                 if (f->bit_width) {

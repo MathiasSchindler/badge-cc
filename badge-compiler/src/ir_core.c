@@ -190,9 +190,8 @@ void ir_map_put(ir_context *c, ir_map *map, const char *name,
   map->entries[slot] = (ir_map_entry){name, value};
   map->count++;
 }
-char *ir_name_key(ir_context *c, const char *name) {
+void ir_name_key_into(const char *name, char *out) {
   static const char hex[] = "0123456789abcdef";
-  char *key = ir_allocate(c, strlen(name) * 2 + 2), *out = key;
   *out++ = *name++;
   int quoted = *name == '"';
   if (quoted)
@@ -208,6 +207,10 @@ char *ir_name_key(ir_context *c, const char *name) {
     *out++ = hex[ch & 15];
   }
   *out = 0;
+}
+char *ir_name_key(ir_context *c, const char *name) {
+  char *key = ir_allocate(c, strlen(name) * 2 + 2);
+  ir_name_key_into(name, key);
   return key;
 }
 char *ir_fresh(ir_context *c, ir_module *m, char prefix) {
@@ -231,22 +234,55 @@ char *ir_fresh(ir_context *c, ir_module *m, char prefix) {
       return name;
   }
 }
+static size_t token_end(ir_context *c, const char *source, size_t size,
+                        size_t start) {
+  size_t k = start;
+  if (source[k] == '"' || ((source[k] == '@' || source[k] == '%') &&
+                           k + 1 < size && source[k + 1] == '"')) {
+    if (source[k] != '"') k++;
+    k++;
+    while (k < size && source[k] != '"') {
+      if (source[k] == '\n') ir_error(c, "newline in IR string");
+      if (source[k] == '\\') {
+        if (k + 2 >= size || !isxdigit((unsigned char)source[k + 1]) ||
+            !isxdigit((unsigned char)source[k + 2]))
+          ir_error(c, "invalid IR string escape");
+        k += 3;
+      } else k++;
+    }
+    if (k >= size) ir_error(c, "unterminated IR string");
+    k++;
+  } else if (strchr("()[]{},=<>:*", source[k])) k++;
+  else
+    while (k < size && !isspace((unsigned char)source[k]) &&
+           !strchr("()[]{},=<>:*;\"", source[k]))
+      k++;
+  if (k == start) ir_error(c, "invalid IR character");
+  return k;
+}
 void ir_parse(ir_context *c, ir_module *m, const char *source, size_t size) {
   if (size > 16u * 1024u * 1024u || memchr(source, 0, size))
     ir_error(c, "invalid/oversized textual IR");
   m->source = source;
   m->size = size;
   unsigned count = 0, lines = 1;
-  for (size_t k = 0; k < size; k++) {
-    if (source[k] == '\n')
-      lines++;
-    if (!isspace((unsigned char)source[k]))
-      count++;
+  size_t text_size = 0;
+  c->line = 1;
+  for (size_t k = 0; k < size;) {
+    if (isspace((unsigned char)source[k])) {
+      if (source[k++] == '\n') c->line = ++lines;
+    } else if (source[k] == ';') {
+      while (k < size && source[k] != '\n') k++;
+    } else {
+      size_t end = token_end(c, source, size, k);
+      if (count++ == 1000000) ir_error(c, "IR token limit exceeded");
+      text_size += end - k + 1;
+      k = end;
+    }
   }
-  if (count > 1000000)
-    count = 1000000;
   m->tokens = ir_allocate(c, ((size_t)count + 1) * sizeof(*m->tokens));
   m->lines = ir_allocate(c, (size_t)lines * sizeof(*m->lines));
+  char *text = ir_allocate(c, text_size);
   size_t k = 0;
   int in_function = 0, target = 0, layout = 0;
   while (k < size) {
@@ -265,39 +301,11 @@ void ir_parse(ir_context *c, ir_module *m, const char *source, size_t size) {
         break;
       }
       size_t start = k;
-      if (source[k] == '"' || ((source[k] == '@' || source[k] == '%') &&
-                               k + 1 < size && source[k + 1] == '"')) {
-        if (source[k] != '"')
-          k++;
-        k++;
-        while (k < size && source[k] != '"') {
-          if (source[k] == '\n')
-            ir_error(c, "newline in IR string");
-          if (source[k] == '\\') {
-            if (k + 2 >= size || !isxdigit((unsigned char)source[k + 1]) ||
-                !isxdigit((unsigned char)source[k + 2]))
-              ir_error(c, "invalid IR string escape");
-            k += 3;
-          } else
-            k++;
-        }
-        if (k >= size)
-          ir_error(c, "unterminated IR string");
-        k++;
-      } else if (strchr("()[]{},=<>:*", source[k]))
-        k++;
-      else
-        while (k < size && !isspace((unsigned char)source[k]) &&
-               !strchr("()[]{},=<>:*;\"", source[k]))
-          k++;
-      if (k == start)
-        ir_error(c, "invalid IR character");
-      if (m->count == 1000000)
-        ir_error(c, "IR token limit exceeded");
+      k = token_end(c, source, size, start);
+      memcpy(text, source + start, k - start);
       m->tokens[m->count++] =
-          (ir_token){.text = ir_copy(c, source + start, k - start),
-                     .begin = start,
-                     .end = k};
+          (ir_token){.text = text, .begin = start, .end = k};
+      text += k - start + 1;
     }
     if (k < size)
       k++;

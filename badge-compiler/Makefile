@@ -33,7 +33,7 @@ TEST_BINS := build/elf2bin_test build/badge_elf_info_test build/badge_cpp_test b
 TEST_BINS += build/ir_loop_invariant_test
 
 .PHONY: all test test-owned test-oracle test-metrics test-fast-io
-.PHONY: test-tilt-maze
+.PHONY: test-tilt-maze test-c-compat
 .PHONY: test-datasheet test-datasheet-facts test-datasheet-experiments
 .PHONY: test-target-cost
 .PHONY: test-compact
@@ -292,6 +292,9 @@ test-assembler-crossover: build/badge-asm build/badge-link build/elf2bin build/b
 	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" LLVM_OBJCOPY="$(LLVM_OBJCOPY)" bash tests/asm_oracle.sh
 	node --test tests/assembler-crossover.test.mjs tests/assembler-listing.test.mjs
 	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" node --test --test-name-pattern='MOVW/MOVT|final branch widths|literal PC' tests/final_layout_test.mjs
+
+test-c-compat: all
+	LLVM_OPT="$(LLVM_OPT)" LLVM_LLD="$(LLVM_LLD)" QEMU_ARM="$(QEMU_ARM)" bash tests/c-compat-oracle.sh
 
 test-tilt-maze: all
 	LLVM_CLANG="$(LLVM_CLANG)" LLVM_LLD="$(LLVM_LLD)" \

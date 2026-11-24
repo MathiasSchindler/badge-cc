@@ -328,6 +328,8 @@ int main(void) {
         ".word (1+2\n", ".word 1junk\n", "movseq r0,#1\n",
         "mrs sp,primask\n","msr control,pc\n","mrs r0,basepri_max_ns\n",
         "msr ipsr,r0\n","msr apsr,r0\n","mrs r0,#16\n",
+        "mcrr p0,#16,r0,r1,c0\n","mrrc p0,#0,r1,r1,c0\n",
+        "vldr d16,[r0]\n","vstr d2,[r0,#3]\n",
         "cpsid a\n","cpsie i,f\n","cpsid.w i\n","it eq\ncpsideq i\n",
         "svc #-1\n","bkpt #256\n","svc.w #0\n","mrs.n r0,control\n",
         "dmb ish\n","dsb #15\n","isb.n sy\n",

@@ -66,6 +66,12 @@ int main(void) {
         {"#define S_(x) #x\n#define S(x) S_(x)\n#define FILE_NAME header.h\n#include S(FILE_NAME)\n",
          "int\nheader\n;\n"},
         {"#define P (x)\nP\n", "(\nx\n)\n"},
+        {"#define N 42\n#define xN raw_name\n#define x42 expanded_name\n"
+         "#define CAT_(a,b) a##b\n#define CAT(a,b) CAT_(a,b)\n"
+         "CAT_(x,N) CAT(x,N) CAT_(,word) CAT_(word,) CAT_(,) CAT_(<,<) CAT_(1,e3)\n",
+         "raw_name\nexpanded_name\nword\nword\n<<\n1e3\n"},
+        {"#define XYZ 5\n#define P(x) X ## x ## Z x #x\n#define Y 3\n"
+         "#define OBJ s ## t\nP(Y) OBJ\n", "5\n3\n\"Y\"\nst\n"},
         {"#define F(x) x\nF\n", "F\n"},
         {"#define N 2\n#undef N\n#define N 3\nN\n", "3\n"},
         {"#define N 1\n#define N 1\nN\n", "1\n"},
@@ -103,7 +109,8 @@ int main(void) {
         matches(normalized, valid[i].expected);
     }
     const char *invalid[] = {
-        "#define F(x) #other\n", "#define F(x,y) x##y\n", "#define F(..., x) 0\n",
+        "#define F(x) #other\n", "#define F(x) ##x\n", "#define F(x) x##\n",
+        "#define F(x,y) x##y\nF(1,+)\n", "#define F(..., x) 0\n",
         "#define F(x,x) x\n", "#define F(x x\n", "#define N 1\n#define N 2\n",
         "#define F(x) x\nF(1,2)\n", "#define F(x) x\nF(1\n",
         "#define F(x,y) x\nF()\n", "#if\n#endif\n", "#ifdef\n#endif\n",

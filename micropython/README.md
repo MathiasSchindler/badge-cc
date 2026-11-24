@@ -227,15 +227,38 @@ reads back all 16 MiB, and leaves the badge in BOOTSEL. `MPREMOTE_PYTHON`
 can select `python -m mpremote` instead of the `mpremote` executable.
 The images are experimental and should not be used as a daily badge firmware.
 
-## Scope
+## Survey every remaining C file
 
-This does not replace GCC for the interpreter or compile Python scripts with
-the owned compiler. Stock RP2 still needs GNU computed `goto`, floating-point
-lowering, and more SDK/toolchain interoperability. The owned preprocessor
-now handles LittleFS's stringification and standard variadic macros; token
-pasting and broader SDK/system-header compatibility remain separate work.
+After `node micropython/build.mjs --interpreter`, run:
 
-Completing the survey is not the same as replacing all interpreter objects.
-Next, boot-test the eight-module variant, expand the survey to more stock
-translation units, and qualify any additional varargs forms and live SDK
-register-operand assembly needed by those units.
+```sh
+node micropython/survey-remaining.mjs
+make -C badge-compiler test-c-compat
+```
+
+The survey replays every C file in the mixed interpreter's GCC compile
+database, preserving the board defines and SDK headers. GCC preprocesses;
+the owned frontend, optimizer, backend, and assembler build each object.
+`build/remaining-c-audit.csv` lists the result and first blocking diagnostic
+for every source. This survey does not link substitutions or certify their
+runtime behavior. The compatibility oracle separately runs mixed GCC/owned
+objects in Cortex-M33 QEMU and checks aggregate layout, bit-fields, builtins,
+static relocations, weak symbol overrides, and basic-asm naked functions.
+
+The first compatibility round raised object coverage from 165 to 332 of
+423 C files. The register-operand assembly and scaling changes raise it to
+**381 of 423**, with no previously successful file lost. All 25 files
+formerly blocked by register operands now assemble. Fifteen of the 16
+former resource-limit cases now assemble without increasing the limits:
+the IR parser and analysis use less scratch, and the backend indexes
+branches and stores instruction uses sparsely. The remaining large
+`py/compile.c` unit reaches backend costing but still hits its 128 MiB
+allocation limit. The other 41 failures are frontend compatibility gaps.
+
+The owned preprocessor supports standard token pasting and 128 include
+directories. The stock RP2 build still uses GCC preprocessing: GCC system
+header directives, compiler feature detection, and some GNU macros are
+not yet supported. Memory/immediate inline-asm constraints, operand modifiers,
+`asm goto`, and broader SDK and C runtime interoperability remain open. The eight-module
+firmware remains experimental and has not been boot-tested on a badge;
+none of this compiles Python scripts with the owned C compiler.

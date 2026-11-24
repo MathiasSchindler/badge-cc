@@ -9,6 +9,8 @@ typedef struct {
   ir_analysis *a;
   unsigned p, end, function, instruction, depth;
   uint64_t work;
+  char *name_buffer;
+  size_t name_capacity;
 } reader;
 
 static const char *text(reader *r) { return ir_text(r->a->text, r->p); }
@@ -51,6 +53,17 @@ static unsigned index_get(const ir_index *map, const char *key) {
   }
   return IR_NONE;
 }
+static const char *lookup_name(reader *r, const char *name) {
+  size_t minimum = strlen(name) * 2 + 2;
+  if (minimum > r->name_capacity) {
+    size_t capacity = r->name_capacity ? r->name_capacity : 64;
+    while (capacity < minimum) capacity *= 2;
+    r->name_buffer = ir_allocate(r->c, capacity);
+    r->name_capacity = capacity;
+  }
+  ir_name_key_into(name, r->name_buffer);
+  return r->name_buffer;
+}
 static void index_put(ir_context *c, ir_index *map, const char *key,
                       unsigned index) {
   if (!map->capacity)
@@ -72,6 +85,19 @@ static unsigned intern(reader *r, ir_type type) {
     return found;
   if (r->a->type_count == r->a->capacity)
     ir_error(r->c, "IR type limit exceeded");
+  if (r->a->type_count == r->a->type_capacity) {
+    ir_analysis *a = r->a;
+    unsigned capacity = a->type_capacity * 2;
+    if (capacity > a->capacity) capacity = a->capacity;
+    ir_type *types = ir_allocate(r->c, capacity * sizeof(*types));
+    memcpy(types, a->types, a->type_count * sizeof(*types));
+    a->types = types;
+    a->type_capacity = capacity;
+    a->type_index = (ir_index){0};
+    index_init(r->c, &a->type_index, capacity);
+    for (unsigned i = 0; i < a->type_count; i++)
+      index_put(r->c, &a->type_index, a->types[i].key, i);
+  }
   unsigned id = r->a->type_count++;
   r->a->types[id] = type;
   index_put(r->c, &r->a->type_index, type.key, id);
@@ -131,6 +157,16 @@ static unsigned type(reader *r) {
     else {
       if (n > r->a->capacity - r->a->field_count)
         ir_error(r->c, "IR field limit exceeded");
+      if (n > r->a->field_capacity - r->a->field_count) {
+        ir_analysis *a = r->a;
+        unsigned required = a->field_count + n, capacity = a->field_capacity;
+        while (capacity < required) capacity *= 2;
+        if (capacity > a->capacity) capacity = a->capacity;
+        unsigned *fields = ir_allocate(r->c, capacity * sizeof(*fields));
+        memcpy(fields, a->fields, a->field_count * sizeof(*fields));
+        a->fields = fields;
+        a->field_capacity = capacity;
+      }
       ir_type t = {.kind = IR_STRUCT,
                    .count = n,
                    .first_field = r->a->field_count,
@@ -142,12 +178,13 @@ static unsigned type(reader *r) {
     }
   } else if (*text(r) == '%') {
     const char *name = text(r);
-    const char *key = ir_name_key(r->c, name);
+    const char *key = lookup_name(r, name);
     unsigned line = index_get(&r->a->named_types, key);
     if (line == IR_NONE)
       ir_error(r->c, "unknown IR named type");
     id = index_get(&r->a->type_index, key);
     if (id == IR_NONE) {
+      key = ir_name_key(r->c, name);
       const ir_line *definition = &r->a->text->lines[line];
       unsigned pos = r->p, end = r->end;
       r->p = definition->first + 3;
@@ -214,7 +251,7 @@ static unsigned definition(reader *r, const char *name, unsigned t,
                            unsigned block, unsigned instruction) {
   ir_function *f = &r->a->functions[r->function];
   unsigned id = r->a->definition_count++;
-  if (id >= r->a->capacity)
+  if (id >= r->a->definition_capacity)
     ir_error(r->c, "IR definition limit exceeded");
   const char *key = ir_name_key(r->c, name);
   if (index_get(&f->labels, key) != IR_NONE)
@@ -229,7 +266,7 @@ static unsigned operand(reader *r, unsigned t, ir_operand_kind forced) {
   if (r->p == r->end)
     ir_error(r->c, "missing IR operand");
   unsigned token = r->p++, id = r->a->operand_count++;
-  if (id >= r->a->capacity)
+  if (id >= r->a->operand_capacity)
     ir_error(r->c, "IR operand limit exceeded");
   const char *s = ir_text(r->a->text, token);
   ir_operand_kind k = forced;
@@ -444,7 +481,7 @@ static void instruction(reader *r, unsigned line, unsigned end_line,
                         unsigned block) {
   ir_analysis *a = r->a;
   unsigned id = a->instruction_count++;
-  if (id >= a->capacity)
+  if (id >= a->instruction_capacity)
     ir_error(r->c, "IR instruction limit exceeded");
   r->instruction = id;
   ir_instruction *in = &a->instructions[id];
@@ -709,7 +746,7 @@ static void signature(reader *r, unsigned line) {
     ir_error(r->c, "expected function name");
   r->p++;
   unsigned fn = a->function_count++;
-  if (fn >= a->capacity)
+  if (fn >= a->function_capacity)
     ir_error(r->c, "IR function limit exceeded");
   r->function = fn;
   ir_function *f = &a->functions[fn];
@@ -751,7 +788,7 @@ static void add_block(reader *r, unsigned fn, const char *name, unsigned line) {
   ir_analysis *a = r->a;
   ir_function *f = &a->functions[fn];
   unsigned id = a->block_count++;
-  if (id >= a->capacity)
+  if (id >= a->block_capacity)
     ir_error(r->c, "IR block limit exceeded");
   const char *key = ir_name_key(r->c, ir_format(r->c, "%%%s", name));
   if (index_get(&f->locals, key) != IR_NONE)
@@ -778,11 +815,16 @@ static void bodies(reader *r) {
            (!m->lines[end_line].count ||
             strcmp(ir_text(m, m->lines[end_line].first), "}")))
       end_line++;
-    unsigned tokens = 0;
-    for (unsigned l = header; l <= end_line; l++)
-      tokens += m->lines[l].count;
-    index_init(r->c, &f->locals, tokens);
-    index_init(r->c, &f->labels, end_line - header);
+    unsigned locals = f->parameter_count, labels = 0;
+    for (unsigned l = header + 1; l < end_line; l++) {
+      const ir_line *row = &m->lines[l];
+      if (row->count < 2) continue;
+      const char *second = ir_text(m, row->first + 1);
+      labels += row->count == 2 && !strcmp(second, ":");
+      locals += *ir_text(m, row->first) == '%' && !strcmp(second, "=");
+    }
+    index_init(r->c, &f->locals, locals);
+    index_init(r->c, &f->labels, labels);
     f->first_definition = a->definition_count;
     f->first_block = a->block_count;
     r->function = fn;
@@ -867,7 +909,7 @@ static void resolve(reader *r) {
       const char *name = ir_text(a->text, op->token);
       if (op->kind == IR_OPERAND_LITERAL)
         continue;
-      const char *key = ir_name_key(r->c, name);
+      const char *key = lookup_name(r, name);
       if (op->kind == IR_OPERAND_LOCAL) {
         unsigned d = index_get(&f->locals, key);
         if (d == IR_NONE)
@@ -938,7 +980,7 @@ static void cfg(reader *r) {
       ir_operand *op = &a->operands[i];
       if (op->kind != IR_OPERAND_BLOCK)
         continue;
-      if (a->successor_count == a->capacity)
+      if (a->successor_count == a->edge_capacity)
         ir_error(r->c, "CFG edge limit exceeded");
       a->successors[a->successor_count++] = op->block;
       b->successor_count++;
@@ -1130,30 +1172,64 @@ static void ssa(reader *r) {
 }
 void ir_analyze(ir_context *c, ir_module *m, ir_analysis *a) {
   *a = (ir_analysis){.text = m, .capacity = m->count + 1};
-  size_t n = a->capacity;
-#define ALLOC(member) a->member = ir_allocate(c, n * sizeof(*a->member))
-  ALLOC(types);
-  ALLOC(fields);
-  ALLOC(functions);
-  ALLOC(globals);
-  ALLOC(definitions);
-  ALLOC(instructions);
-  ALLOC(operands);
-  ALLOC(blocks);
-  ALLOC(successors);
-  ALLOC(predecessors);
-  ALLOC(parameters);
+  unsigned globals = 0, named = 0;
+  a->type_capacity = a->field_capacity = a->capacity < 32 ? a->capacity : 32;
+  a->edge_capacity = a->instruction_capacity = a->block_capacity =
+      a->function_capacity = a->definition_capacity = a->operand_capacity = 1;
+  for (unsigned i = 0; i < m->count; i++) {
+    const char *token = ir_text(m, i);
+    a->edge_capacity += !strcmp(token, "label");
+    a->operand_capacity += *token == '%' || *token == '@' || *token == '-' ||
+        isdigit((unsigned char)*token) || !strcmp(token, "true") || !strcmp(token, "false") ||
+        !strcmp(token, "null") || !strcmp(token, "undef") || !strcmp(token, "poison") ||
+        !strcmp(token, "zeroinitializer");
+  }
+  for (unsigned l = 0; l < m->line_count; l++) {
+    const ir_line *row = &m->lines[l];
+    if (!row->count) continue;
+    const char *first = ir_text(m, row->first);
+    int definition = !strcmp(first, "define");
+    if (definition || !strcmp(first, "declare")) {
+      a->function_capacity++;
+      globals++;
+      if (definition)
+        for (unsigned k = 1; k < row->count; k++)
+          a->definition_capacity += *ir_text(m, row->first + k) == '%';
+    } else {
+      a->instruction_capacity++;
+      globals += *first == '@';
+      if (row->count < 2) continue;
+      const char *second = ir_text(m, row->first + 1);
+      a->block_capacity += row->count == 2 && !strcmp(second, ":");
+      if (*first == '%' && !strcmp(second, "=")) {
+        a->definition_capacity++;
+        named += row->count >= 4 && !strcmp(ir_text(m, row->first + 2), "type");
+      }
+    }
+  }
+#define ALLOC(member, n) a->member = ir_allocate(c, (size_t)(n) * sizeof(*a->member))
+  ALLOC(types, a->type_capacity);
+  ALLOC(fields, a->field_capacity);
+  ALLOC(functions, a->function_capacity);
+  ALLOC(globals, globals);
+  ALLOC(definitions, a->definition_capacity);
+  ALLOC(instructions, a->instruction_capacity);
+  ALLOC(operands, a->operand_capacity);
+  ALLOC(blocks, a->block_capacity);
+  ALLOC(successors, a->edge_capacity);
+  ALLOC(predecessors, a->edge_capacity);
+  ALLOC(parameters, a->capacity);
 #undef ALLOC
-  index_init(c, &a->type_index, a->capacity);
-  index_init(c, &a->global_index, a->capacity);
+  index_init(c, &a->type_index, a->type_capacity);
+  index_init(c, &a->global_index, globals);
+  if (named)
+    index_init(c, &a->named_types, named);
   for (unsigned l = 0; l < m->line_count; l++) {
     const ir_line *line = &m->lines[l];
     if (line->count < 4 || *ir_text(m, line->first) != '%' ||
         strcmp(ir_text(m, line->first + 1), "=") ||
         strcmp(ir_text(m, line->first + 2), "type"))
       continue;
-    if (!a->named_types.capacity)
-      index_init(c, &a->named_types, a->capacity);
     c->line = l + 1;
     index_put(c, &a->named_types, ir_name_key(c, ir_text(m, line->first)), l);
   }
@@ -1201,7 +1277,7 @@ void ir_analyze(ir_context *c, ir_module *m, ir_analysis *a) {
          token++) {
       const char *name = ir_text(m, token);
       if (*name == '@' &&
-          index_get(&a->global_index, ir_name_key(c, name)) == IR_NONE)
+          index_get(&a->global_index, lookup_name(&r, name)) == IR_NONE)
         ir_error(
             c, ir_format(c, "undefined global initializer reference %s", name));
     }

@@ -17,10 +17,10 @@ typedef struct {
 typedef struct {
   char *text;
   const char *replacement;
-  size_t begin, end;
+  uint32_t begin, end;
 } ir_token;
 typedef struct {
-  size_t begin, end;
+  uint32_t begin, end;
   unsigned first, count, op;
   int instruction;
   char *replacement;
@@ -91,6 +91,7 @@ char *ir_copy(ir_context *c, const char *source, size_t size);
 char *ir_format(ir_context *c, const char *format, ...);
 char *ir_fresh(ir_context *c, ir_module *m, char prefix);
 char *ir_name_key(ir_context *, const char *);
+void ir_name_key_into(const char *, char *);
 void ir_append(ir_context *c, const char *bytes, size_t size);
 void ir_emit(ir_context *c, const char *format, ...);
 void ir_parse(ir_context *c, ir_module *m, const char *source, size_t size);

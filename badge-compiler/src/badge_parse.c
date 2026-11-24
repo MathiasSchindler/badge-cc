@@ -436,6 +436,12 @@ static node_t *unary(parser_t *p) {
                 node_t *field = node(p, "member_name", NULL);
                 field->text = identifier(p);
                 child(p, n, finish(p, field));
+                while (accept(p, "[")) {
+                    node_t *index = node_at(p, "offsetof_index", NULL, p->position - 1);
+                    child(p, index, expression(p, 2));
+                    expect(p, "]");
+                    child(p, n, finish(p, index));
+                }
             } while (accept(p, "."));
             expect(p, ")"); finish(p, n);
         } else if (accept(p, "_Generic")) {
@@ -611,13 +617,18 @@ static node_t *declaration(parser_t *p, int member, int external) {
     return finish(p, n);
 }
 
+static int gnu_fallthrough(parser_t *p) {
+    return at(p, "__attribute__") && !strcmp(peek(p, 1)->text, "(") &&
+        !strcmp(peek(p, 2)->text, "(") &&
+        word_in(peek(p, 3)->text, "fallthrough __fallthrough__");
+}
 static node_t *block(parser_t *p) {
     enter(p);
     node_t *n = node(p, "block", NULL);
     binding_t *saved = p->bindings;
     expect(p, "{");
     while (!at(p, "}"))
-        child(p, n, declaration_start(p, 0) &&
+        child(p, n, declaration_start(p, 0) && !gnu_fallthrough(p) &&
               strcmp(peek(p, 1)->text, ":") != 0 ? declaration(p, 0, 0) : statement(p));
     expect(p, "}"); p->bindings = saved; --p->depth;
     return finish(p, n);
@@ -626,7 +637,12 @@ static node_t *block(parser_t *p) {
 static node_t *statement(parser_t *p) {
     enter(p);
     node_t *n;
-    if (at(p, "{")) n = block(p);
+    if (gnu_fallthrough(p)) {
+        n = node(p, "fallthrough", NULL);
+        node_t *attribute = attributes(p)->first;
+        if (attribute->first || attribute->next) parse_error(p, "fallthrough requires no arguments or other attributes");
+        expect(p, ";"); finish(p, n);
+    } else if (at(p, "{")) n = block(p);
     else if (at(p, "if")) {
         n = node(p, "if", NULL); ++p->position;
         expect(p, "("); child(p, n, expression(p, 1)); expect(p, ")");
@@ -722,6 +738,7 @@ static node_t *statement(parser_t *p) {
 
 static void validate_number(parser_t *p, const char *s) {
     int hex = s[0] == '0' && (s[1] == 'x' || s[1] == 'X');
+    int binary = s[0] == '0' && (s[1] == 'b' || s[1] == 'B');
     if (strchr(s, '.') != NULL || strpbrk(s, hex ? "pP" : "eE") != NULL) {
         char *end;
         (void)strtod(s, &end);
@@ -730,8 +747,8 @@ static void validate_number(parser_t *p, const char *s) {
             parse_error(p, "invalid floating constant '%s'", s);
         return;
     }
-    const char *digits = s + (hex ? 2 : 0), *end = digits;
-    unsigned base = hex ? 16 : s[0] == '0' ? 8 : 10;
+    const char *digits = s + (hex || binary ? 2 : 0), *end = digits;
+    unsigned base = hex ? 16 : binary ? 2 : s[0] == '0' ? 8 : 10;
     while (*end != '\0') {
         unsigned digit = *end >= '0' && *end <= '9' ? (unsigned)(*end - '0') :
             *end >= 'a' && *end <= 'f' ? (unsigned)(*end - 'a' + 10) :

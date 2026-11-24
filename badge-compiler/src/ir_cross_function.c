@@ -1511,7 +1511,6 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
                 before.bytes - best_bytes);
       ir_reparse(c, m, analysis_mark);
       if (attempts < CROSS_ATTEMPTS) {
-        analysis_mark = c->allocations;
         analyze(&p);
       }
       changes++;
@@ -1526,7 +1525,7 @@ static void run_cross_function(ir_context *c, ir_module *m, cross_policy policy)
     ir_note(c, "skipped", "module_attempt_budget", 1);
   if (changes) {
     m->suffix = ir_format(c, "%s\n", marker);
-    ir_reparse(c, m, c->allocations);
+    ir_reparse(c, m, analysis_mark);
   }
   c->size = 0;
 }

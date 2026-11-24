@@ -65,7 +65,8 @@ static void function_header(cg_context *c, cg_function *f) {
           f->alignment, f->frame, c->register_saved_bytes);
   if (f->foldable)
     cg_emit(c, ".badge.fold.%u:\n", f->id);
-  if (!f->internal) cg_emit(c, ".global %s\n", f->name);
+  if (f->weak) cg_emit(c, ".weak %s\n", f->name);
+  else if (!f->internal) cg_emit(c, ".global %s\n", f->name);
   cg_emit(c, ".type %s, %%function\n.thumb_func\n%s:\n", f->name, f->name);
 }
 void cg_saved_register_list(cg_context *c, unsigned mask, int pop) {
@@ -1109,9 +1110,34 @@ static void finish_function(cg_context *c, size_t header, size_t body_start) {
 }
 void cg_generate_function(cg_context *c, cg_function *f) {
   c->schedule_active = 0;
+  c->fn = f;
+  if (f->naked) {
+    cg_block *block = f->blocks;
+    if (f->variadic || !block || block->next || !block->first || !block->first->next)
+      cg_error(c, "naked function requires a basic assembly body");
+    if (f->section)
+      cg_emit(c, ".section \"%s\",\"ax\",%%progbits\n", f->section);
+    else
+      cg_emit(c, ".section .text.%s,\"ax\",%%progbits\n", f->name);
+    c->register_saved_bytes = 0;
+    f->frame = 0;
+    cg_emit(c, "@ global-allocation: allocated 0 spilled 0\n");
+    function_header(c, f);
+    for (cg_inst *i = block->first; i; i = i->next) {
+      if (!i->next && !strcmp(c->tokens[i->begin].text, "unreachable")) break;
+      cg_assembly *assembly = i->begin + 1 < i->end &&
+          !strcmp(c->tokens[i->begin].text, "call") &&
+          !strcmp(c->tokens[i->begin + 1].text, "void") ? cg_instruction_assembly(c, i) : NULL;
+      if (!assembly || !i->next)
+        cg_error(c, "naked function requires basic assembly followed by unreachable");
+      cg_emit(c, "%s\n", assembly->text);
+    }
+    cg_emit(c, ".size %s, .-%s\n", f->name, f->name);
+    c->fn = NULL;
+    return;
+  }
   c->schedule_moves = c->schedule_windows = c->schedule_hazards = 0;
   c->schedule_unfilled = c->schedule_barriers = 0;
-  c->fn = f;
   c->tail_target = NULL;
   c->scalar_stream_retry = 0;
   c->frame_sp_relative = 0;

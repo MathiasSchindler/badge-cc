@@ -53,13 +53,16 @@ typedef struct cg_inst {
 typedef struct cg_assembly {
   char *text;
   unsigned reads, writes;
+  unsigned input_count, output, input_registers[3];
   int flags_read, flags_write, memory_read, memory_write, memory_barrier;
   int control, known;
 } cg_assembly;
 typedef struct cg_block {
-  char *name;
+  char *name, *jump_reference;
   cg_inst *first, *last;
-  struct cg_block *next;
+  struct cg_block *next, *forward;
+  unsigned live_index;
+  int has_phi, pinned, removed;
 } cg_block;
 typedef struct cg_function {
   char *name, *section;
@@ -69,12 +72,14 @@ typedef struct cg_function {
   unsigned value_count, value_capacity;
   unsigned argc, frame, byval[256], arg_align[256];
   cg_block *blocks, *last;
+  cg_block **block_index;
+  unsigned block_count, block_index_capacity;
   unsigned id, alignment;
   unsigned source_begin, source_end;
   unsigned machine_register_mentions;
   int machine_registers_known;
   unsigned fixed_arg_words;
-  int internal, return_ext, dynamic_stack, variadic;
+  int internal, weak, naked, return_ext, dynamic_stack, variadic;
   int foldable;
   struct cg_function *next;
 } cg_function;
@@ -120,6 +125,7 @@ typedef struct {
   jmp_buf failure;
   cg_allocation *allocations;
   size_t memory;
+  uint64_t *liveness_scratch;
   cg_token *tokens;
   unsigned count, pos, line;
   struct cg_named_type *named_types;
@@ -293,6 +299,7 @@ cg_value *cg_find(cg_context *c, const char *name);
 cg_value *cg_define(cg_context *c, char *name, cg_type *t);
 void cg_generate_function(cg_context *c, cg_function *f);
 void cg_prepare_cfg(cg_context *c);
+cg_block *cg_find_block(cg_context *c, const char *target);
 int cg_target_has_phi(cg_context *c, const char *target);
 cg_block *cg_fixed_fill(cg_context *c, cg_block *pre, cg_block *head);
 

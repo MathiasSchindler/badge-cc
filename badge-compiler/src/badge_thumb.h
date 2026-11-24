@@ -329,13 +329,17 @@ static unsigned thumb_system_register(assembler_t *s, const char *name, int writ
         {"primask_ns",144,1,1},{"basepri_ns",145,1,1},{"faultmask_ns",147,1,1},{"control_ns",148,1,1},
         {"sp_ns",152,1,1}
     };
+    char lower[16];
+    size_t length=strlen(name);
+    if(length>=sizeof(lower)) as_error(s,"unsupported named system register '%s'",name);
+    for(size_t k=0;k<=length;++k) lower[k]=(char)tolower((unsigned char)name[k]);
     if(write) {
-        if(strcmp(name,"apsr_nzcvq")==0) return 0x800;
-        if(strcmp(name,"apsr_g")==0) return 0x400;
-        if(strcmp(name,"apsr_nzcvqg")==0) return 0xc00;
+        if(strcmp(lower,"apsr_nzcvq")==0) return 0x800;
+        if(strcmp(lower,"apsr_g")==0) return 0x400;
+        if(strcmp(lower,"apsr_nzcvqg")==0) return 0xc00;
     }
     for(size_t k=0;k<sizeof(registers)/sizeof(*registers);++k)
-        if(strcmp(name,registers[k].name)==0) {
+        if(strcmp(lower,registers[k].name)==0) {
             if(write? !registers[k].writable:!registers[k].readable)
                 as_error(s,"system register does not support this access");
             return registers[k].number|(write?0x800:0);
@@ -343,13 +347,55 @@ static unsigned thumb_system_register(assembler_t *s, const char *name, int writ
     as_error(s,"unsupported named system register '%s'",name);
 }
 
+static unsigned thumb_numbered_operand(assembler_t *s,const char *operand,char prefix,unsigned maximum) {
+    if(operand[0]!=prefix || !isdigit((unsigned char)operand[1]))
+        as_error(s,"expected a numbered %c operand",prefix);
+    return as_bounded(s,operand+1,maximum);
+}
+static unsigned thumb_coprocessor(assembler_t *s,as_line_t *l,const char *op) {
+    int pair=!strcmp(op,"mcrr") || !strcmp(op,"mrrc"), read=!strcmp(op,"mrc") || !strcmp(op,"mrrc");
+    thumb_count(s,l,5,pair?5:6);
+    if(l->encoding&6) as_error(s,"coprocessor transfer does not take a width suffix");
+    unsigned coproc=thumb_numbered_operand(s,l->arg[0],'p',7);
+    unsigned opcode=as_bounded(s,l->arg[1],pair?15:7);
+    unsigned rt=(unsigned)as_register(s,l->arg[2]);
+    if(!thumb_data_register(rt)) as_error(s,"invalid coprocessor transfer register");
+    if(pair) {
+        unsigned rt2=(unsigned)as_register(s,l->arg[3]);
+        if(!thumb_data_register(rt2) || (read && rt==rt2))
+            as_error(s,"invalid coprocessor pair register");
+        unsigned crm=thumb_numbered_operand(s,l->arg[4],'c',15);
+        return thumb_emit(s,l,4,0xec40|((unsigned)read<<4)|rt2,
+                          (rt<<12)|(coproc<<8)|(opcode<<4)|crm);
+    }
+    unsigned crn=thumb_numbered_operand(s,l->arg[3],'c',15);
+    unsigned crm=thumb_numbered_operand(s,l->arg[4],'c',15);
+    unsigned opcode2=l->count==6?as_bounded(s,l->arg[5],7):0;
+    return thumb_emit(s,l,4,0xee00|(opcode<<5)|((unsigned)read<<4)|crn,
+                      (rt<<12)|(coproc<<8)|(opcode2<<5)|0x10|crm);
+}
+static unsigned thumb_fp_memory(assembler_t *s,as_line_t *l,int load) {
+    thumb_count(s,l,2,2);
+    if(l->encoding&6) as_error(s,"VLDR/VSTR does not take a width suffix");
+    int single=l->arg[0][0]=='s';
+    unsigned vd=thumb_numbered_operand(s,l->arg[0],single?'s':'d',single?31:15);
+    thumb_memory_t m=thumb_memory(s,l->arg[1],NULL);
+    if(m.index>=0 || m.writeback || !m.pre || m.offset < -1020 || m.offset > 1020 ||
+       m.offset%4 || m.base==15)
+        as_error(s,"VLDR/VSTR requires a base register and a word-aligned offset");
+    unsigned offset=(unsigned)(m.offset<0?-m.offset:m.offset);
+    return thumb_emit(s,l,4,0xed00|(m.offset>=0?0x80:0)|((single&&(vd&1))?0x40:0)|
+                         (load?0x10:0)|(unsigned)m.base,
+                      ((single?vd>>1:vd)<<12)|(single?0xa00:0xb00)|(offset>>2));
+}
+
 static const char *thumb_mnemonic(const char *name) {
     static const char *const bases[]={
         "adc","adcs","add","adds","addw","adr","and","ands","asr","asrs","b","bfc","bfi","bic","bics","bkpt","bl","blx","bx","cbnz","cbz","clrex","clz","cmn","cmp","cpsid","cpsie","dmb","dsb","eor","eors","isb",
-        "lda","ldab","ldaex","ldaexb","ldaexh","ldah","ldm","ldr","ldrb","ldrd","ldrex","ldrexb","ldrexh","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mla","mls","mov","movs","movt","movw","mrs","msr","mul","muls","mvn","mvns","nop","orn","orr","orrs",
+        "lda","ldab","ldaex","ldaexb","ldaexh","ldah","ldm","ldr","ldrb","ldrd","ldrex","ldrexb","ldrexh","ldrh","ldrsb","ldrsh","lsl","lsls","lsr","lsrs","mcr","mcrr","mla","mls","mov","movs","movt","movw","mrc","mrrc","mrs","msr","mul","muls","mvn","mvns","nop","orn","orr","orrs",
         "pop","push","rev","rev16","ror","rors","rsb","rsbs","sbc","sbcs","sbfx","sdiv","sev","smlabb","smlal","smlatt","smuad","smulbb","smull","ssat",
         "stl","stlb","stlex","stlexb","stlexh","stlh","stm","str","strb","strd","strex","strexb","strexh","strh","sub","subs","subw",
-        "svc","sxtb","sxth","tbb","tbh","tst","ubfx","udiv","umull","uxtab","uxtah","uxtb","uxth","wfe","wfi","yield"
+        "svc","sxtb","sxth","tbb","tbh","tst","tt","tta","ttat","ttt","ubfx","udiv","umull","uxtab","uxtah","uxtb","uxth","vldr","vstr","wfe","wfi","yield"
     };
     size_t lo=0,hi=sizeof(bases)/sizeof(*bases);
     while(lo<hi) {
@@ -365,7 +411,8 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
     if(!l->encoding) {
         char mnemonic[32]; size_t len=strlen(l->op);
         if(len>=sizeof(mnemonic)) as_error(s,"instruction name too long");
-        memcpy(mnemonic,l->op,len+1); l->encoding=1; l->condition=14;
+        for(size_t k=0;k<=len;++k) mnemonic[k]=(char)tolower((unsigned char)l->op[k]);
+        l->encoding=1; l->condition=14;
         if(len>2 && (strcmp(mnemonic+len-2,".w")==0 || strcmp(mnemonic+len-2,".n")==0)) {
             l->encoding|=mnemonic[len-1]=='w'?2:4; mnemonic[len-2]=0; len-=2;
         }
@@ -503,8 +550,9 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
         int half=strcmp(op,"smulbb")==0, dual=strcmp(op,"smuad")==0;
         int half_acc=strcmp(op,"smlabb")==0 || strcmp(op,"smlatt")==0;
         unsigned operands=basic||divide||half||dual?3:4;
-        thumb_count(s,l,operands,operands);
+        thumb_count(s,l,!strcmp(op,"muls")?2:operands,operands);
         unsigned r[4]={0}; for(unsigned k=0;k<l->count;++k) { r[k]=(unsigned)as_register(s,l->arg[k]); if(!thumb_data_register(r[k])) as_error(s,"invalid multiply/divide register"); }
+        if(l->count==2) r[2]=r[0];
         if(basic && !wide && ((strcmp(op,"muls")==0 && !in_it) || (strcmp(op,"mul")==0 && in_it)) && r[0]<8 && r[1]<8 && r[2]<8 && (r[0]==r[1] || r[0]==r[2])) {
             unsigned other=r[0]==r[1]?r[2]:r[1]; width=thumb_emit(s,l,2,0x4340|(other<<3)|r[0],0);
         } else if(strcmp(op,"muls")==0) as_error(s,"MULS has no wide encoding");
@@ -566,6 +614,17 @@ static unsigned as_instruction(assembler_t *s, as_line_t *l) {
             else a=strcmp(op,"uxtb")==0?0xfa5f:strcmp(op,"uxth")==0?0xfa1f:strcmp(op,"sxtb")==0?0xfa4f:0xfa0f;
             width=thumb_emit(s,l,4,a,b);
         }
+    } else if(strcmp(op,"tt")==0 || strcmp(op,"tta")==0 || strcmp(op,"ttat")==0 || strcmp(op,"ttt")==0) {
+        thumb_count(s,l,2,2);
+        unsigned rd=(unsigned)as_register(s,l->arg[0]), rn=(unsigned)as_register(s,l->arg[1]);
+        if((l->encoding&6) || !thumb_data_register(rd) || !thumb_data_register(rn))
+            as_error(s,"invalid TT register or width suffix");
+        unsigned mode=!strcmp(op,"tta")?0x80:!strcmp(op,"ttat")?0xc0:!strcmp(op,"ttt")?0x40:0;
+        width=thumb_emit(s,l,4,0xe840|rn,0xf000|(rd<<8)|mode);
+    } else if(strcmp(op,"mcr")==0 || strcmp(op,"mcrr")==0 || strcmp(op,"mrc")==0 || strcmp(op,"mrrc")==0) {
+        width=thumb_coprocessor(s,l,op);
+    } else if(strcmp(op,"vldr")==0 || strcmp(op,"vstr")==0) {
+        width=thumb_fp_memory(s,l,strcmp(op,"vldr")==0);
     } else if(strcmp(op,"mrs")==0 || strcmp(op,"msr")==0) {
         thumb_count(s,l,2,2); int write=strcmp(op,"msr")==0;
         if(l->encoding&6) as_error(s,"MRS/MSR does not take a width suffix");

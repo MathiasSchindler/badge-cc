@@ -136,7 +136,67 @@ static void effects(const char *text, cg_constant facts[13]) {
 static const char *find_label(cg_context *c, const char *body, const char *name);
 static int sole_label_entry(cg_context *c, const char *body, const char *name,
                             const char *label, const char *jump);
-int cg_flags_overwritten(cg_context *c, const char *body, const char *text) {
+static int label_character(unsigned char ch);
+typedef struct {
+  const char *name, *definition;
+  size_t length;
+  unsigned mentions;
+} emitted_label;
+typedef struct {
+  emitted_label *slots;
+  unsigned capacity;
+} emitted_labels;
+static emitted_label *emitted_lookup(cg_context *c, emitted_labels labels,
+                                     const char *name, size_t length) {
+  uint32_t hash = 2166136261u;
+  for (size_t k = 0; k < length; ++k)
+    hash = (hash ^ (unsigned char)name[k]) * 16777619u;
+  unsigned slot = hash & (labels.capacity - 1);
+  while (labels.slots[slot].name &&
+         (labels.slots[slot].length != length || memcmp(labels.slots[slot].name, name, length))) {
+    cg_register_work(c);
+    slot = (slot + 1) & (labels.capacity - 1);
+  }
+  return &labels.slots[slot];
+}
+static emitted_labels index_emitted_labels(cg_context *c, const char *body, int mentions) {
+  unsigned capacity = 8, count = 0;
+  for (const char *p = body; (p = strstr(p, "\n.Lcg_")); ++p) {
+    cg_register_work(c);
+    count++;
+  }
+  while (capacity < 2 * (count + 1)) capacity *= 2;
+  emitted_labels index = {cg_alloc(c, capacity * sizeof(emitted_label)), capacity};
+  unsigned assembly_lines = 0;
+  for (const char *p = body; *p;) {
+    cg_register_work(c);
+    const char *end = strchr(p, '\n');
+    if (!end) cg_error(c, "unterminated instruction in emitted label index");
+    if (assembly_lines) assembly_lines--;
+    else if (!strncmp(p, "@ constant-assembly-lines:", 26))
+      sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
+    else if (!strncmp(p, ".Lcg_", 5) && end[-1] == ':') {
+      size_t length = (size_t)(end - p - 1);
+      emitted_label *slot = emitted_lookup(c, index, p, length);
+      if (!slot->name) *slot = (emitted_label){p, p, length, 0};
+    }
+    p = end + 1;
+  }
+  if (mentions)
+    for (const char *p = body; (p = strstr(p, ".Lcg_"));) {
+      cg_register_work(c);
+      const char *end = p + 5;
+      while (label_character((unsigned char)*end)) ++end;
+      if (p == body || !label_character((unsigned char)p[-1])) {
+        emitted_label *slot = emitted_lookup(c, index, p, (size_t)(end - p));
+        if (slot->name) slot->mentions++;
+      }
+      p = end;
+    }
+  return index;
+}
+static int flags_overwritten(cg_context *c, const char *body, const char *text,
+                             const emitted_labels *labels) {
   /* Follow only neutral instructions and unconditional edges to an NZCV kill. */
   unsigned instructions = 0;
   for (unsigned lines = 0; lines < 64 && instructions < 8 && *text; lines++) {
@@ -170,7 +230,8 @@ int cg_flags_overwritten(cg_context *c, const char *body, const char *text) {
       if (sscanf(instruction, "%23s %127s%n", opcode, target, &consumed) != 2 ||
           instruction[consumed] || strncmp(target, ".Lcg_", 5))
         return 0;
-      text = find_label(c, body, target);
+      text = labels ? emitted_lookup(c, *labels, target, strlen(target))->definition
+                    : find_label(c, body, target);
       if (!text) return 0;
       continue;
     }
@@ -196,6 +257,9 @@ int cg_flags_overwritten(cg_context *c, const char *body, const char *text) {
     text = end + 1;
   }
   return 0;
+}
+int cg_flags_overwritten(cg_context *c, const char *body, const char *text) {
+  return flags_overwritten(c, body, text, NULL);
 }
 static const char *find_label(cg_context *c, const char *body, const char *name) {
   size_t length = strlen(name);
@@ -331,9 +395,11 @@ void cg_fold_distances(cg_context *c, size_t start) {
 }
 
 void cg_reduce_branches(cg_context *c, size_t body_start) {
+  if (!strstr(c->out + body_start, ".Lcg_edge")) return;
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
   memcpy(body, c->out + body_start, length);
+  emitted_labels labels = index_emitted_labels(c, body, 1);
   c->size = body_start;
   unsigned assembly_lines = 0;
   for (const char *p = body; p < body + length;) {
@@ -357,12 +423,11 @@ void cg_reduce_branches(cg_context *c, size_t body_start) {
           sscanf(jump, "b %127s%n", target, &consumed) == 1 &&
           jump + consumed == jump_end && !strncmp(target, ".Lcg_", 5)) {
         snprintf(label, sizeof(label), "%s:", edge);
-        const char *destination = find_label(c, body, target);
-        const char *original = find_label(c, body, edge);
+        const char *destination = emitted_lookup(c, labels, target, strlen(target))->definition;
+        const emitted_label *original = emitted_lookup(c, labels, edge, strlen(edge));
         if ((size_t)(edge_end - edge_line) == strlen(label) &&
             !memcmp(edge_line, label, strlen(label)) && destination &&
-            original == edge_line &&
-            sole_label_entry(c, body, edge, original, strstr(p, edge))) {
+            original->definition == edge_line && original->mentions == 2) {
           int narrow = branch_span(c, p, destination, 240);
           if (narrow || branch_span(c, p, destination, 32760)) {
             cg_emit(c, "b%s.%c %s\n@ branch-selection: folded edge\n",
@@ -504,9 +569,11 @@ void cg_forward_byte_arguments(cg_context *c, size_t body_start) {
   }
 }
 void cg_fold_zero_branches(cg_context *c, size_t body_start) {
+  if (!strstr(c->out + body_start, "cmp.n ")) return;
   size_t length = c->size - body_start;
   char *body = cg_alloc(c, length + 1);
   memcpy(body, c->out + body_start, length);
+  emitted_labels labels = index_emitted_labels(c, body, 0);
   c->size = body_start;
   unsigned assembly_lines = 0;
   for (const char *p = body; p < body + length;) {
@@ -527,7 +594,7 @@ void cg_fold_zero_branches(cg_context *c, size_t body_start) {
           sscanf(branch, "%11s %127s%n", opcode, target, &consumed) == 2 &&
           branch + consumed == branch_end &&
           (!strcmp(opcode, "beq.n") || !strcmp(opcode, "bne.n"))) {
-        const char *destination = find_label(c, body, target);
+        const char *destination = emitted_lookup(c, labels, target, strlen(target))->definition;
         unsigned bytes = 0, instructions = 0;
         int bounded = destination && destination > branch_end;
         for (const char *q = branch_end + 1; bounded && q < destination;) {
@@ -546,8 +613,8 @@ void cg_fold_zero_branches(cg_context *c, size_t body_start) {
           cg_register_work(c);
         }
         if (bounded && instructions &&
-            cg_flags_overwritten(c, body, branch_end + 1) &&
-            cg_flags_overwritten(c, body, destination)) {
+            flags_overwritten(c, body, branch_end + 1, &labels) &&
+            flags_overwritten(c, body, destination, &labels)) {
           cg_emit(c, "%s r%u, %s\n@ zero-branch: saved 2\n",
                   opcode[1] == 'e' ? "cbz" : "cbnz", reg, target);
           p = branch_end + 1;

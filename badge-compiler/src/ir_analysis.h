@@ -111,6 +111,8 @@ typedef struct {
   unsigned *parameters, parameter_count;
   ir_index type_index, global_index, named_types;
   unsigned capacity;
+  unsigned type_capacity, field_capacity, function_capacity, definition_capacity;
+  unsigned instruction_capacity, block_capacity, edge_capacity, operand_capacity;
 } ir_analysis;
 
 /* The view owns no text: all storage has the context's scratch lifetime. */

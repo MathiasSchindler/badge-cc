@@ -1,5 +1,6 @@
 #include "codegen_internal.h"
 #include <stdlib.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct cg_successor {
@@ -15,7 +16,7 @@ typedef struct {
 typedef struct {
   cg_inst *instruction;
   cg_register_value *result;
-  uint64_t *use;
+  unsigned first_use, use_count;
 } cg_live_instruction;
 typedef struct cg_asm_live {
   cg_inst *instruction;
@@ -32,6 +33,7 @@ struct cg_global {
   cg_register_value **values;
   cg_live_block *block;
   cg_live_instruction *instruction;
+  unsigned *uses, use_count, use_capacity;
   uint64_t *graph;
   cg_asm_live *assembly, *current_assembly;
   cg_affinity *affinities;
@@ -43,6 +45,11 @@ static const unsigned registers[CG_GLOBAL_REGISTER_COUNT] = {8, 10, 11, 4, 5, 3,
 
 static uint64_t *bits(cg_context *c) {
   return cg_alloc(c, c->global->words * sizeof(uint64_t));
+}
+static uint64_t *scratch_bits(uint64_t **next,unsigned words) {
+  uint64_t *row = *next;
+  *next += words;
+  return row;
 }
 static void add(uint64_t *set, unsigned index) {
   set[index / 64] |= UINT64_C(1) << (index % 64);
@@ -57,13 +64,9 @@ static void merge(cg_context *c, uint64_t *dst, const uint64_t *src) {
   }
 }
 static unsigned block_index(cg_context *c, const char *token) {
-  const char *name = cg_name(c, token);
-  for (unsigned n = 0; n < c->global->blocks; n++) {
-    cg_register_work(c);
-    if (!strcmp(c->global->block[n].block->name, name))
-      return n;
-  }
-  cg_error(c, "register allocation branch target does not exist");
+  cg_block *block = cg_find_block(c, token);
+  if (!block) cg_error(c, "register allocation branch target does not exist");
+  return block->live_index;
 }
 enum { LOOP_BLOCK_LIMIT = 256, LOOP_DEPTH_LIMIT = 2 };
 
@@ -142,7 +145,13 @@ static void uses(cg_context *c, unsigned start, unsigned end, uint64_t *set,
     cg_register_value *v = cg_register_lookup(c, c->tokens[k].text);
     if (!v->value)
       continue;
-    add(set, v->index);
+    if (set) add(set, v->index);
+    else {
+      struct cg_global *g = c->global;
+      if (g->use_count == g->use_capacity)
+        cg_error(c, "register use inventory exceeded");
+      g->uses[g->use_count++] = v->index;
+    }
     v->uses++;
     unsigned score = 1 + bonus + (v->definition != block->block ? 4 : 0);
     v->score += score + depth;
@@ -242,16 +251,22 @@ static void constrain(cg_context *c, cg_live_instruction *i,
   if (c->global->registers < 6) mask &= ~(1u << 3);
   if (!mask)
     return;
-  for (unsigned w = 0; w < c->global->words; w++) {
+  struct cg_global *g = c->global;
+  int transient_call_uses = c->scalar_stream_selection &&
+      i->instruction->scalar_call_arguments_plus_one &&
+      i->instruction->scalar_call_arguments_plus_one <= 4;
+  if (!transient_call_uses)
+    for (unsigned n = i->first_use; n < i->first_use + i->use_count; n++) {
+      cg_register_work(c);
+      g->values[g->uses[n]]->forbidden |= mask;
+    }
+  for (unsigned w = 0; w < g->words; w++) {
     cg_register_work(c);
-    int transient_call_uses = c->scalar_stream_selection &&
-        i->instruction->scalar_call_arguments_plus_one &&
-        i->instruction->scalar_call_arguments_plus_one <= 4;
-    uint64_t values = live[w] | (transient_call_uses ? 0 : i->use[w]);
+    uint64_t values = live[w];
     while (values) {
       cg_register_work(c);
       unsigned bit = (unsigned)__builtin_ctzll(values);
-      cg_register_value *v = c->global->values[w * 64 + bit];
+      cg_register_value *v = g->values[w * 64 + bit];
       v->forbidden |= mask;
       values &= values - 1;
     }
@@ -542,13 +557,25 @@ void cg_global_prepare(cg_context *c) {
   g->words = (g->count + 63) / 64;
   for (cg_block *b = c->fn->blocks; b; b = b->next) {
     g->blocks++;
-    for (cg_inst *i = b->first; i; i = i->next)
+    for (cg_inst *i = b->first; i; i = i->next) {
       g->instructions++;
+      g->use_capacity += i->end - i->begin;
+    }
   }
   g->values = cg_alloc(c, g->count * sizeof(*g->values));
   g->block = cg_alloc(c, g->blocks * sizeof(*g->block));
   g->instruction = cg_alloc(c, g->instructions * sizeof(*g->instruction));
-  g->graph = cg_alloc(c, (size_t)g->count * g->words * sizeof(uint64_t));
+  g->uses = cg_alloc(c, (size_t)g->use_capacity * sizeof(*g->uses));
+  size_t rows = (size_t)g->count + (size_t)g->blocks * 5 + 2;
+  size_t word_bytes = (size_t)g->words * sizeof(uint64_t);
+  if (word_bytes && rows > (CG_ALLOCATION_LIMIT - c->memory) / word_bytes)
+    cg_error(c, "backend allocation limit exceeded");
+  size_t scratch_bytes = rows * word_bytes;
+  c->liveness_scratch = calloc(1, scratch_bytes ? scratch_bytes : sizeof(uint64_t));
+  if (!c->liveness_scratch) cg_error(c, "out of memory");
+  c->memory += scratch_bytes;
+  g->graph = c->liveness_scratch;
+  uint64_t *scratch = g->graph + (size_t)g->count * g->words;
   for (unsigned n = 0; n < c->register_capacity; n++) {
     cg_register_value *v = &c->register_table[n];
     if (v->value)
@@ -557,16 +584,16 @@ void cg_global_prepare(cg_context *c) {
   unsigned bn = 0, in = 0;
   for (cg_block *b = c->fn->blocks; b; b = b->next, bn++) {
     cg_live_block *lb = &g->block[bn];
+    b->live_index = bn;
     lb->block = b;
     lb->first = in;
-    lb->use = bits(c);
-    lb->def = bits(c);
-    lb->in = bits(c);
-    lb->out = bits(c);
-    lb->edge = bits(c);
+    lb->use = scratch_bits(&scratch, g->words);
+    lb->def = scratch_bits(&scratch, g->words);
+    lb->in = scratch_bits(&scratch, g->words);
+    lb->out = scratch_bits(&scratch, g->words);
+    lb->edge = scratch_bits(&scratch, g->words);
     for (cg_inst *i = b->first; i; i = i->next, in++) {
       g->instruction[in].instruction = i;
-      g->instruction[in].use = bits(c);
       if (i->result) {
         cg_value *result = i->resident_extension ? i->resident_extension->result : i->result;
         cg_register_value *v = cg_register_lookup(c, result->name);
@@ -601,6 +628,7 @@ void cg_global_prepare(cg_context *c) {
     for (in = b->first; in < b->first + b->count; in++) {
       cg_live_instruction *li = &g->instruction[in];
       cg_inst *i = li->instruction;
+      li->first_use = g->use_count;
       unsigned op = i->begin + (i->result ? 2 : 0);
       int phi = !strcmp(c->tokens[op].text, "phi");
       if (phi) {
@@ -609,27 +637,28 @@ void cg_global_prepare(cg_context *c) {
           li->result->score += 16;
       } else if (i->immediate_address) {
         uses(c, i->immediate_address, i->immediate_address + 1,
-             li->use, b, b->loop_depth && c->neighbor_selection ? 6 : 0, b->loop_depth);
+             NULL, b, b->loop_depth && c->neighbor_selection ? 6 : 0, b->loop_depth);
       } else if (i->indexed_source) {
         /* Operands of a folded address are live at the access, not at the GEP. */
         unsigned value = op + 2;
         if (!strcmp(c->tokens[op].text, "store"))
-          uses(c, value, value + 1, li->use, b, 0, b->loop_depth);
+          uses(c, value, value + 1, NULL, b, 0, b->loop_depth);
         unsigned base = i->indexed_address->begin + 6;
-        uses(c, base, base + 1, li->use, b, 0, b->loop_depth);
+        uses(c, base, base + 1, NULL, b, 0, b->loop_depth);
         uses(c, i->indexed_source, i->indexed_source + 1,
-             li->use, b, 0, b->loop_depth);
+             NULL, b, 0, b->loop_depth);
       } else if (i->shifted_producer) {
         uses(c, i->shifted_source, i->shifted_source + 1,
-             li->use, b, 0, b->loop_depth);
+             NULL, b, 0, b->loop_depth);
         uses(c, i->shifted_other, i->shifted_other + 1,
-             li->use, b, 0, b->loop_depth);
+             NULL, b, 0, b->loop_depth);
       } else if (i->forwarded_call_argument) {
         unsigned argument = i->forwarded_call_argument;
-        uses(c, op + 1, argument, li->use, b, 0, b->loop_depth);
-        uses(c, argument + 1, i->end, li->use, b, 0, b->loop_depth);
+        uses(c, op + 1, argument, NULL, b, 0, b->loop_depth);
+        uses(c, argument + 1, i->end, NULL, b, 0, b->loop_depth);
       } else if (!i->folded_operand)
-        uses(c, op + 1, i->end, li->use, b, 0, b->loop_depth);
+        uses(c, op + 1, i->end, NULL, b, 0, b->loop_depth);
+      li->use_count = g->use_count - li->first_use;
       if (li->result && (!strcmp(c->tokens[op].text, "freeze") ||
                          !strcmp(c->tokens[op].text, "ptrtoint") ||
                          !strcmp(c->tokens[op].text, "inttoptr")) &&
@@ -643,15 +672,18 @@ void cg_global_prepare(cg_context *c) {
           !strcmp(c->tokens[op].text, "getelementptr") &&
           i->end - op == 8 && !strcmp(c->tokens[op + 1].text, "i8"))
         affinity(c, li->result, c->tokens[op + 4].text, 4);
-      for (unsigned w = 0; w < g->words; w++) {
+      for (unsigned n = li->first_use; n < g->use_count; n++) {
         cg_register_work(c);
-        b->use[w] |= li->use[w] & ~b->def[w];
+        unsigned value = g->uses[n];
+        if (!(b->def[value / 64] & (UINT64_C(1) << (value % 64))))
+          add(b->use, value);
       }
       if (li->result)
         add(b->def, li->result->index);
     }
   }
-  uint64_t *out = bits(c), *live = bits(c);
+  uint64_t *out = scratch_bits(&scratch, g->words);
+  uint64_t *live = scratch_bits(&scratch, g->words);
   int changed;
   do {
     changed = 0;
@@ -701,7 +733,10 @@ void cg_global_prepare(cg_context *c) {
           break;
         }
       }
-      merge(c, live, li->use);
+      for (unsigned n = li->first_use; n < li->first_use + li->use_count; n++) {
+        cg_register_work(c);
+        add(live, g->uses[n]);
+      }
     }
   }
   if (g->blocks)
@@ -861,6 +896,9 @@ void cg_global_prepare(cg_context *c) {
   }
   if (c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT)
     compact_frame(c, order);
+  free(c->liveness_scratch);
+  c->liveness_scratch = NULL;
+  c->memory -= scratch_bytes;
 }
 unsigned cg_global_register(cg_context *c, const char *name) {
   if (!cg_global_residency(c))

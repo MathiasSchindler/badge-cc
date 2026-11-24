@@ -13,8 +13,8 @@ typedef struct c_field {
     const char *name;
     c_type_t *type;
     uint32_t offset;
-    unsigned bit_width,bit_offset;
-    struct c_field *next;
+    unsigned bit_width,bit_offset,bit_bytewise;
+    struct c_field *next,*container,*member;
 } c_field_t;
 struct c_type {
     unsigned id,qualifiers,rank;
@@ -25,7 +25,7 @@ struct c_type {
     uint64_t length;
     c_type_t **parameters;
     size_t parameter_count;
-    c_field_t *fields,*last_field;
+    c_field_t *fields,*last_field,*promoted_fields;
     const char *tag;
 };
 typedef enum { S_OBJECT,S_FUNCTION,S_TYPEDEF,S_ENUM,S_PARAMETER,S_STRING } symbol_kind_t;
@@ -35,7 +35,7 @@ typedef struct symbol {
     symbol_kind_t kind;
     c_type_t *type;
     int defined,tentative,linkage,static_storage,register_storage,noreturn,used;
-    int is_inline,always_inline,noinline;
+    int is_inline,always_inline,noinline,weak,naked;
     node_t *definition;
     node_t **label_targets;
     struct symbol *owner;
@@ -50,7 +50,9 @@ typedef struct symbol {
 typedef struct scope scope_t;
 typedef enum {
     BUILTIN_NONE, BUILTIN_CLZ, BUILTIN_CTZ, BUILTIN_MUL_OVERFLOW, BUILTIN_EXPECT,
-    BUILTIN_ALLOCA, BUILTIN_VA_START, BUILTIN_VA_END
+    BUILTIN_ALLOCA, BUILTIN_VA_START, BUILTIN_VA_END, BUILTIN_POPCOUNT,
+    BUILTIN_CONSTANT_P, BUILTIN_BSWAP, BUILTIN_ISNAN, BUILTIN_ISFINITE,
+    BUILTIN_ISINF_SIGN, BUILTIN_SIGNBIT, BUILTIN_UNREACHABLE
 } c_builtin_t;
 typedef struct sem_info {
     c_type_t *type,*conversion,*operation_type;
@@ -60,7 +62,7 @@ typedef struct sem_info {
     int constant,ice,lvalue,address,unaligned_member,null_pointer_constant,float_literal;
     int64_t addend;
     uint32_t field_offset;
-    unsigned bit_width,bit_offset;
+    unsigned bit_width,bit_offset,bit_bytewise;
     node_t *selected;
     c_builtin_t builtin;
 } sem_info_t;

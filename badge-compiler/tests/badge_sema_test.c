@@ -157,6 +157,11 @@ int main(void) {
         "inline __attribute__((__always_inline__)) int f(int x){return x+1;} int g(void){return f(1);}",
         "; struct N{char c; struct {short x; int y;} inner;}; "
         "_Static_assert(__builtin_offsetof(struct N, inner.y)==8,\"nested offset\");",
+        "struct A{char tag; union{struct{short x; int y[2];}; unsigned raw;};}; "
+        "_Static_assert(__builtin_offsetof(struct A,y[0b1])==12,\"promoted indexed offset\");"
+        "struct A a={.tag=1,.x=2,.y[1]=7}; int f(void){return a.y[1];}",
+        "_Static_assert(__builtin_constant_p(10+2),\"constant\");"
+        "extern int touch(void); int f(void){return __builtin_constant_p(touch());}",
         "int log_printf(const char *, ...) __attribute__((__format__(__printf__,1,2))); "
         "void *make(unsigned, unsigned) __attribute__((__alloc_size__(1,2)));",
         "struct T{char tag; unsigned values[0];}; "
@@ -172,7 +177,8 @@ int main(void) {
         "void f(void){extern int x; x=1;} int x;",
         "int f(int a[static const 2]){return a[0];}",
         "struct S{int a;}; int f(void){struct S s={1};return ((struct S){.a=s.a}).a;}",
-        "float f(float x){return x+x;}", "static float x=1;",
+        "float f(float x){return x+x;}", "static float x=1;", "double x=1.0;",
+        "struct __attribute__((packed)) S{unsigned b:2;};",
         "int (*factory(int x))(int){return 0;}"
         , "int x; int *p=0 ? &x : 0;"
         , "enum E{X=0}; _Static_assert(_Generic((enum E)0,unsigned int:1,default:0),\"enum compatible\");"
@@ -198,6 +204,10 @@ int main(void) {
         "int x=1; int x=2;", "int f(void){return 1;} int f(void){return 2;}",
         "void x;", "unsigned float x;", "long short x;", "int int x;",
         "struct S{int x;char x;};", "struct S{struct S self;};",
+        "struct S{struct{int x;}; char x;};",
+        "struct S{union{int x; char y;};}; struct S s={.x=2,.y=1};",
+        "struct S{int x[2];}; unsigned n=__builtin_offsetof(struct S,x[2]);",
+        "static int x __attribute__((weak));",
         "struct S{int x;}; struct S{int y;};", "struct S{int x;}; int f(struct S s){return s.no;}",
         "int f(void){int x;return x.no;}", "int f(void){return *1;}",
         "int f(void){return 1();}", "int f(int); int g(void){return f();}",
@@ -256,8 +266,10 @@ int main(void) {
         }
     }
     const char *unsupported[] = {
-        "double x=1.0;", "struct S{signed x:2;};", "_Atomic(int) x;",
-        "void f(int n){int a[n];}", "struct __attribute__((packed)) S{unsigned b:2;};",
+        "struct S{signed x:2;};", "_Atomic(int) x;",
+        "union U{struct{int x;}; char y;}; union U u={.y=1,.x=2};",
+        "int f(void){return 2;} int f(void) __attribute__((naked));",
+        "void f(int n){int a[n];}",
         "unsigned x=0; char c=L'x';", "int c='ab';", "void f(void*p){p++;}",
         "int f(){return 0;}", "extern inline int f(void){return 0;}",
         "struct S{int a[0]; int y;};",

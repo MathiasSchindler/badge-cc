@@ -273,6 +273,14 @@ no:
   assert.match(error.stderr, /work limit exceeded/);
   assert.equal(fs.readFileSync(file('preserved.s'), 'utf8'), 'preserved');
 });
+test('default CFG cleanup threads thousands of jump-only blocks within the work bound', t => {
+  const file = files(t);
+  const trampolines = Array.from({ length: 3600 }, (_, k) => `jump${k}:\n br label %jump${k + 1}\n`).join('');
+  const assembly = compile(file, `define i32 @main() {\nentry:\n br label %jump0\n${trampolines}jump3600:\n ret i32 0\n}\n`,
+    'thumb-constants');
+  assert((assembly.match(/^\.Lcg_\d+_b\d+:/gm) ?? []).length <= 2);
+  run(tool('badge-asm'), [file('thumb-constants.s'), '-o', file('body.o')]);
+});
 test('branch-only cycles terminate analysis and chains preserve PHI predecessor transport', t => {
   const file = files(t);
   const source = `define void @cycle() {

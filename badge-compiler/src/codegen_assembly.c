@@ -7,7 +7,8 @@ static int hex(unsigned char ch) {
   if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
   return -1;
 }
-static char *decode(cg_context *c, const char *text) {
+static char *decode(cg_context *c, const char *text, const unsigned *registers,
+                    unsigned register_count) {
   size_t length = strlen(text);
   if (length < 2 || text[0] != '"' || text[length - 1] != '"')
     cg_error(c, "invalid inline assembly string");
@@ -24,6 +25,14 @@ static char *decode(cg_context *c, const char *text) {
     }
     if (!ch) cg_error(c, "NUL in inline assembly");
     if (ch == '$' && k + 2 < length && text[k + 1] == '$') k++;
+    else if (ch == '$' && register_count) {
+      if (k + 2 >= length || text[k + 1] < '0' ||
+          (unsigned)(text[k + 1] - '0') >= register_count ||
+          (text[k + 2] >= '0' && text[k + 2] <= '9'))
+        cg_error(c, "unsupported inline assembly operand reference");
+      decoded[count++] = 'r';
+      ch = '0' + registers[(unsigned)(text[++k] - '0')];
+    }
     decoded[count++] = (char)ch;
   }
   decoded[count] = 0;
@@ -63,27 +72,56 @@ cg_assembly *cg_instruction_assembly(cg_context *c, cg_inst *i) {
   if (k == i->end) return NULL;
   k++;
   if (k < i->end && !strcmp(c->tokens[k].text, "sideeffect")) k++;
-  if (i->result || k + 4 >= i->end || strcmp(c->tokens[k + 1].text, ",") ||
-      strcmp(c->tokens[k + 3].text, "(") || strcmp(c->tokens[k + 4].text, ")"))
+  if (k + 4 >= i->end || strcmp(c->tokens[k + 1].text, ",") ||
+      strcmp(c->tokens[k + 3].text, "("))
     cg_error(c, "unsupported inline assembly operands/modifiers");
   cg_assembly *a = cg_alloc(c, sizeof(*a));
-  a->text = decode(c, c->tokens[k].text);
-  char *constraints = decode(c, c->tokens[k + 2].text);
+  char *constraints = decode(c, c->tokens[k + 2].text, NULL, 0);
   const char *p = constraints;
+  unsigned registers[5], register_count = 0, tied = 0;
+  int clobbers = 0;
   while (*p) {
     cg_register_work(c);
     if (!strncmp(p, "~{memory}", 9)) {
+      clobbers = 1;
       a->memory_barrier = 1;
       p += 9;
     } else if (!strncmp(p, "~{cc}", 5)) {
+      clobbers = 1;
       a->flags_write = 1;
       p += 5;
-    } else
-      cg_error(c, "unsupported inline assembly clobber");
+    } else if (*p == '=' && register_count == a->output && a->output < 2 && !clobbers) {
+      p++;
+      if (*p == '&') p++;
+      if (*p != 'r' && *p != 'l')
+        cg_error(c, "unsupported inline assembly output constraint");
+      p++;
+      a->output++;
+      registers[register_count] = register_count;
+      register_count++;
+    } else if (!clobbers && (*p == 'r' || *p == 'l')) {
+      if (tied || register_count == 3)
+        cg_error(c, "inline assembly register operand limit exceeded");
+      p++;
+      a->input_registers[a->input_count++] = register_count;
+      registers[register_count] = register_count;
+      register_count++;
+    } else if (!clobbers && *p >= '0' && (unsigned)(*p - '0') < a->output) {
+      unsigned reg = (unsigned)(*p++ - '0');
+      if (a->input_count == 3 || (tied & (1u << reg)))
+        cg_error(c, "invalid tied inline assembly input");
+      tied |= 1u << reg;
+      a->input_registers[a->input_count++] = reg;
+      registers[register_count] = reg;
+      register_count++;
+    } else cg_error(c, "unsupported inline assembly constraint or clobber");
     if (*p && *p != ',') cg_error(c, "unsupported inline assembly clobber");
     if (*p == ',' && !*++p) cg_error(c, "invalid inline assembly clobber list");
   }
-  a->known = nops(c, a->text);
+  if ((a->output != 0) != (i->result != NULL))
+    cg_error(c, "inline assembly output constraint does not match the result");
+  a->text = decode(c, c->tokens[k].text, registers, register_count);
+  a->known = !register_count && nops(c, a->text);
   if (!a->known) {
     a->reads = a->writes = 0xffffu;
     a->flags_read = a->flags_write = 1;

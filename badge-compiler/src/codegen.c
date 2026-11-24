@@ -623,13 +623,17 @@ static void cg_global(cg_context *c) {
   }
   if (!strncmp(name, "llvm.", 5))
     cg_error(c, "unsupported LLVM special global");
-  int internal = 0, external = 0, constant = 0, unnamed = 0;
+  int internal = 0, external = 0, weak = 0, constant = 0, unnamed = 0;
   while (!cg_is(c, "global") && !cg_is(c, "constant")) {
     char *s = cg_take(c);
     if (!strcmp(s, "internal") || !strcmp(s, "private"))
       internal = 1;
     else if (!strcmp(s, "external"))
       external = 1;
+    else if (!strcmp(s, "weak") || !strcmp(s, "extern_weak")) {
+      weak = 1;
+      external |= !strcmp(s, "extern_weak");
+    }
     else if (!strcmp(s, "unnamed_addr"))
       unnamed = 1;
     else if (strcmp(s, "dso_local") && strcmp(s, "local_unnamed_addr"))
@@ -653,6 +657,8 @@ static void cg_global(cg_context *c) {
   }
   if (!align || (align & (align - 1)) || align > 65536)
     cg_error(c, "invalid global alignment");
+  if (weak && internal) cg_error(c, "weak global requires external linkage");
+  if (weak) cg_emit(c, ".weak %s\n", name);
   if (!external) {
     if (section)
       cg_emit(c, ".section \"%s\",\"%s\",%%progbits\n", section,
@@ -668,7 +674,7 @@ static void cg_global(cg_context *c) {
                                             : "data",
               name, constant ? "a" : "aw",
               !constant && cg_is(c, "zeroinitializer") ? "nobits" : "progbits");
-    if (!internal)
+    if (!internal && !weak)
       cg_emit(c, ".global %s\n", name);
     cg_emit(c, ".type %s, %%object\n.balign %u\n%s:\n", name, align, name);
     cg_global_constant(c, t);
@@ -687,6 +693,8 @@ static void cg_function_parse(cg_context *c) {
     char *s = cg_take(c);
     if (!strcmp(s, "internal") || !strcmp(s, "private"))
       f->internal = 1;
+    else if (!strcmp(s, "weak"))
+      f->weak = 1;
     else if (!strcmp(s, "signext"))
       f->return_ext = 1;
     else if (!strcmp(s, "fastcc"))
@@ -765,6 +773,8 @@ static void cg_function_parse(cg_context *c) {
   while (!cg_accept(c, "{")) {
     if (cg_accept(c, "internal"))
       f->internal = 1;
+    else if (cg_accept(c, "naked"))
+      f->naked = 1;
     else if (cg_accept(c, "section"))
       f->section = cg_section(c);
     else if (cg_accept(c, "align")) {
@@ -775,6 +785,8 @@ static void cg_function_parse(cg_context *c) {
     } else
       cg_take(c);
   }
+  if (f->weak && f->internal)
+    cg_error(c, "weak function requires external linkage");
   while (!cg_accept(c, "}")) {
     char *s = cg_take(c);
     unsigned line = c->line;
@@ -979,12 +991,9 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
                     int fallthrough) {
   target = cg_name(c, target);
   if (cg_control_selection(c)) {
-    unsigned limit = 0;
-    for (cg_block *p = c->fn->blocks; p; p = p->next) limit++;
-    for (unsigned n = 0; n < limit; n++) {
+    for (unsigned n = 0; n < c->fn->block_count; n++) {
       cg_register_work(c);
-      cg_block *p = c->fn->blocks;
-      while (p && strcmp(p->name, target)) p = p->next;
+      cg_block *p = cg_find_block(c, target);
       if (!p || !p->first || p->first != p->last || p->first->result ||
           p->first->end - p->first->begin != 3 ||
           strcmp(c->tokens[p->first->begin].text, "br") ||
@@ -994,9 +1003,7 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
       target = cg_name(c, next);
     }
   }
-  cg_block *b = c->fn->blocks;
-  while (b && strcmp(b->name, target))
-    b = b->next;
+  cg_block *b = cg_find_block(c, target);
   if (!b)
     cg_error(c, "branch target does not exist");
   unsigned scratch = c->phi_space;
@@ -1602,13 +1609,25 @@ static void cg_call(cg_context *c, cg_inst *i) {
   }
   if (!strcmp(callee, "asm")) {
     cg_assembly *effects = cg_instruction_assembly(c, i);
-    if (ret->size) cg_error(c, "unsupported inline assembly return type");
+    if ((!effects->output && ret->size) || (effects->output == 1 && ret->bits != 32) ||
+        (effects->output == 2 && (!ret->fields || ret->count != 2 || ret->size != 8 ||
+                                  ret->fields[0]->bits != 32 || ret->fields[1]->bits != 32)))
+      cg_error(c, "unsupported inline assembly return type");
     cg_accept(c, "sideeffect");
     cg_take(c);
     cg_expect(c, ",");
     cg_take(c);
-    cg_expect(c, "(");
-    cg_expect(c, ")");
+    cg_arg args[256] = {0};
+    unsigned count = cg_arguments(c, args), after = c->pos;
+    if (count != effects->input_count)
+      cg_error(c, "inline assembly constraint count does not match the arguments");
+    for (unsigned k = 0; k < count; k++) {
+      if (args[k].type->bits != 32 || args[k].byval)
+        cg_error(c, "inline assembly register input must be i32");
+      c->pos = args[k].start;
+      cg_value_read(c, args[k].type, effects->input_registers[k], 0);
+    }
+    c->pos = after;
     if (cg_effect_selection(c))
       cg_emit(c, "@ assembly-effects: known %d reads %u writes %u flags %d/%d "
               "memory %d/%d barrier %d control %d\n",
@@ -1624,6 +1643,8 @@ static void cg_call(cg_context *c, cg_inst *i) {
       cg_emit(c, "@ constant-assembly-lines: %u\n", lines);
     }
     cg_emit(c, "%s\n", effects->text);
+    for (unsigned k = 0; k < effects->output; k++)
+      cg_save(c, i->result, k, k);
     return;
   }
   cg_arg args[256] = {0};
@@ -1693,14 +1714,25 @@ static void cg_call(cg_context *c, cg_inst *i) {
       c->pos = after;
       return;
     }
-    if (!strcmp(callee, "@llvm.bswap.i16")) {
-      if (count != 1 || !i->result || ret->bits != 16 ||
-          i->result->type->bits != 16 || args[0].type->bits != 16)
-        cg_error(c, "invalid i16 byte-swap intrinsic");
+    unsigned swap = !strcmp(callee, "@llvm.bswap.i16") ? 16
+                    : !strcmp(callee, "@llvm.bswap.i32") ? 32
+                    : !strcmp(callee, "@llvm.bswap.i64") ? 64 : 0;
+    if (swap) {
+      if (count != 1 || !i->result || ret->bits != swap ||
+          i->result->type->bits != swap || args[0].type->bits != swap)
+        cg_error(c, "invalid byte-swap intrinsic");
       c->pos = args[0].start;
       cg_value_read(c, args[0].type, 0, 0);
-      cg_emit(c, "rev16.n r0, r0\n");
-      cg_save(c, i->result, 0, 0);
+      if (swap == 64) {
+        c->pos = args[0].start;
+        cg_value_read(c, args[0].type, 1, 1);
+        cg_emit(c, "rev.n r0, r0\nrev.n r1, r1\n");
+        cg_save(c, i->result, 1, 0);
+        cg_save(c, i->result, 0, 1);
+      } else {
+        cg_emit(c, swap == 16 ? "rev16.n r0, r0\n" : "rev.n r0, r0\n");
+        cg_save(c, i->result, 0, 0);
+      }
       c->pos = after;
       return;
     }
@@ -1885,7 +1917,7 @@ unsigned cg_instruction_scratch(cg_context *c, cg_inst *i) {
     for (unsigned k = at + 1; k < i->end; k++) {
       cg_register_work(c);
       if (!strcmp(c->tokens[k].text, "asm") ||
-          !strcmp(c->tokens[k].text, "@llvm.bswap.i16"))
+          !strncmp(c->tokens[k].text, "@llvm.bswap.i", sizeof("@llvm.bswap.i") - 1))
         return 0;
     }
     unsigned ret = at + 1;
@@ -3233,12 +3265,37 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
       cg_emit(c, "%s.w r1, r1, r3\n", ins);
   } else if (!strcmp(op, "shl") || !strcmp(op, "lshr") || !strcmp(op, "ashr")) {
     if (t->size == 8) {
+      int left_shift = !strcmp(op, "shl"), arithmetic = !strcmp(op, "ashr");
       c->pos = right;
-      uint64_t amount = cg_number(c, cg_take(c));
+      const char *operand = cg_take(c);
+      if (*operand == '%') {
+        unsigned id = ++c->unique;
+        const char *right_op = arithmetic ? "asr" : "lsr";
+        cg_emit(c, "cmp r2, #32\nbhs.n .Lcg_shiftwide%u\nrsb.w r12, r2, #32\n", id);
+        if (left_shift)
+          cg_emit(c, "lsr.w r4, r0, r12\nlsl.w r1, r1, r2\norr.w r1, r1, r4\n"
+                     "lsl.w r0, r0, r2\n");
+        else
+          cg_emit(c, "lsl.w r4, r1, r12\nlsr.w r0, r0, r2\norr.w r0, r0, r4\n"
+                     "%s.w r1, r1, r2\n", right_op);
+        cg_emit(c, "b.n .Lcg_shiftend%u\n.Lcg_shiftwide%u:\nsub.w r2, r2, #32\n", id, id);
+        if (left_shift) {
+          cg_emit(c, "lsl.w r1, r0, r2\n");
+          cg_immediate(c, 0, 0);
+        } else {
+          cg_emit(c, "%s.w r0, r1, r2\n", right_op);
+          if (arithmetic) cg_emit(c, "asr.w r1, r1, #31\n");
+          else cg_immediate(c, 1, 0);
+        }
+        cg_emit(c, ".Lcg_shiftend%u:\n", id);
+        cg_save(c, i->result, 0, 0);
+        cg_save(c, i->result, 1, 1);
+        return;
+      }
+      uint64_t amount = cg_number(c, operand);
       if (amount >= 64)
         cg_error(c, "64-bit shift count out of range");
       unsigned shift = (unsigned)amount;
-      int left_shift = !strcmp(op, "shl"), arithmetic = !strcmp(op, "ashr");
       if (shift && shift < 32) {
         if (left_shift)
           cg_emit(c,
@@ -3423,8 +3480,18 @@ static void cg_process(cg_context *c, const char *source, size_t size,
       } else if (!strcmp(kind, "datalayout") && strcmp(value, BADGE_IR_LAYOUT))
         cg_error(c, "unsupported data layout");
       cg_skip_line(c, line);
+    } else if (!strcmp(s, "declare")) {
+      if (cg_accept(c, "extern_weak")) {
+        while (c->pos < c->count && c->tokens[c->pos].line == line &&
+               c->tokens[c->pos].text[0] != '@')
+          cg_take(c);
+        if (c->pos == c->count || c->tokens[c->pos].line != line)
+          cg_error(c, "weak declaration requires a function name");
+        cg_emit(c, ".weak %s\n", cg_name(c, cg_take(c)));
+      }
+      cg_skip_line(c, line);
     } else if ((*s == '%' && cg_named_type_find(c, s)) ||
-               !strcmp(s, "declare") || !strcmp(s, "attributes") ||
+               !strcmp(s, "attributes") ||
                !strcmp(s, "source_filename") || *s == '!')
       cg_skip_line(c, line);
     else
@@ -3554,6 +3621,7 @@ static int cg_compile(
     c->allocations = a->next;
     free(a);
   }
+  free(c->liveness_scratch);
   free(c->out);
   free(c);
   return result;

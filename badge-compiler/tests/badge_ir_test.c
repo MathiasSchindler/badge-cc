@@ -143,12 +143,27 @@ int main(void) {
         {"static inline int f(void){return 0;} int (*p)(void)=f;","define internal i32 @\"f\""},
         {"__attribute__((section(\".vectors\"),used)) int x=2;","section \".vectors\""},
         {"__attribute__((section(\".\\x74\"))) int f(void){return 0;}","section \".t\""},
+        {"__attribute__((section(\".init\" \".test\"),weak)) int f(void){return 0;}",
+         "define weak i32 @\"f\"() #0 section \".init.test\""},
+        {"extern int option __attribute__((weak)); int *f(void){return &option;}",
+         "extern_weak global"},
+        {"float value=-0.0f; double wide=1.5f;", "c\"\\00\\00\\00\\80\""},
+        {"int a; unsigned address=(unsigned)&a;", "ptr @\"a\""},
+        {"void *f(void *p,unsigned n){return __builtin_memset(p,257,n);}",
+         "call ptr @\"memset\""},
+        {"unsigned long long f(unsigned long long x){return __builtin_bswap64(x);}",
+         "call i64 @llvm.bswap.i64"},
         {"int f(int x){return _Generic(x,int:x+2,default:0);}","add i32"},
         {"int f(int x){return _Generic(&f,int(*)(int):x+2,default:0);}","add i32"},
         {"int f(int x){_Generic(x,int:x,default:x)=3;return x;}","store i32 3"},
         {"void f(void){__asm__ volatile(\"nop\":::\"memory\");}","~{memory}"},
         {"void f(void){__asm__ volatile(\"nop\":::\"mem\" \"ory\");}","~{memory}"},
         {"void f(void){__asm__(\"dollar$label: nop\");}","dollar$$label: nop"},
+        {"int f(int x){__asm__ volatile(\"adds %0, #1\":\"+l\"(x)::\"cc\");return x;}",
+         "\"=r,0,~{cc}\""},
+        {"int f(int x){int a,b;__asm__ volatile(\"mov %[a], %2\\nmov %1, %2\":"
+         "[a]\"=&r\"(a),\"=&r\"(b):\"r\"(x));return a+b;}", "extractvalue { i32, i32 }"},
+        {"struct __attribute__((packed)) S{char c;int x;};int f(struct S *p){return p->x;}", "load i8"},
         {"struct S{int x;};void f(volatile struct S *s){(void)*s;}","i32 4, i1 true"},
         {"struct S{int x;};void f(void){volatile struct S s={3};}","store volatile i32"},
         {"int f(void){int a[2]={1,2};return sizeof(a)+_Alignof(int);}","ret i32 12"},
@@ -173,6 +188,8 @@ int main(void) {
     fixture("extern int a,b; int f(void){return &a!=&b;}", "icmp ne ptr", 1, path);
     fixture_checked("extern int c_name(int) __asm__(\"real\" \"_f\"); int c_name(int); "
                     "int entry(int x){return c_name(x);}", "call i32 @\"real_f\"", "@\"c_name\"", 1, path);
+    fixture_checked("extern int touch(void); int f(void){return __builtin_constant_p(touch());}",
+                    "ret i32 0", "@\"touch\"", 1, path);
     fixture_checked("inline __attribute__((always_inline)) int g(int x){if(x)return x;return 5;} "
                     "int f(int *p){int a=(g)((*p)++);return a+g(*p);}", "store i32 5", "@\"g\"", 1, path);
     fixture_checked("float opaque(float); static inline void dead(int x){__asm__(\"nop\"::\"r\"(x));} "
@@ -193,8 +210,9 @@ int main(void) {
     memcpy(chain+written,"else return -1;}",sizeof("else return -1;}"));
     fixture(chain,"ret i32 320",1,path);
     const char *negative[]={
-        "void f(int x){__asm__(\"nop\":\"=r\"(x));}",
-        "void f(int x){__asm__(\"nop\"::\"r\"(x));}",
+        "void f(int x){__asm__(\"nop\"::\"m\"(x));}",
+        "void f(int x){__asm__(\"mov %1, %0\"::\"r\"(x));}",
+        "void f(int x){__asm__(\"mov r0, %00\"::\"r\"(x));}",
         "void f(void){__asm__(\"nop\":::\"r0\");}",
         "void f(void){__asm__ goto(\"nop\"::::done);done:;}",
         "int f(void){return missing;}",
@@ -203,7 +221,7 @@ int main(void) {
         "int f(void){return 1.5;}",
         "struct S{int x:2;};",
         "void f(int n){int x[n];}",
-        "int a; unsigned address=(unsigned)&a;",
+        "int a; unsigned short address=(unsigned short)(unsigned)&a;",
         "struct A{long long x __attribute__((aligned(3)));};",
         "struct A{long long x __attribute__((aligned));};",
         "int f(void){return nullptr;}",
@@ -216,7 +234,7 @@ int main(void) {
         "struct S; struct S f(void); struct S (*p)(void)=f;",
         "static inline __attribute__((always_inline)) int f(void){return f();} int g(void){return f();}",
         "static inline __attribute__((always_inline)) int f(void){return 1;} int (*p)(void)=f;",
-        "struct __attribute__((packed)) S{char c;int x;}; int f(struct S *p){return p->x;}",
+        "struct __attribute__((packed)) S{char c;int x;}; int *f(struct S *p){return &p->x;}",
         "struct Bits{unsigned a:3;}; unsigned f(volatile struct Bits *p){return p->a;}",
         "extern int *a,*b; unsigned f(void){return sizeof(char[1-2*!(a!=b)]);}",
         "void f(int n){static const void *const t[2]={[0]=&&x}; goto *t[n]; x:;}",

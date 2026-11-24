@@ -1,20 +1,56 @@
 #include "codegen_internal.h"
 #include <string.h>
 
-int cg_target_has_phi(cg_context *c, const char *target) {
-  const char *name = cg_name(c, target);
-  for (cg_block *b = c->fn->blocks; b; b = b->next) {
+static cg_block **block_slot(cg_context *c, const char *name) {
+  uint32_t hash = 2166136261u;
+  for (const unsigned char *p = (const unsigned char *)name; *p; ++p) {
     cg_register_work(c);
-    if (strcmp(b->name, name))
-      continue;
-    for (cg_inst *i = b->first; i; i = i->next) {
-      cg_register_work(c);
-      if (i->result && !strcmp(c->tokens[i->begin + 2].text, "phi"))
-        return 1;
-    }
-    return 0;
+    hash = (hash ^ *p) * 16777619u;
   }
-  cg_error(c, "branch target does not exist");
+  unsigned mask = c->fn->block_index_capacity - 1, slot = hash & mask;
+  cg_block **map = c->fn->block_index;
+  while (map[slot] && strcmp(map[slot]->name, name)) {
+    cg_register_work(c);
+    slot = (slot + 1) & mask;
+  }
+  return &map[slot];
+}
+cg_block *cg_find_block(cg_context *c, const char *target) {
+  cg_block *block = *block_slot(c, cg_name(c, target));
+  return block && !block->removed ? block : NULL;
+}
+int cg_target_has_phi(cg_context *c, const char *target) {
+  cg_block *block = cg_find_block(c, target);
+  if (!block) cg_error(c, "branch target does not exist");
+  return block->has_phi;
+}
+static void index_blocks(cg_context *c) {
+  for (cg_function *f = c->functions; f; f = f->next) {
+    c->fn = f;
+    unsigned capacity = 8;
+    for (cg_block *b = f->blocks; b; b = b->next)
+      f->block_count++;
+    while (capacity < 2 * f->block_count) capacity *= 2;
+    f->block_index_capacity = capacity;
+    f->block_index = cg_alloc(c, capacity * sizeof(*f->block_index));
+    for (cg_block *b = f->blocks; b; b = b->next) {
+      cg_block **slot = block_slot(c, b->name);
+      if (*slot) cg_error(c, "duplicate block label");
+      *slot = b;
+      for (cg_inst *i = b->first; i; i = i->next) {
+        cg_register_work(c);
+        if (i->result && !strcmp(c->tokens[i->begin + 2].text, "phi")) {
+          b->has_phi = 1;
+          break;
+        }
+      }
+    }
+  }
+}
+static void remove_block(cg_function *f, cg_block **link) {
+  (*link)->removed = 1;
+  *link = (*link)->next;
+  f->block_count--;
 }
 static int cg_plain_jump(cg_context *c, cg_inst *i) {
   return i && !i->result && i->end - i->begin == 3 &&
@@ -82,8 +118,7 @@ static void cg_forward_boolean_edges(cg_context *c) {
         if (*value != '%' && strcmp(value, "true") && strcmp(value, "false") &&
             strcmp(value, "0") && strcmp(value, "1")) { eligible = 0; break; }
         const char *name = cg_name(c, c->tokens[at + 3].text);
-        cg_block *p = f->blocks;
-        while (p && strcmp(p->name, name)) { cg_register_work(c); p = p->next; }
+        cg_block *p = cg_find_block(c, name);
         if (!p || !cg_plain_jump(c, p->last) || p->last->begin >= original_count ||
             strcmp(cg_name(c, c->tokens[p->last->begin + 2].text), b->name))
           eligible = 0;
@@ -101,8 +136,7 @@ static void cg_forward_boolean_edges(cg_context *c) {
       }
       for (at = phi->begin + 4; at < phi->end; at += 6) {
         const char *name = cg_name(c, c->tokens[at + 3].text);
-        cg_block *p = f->blocks;
-        while (strcmp(p->name, name)) { cg_register_work(c); p = p->next; }
+        cg_block *p = cg_find_block(c, name);
         cg_inst *jump = p->last;
         char *value = c->tokens[at + 1].text;
         unsigned begin = c->count;
@@ -119,7 +153,7 @@ static void cg_forward_boolean_edges(cg_context *c) {
         jump->begin = begin;
         jump->end = c->count;
       }
-      *link = b->next;
+      remove_block(f, link);
     }
   }
 }
@@ -229,11 +263,47 @@ static void cg_delay_byte_advances(cg_context *c) {
       }
     }
 }
+static cg_block *jump_destination(cg_context *c, cg_block *from) {
+  cg_block *to = from;
+  while (to->forward) {
+    cg_register_work(c);
+    to = to->forward;
+  }
+  while (from->forward && from->forward != to) {
+    cg_register_work(c);
+    cg_block *next = from->forward;
+    from->forward = to;
+    from = next;
+  }
+  return to;
+}
 static void cg_remove_jump_blocks(cg_context *c) {
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS) return;
   for (cg_function *f = c->functions; f; f = f->next) {
     c->fn = f;
+    unsigned candidates = 0;
+    for (cg_block *b = f->blocks; b; b = b->next) {
+      cg_register_work(c);
+      candidates += b != f->blocks && b->first == b->last && cg_plain_jump(c, b->last);
+    }
+    if (!candidates) continue;
+    for (cg_block *b = f->blocks; b; b = b->next)
+      for (cg_inst *i = b->first; i; i = i->next) {
+        int branch = !i->result && !strcmp(c->tokens[i->begin].text, "br");
+        for (unsigned k = i->begin; k < i->end; ++k) {
+          cg_register_work(c);
+          char *token = c->tokens[k].text;
+          if (*token != '%') continue;
+          cg_block *entry = cg_find_block(c, token);
+          if (!entry) continue;
+          if (branch && k > i->begin && !strcmp(c->tokens[k - 1].text, "label"))
+            entry->jump_reference = token;
+          else
+            entry->pinned = 1;
+        }
+      }
     cg_block **link = &f->blocks;
+    unsigned removed = 0;
     while (*link) {
       cg_register_work(c);
       cg_block *b = *link;
@@ -241,39 +311,34 @@ static void cg_remove_jump_blocks(cg_context *c) {
         link = &b->next;
         continue;
       }
-      char *target = c->tokens[b->last->begin + 2].text;
-      if (!strcmp(cg_name(c, target), b->name) || cg_target_has_phi(c, target)) {
+      cg_block *target = *block_slot(c, cg_name(c, c->tokens[b->last->begin + 2].text));
+      if (!target || (target->removed && !target->forward))
+        cg_error(c, "branch target does not exist");
+      target = jump_destination(c, target);
+      if (b->pinned || b == target || target->has_phi) {
         link = &b->next;
         continue;
       }
-      int eligible = 1;
-      for (cg_block *p = f->blocks; p; p = p->next)
-        for (cg_inst *i = p->first; i; i = i->next)
-          for (unsigned k = i->begin; k < i->end; k++) {
-            cg_register_work(c);
-            const char *text = c->tokens[k].text;
-            if (*text == '%' && !strcmp(cg_name(c, text), b->name) &&
-                (i->result || strcmp(c->tokens[i->begin].text, "br") ||
-                 k == i->begin || strcmp(c->tokens[k - 1].text, "label")))
-              eligible = 0;
-          }
-      if (!eligible) {
-        link = &b->next;
-        continue;
-      }
-      for (cg_block *p = f->blocks; p; p = p->next)
-        for (cg_inst *i = p->first; i; i = i->next)
-          for (unsigned k = i->begin; k < i->end; k++) {
-            cg_register_work(c);
-            const char *text = c->tokens[k].text;
-            if (*text == '%' && !strcmp(cg_name(c, text), b->name))
-              c->tokens[k].text = target;
-          }
-      *link = b->next;
+      b->forward = target;
+      removed++;
+      remove_block(f, link);
     }
+    if (removed)
+      for (cg_block *b = f->blocks; b; b = b->next)
+        for (cg_inst *i = b->first; i; i = i->next) {
+          if (i->result || strcmp(c->tokens[i->begin].text, "br")) continue;
+          for (unsigned k = i->begin + 1; k < i->end; ++k) {
+            cg_register_work(c);
+            if (*c->tokens[k].text != '%' || strcmp(c->tokens[k - 1].text, "label")) continue;
+            cg_block *entry = *block_slot(c, cg_name(c, c->tokens[k].text));
+            if (entry && entry->forward)
+              c->tokens[k].text = jump_destination(c, entry)->jump_reference;
+          }
+        }
   }
 }
 void cg_prepare_cfg(cg_context *c) {
+  index_blocks(c);
   cg_forward_boolean_edges(c);
   cg_remove_jump_blocks(c);
   cg_sink_guarded_decrements(c);

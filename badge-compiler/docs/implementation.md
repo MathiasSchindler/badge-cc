@@ -718,8 +718,9 @@ Implemented:
   and line-marker metadata.
 
 This is intentionally a **tested corpus subset**, not a claim of all C11
-preprocessing. Function-like macros support stringification (`#`) and
-standard `...` / `__VA_ARGS__`. Token pasting (`##`), trigraphs, digraphs,
+preprocessing. Macros support standard token pasting (`##`), and
+function-like macros support stringification (`#`) and `...` / `__VA_ARGS__`.
+GNU comma elision with `, ## __VA_ARGS__`, trigraphs, digraphs,
 universal-character/extended identifiers, source `#line`,
 other pragmas, character constants in `#if`, `_Pragma`, `__COUNTER__`,
 `__DATE__` and `__TIME__` are not implemented. Unsupported directives/macros
@@ -729,7 +730,7 @@ branch selection. There is no implicit system include path,
 and their tests when the input contract actually needs them.
 
 Limits are explicit: 512 distinct macro names, 32 macro parameters,
-64 include/conditional/argument-expansion nesting levels, 64 include paths,
+64 include/conditional/argument-expansion nesting levels, 128 include paths,
 512 distinct input files, 250,000 tokens per vector, one million macro
 expansions, 8 MiB per source file, 16 MiB per text buffer and 128 MiB of
 tracked allocation. These are initial implementation bounds, not hardware
@@ -955,8 +956,9 @@ The checker implements:
   depth limit for genuinely nested statements. Argument-free GNU
   `pure`, `const`, `malloc`, and `warn_unused_result` function attributes
   are accepted without drawing optimization or aliasing conclusions.
-- GNU `__builtin_offsetof` on named member chains, file-scope empty
-  declarations, and diagnostic-only `unused` and `deprecated` hints.
+- GNU `__builtin_offsetof` on member chains with constant array indices,
+  binary integer literals, file-scope empty declarations, and
+  diagnostic-only `fallthrough`, `unused`, and `deprecated` hints.
   Declaration `format`, `alloc_size`, `alloc_align`, and `nonnull` hints do
   not supply optimizer facts.
 - GNU assembly names on file-scope external declarations are preserved
@@ -968,11 +970,32 @@ The checker implements:
   Unreferenced inline bodies and external declarations are checked
   semantically but are not emitted.
 - Packed and explicitly aligned record layouts, empty GNU structs, and
-  AAPCS32 layout, integer promotions, reads, writes, and initialization
-  for named nonvolatile unsigned 32-bit bit-fields in unpacked structs.
-  A read or masked update only touches the bytes containing the field.
-  Potentially unaligned packed-member accesses and automatic field
-  initializers are diagnosed, not emitted with optimistic alignment.
+  C11 anonymous struct/union members with promoted lookup and designated
+  initialization. Positional continuation after a promoted designator and
+  overriding an already selected anonymous union alternative are diagnosed.
+  Nonvolatile struct bit-fields support `_Bool` and unsigned 8/16/32-bit
+  bases, including unnamed padding and zero-width alignment barriers.
+  Packed bit-fields touching at most four bytes and unaligned nonvolatile
+  packed integer/pointer members of up to four bytes use byte accesses.
+  Taking an unaligned member's address, or performing a volatile unaligned
+  access, remains unsupported.
+- Floating literals (including unary signs) can initialize static floating
+  objects. Explicit 32-bit integer casts of link-time symbol addresses can
+  initialize static objects with an ARM address relocation.
+- `__builtin_constant_p` recognizes proven scalar constants without evaluating
+  the operand. The target supports `popcount`, `bswap16/32/64`, infinity
+  literals and base-PCS float classification. `__builtin_memset`, `memcpy`,
+  `memmove`, and `memcmp` use the corresponding C runtime functions.
+- GNU ELF weak declarations and definitions preserve their symbol binding.
+  A `naked` definition accepts only basic assembly and emits no generated
+  prologue or epilogue. Extended asm accepts up to three `r`/`l` operands
+  (including up to two outputs), `=`/`+` outputs with optional early clobber,
+  numeric and named references, and `cc`/`memory` clobbers. Unmodified
+  references to wide integer inputs name the low lane, as on Arm. Memory,
+  immediate and alternative constraints, operand modifiers and `asm goto`
+  remain unsupported. The assembler supports the RP2350 SDK's coprocessor
+  transfers, TT instructions and VFP register loads/stores used by these
+  templates; byte encodings are checked against GNU as.
 - GNU zero-length arrays as trailing struct members. An explicit `[0]`
   is complete and has size zero; an omitted bound remains incomplete.
   A file-scope object can initialize a naturally aligned flexible tail
@@ -1005,7 +1028,7 @@ that address.
 
 The explicit exclusions are general floating constant evaluation and general bit-fields,
 atomics, TLS, complex/imaginary types, VLAs, wide literals and
-multibyte/multicharacter character constants, anonymous record members,
+multibyte/multicharacter character constants, unsupported bit-field bases,
 general initializer brace elision, other external and block-scope inline forms,
 non-prototype function definitions, GNU void/function-pointer arithmetic,
 implicit GNU alignment, and unrecognized semantic attributes. Floating types
@@ -2617,6 +2640,15 @@ caller before the pipeline are preserved; failure cleanup remains owned by
 the context's `ir_destroy`. Pass/module pointers must not escape a pass.
 The source and output buffers are separately bounded; the 128 MiB tracked
 allocation limit is not multiplied by the number of passes.
+IR token spellings share one packed buffer sized by the lexer. Typed
+analysis sizes CFG and definition tables from the parsed source, interns
+types on demand, and reuses a temporary canonical-name lookup buffer.
+Candidate admission reclaims per-function and superseded module scratch.
+The backend indexes blocks and emitted labels instead of repeatedly
+scanning whole functions for branch targets. Register allocation stores
+instruction uses sparsely and releases its dense liveness scratch once
+allocation for the function is complete. Existing memory, token and work
+limits remain in force.
 Constant lookup uses a per-function hash index. Fresh-name collision checks
 use a lazily built module index that normalizes quoted/unquoted and
 hex-escaped names without changing generated name order.

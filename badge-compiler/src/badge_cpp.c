@@ -33,7 +33,7 @@ typedef struct {
     char *params[MAX_PARAMS];
     size_t param_count;
     tokens_t body;
-    uint32_t stringified;
+    uint32_t unexpanded;
     int active, function, builtin, variadic;
 } macro_t;
 typedef struct {
@@ -54,7 +54,7 @@ typedef struct {
     unsigned line, expansion_depth;
     macro_t macros[MAX_MACROS];
     size_t macro_count;
-    const char *includes[64];
+    const char *includes[128];
     size_t include_count;
     input_t inputs[512];
     size_t input_count;
@@ -197,14 +197,22 @@ static void define_macro(cpp_t *c, tokens_t definition) {
         }
         if (i == definition.count || !is_token(&definition.items[i++], ")")) fail(c, "unclosed macro parameters");
     }
+    size_t body = i;
     for (; i < definition.count; ++i) {
-        if (is_token(&definition.items[i], "##"))
-            fail(c, "macro token pasting is unsupported");
+        if (is_token(&definition.items[i], "##")) {
+            if (i == body || i + 1 == definition.count ||
+                is_token(&definition.items[i + 1], "##"))
+                fail(c, "macro '##' needs two operands");
+            size_t left = parameter(&candidate, &definition.items[i - 1]);
+            size_t right = parameter(&candidate, &definition.items[i + 1]);
+            if (left < candidate.param_count) candidate.unexpanded |= UINT32_C(1) << left;
+            if (right < candidate.param_count) candidate.unexpanded |= UINT32_C(1) << right;
+        }
         if (is_token(&definition.items[i], "#") && candidate.function) {
             size_t p = i + 1 < definition.count
                 ? parameter(&candidate, &definition.items[i + 1]) : candidate.param_count;
             if (p == candidate.param_count) fail(c, "macro '#' must precede a parameter");
-            candidate.stringified |= UINT32_C(1) << p;
+            candidate.unexpanded |= UINT32_C(1) << p;
         }
         if (!candidate.variadic && is_token(&definition.items[i], "__VA_ARGS__"))
             fail(c, "__VA_ARGS__ requires a variadic macro");
@@ -257,6 +265,37 @@ static char *stringify(cpp_t *c, const tokens_t *arg) {
     return quoted(c, spelling.data ? spelling.data : "");
 }
 
+static void paste_tokens(cpp_t *c, tokens_t *v) {
+    size_t count = 0;
+    for (size_t j = 0; j < v->count; ++j) {
+        token_t t = v->items[j];
+        if (t.kind != NEWLINE || !is_token(&t, "##")) {
+            v->items[count++] = t;
+            continue;
+        }
+        token_t *left = &v->items[count - 1], right = v->items[++j];
+        if (right.kind == NEWLINE) continue;
+        if (left->kind == NEWLINE) {
+            right.space = left->space;
+            *left = right;
+            continue;
+        }
+        string_t spelling = {0};
+        append(c, &spelling, left->text, strlen(left->text));
+        append(c, &spelling, right.text, strlen(right.text));
+        tokens_t joined = lex(c, spelling.data, spelling.size, t.file);
+        location(c, &t);
+        if (joined.count != 1 || strcmp(joined.items[0].text, spelling.data))
+            fail(c, "macro '##' does not form a preprocessing token: %s", spelling.data);
+        left->text = joined.items[0].text;
+        left->kind = joined.items[0].kind;
+        for (size_t h = 0; h < MAX_MACROS / 64u; ++h) left->hide[h] &= right.hide[h];
+    }
+    v->count = 0;
+    for (size_t j = 0; j < count; ++j)
+        if (v->items[j].kind != NEWLINE) v->items[v->count++] = v->items[j];
+}
+
 static void expand(cpp_t *c, tokens_t *v) {
     if (++c->expansion_depth > MAX_DEPTH) fail(c, "macro argument expansion depth exceeded");
     for (size_t i = 0; i < v->count;) {
@@ -307,6 +346,7 @@ static void expand(cpp_t *c, tokens_t *v) {
         hide[id / 64u] |= bit;
         if (++c->expansions > 1000000u) fail(c, "macro expansion limit exceeded");
         tokens_t replacement = {0};
+        int pasted = 0;
         if (m->builtin != 0) {
             token_t t = invocation;
             char number[32];
@@ -331,10 +371,21 @@ static void expand(cpp_t *c, tokens_t *v) {
                 push(c, &replacement, t);
                 continue;
             }
+            if (is_token(&t, "##")) {
+                /* Only operators from the replacement list are active. */
+                t.kind = NEWLINE;
+                t.file = invocation.file;
+                t.line = invocation.line;
+                push(c, &replacement, t);
+                pasted = 1;
+                continue;
+            }
             size_t param = parameter(m, &t);
             if (param < m->param_count) {
-                if (!ready[param]) {
-                    if (m->stringified & (UINT32_C(1) << param)) {
+                int raw_argument = (j && is_token(&m->body.items[j - 1], "##")) ||
+                    (j + 1 < m->body.count && is_token(&m->body.items[j + 1], "##"));
+                if (!raw_argument && !ready[param]) {
+                    if (m->unexpanded & (UINT32_C(1) << param)) {
                         reserve(c, &args[param], raw[param].count);
                         if (raw[param].count)
                             memcpy(args[param].items, raw[param].items, raw[param].count * sizeof(token_t));
@@ -344,8 +395,14 @@ static void expand(cpp_t *c, tokens_t *v) {
                     expand(c, &args[param]);
                     ready[param] = 1;
                 }
-                for (size_t k = 0; k < args[param].count; ++k) {
-                    token_t a = args[param].items[k];
+                const tokens_t *arg = raw_argument ? &raw[param] : &args[param];
+                if (raw_argument && !arg->count) {
+                    t.kind = NEWLINE;
+                    t.text = "";
+                    push(c, &replacement, t);
+                }
+                for (size_t k = 0; k < arg->count; ++k) {
+                    token_t a = arg->items[k];
                     if (k == 0) a.space = t.space;
                     for (size_t h = 0; h < MAX_MACROS / 64u; ++h) a.hide[h] |= hide[h];
                     push(c, &replacement, a);
@@ -357,6 +414,7 @@ static void expand(cpp_t *c, tokens_t *v) {
                 push(c, &replacement, t);
             }
         }
+        if (pasted) paste_tokens(c, &replacement);
         size_t tail = v->count - end;
         if (replacement.count) replacement.items[0].space = invocation.space;
         reserve(c, v, i + replacement.count + tail);
@@ -837,7 +895,8 @@ int main(int argc, char **argv) {
                     value = argv[i];
                 }
                 if (option == 'I') {
-                    if (c->include_count == 64) fail(c, "include directory limit exceeded");
+                    if (c->include_count == sizeof(c->includes) / sizeof(*c->includes))
+                        fail(c, "include directory limit exceeded");
                     c->includes[c->include_count++] = value;
                 } else if (option == 'D') {
                     const char *equal = strchr(value, '=');
