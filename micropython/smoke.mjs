@@ -10,7 +10,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
 const build = path.join(here, 'build');
 const serial = process.argv[2]?.toUpperCase();
-const vm = process.argv[3] === '--vm';
+const interpreterSplit = process.argv[3] === '--interpreter-split';
+const interpreter = interpreterSplit || process.argv[3] === '--interpreter';
+const vm = interpreter || process.argv[3] === '--vm';
 const core = vm || process.argv[3] === '--core';
 const picotool = process.env.PICOTOOL ?? path.join(root, 'build/picotool-usb/picotool');
 const mpremote = process.env.MPREMOTE_PYTHON ?? 'mpremote';
@@ -77,23 +79,24 @@ function measure(port, phase, workload, marker) {
     return { samples, median: [...samples].sort((a, b) => a - b)[3] };
 }
 
-const python = phase => `
-import gc, os, sys
+const python = (phase, index, count) => `
+import gc, machine, os, sys
 assert sys.platform == "rp2"
 assert sys.implementation.version[:3] == (1, 29, 0)
 assert sum(i*i for i in range(10)) == 285
 assert 3.5 * 2.0 == 7.0
 gc.collect()
-payload = bytes((i * 13 + (i >> 4)) & 255 for i in range(8193))
-alternate = bytes((n ^ 165) for n in payload)
-if ${JSON.stringify(phase)} != "stock":
+def payload(seed):
+    mask = (seed * 165) & 255
+    return bytes((((i * 13 + (i >> 4)) & 255) ^ mask) for i in range(8193))
+if ${index} != 0:
     with open("/crc-check.bin", "rb") as f:
-        assert f.read() == (payload if ${JSON.stringify(phase)} == "mixed" else alternate)
-if ${JSON.stringify(phase)} != "stock-readback":
+        assert f.read() == payload(${index} - 1)
+if ${index} != ${count} - 1:
     with open("/crc-next.bin", "wb") as f:
-        data = payload if ${JSON.stringify(phase)} == "stock" else alternate
+        data = payload(${index})
         assert f.write(data) == len(data)
-    if ${JSON.stringify(phase)} == "mixed":
+    if ${index} != 0:
         os.remove("/crc-check.bin")
     os.rename("/crc-next.bin", "/crc-check.bin")
     os.sync()
@@ -104,35 +107,57 @@ else:
     os.sync()
 print(sys.version)
 print(os.uname().machine)
+print("MP_CLOCK_HZ", machine.freq())
 print("MP_CRC_OK " + ${JSON.stringify(phase)})
 `;
 
+function measurePlan(variant) {
+    if (!interpreterSplit) return [['stock', 'stock'], ['mixed', variant], ['stock-readback', 'stock']];
+    const roles = ['sequenceVm', 'runtimeOnly', 'vmOnly', 'interpreter'];
+    return [...roles, ...[...roles].reverse()].map((role, i) => [`${i + 1}-${role}`, role]);
+}
+
 try {
     assert.match(serial ?? '', /^[0-9A-F]{16}$/, 'Pass the explicitly selected BOOTSEL serial');
-    assert(process.argv.length === 3 || (core && process.argv.length === 4), 'Expected a serial and optional --core or --vm');
+    assert(process.argv.length === 3 || (core && process.argv.length === 4),
+        'Expected a serial and optional --core, --vm, --interpreter, or --interpreter-split');
     usbPorts();
     const comparison = JSON.parse(fs.readFileSync(path.join(build, 'comparison.json'), 'utf8'));
     capture = fs.mkdtempSync(path.join(build, 'smoke-'));
-    const report = { revision: comparison.revision, variant: vm ? 'vm' : core ? 'core' : 'crc',
-        backups: [], restoration: [], errors: [], runs: [] };
+    const variant = interpreterSplit ? 'interpreter-split' : interpreter ? 'interpreter' : vm ? 'vm' : core ? 'core' : 'mixed';
+    const plan = measurePlan(variant);
+    const images = {};
+    for (const role of new Set(plan.map(([, role]) => role))) {
+        assert(comparison[role], `Build the ${role} image before measuring`);
+        const uf2 = path.join(comparison[role].directory, 'firmware.uf2');
+        images[role] = { uf2, bytes: comparison[role].bytes, sha256: sha(uf2) };
+    }
+    const report = { revision: comparison.revision, variant: variant === 'mixed' ? 'crc' : variant,
+        images, order: plan.map(([, role]) => role), backups: [], restoration: [], errors: [], runs: [] };
     const save = () => fs.writeFileSync(path.join(capture, 'capture.json'), JSON.stringify(report, null, 2) + '\n');
     preserveFlash([serial], capture, command, report, save, () => {
         command(['erase', '-r', '0x10d00000', '0x11000000', '--ser', serial], 'erase-experiment-filesystem');
-        for (const phase of ['stock', 'mixed', 'stock-readback']) {
-            const image = comparison[phase === 'mixed' ? (vm ? 'vm' : core ? 'core' : 'mixed') : 'stock'];
-            const uf2 = path.join(image.directory, 'firmware.uf2');
+        let clock;
+        for (const [index, [phase, role]] of plan.entries()) {
+            const { uf2, sha256 } = images[role];
+            assert.equal(sha(uf2), sha256, `${role}: UF2 changed during the campaign`);
             const ports = usbPorts();
             command(['load', '-v', uf2, '--ser', serial], `${phase}-flash`);
             command(['reboot', '--ser', serial], `${phase}-boot`);
             const port = waitRepl(ports);
             let output;
             try {
-                output = exec(port, python(phase), `${phase}-repl`);
+                output = exec(port, python(phase, index, plan.length), `${phase}-repl`);
                 assert(output.includes(`MP_CRC_OK ${phase}`), `${phase}: missing REPL success marker`);
+                const measuredClock = Number(output.match(/^MP_CLOCK_HZ (\d+)\r?$/m)?.[1]);
+                assert(Number.isSafeInteger(measuredClock) && measuredClock > 0, `${phase}: missing clock`);
+                clock ??= measuredClock;
+                assert.equal(measuredClock, clock, `${phase}: clock changed`);
                 const smallint = core ? measure(port, phase, 'smallint', 'MP_SMALLINT_OK') : undefined;
                 const radix = vm ? measure(port, phase, 'radix', 'MP_RADIX_OK') : undefined;
                 const calendar = vm ? measure(port, phase, 'calendar', 'MP_CALENDAR_OK') : undefined;
-                report.runs.push({ phase, uf2Sha256: sha(uf2), output, smallint, radix, calendar });
+                const pythonVm = interpreter ? measure(port, phase, 'interpreter', 'MP_INTERPRETER_OK') : undefined;
+                report.runs.push({ phase, role, clockHz: clock, uf2Sha256: sha256, output, smallint, radix, calendar, pythonVm });
                 save();
                 process.stdout.write(output);
             } finally {

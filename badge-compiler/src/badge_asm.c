@@ -169,6 +169,7 @@ static void as_destroy(assembler_t *s) {
     while(s->memory!=NULL) {
         as_memory_t *m=s->memory; s->memory=m->next; free(m->data); free(m);
     }
+    free(s->lines);
     free(s);
 }
 
@@ -633,27 +634,72 @@ static int as_condition(const char *text) {
 
 static unsigned as_instruction(assembler_t *, as_line_t *);
 
+static void as_resize_lines(assembler_t *s, size_t capacity) {
+    size_t old=s->line_capacity*sizeof(*s->lines), bytes=capacity*sizeof(*s->lines);
+    if(bytes-old>AS_MAX_MEMORY-s->allocated) as_error(s,"192 MiB allocation limit exceeded");
+    as_line_t *lines=realloc(s->lines,bytes);
+    if(!lines) as_error(s,"out of memory");
+    s->lines=lines;
+    s->line_capacity=capacity;
+    s->allocated+=bytes-old;
+}
 static as_line_t *as_append_line(assembler_t *s) {
     if(s->line_count==AS_MAX_LINES) as_error(s,"source record limit exceeded");
     if(s->line_count==s->line_capacity) {
         size_t capacity=s->line_capacity*2;
         if(capacity>AS_MAX_LINES) capacity=AS_MAX_LINES;
-        as_line_t *lines=as_allocate(s,capacity*sizeof(*lines));
-        memcpy(lines,s->lines,s->line_count*sizeof(*lines)); s->lines=lines; s->line_capacity=capacity;
+        as_resize_lines(s,capacity);
     }
-    return &s->lines[s->line_count++];
+    as_line_t *record=&s->lines[s->line_count++];
+    memset(record,0,sizeof(*record));
+    return record;
 }
 static int as_numeric_compare(const void *a, const void *b) {
     const as_numeric_t *x=a,*y=b;
     if(x->number!=y->number) return x->number<y->number?-1:1;
     return x->record<y->record?-1:x->record>y->record;
 }
+static void as_strip_block_comments(assembler_t *s, unsigned char *input, size_t length) {
+    unsigned line=1, opened=0;
+    int quoted=0, escaped=0, end_of_line=0;
+    for(size_t k=0;k<length;++k) {
+        unsigned char ch=input[k];
+        if(ch=='\n') { ++line; end_of_line=quoted=escaped=0; continue; }
+        if(opened) {
+            input[k]=' ';
+            if(ch=='*' && k+1<length && input[k+1]=='/') {
+                input[++k]=' ';
+                opened=0;
+            }
+        } else if(end_of_line) continue;
+        else if(quoted) {
+            if(escaped) escaped=0;
+            else if(ch=='\\') escaped=1;
+            else if(ch=='"') quoted=0;
+        } else if(ch=='"') quoted=1;
+        else if(ch=='@' || (ch=='/' && k+1<length && input[k+1]=='/')) end_of_line=1;
+        else if(ch=='/' && k+1<length && input[k+1]=='*') {
+            input[k]=' ';
+            input[++k]=' ';
+            opened=line;
+        }
+    }
+    if(opened) { s->line=opened; as_error(s,"unterminated block comment"); }
+}
 static void as_parse(assembler_t *s, unsigned char *input, size_t length) {
     if(memchr(input,0,length)!=NULL) as_error(s,"NUL byte in assembly");
+    as_strip_block_comments(s,input,length);
     size_t capacity=2;
-    for(size_t k=0;k<length;++k) if(input[k]=='\n') capacity+=2;
+    for(size_t k=0;k<length;) {
+        while(k<length && input[k]!='\n' && isspace(input[k])) ++k;
+        if(k<length && input[k]!='\n' && input[k]!='@' && input[k]!='#' &&
+           !(input[k]=='/' && k+1<length && input[k+1]=='/'))
+            ++capacity;
+        while(k<length && input[k]!='\n') ++k;
+        if(k<length) ++k;
+    }
     if(capacity>AS_MAX_LINES) capacity=AS_MAX_LINES;
-    s->lines=as_allocate(s,capacity*sizeof(*s->lines)); s->line_capacity=capacity;
+    as_resize_lines(s,capacity);
     char *line=(char *)input; unsigned number=0,origin=0;
     while(line!=NULL) {
         ++number; s->line=number;
@@ -867,6 +913,7 @@ static void as_directive(assembler_t *s, as_line_t *l) {
         }
         if(n>=3) {
             if(strcmp(l->arg[2],"%nobits")==0) type=BO_NOBITS;
+            else if(strcmp(l->arg[2],"%init_array")==0) { type=BO_INIT_ARRAY; entry=4; }
             else if(strcmp(l->arg[2],"%progbits")!=0) as_error(s,"unsupported section type");
         }
         if(n==4) entry=as_bounded(s,l->arg[3],BO_MAX_FILE);

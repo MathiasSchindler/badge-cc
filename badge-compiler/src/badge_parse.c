@@ -75,7 +75,8 @@ static int keyword(const char *s) {
         "struct switch typedef union unsigned void volatile while _Alignas _Alignof _Atomic "
         "_Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local "
         "__attribute__ __asm__ __asm asm __volatile__ __alignof__ __alignof "
-        "__typeof__ nullptr bool true false __inline__ __inline __extension__ __builtin_va_list");
+        "typeof __typeof __typeof__ nullptr bool true false __inline__ __inline __extension__ "
+        "__const __const__ __restrict __restrict__ __volatile __builtin_va_list");
 }
 
 static int at(parser_t *p, const char *s) { return strcmp(peek(p, 0)->text, s) == 0; }
@@ -129,7 +130,9 @@ static void bind(parser_t *p, const char *name, int is_type) {
     b->name = name; b->is_typedef = is_type; b->next = p->bindings;
     p->bindings = b;
 }
-static int qualifier(const char *s) { return word_in(s, "const restrict volatile _Atomic"); }
+static int qualifier(const char *s) {
+    return word_in(s, "const __const __const__ restrict __restrict __restrict__ volatile __volatile __volatile__ _Atomic");
+}
 static int storage(const char *s) { return word_in(s, "typedef extern static auto register _Thread_local"); }
 static int type_word(const char *s) {
     return word_in(s, "void char short int long float double signed unsigned _Bool bool _Complex _Imaginary __builtin_va_list");
@@ -138,7 +141,7 @@ static int declaration_start(parser_t *p, size_t ahead) {
     const char *s = peek(p, ahead)->text;
     return qualifier(s) || storage(s) || type_word(s) || is_typedef(p, s) ||
         word_in(s, "struct union enum inline __inline__ __inline __extension__ "
-                   "_Noreturn _Alignas _Static_assert __attribute__ __typeof__");
+                   "_Noreturn _Alignas _Static_assert __attribute__ typeof __typeof __typeof__");
 }
 static int string_token(token_t *t) {
     if (t->kind != LITERAL) return 0;
@@ -227,7 +230,7 @@ static node_t *specifiers(parser_t *p, int allow_storage, int *is_type) {
         const char *s = peek(p, 0)->text;
         if (accept(p, "__extension__")) continue;
         if (at(p, "__attribute__")) child(p, n, attributes(p));
-        else if (at(p, "__typeof__")) {
+        else if (word_in(s, "typeof __typeof __typeof__")) {
             node_t *t = node(p, "typeof", NULL);
             ++p->position; expect(p, "(");
             child(p, t, declaration_start(p, 0) ? type_name(p) : expression(p, 1));
@@ -396,7 +399,9 @@ static node_t *postfix(parser_t *p, node_t *n) {
 static node_t *unary(parser_t *p) {
     enter(p);
     node_t *n;
-    if (accept(p, "&&")) {
+    if (accept(p, "__extension__")) {
+        n = unary(p);
+    } else if (accept(p, "&&")) {
         n = node_at(p, "label_address", NULL, p->position - 1);
         n->text = identifier(p); finish(p, n);
     } else if (word_in(peek(p, 0)->text, "++ -- & * + - ~ !")) {
@@ -428,6 +433,11 @@ static node_t *unary(parser_t *p) {
                         NULL, p->position - 1);
             child(p, n, compound ? block(p) : expression(p, 1));
             expect(p, ")"); finish(p, n);
+        } else if (at(p, "__builtin_va_arg") && strcmp(peek(p, 1)->text, "(") == 0) {
+            n = node(p, "va_arg", NULL);
+            ++p->position;
+            expect(p, "("); child(p, n, expression(p, 2)); expect(p, ",");
+            child(p, n, type_name(p)); expect(p, ")"); finish(p, n);
         } else if (at(p, "__builtin_offsetof") && strcmp(peek(p, 1)->text, "(") == 0) {
             n = node(p, "offsetof", NULL);
             ++p->position;
@@ -836,6 +846,16 @@ node_t *parse_source(parser_t *p, const char *source, size_t length, const char 
             size_t end = i + 1;
             while (end < raw.count && raw.items[end].kind != NEWLINE) ++end;
             size_t number = i + 1;
+            if (end > i + 3 && !strcmp(raw.items[i + 1].text, "pragma") &&
+                !strcmp(raw.items[i + 2].text, "GCC")) {
+                const char *directive = raw.items[i + 3].text;
+                if ((end == i + 4 && word_in(directive, "push_options pop_options")) ||
+                    (end == i + 5 && !strcmp(directive, "unroll") && raw.items[i + 4].kind == NUMBER)) {
+                    if (end == i + 5) (void)marker_number(p, &raw.items[i + 4]);
+                    i = end;
+                    continue;
+                }
+            }
             if (number < end && strcmp(raw.items[number].text, "line") == 0) ++number;
             if (end == number) parse_error(p, "expected preprocessing line marker");
             mapped_line = marker_number(p, &raw.items[number]);

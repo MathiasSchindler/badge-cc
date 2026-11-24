@@ -11,7 +11,7 @@ const work = path.join(import.meta.dirname, 'build');
 const upstream = path.join(work, 'upstream');
 const database = path.join(work, 'badge-interpreter/compile_commands.json');
 const tools = path.join(root, 'badge-compiler/build');
-const timeout = 25_000;
+const timeout = 60_000;
 const extensions = ['.i', '.ll', '.opt.ll', '.s', '.o'];
 const standardLibc = new Set(['py/objint.c', 'py/objstr.c']);
 
@@ -56,7 +56,8 @@ function probe(row, stem) {
 if (isMainThread) {
     const rows = JSON.parse(fs.readFileSync(database, 'utf8')).filter(row => row.file.endsWith('.c'));
     assert(rows.length && new Set(rows.map(row => row.file)).size === rows.length, 'Expected distinct C files');
-    const jobs = 6;
+    const jobs = Number(process.env.JOBS ?? '6');
+    assert(Number.isInteger(jobs) && jobs >= 1 && jobs <= 16, 'JOBS must be an integer from 1 to 16');
     const temp = fs.mkdtempSync(path.join(work, 'compile-audit-temp-'));
     try {
         const batches = await Promise.allSettled(Array.from({ length: jobs }, (_, i) =>

@@ -1255,10 +1255,16 @@ void ir_analyze(ir_context *c, ir_module *m, ir_analysis *a) {
       unsigned id = a->global_count++;
       r.p += 2;
       while (r.p < r.end && strcmp(text(&r), "global") &&
-             strcmp(text(&r), "constant"))
+             strcmp(text(&r), "constant") && strcmp(text(&r), "alias"))
         r.p++;
       if (r.p == r.end)
         ir_error(c, "unsupported global declaration");
+      int alias = accept(&r, "alias");
+      if (alias) {
+        a->globals[id] = (ir_global){first, IR_NONE, IR_NONE, l + 1};
+        index_put(c, &a->global_index, ir_name_key(c, first), id);
+        continue;
+      }
       r.p++;
       unsigned storage = type(&r);
       if (a->types[storage].kind == IR_VOID)
@@ -1273,6 +1279,41 @@ void ir_analyze(ir_context *c, ir_module *m, ir_analysis *a) {
       continue;
     ir_line *line = &m->lines[g->line - 1];
     c->line = g->line;
+    if (g->storage_type == IR_NONE) {
+      r.p = line->first + 2;
+      r.end = line->first + line->count;
+      (void)accept(&r, "weak");
+      expect(&r, "alias");
+      unsigned result = type(&r), params[256], count = 0;
+      int variadic = 0;
+      expect(&r, "(");
+      if (!accept(&r, ")")) {
+        do {
+          if (accept(&r, "...")) { variadic = 1; break; }
+          if (count == 256) ir_error(c, "alias parameter limit exceeded");
+          params[count++] = type(&r);
+        } while (accept(&r, ","));
+        expect(&r, ")");
+      }
+      expect(&r, ",");
+      expect(&r, "ptr");
+      if (r.p + 1 != r.end || *text(&r) != '@')
+        ir_error(c, "invalid function alias target");
+      unsigned target = index_get(&a->global_index, lookup_name(&r, text(&r)));
+      if (target == IR_NONE || a->globals[target].storage_type != IR_NONE ||
+          a->globals[target].function == IR_NONE)
+        ir_error(c, "alias requires a same-unit function definition");
+      unsigned function = a->globals[target].function;
+      const ir_function *fn = &a->functions[function];
+      if (fn->declaration || fn->line != a->globals[target].line)
+        ir_error(c, "alias requires a same-unit function definition");
+      if (fn->return_type != result || fn->parameter_count != count || fn->variadic != variadic)
+        ir_error(c, "alias signature does not match target");
+      for (unsigned n = 0; n < count; ++n)
+        same(&r, params[n], a->parameters[fn->first_parameter + n]);
+      g->function = function;
+      continue;
+    }
     for (unsigned token = line->first + 2; token < line->first + line->count;
          token++) {
       const char *name = ir_text(m, token);

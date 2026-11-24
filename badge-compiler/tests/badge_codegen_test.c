@@ -479,11 +479,7 @@ static void residency_tests(void) {
     cg_register_prepare(c);
     assert(!"work budget must fail");
   }
-  while (c->allocations) {
-    cg_allocation *a = c->allocations;
-    c->allocations = a->next;
-    free(a);
-  }
+  cg_release_storage(c);
   free(c);
 }
 static void frame_tests(const char *path) {
@@ -934,11 +930,7 @@ static void host_tests(void) {
     cg_alloc(c, 1);
     assert(!"allocation limit must fail");
   }
-  while (c->allocations) {
-    cg_allocation *a = c->allocations;
-    c->allocations = a->next;
-    free(a);
-  }
+  cg_release_storage(c);
   free(c->out);
   free(c);
 }

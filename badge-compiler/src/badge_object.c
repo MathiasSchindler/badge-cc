@@ -52,7 +52,7 @@ static int bo_name(const char *name) {
 }
 
 static int bo_section_type(uint32_t type) {
-    return type == BO_PROGBITS || type == BO_NOBITS || type == BO_ARM_EXIDX ||
+    return type == BO_PROGBITS || type == BO_NOBITS || type == BO_INIT_ARRAY || type == BO_ARM_EXIDX ||
         type == BO_ARM_ATTRIBUTES || type == BO_LLVM_ADDRSIG;
 }
 
@@ -103,6 +103,8 @@ static int bo_validate(const bo_object_t *o) {
         }
         if (s->entry_size != 0 && s->size % s->entry_size != 0)
             return bo_error("section size is not a multiple of entry size");
+        if (s->type == BO_INIT_ARRAY && (s->entry_size != 4 || s->alignment < 4 || s->flags != 3))
+            return bo_error("invalid ARM initializer array section");
         if ((s->flags & 32) && (!(s->flags & 16) || s->entry_size == 0))
             return bo_error("string merging requires SHF_MERGE and an entry size");
         if ((s->flags & 16) && s->entry_size == 0)

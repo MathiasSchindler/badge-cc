@@ -32,6 +32,10 @@ const interpreterModules = [
     { source: 'py/runtime.c', option: 'BADGE_RUNTIME_OBJECT', object: 'runtime-owned.o', symbol: 'mp_import_from' },
     { source: 'py/vm.c', option: 'BADGE_VM_OBJECT', object: 'vm-owned.o', symbol: 'mp_execute_bytecode' },
 ];
+const libraryModules = [
+    { source: 'lib/libm/ef_sqrt.c', option: 'BADGE_SQRT_OBJECT', object: 'sqrt-owned.o', symbol: 'sqrtf' },
+    { source: 'lib/littlefs/lfs2.c', option: 'BADGE_LFS2_CORE_OBJECT', object: 'lfs2-core-owned.o', symbol: 'lfs2_mount' },
+];
 const fixture = path.join(root, 'badge-compiler/tests/fixtures');
 const qemu = process.env.QEMU_ARM ?? 'qemu-system-arm';
 const emulator = ['-M', 'mps2-an505', '-nographic', '-monitor', 'none', '-serial', 'none',
@@ -50,7 +54,8 @@ function run(tool, args, { timeout = 120000, log, capture = false, ...options } 
     return result.stdout ?? '';
 }
 
-function firmware(name, board, mixed = false, core = false, vm = false, sequenceObject = null, interpreter = false) {
+function firmware(name, board, mixed = false, core = false, vm = false, sequenceObject = null, interpreter = [],
+    libraries = []) {
     const directory = path.join(build, name);
     const picotool = path.join(build, 'pico2-stock/_deps/picotool');
     const args = ['-S', port, '-B', directory, `-DMICROPY_BOARD=${board}`, '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'];
@@ -61,8 +66,10 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     if (core) args.push(`-DBADGE_SMALLINT_OBJECT=${ownedSmallint}`);
     if (vm) args.push(`-DBADGE_RADIX_OBJECT=${ownedRadix}`, `-DBADGE_UNICODE_OBJECT=${ownedUnicode}`,
         `-DBADGE_TIMEUTILS_OBJECT=${ownedTimeutils}`, `-DBADGE_SEQUENCE_OBJECT=${sequenceObject ?? ''}`);
-    if (interpreter) {
-        for (const mod of interpreterModules) args.push(`-D${mod.option}=${path.join(build, mod.object)}`);
+    const replacements = [...interpreter, ...libraries];
+    if (mixed) {
+        for (const mod of [...interpreterModules, ...libraryModules])
+            args.push(`-D${mod.option}=${replacements.includes(mod) ? path.join(build, mod.object) : ''}`);
     }
     run('cmake', args, {
         cwd: port, timeout: 240000, log: `${name}-configure`,
@@ -77,19 +84,21 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     assert.equal(commands.filter(row => row.file === timeutils).length, vm ? 0 : 1);
     assert.equal(commands.filter(row => row.file === sequence).length, sequenceObject ? 0 : 1);
     const map = fs.readFileSync(path.join(directory, 'firmware.elf.map'), 'utf8');
+    const linkedSections = map.slice(map.indexOf('\nLinker script and memory map')).split('\n');
     assert(map.includes(mixed ? owned : '/lib/littlefs/lfs2_util.c.o'));
     assert(map.includes(core ? ownedSmallint : '/py/smallint.c.o'));
     assert(map.includes(vm ? ownedRadix : '/py/parsenumbase.c.o'));
     assert(map.includes(vm ? ownedUnicode : '/py/unicode.c.o'));
     assert(map.includes(vm ? ownedTimeutils : '/shared/timeutils/timeutils.c.o'));
     assert(map.includes(sequenceObject ?? '/py/sequence.c.o'));
-    for (const mod of interpreterModules) {
-        assert.equal(commands.filter(row => row.file === path.join(upstream, mod.source)).length, interpreter ? 0 : 1);
-        if (interpreter) {
+    for (const mod of [...interpreterModules, ...libraryModules]) {
+        assert.equal(commands.filter(row => row.file === path.join(upstream, mod.source)).length,
+            replacements.includes(mod) ? 0 : 1);
+        if (replacements.includes(mod)) {
             const object = path.join(build, mod.object);
             assert(map.includes(object));
-            const section = map.indexOf(` .text.${mod.symbol}\n`);
-            assert(section >= 0 && map.slice(section, section + 512).split('\n').slice(0, 3).join('\n').includes(object),
+            assert(linkedSections.some((line, i) => line.trim().split(/\s+/)[0] === `.text.${mod.symbol}` &&
+                (line.includes(object) || linkedSections[i + 1]?.includes(object))),
                 `Missing linked ${mod.symbol} from ${object}`);
         }
     }
@@ -106,6 +115,50 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     const uf2 = fs.statSync(path.join(directory, 'firmware.uf2')).size;
     console.log(`${name}: ${bytes} loaded bytes; ${crc} bytes in lfs2_crc`);
     return { directory, bytes, uf2, crc };
+}
+
+function checkLibraries(stockDirectory, start) {
+    const original = JSON.parse(fs.readFileSync(path.join(stockDirectory, 'compile_commands.json'), 'utf8'));
+    const runtime = run(gcc, [...arm, '-mfloat-abi=softfp', '-print-libgcc-file-name'], { capture: true }).trim();
+    const libc = run(gcc, [...arm, '-mfloat-abi=softfp', '-print-file-name=libg.a'], { capture: true }).trim();
+    const lfs = path.join(upstream, 'lib/littlefs');
+    const defines = ['ASSERT', 'DEBUG', 'ERROR', 'MALLOC', 'WARN'].map(name => `-DLFS2_NO_${name}`);
+    const exeBytes = (file, symbol) => {
+        const code = run('llvm-nm', ['--defined-only', '--print-size', file], { capture: true });
+        const row = code.split('\n').find(line => line.endsWith(` ${symbol}`));
+        assert(row, `Missing ${symbol} in ${file}`);
+        return Number.parseInt(row.trim().split(/\s+/)[1], 16);
+    };
+    const report = {};
+    for (const mod of libraryModules) {
+        const file = path.join(upstream, mod.source);
+        const stock = path.resolve(stockDirectory, original.find(row => row.file === file).output);
+        const sqrt = mod.symbol === 'sqrtf';
+        const label = sqrt ? 'sqrt' : 'littlefs';
+        const harness = path.join(build, `${label}-oracle.o`);
+        run(gcc, [...arm, '-mfloat-abi=softfp', '-Os', '-ffreestanding', '-fno-builtin', '-I', lfs,
+            ...defines, '-c', path.join(here, `${label}-oracle.c`), '-o', harness]);
+        const objects = { gcc: stock, owned: path.join(build, mod.object) };
+        const stages = {};
+        for (const [role, obj] of Object.entries(objects)) {
+            const elf = path.join(build, `${label}-${role}.elf`);
+            const trace = path.join(build, `${label}-${role}.trace`);
+            run('ld.lld', ['--gc-sections', '-T', path.join(fixture, 'codegen_fixture.ld'), start,
+                harness, obj, ...(sqrt ? [] : [owned]), libc, runtime, '-o', elf]);
+            try {
+                run(qemu, [...emulator, '-kernel', elf, '-accel', 'tcg,one-insn-per-tb=on',
+                    '-d', 'exec,nochain', '-D', trace], { timeout: 25000 });
+                const replayInstructions = tracePcs(trace).length;
+                assert(replayInstructions > 0, `Missing ${label} ${role} execution trace`);
+                stages[role] = { functionBytes: exeBytes(elf, mod.symbol), replayInstructions };
+            } finally {
+                fs.rmSync(trace, { force: true });
+            }
+        }
+        console.log(`${label}: both target objects passed; ${mod.symbol} bytes and complete QEMU replay:`, stages);
+        report[label] = stages;
+    }
+    return report;
 }
 
 function compileStockModule(controlDirectory, source, object, frontendArgs = []) {
@@ -336,8 +389,9 @@ function crcOracle(controlDirectory) {
 
 try {
     const options = new Set(process.argv.slice(2));
-    assert(options.size === process.argv.length - 2 && [...options].every(arg => ['--sequence-before', '--interpreter'].includes(arg)),
-        'usage: node micropython/build.mjs [--sequence-before] [--interpreter]');
+    assert(options.size === process.argv.length - 2 &&
+        [...options].every(arg => ['--sequence-before', '--interpreter', '--interpreter-split', '--libraries'].includes(arg)),
+        'usage: node micropython/build.mjs [--sequence-before] [--interpreter|--interpreter-split] [--libraries]');
     fs.mkdirSync(build, { recursive: true });
     if (!fs.existsSync(upstream))
         run('git', ['clone', '--depth', '1', '--branch', 'v1.29.0', 'https://github.com/micropython/micropython.git', upstream]);
@@ -370,19 +424,34 @@ try {
         assert(sequenceVm.bytes < sequenceBeforeVm.bytes);
         console.log('Sequence fold loaded flash savings:', sequenceBeforeVm.bytes - sequenceVm.bytes);
     }
-    let interpreter;
-    if (options.has('--interpreter')) {
+    let interpreter, vmOnly, runtimeOnly;
+    if (options.has('--interpreter') || options.has('--interpreter-split')) {
         const map = fs.readFileSync(path.join(stock.directory, 'firmware.elf.map'), 'utf8');
         assert.match(map, /libg\.a\(libc_a-strcmp\.o\)/);
         for (const mod of interpreterModules)
             compileStockModule(stock.directory, path.join(upstream, mod.source), path.join(build, mod.object), ['--libc-strcmp']);
-        interpreter = firmware('badge-interpreter', 'BADGE_RP2350', true, true, true, ownedSequence, true);
+        interpreter = firmware('badge-interpreter', 'BADGE_RP2350', true, true, true, ownedSequence, interpreterModules);
+        if (options.has('--interpreter-split')) {
+            const [runtime, vmCore] = interpreterModules;
+            runtimeOnly = firmware('badge-runtime-only', 'BADGE_RP2350', true, true, true, ownedSequence, [runtime]);
+            vmOnly = firmware('badge-vm-only', 'BADGE_RP2350', true, true, true, ownedSequence, [vmCore]);
+        }
+    }
+    let libraries;
+    if (options.has('--libraries')) {
+        for (const mod of libraryModules)
+            compileStockModule(stock.directory, path.join(upstream, mod.source), path.join(build, mod.object));
+        const qualification = checkLibraries(stock.directory, path.join(build, 'crc-start.o'));
+        const libm = firmware('badge-libm', 'BADGE_RP2350', true, false, false, null, [], libraryModules.slice(0, 1));
+        const littlefs = firmware('badge-libraries', 'BADGE_RP2350', true, false, false, null, [], libraryModules);
+        libraries = { libm, littlefs, qualification };
     }
     const sameTokens = crcComparison();
     console.log('Same-token CRC comparison (1,024-byte input):', sameTokens);
     fs.writeFileSync(path.join(build, 'comparison.json'),
-        JSON.stringify({ revision, pico2, stock, mixed, core, vm, sequenceVm, sequenceBeforeVm, interpreter, smallInteger, radixParser, calendar, sequenceIndex,
-            sameTokens, oracleCases: 1028 }, null, 2) + '\n');
+        JSON.stringify({ revision, pico2, stock, mixed, core, vm, sequenceVm, sequenceBeforeVm, interpreter, runtimeOnly, vmOnly,
+            smallInteger, radixParser, calendar, sequenceIndex,
+            libraries, sameTokens, oracleCases: 1028 }, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython build: ${error.message}`);
     process.exitCode = 1;

@@ -83,9 +83,7 @@ typedef struct cg_function {
   int foldable;
   struct cg_function *next;
 } cg_function;
-typedef struct cg_allocation {
-  struct cg_allocation *next;
-} cg_allocation;
+typedef struct cg_chunk cg_chunk;
 typedef struct {
   cg_value *value;
   cg_block *definition, *use_block;
@@ -117,14 +115,16 @@ typedef struct {
 #ifndef CG_REGISTER_WORK_LIMIT
 #define CG_REGISTER_WORK_LIMIT (32u * 1024u * 1024u)
 #endif
+#ifndef CG_ALLOCATION_LIMIT
 #define CG_ALLOCATION_LIMIT (128u * 1024u * 1024u)
+#endif
 #ifndef CG_SCHEDULE_WORK_LIMIT
 #define CG_SCHEDULE_WORK_LIMIT 16000000u
 #endif
 typedef struct {
   jmp_buf failure;
-  cg_allocation *allocations;
-  size_t memory;
+  cg_chunk *chunks;
+  size_t memory, function_memory_peak;
   uint64_t *liveness_scratch;
   cg_token *tokens;
   unsigned count, pos, line;
@@ -287,6 +287,8 @@ static inline int cg_narrow_memory_selection(const cg_context *c) {
 
 _Noreturn void cg_error(cg_context *c, const char *message);
 void *cg_alloc(cg_context *c, size_t n);
+void cg_charge_memory(cg_context *c, size_t n);
+void cg_release_storage(cg_context *c);
 void cg_append(cg_context *c, const char *text, size_t n);
 void cg_emit(cg_context *c, const char *format, ...);
 unsigned cg_round(unsigned n, unsigned a);

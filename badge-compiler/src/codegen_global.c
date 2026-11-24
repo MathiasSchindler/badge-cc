@@ -571,9 +571,9 @@ void cg_global_prepare(cg_context *c) {
   if (word_bytes && rows > (CG_ALLOCATION_LIMIT - c->memory) / word_bytes)
     cg_error(c, "backend allocation limit exceeded");
   size_t scratch_bytes = rows * word_bytes;
+  cg_charge_memory(c, scratch_bytes);
   c->liveness_scratch = calloc(1, scratch_bytes ? scratch_bytes : sizeof(uint64_t));
   if (!c->liveness_scratch) cg_error(c, "out of memory");
-  c->memory += scratch_bytes;
   g->graph = c->liveness_scratch;
   uint64_t *scratch = g->graph + (size_t)g->count * g->words;
   for (unsigned n = 0; n < c->register_capacity; n++) {

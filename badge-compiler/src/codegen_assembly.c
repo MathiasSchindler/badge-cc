@@ -90,6 +90,14 @@ cg_assembly *cg_instruction_assembly(cg_context *c, cg_inst *i) {
       clobbers = 1;
       a->flags_write = 1;
       p += 5;
+    } else if (!register_count && !strncmp(p, "~{r", 3) && p[3] >= '0' && p[3] <= '3' && p[4] == '}') {
+      clobbers = 1;
+      a->writes |= 1u << (p[3] - '0');
+      p += 5;
+    } else if (!register_count && c->fn && c->fn->naked && !strncmp(p, "~{r12}", 6)) {
+      clobbers = 1;
+      a->writes |= 1u << 12;
+      p += 6;
     } else if (*p == '=' && register_count == a->output && a->output < 2 && !clobbers) {
       p++;
       if (*p == '&') p++;

@@ -16,16 +16,52 @@ _Noreturn void cg_error(cg_context *c, const char *message) {
     fprintf(stderr, "badge-codegen: %s:%u: %s\n", c->file, c->line, message);
   longjmp(c->failure, 1);
 }
-void *cg_alloc(cg_context *c, size_t n) {
-  if (n > CG_ALLOCATION_LIMIT - c->memory)
+void cg_charge_memory(cg_context *c, size_t n) {
+  if (c->memory > CG_ALLOCATION_LIMIT || n > CG_ALLOCATION_LIMIT - c->memory)
     cg_error(c, "backend allocation limit exceeded");
-  cg_allocation *a = calloc(1, sizeof(*a) + n);
-  if (!a)
-    cg_error(c, "out of memory");
-  a->next = c->allocations;
-  c->allocations = a;
   c->memory += n;
-  return a + 1;
+  if (c->memory > c->function_memory_peak)
+    c->function_memory_peak = c->memory;
+}
+struct cg_chunk {
+  cg_chunk *next;
+  size_t used, capacity;
+  _Alignas(max_align_t) unsigned char data[];
+};
+typedef struct {
+  cg_chunk *chunk;
+  size_t used, memory;
+} cg_mark;
+void *cg_alloc(cg_context *c, size_t n) {
+  cg_charge_memory(c, n);
+  size_t alignment = _Alignof(max_align_t), size = n ? n : 1;
+  size = (size + alignment - 1) & ~(alignment - 1);
+  cg_chunk *chunk = c->chunks;
+  if (!chunk || size > chunk->capacity - chunk->used) {
+    size_t capacity = size > 65536 ? size : 65536;
+    chunk = malloc(sizeof(*chunk) + capacity);
+    if (!chunk) cg_error(c, "out of memory");
+    *chunk = (cg_chunk){c->chunks, 0, capacity};
+    c->chunks = chunk;
+  }
+  void *p = chunk->data + chunk->used;
+  chunk->used += size;
+  memset(p, 0, n);
+  return p;
+}
+static void cg_release(cg_context *c, cg_mark mark) {
+  while (c->chunks != mark.chunk) {
+    cg_chunk *chunk = c->chunks;
+    c->chunks = chunk->next;
+    free(chunk);
+  }
+  if (mark.chunk) mark.chunk->used = mark.used;
+  c->memory = mark.memory;
+}
+void cg_release_storage(cg_context *c) {
+  cg_release(c, (cg_mark){0});
+  free(c->liveness_scratch);
+  c->liveness_scratch = NULL;
 }
 static char *cg_copy(cg_context *c, const char *p, size_t n) {
   char *s = cg_alloc(c, n + 1);
@@ -106,9 +142,10 @@ static uint64_t cg_number(cg_context *c, const char *s) {
   return n;
 }
 unsigned cg_round(unsigned n, unsigned a) { return (n + a - 1) & ~(a - 1); }
-static void cg_lex(cg_context *c, const char *source, size_t length) {
-  size_t maximum = length < 1000000 ? length : 1000000;
-  c->tokens = cg_alloc(c, maximum * sizeof(*c->tokens));
+static size_t cg_scan_tokens(cg_context *c, const char *source, size_t length,
+                             char *spellings) {
+  size_t bytes = 0;
+  unsigned count = 0;
   unsigned line = 1;
   for (size_t k = 0; k < length;) {
     unsigned char ch = (unsigned char)source[k];
@@ -127,6 +164,7 @@ static void cg_lex(cg_context *c, const char *source, size_t length) {
       continue;
     }
     size_t start = k;
+    c->line = line;
     if (ch == '"' ||
         ((ch == '@' || ch == '%') && k + 1 < length && source[k + 1] == '"')) {
       if (ch != '"')
@@ -152,11 +190,24 @@ static void cg_lex(cg_context *c, const char *source, size_t length) {
     }
     if (k == start)
       cg_error(c, "invalid IR character");
-    if (c->count == 1000000)
+    if (count == 1000000)
       cg_error(c, "IR token limit exceeded");
-    c->tokens[c->count++] =
-        (cg_token){cg_copy(c, source + start, k - start), line, (unsigned)start};
+    if (spellings) {
+      memcpy(spellings + bytes, source + start, k - start);
+      c->tokens[count] = (cg_token){spellings + bytes, line, (unsigned)start};
+    }
+    count++;
+    bytes += k - start + 1;
   }
+  c->count = count;
+  return bytes;
+}
+static void cg_lex(cg_context *c, const char *source, size_t length) {
+  size_t bytes = cg_scan_tokens(c, source, length, NULL);
+  c->tokens = cg_alloc(c, (size_t)c->count * sizeof(*c->tokens));
+  char *spellings = cg_alloc(c, bytes);
+  (void)cg_scan_tokens(c, source, length, spellings);
+  c->line = 1;
 }
 char *cg_name(cg_context *c, const char *s) {
   if (*s == '@' || *s == '%')
@@ -234,28 +285,24 @@ static cg_type *cg_type_parse(cg_context *c, unsigned depth) {
     }
     return named->type;
   }
-  cg_type *t = cg_alloc(c, sizeof(*t));
+  static cg_type scalar[] = {
+      {.align = 1}, {.size = 1, .align = 1, .bits = 1},
+      {.size = 1, .align = 1, .bits = 8}, {.size = 2, .align = 2, .bits = 16},
+      {.size = 4, .align = 4, .bits = 32}, {.size = 8, .align = 8, .bits = 64},
+  };
   if (!strcmp(s, "void")) {
-    t->align = 1;
-    return t;
+    return &scalar[0];
   }
   if (!strcmp(s, "ptr")) {
-    t->size = t->align = 4;
-    t->bits = 32;
-    return t;
+    return &scalar[4];
   }
   if (s[0] == 'i' && isdigit((unsigned char)s[1])) {
     uint64_t bits = cg_number(c, s + 1);
-    if (bits > 64)
-      cg_error(c, "unsupported integer width");
-    t->bits = (unsigned)bits;
-    if (t->bits != 1 && t->bits != 8 && t->bits != 16 && t->bits != 32 &&
-        t->bits != 64)
-      cg_error(c, "unsupported integer width");
-    t->size = (t->bits + 7) / 8;
-    t->align = t->size;
-    return t;
+    for (unsigned k = 1; k < sizeof(scalar) / sizeof(*scalar); k++)
+      if (scalar[k].bits == bits) return &scalar[k];
+    cg_error(c, "unsupported integer width");
   }
+  cg_type *t = cg_alloc(c, sizeof(*t));
   if (!strcmp(s, "[")) {
     uint64_t n = cg_number(c, cg_take(c));
     cg_expect(c, "x");
@@ -272,13 +319,13 @@ static cg_type *cg_type_parse(cg_context *c, unsigned depth) {
     t->packed = !strcmp(s, "<");
     if (t->packed)
       cg_expect(c, "{");
-    t->fields = cg_alloc(c, 256 * sizeof(*t->fields));
+    cg_type *fields[256];
     t->align = 1;
     while (!cg_accept(c, "}")) {
       if (t->count == 256)
         cg_error(c, "too many aggregate fields");
       cg_type *f = cg_type_parse(c, depth + 1);
-      t->fields[t->count++] = f;
+      fields[t->count++] = f;
       unsigned a = t->packed ? 1 : f->align;
       unsigned next = cg_round(t->size, a);
       if (next > 16u * 1024u * 1024u || f->size > 16u * 1024u * 1024u - next)
@@ -291,6 +338,8 @@ static cg_type *cg_type_parse(cg_context *c, unsigned depth) {
       cg_expect(c, "}");
       break;
     }
+    t->fields = cg_alloc(c, t->count * sizeof(*t->fields));
+    memcpy(t->fields, fields, t->count * sizeof(*t->fields));
     if (t->packed)
       cg_expect(c, ">");
     t->size = cg_round(t->size, t->align);
@@ -624,7 +673,7 @@ static void cg_global(cg_context *c) {
   if (!strncmp(name, "llvm.", 5))
     cg_error(c, "unsupported LLVM special global");
   int internal = 0, external = 0, weak = 0, constant = 0, unnamed = 0;
-  while (!cg_is(c, "global") && !cg_is(c, "constant")) {
+  while (!cg_is(c, "global") && !cg_is(c, "constant") && !cg_is(c, "alias")) {
     char *s = cg_take(c);
     if (!strcmp(s, "internal") || !strcmp(s, "private"))
       internal = 1;
@@ -633,11 +682,30 @@ static void cg_global(cg_context *c) {
     else if (!strcmp(s, "weak") || !strcmp(s, "extern_weak")) {
       weak = 1;
       external |= !strcmp(s, "extern_weak");
-    }
-    else if (!strcmp(s, "unnamed_addr"))
+    } else if (!strcmp(s, "unnamed_addr"))
       unnamed = 1;
     else if (strcmp(s, "dso_local") && strcmp(s, "local_unnamed_addr"))
       cg_error(c, "unsupported global linkage/attribute");
+  }
+  if (cg_accept(c, "alias")) {
+    if (internal || external || unnamed) cg_error(c, "unsupported alias linkage");
+    (void)cg_type_parse(c, 0);
+    cg_expect(c, "(");
+    if (!cg_accept(c, ")")) {
+      do {
+        if (cg_accept(c, "...")) break;
+        (void)cg_type_parse(c, 0);
+      } while (cg_accept(c, ","));
+      cg_expect(c, ")");
+    }
+    cg_expect(c, ",");
+    cg_expect(c, "ptr");
+    const char *target = cg_take(c);
+    if (*target != '@' || (c->pos < c->count && c->tokens[c->pos].line == line))
+      cg_error(c, "invalid function alias target");
+    cg_emit(c, ".%s %s\n.thumb_func %s\n.set %s,%s\n",
+            weak ? "weak" : "global", name, name, name, cg_name(c, target));
+    return;
   }
   constant = cg_accept(c, "constant");
   if (!constant)
@@ -661,8 +729,10 @@ static void cg_global(cg_context *c) {
   if (weak) cg_emit(c, ".weak %s\n", name);
   if (!external) {
     if (section)
-      cg_emit(c, ".section \"%s\",\"%s\",%%progbits\n", section,
-              constant ? "a" : "aw");
+      cg_emit(c, ".section \"%s\",\"%s\",%%%s\n", section,
+              constant ? "a" : "aw",
+              !strcmp(section,".init_array") || !strncmp(section,".init_array.",12) ?
+              "init_array" : "progbits");
     else if (internal && unnamed && constant && align == 1 && t->base &&
              t->base->bits == 8 && t->size && cg_is(c, "c"))
       cg_emit(c, ".section .rodata.badge.literal.%s,\"aM\",%%progbits,%u\n",
@@ -3393,6 +3463,16 @@ struct badge_codegen_admission_cache {
   char bytes[ADMISSION_FUNCTION_BYTES];
 };
 
+static size_t cg_emit_function(cg_context *c, cg_function *f) {
+  cg_mark mark = {c->chunks, c->chunks ? c->chunks->used : 0, c->memory};
+  c->function_memory_peak = mark.memory;
+  cg_generate_function(c, f);
+  /* Named types can be resolved lazily and shared by subsequent functions. */
+  if (!c->named_types)
+    cg_release(c, mark);
+  return c->function_memory_peak - mark.memory;
+}
+
 static void cg_generate_admission(cg_context *c, cg_function *f, const char *source,
                                   struct badge_codegen_admission_cache *cache) {
   size_t n = f->source_end - f->source_begin;
@@ -3408,15 +3488,14 @@ static void cg_generate_admission(cg_context *c, cg_function *f, const char *sou
     cg_append(c, entry->assembly, entry->assembly_size);
     c->unique = entry->next_unique;
     c->register_work += entry->work;
-    c->memory += entry->memory;
     f->machine_register_mentions = entry->mentions;
     f->machine_registers_known = entry->known;
     return;
   }
-  size_t start = c->size, memory = c->memory;
+  size_t start = c->size;
   unsigned work = c->register_work, unique = c->unique;
   c->admission_dependent = 0;
-  cg_generate_function(c, f);
+  size_t memory = cg_emit_function(c, f);
   size_t emitted = c->size - start;
   /* Calls that consult module linkage or register summaries must be
      regenerated. Final assembly still runs over the whole module. */
@@ -3427,7 +3506,7 @@ static void cg_generate_admission(cg_context *c, cg_function *f, const char *sou
     memcpy(storage + n, c->out + start, emitted);
     *entry = (cg_cached_function){
         .source = storage, .assembly = storage + n, .source_size = n,
-        .assembly_size = emitted, .memory = c->memory - memory,
+        .assembly_size = emitted, .memory = memory,
         .work = c->register_work - work, .id = f->id, .unique = unique,
         .next_unique = c->unique, .mentions = f->machine_register_mentions,
         .known = f->machine_registers_known, .selection = c->scalar_selection};
@@ -3504,7 +3583,7 @@ static void cg_process(cg_context *c, const char *source, size_t size,
     if (cache && !c->named_types)
       cg_generate_admission(c, f, source, cache);
     else
-      cg_generate_function(c, f);
+      (void)cg_emit_function(c, f);
   cg_emit(c, ".section .note.GNU-stack,\"\",%%progbits\n");
 }
 int badge_codegen_compile(const char *source, size_t length,
@@ -3616,12 +3695,7 @@ static int cg_compile(
     c->out = NULL;
     result = 1;
   }
-  while (c->allocations) {
-    cg_allocation *a = c->allocations;
-    c->allocations = a->next;
-    free(a);
-  }
-  free(c->liveness_scratch);
+  cg_release_storage(c);
   free(c->out);
   free(c);
   return result;

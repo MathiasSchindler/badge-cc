@@ -95,3 +95,49 @@ void wide_shifts(unsigned long long x, unsigned count, unsigned long long *out)
     out[1] = x >> count;
     out[2] = (unsigned long long)((long long)x >> count);
 }
+
+const char braced_text[] = {"firmware"};
+const int *const literal_values = (const int[]){17, 42};
+float folded_float = (float)(2.0 * 3.125);
+float quiet_nan = __builtin_nanf("");
+
+struct SignedFields { int a : 5; unsigned b : 4; };
+int signed_fields(struct SignedFields *p, int value)
+{
+    int old = p->a;
+    return old + (p->a = value);
+}
+
+int gnu_scope(int flag)
+{
+    ({ if (flag) return 7; });
+    typeof(flag) value = 24;
+    return value;
+}
+
+unsigned long long read_args(unsigned prefix, ...)
+{
+    __builtin_va_list args;
+    __builtin_va_start(args, prefix);
+    unsigned first = __builtin_va_arg(args, unsigned);
+    unsigned long long wide = __builtin_va_arg(args, unsigned long long);
+    const unsigned *tail = __builtin_va_arg(args, const unsigned *);
+    __builtin_va_end(args);
+    return wide + prefix + first + *tail;
+}
+
+volatile unsigned initialization_order;
+static void __attribute__((constructor(1000))) owned_constructor(void)
+{
+    initialization_order = 1;
+}
+
+int wide_clz(unsigned long long bits) { return __builtin_clzll(bits); }
+int wide_clz_alias(unsigned long long) __attribute__((alias("wide_" "clz")));
+
+static const unsigned naked_value __attribute__((used)) = 0xa535;
+__attribute__((naked)) unsigned naked_address(void)
+{
+    __asm__ volatile ("ldr r0, =%[address] /* static address */\nldr r0, [r0]\nbx lr"
+        : : [address] "i"(&naked_value) : "ip", "cc");
+}

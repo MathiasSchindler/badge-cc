@@ -39,7 +39,7 @@ typedef struct {
     symbol_t **inline_queue; unsigned inline_count,inline_expansions;
     ir_buffer body,entry; ir_buffer *buffer;
     unsigned reg,temp,label,block,break_block,continue_block,depth;
-    int terminated,ssa_expressions,uses_ctlz,base_pcs_float,libc_strcmp;
+    int terminated,ssa_expressions,uses_ctlz,base_pcs_float,libc_strcmp,naked_literal_pool;
     unsigned va_intrinsics,bswap_intrinsics;
     ir_float_helper *float_helpers;
     symbol_t *function; ir_label *labels; ir_switch *switches;
@@ -301,6 +301,11 @@ static const char *ir_bits_op(ir_context *c,const char *op,const char *a,const c
 static const char *ir_bits_immediate(ir_context *c,const char *op,const char *a,uint32_t b) {
     return ir_bits_op(c,op,a,ir_format(c,"%" PRIu32,b));
 }
+static const char *ir_signed_field(ir_context *c,const char *bits,c_type_t *type,unsigned width) {
+    if(type->is_unsigned || width==32) return bits;
+    bits=ir_bits_immediate(c,"shl",bits,32-width);
+    return ir_bits_immediate(c,"ashr",bits,32-width);
+}
 static c_type_t *ir_field_chunk(ir_context *c,ir_field_window w,unsigned k) {
     unsigned left=w.size-k;
     return ir_primitive(c,w.bytewise?T_UCHAR:left==4?T_UINT:left>=2 && !((w.first+k)&1)?T_USHORT:T_UCHAR);
@@ -342,6 +347,7 @@ static ir_value ir_read_object(ir_context *c,node_t *n,const char *place) {
     const char *bits=ir_read_window(c,place,w);
     if(w.shift) bits=ir_bits_immediate(c,"lshr",bits,w.shift);
     if(i->bit_width!=w.size*8) bits=ir_bits_immediate(c,"and",bits,ir_bit_mask(i->bit_width));
+    bits=ir_signed_field(c,bits,i->type,i->bit_width);
     return ir_cast(c,(ir_value){ir_primitive(c,T_UINT),bits},i->type);
 }
 static ir_value ir_write_object(ir_context *c,node_t *n,const sem_info_t *i,c_type_t *t,const char *place,ir_value value) {
@@ -363,6 +369,7 @@ static ir_value ir_write_object(ir_context *c,node_t *n,const sem_info_t *i,c_ty
     if(mask!=ir_bit_mask(w.size*8))
         bits=ir_bits_op(c,"or",ir_bits_immediate(c,"and",ir_read_window(c,place,w),~mask),bits);
     ir_write_window(c,place,w,bits);
+    value.text=ir_signed_field(c,value.text,t,i->bit_width);
     return ir_cast(c,value,t);
 }
 static const char *ir_object_place(ir_context *c,node_t *n,int access) {
@@ -388,6 +395,7 @@ static const char *ir_object_place(ir_context *c,node_t *n,int access) {
         return ir_offset(c,left.text,offset);
     }
     if(ir_kind(n,"compound_literal")) {
+        if(i->symbol) return ir_place_symbol(c,i->symbol);
         const char *place=ir_temp(c,i->type,0); ir_initialize(c,i->type,place,b); return place;
     }
     if(ir_kind(n,"string_literal")) return ir_symbol(c,i->symbol);
@@ -411,19 +419,20 @@ static ir_value ir_binary(ir_context *c,const char *op,ir_value left,ir_value ri
     if(left.type->kind==T_POINTER || right.type->kind==T_POINTER) {
         if(strcmp(op,"+")==0 || strcmp(op,"-")==0) {
             if(right.type->kind==T_POINTER && left.type->kind!=T_POINTER) { ir_value swap=left; left=right; right=swap; }
+            uint32_t step=left.type->base->kind==T_VOID?1:left.type->base->size;
             if(right.type->kind==T_POINTER) {
                 ir_value x=ir_cast(c,left,ir_primitive(c,T_UINT)),y=ir_cast(c,right,ir_primitive(c,T_UINT));
                 const char *difference=ir_reg(c); ir_emit(c,"  %s = sub i32 %s, %s\n",difference,x.text,y.text);
-                if(left.type->base->size!=1) {
-                    const char *r=ir_reg(c); ir_emit(c,"  %s = sdiv i32 %s, %" PRIu32 "\n",r,difference,left.type->base->size); difference=r;
+                if(step!=1) {
+                    const char *r=ir_reg(c); ir_emit(c,"  %s = sdiv i32 %s, %" PRIu32 "\n",r,difference,step); difference=r;
                 }
                 return (ir_value){result,difference};
             }
             right=ir_cast(c,right,ir_primitive(c,T_INT)); const char *offset=right.text;
-            if(left.type->base->size!=1 || strcmp(op,"-")==0) {
+            if(step!=1 || strcmp(op,"-")==0) {
                 offset=ir_reg(c);
                 ir_emit(c,"  %s = mul i32 %s, %" PRId64 "\n",offset,right.text,
-                    (strcmp(op,"-")==0?-1:1)*(int64_t)left.type->base->size);
+                    (strcmp(op,"-")==0?-1:1)*(int64_t)step);
             }
             return (ir_value){result,ir_offset(c,left.text,offset)};
         }
@@ -512,6 +521,20 @@ static void ir_signature(ir_context *c,c_type_t *fn,int names) {
     }
     if(fn->variadic || !fn->prototype) { if(comma) ir_text(c,", "); ir_text(c,"..."); }
 }
+static void ir_alias(ir_context *c,symbol_t *s) {
+    c_type_t *fn=s->type;
+    ir_emit(c,"%s = %salias %s (",ir_symbol(c,s),s->weak?"weak ":"",ir_return_type(c,fn));
+    int comma=ir_record(fn->base) && fn->base->size>4;
+    if(comma) ir_text(c,"ptr");
+    for(size_t k=0;k<fn->parameter_count;++k) {
+        c_type_t *t=fn->parameters[k];
+        if(comma) ir_text(c,", ");
+        comma=1;
+        ir_text(c,ir_byval(t)?"ptr":ir_record(t)?ir_carrier(c,t):ir_type(c,t));
+    }
+    if(fn->variadic) ir_text(c,comma?", ...":"...");
+    ir_emit(c,"), ptr %s\n",ir_symbol(c,s->alias_target));
+}
 static ir_value ir_builtin_call(ir_context *c,node_t *n,c_builtin_t builtin) {
     node_t *a=n->first->next;
     if(builtin==BUILTIN_UNREACHABLE)
@@ -591,9 +614,12 @@ static ir_value ir_builtin_call(ir_context *c,node_t *n,c_builtin_t builtin) {
         ir_emit(c,"  %s = sub i32 0, %s\n  %s = and i32 %s, %s\n",neg,x.text,low,x.text,neg);
         x.text=low;
     }
-    c->uses_ctlz=1;
+    unsigned width=ir_bits(x.type);
+    c->uses_ctlz|=width==64?2:1;
     const char *count=ir_reg(c);
-    ir_emit(c,"  %s = call i32 @llvm.ctlz.i32(i32 %s, i1 true)\n",count,x.text);
+    ir_emit(c,"  %s = call i%u @llvm.ctlz.i%u(i%u %s, i1 true)\n",count,width,width,width,x.text);
+    if(width==64)
+        return ir_cast(c,(ir_value){x.type,count},ir_info(n)->type);
     if(builtin==BUILTIN_CTZ) {
         const char *result=ir_reg(c); ir_emit(c,"  %s = sub i32 31, %s\n",result,count);
         count=result;
@@ -716,6 +742,21 @@ static ir_value ir_raw_expression(ir_context *c,node_t *n) {
     if(ir_kind(n,"identifier")) return ir_load(c,i->type,ir_place_symbol(c,i->symbol));
     if(ir_kind(n,"string_literal")) return (ir_value){ir_pointer(c,i->type->base),ir_symbol(c,i->symbol)};
     if(ir_kind(n,"parenthesized_expression")) return ir_raw_expression(c,a);
+    if(ir_kind(n,"va_arg")) {
+        const char *place=ir_lvalue(c,a),*cursor=ir_reg(c);
+        ir_emit(c,"  %s = load ptr, ptr %s, align 4\n",cursor,place);
+        if(i->type->alignment==8) {
+            const char *bits=ir_reg(c);
+            ir_emit(c,"  %s = ptrtoint ptr %s to i32\n",bits,cursor);
+            bits=ir_bits_immediate(c,"add",bits,7);
+            bits=ir_bits_immediate(c,"and",bits,UINT32_MAX-7);
+            cursor=ir_reg(c);
+            ir_emit(c,"  %s = inttoptr i32 %s to ptr\n",cursor,bits);
+        }
+        const char *next=ir_offset(c,cursor,i->type->size==8?"8":"4");
+        ir_emit(c,"  store ptr %s, ptr %s, align 4\n",next,place);
+        return ir_load(c,i->type,cursor);
+    }
     if(ir_kind(n,"statement_expression")) {
         node_t *last=a->last; ir_value result={i->type,""};
         for(node_t *child=a->first;child;child=child->next)
@@ -798,6 +839,7 @@ static node_t *ir_scalar_initializer(node_t *n) {
 }
 static void ir_initializer_contract(ir_context *c,c_type_t *t,node_t *n) {
     if(!ir_kind(n,"initializer_list")) return;
+    if(ir_info(n)->selected || ir_info(n)->zero_initializer) return;
     if(t->kind==T_UNION && n->first && n->first->next)
         ir_error(c,n,"multiple union initializer items are outside the C05 contract");
     for(node_t *item=n->first;item;item=item->next) {
@@ -813,7 +855,9 @@ static void ir_initializer_contract(ir_context *c,c_type_t *t,node_t *n) {
 static void ir_initialize(ir_context *c,c_type_t *t,const char *place,node_t *n) {
     if(n==NULL) return;
     if(ir_kind(n,"initializer_list")) {
+        if(ir_info(n)->selected) { ir_initialize(c,t,place,ir_info(n)->selected); return; }
         ir_zero(c,place,t->size,(ir_object_qualifiers(t)&Q_VOLATILE)!=0);
+        if(ir_info(n)->zero_initializer) return;
         for(node_t *item=n->first;item;item=item->next) {
             sem_info_t *i=ir_info(item);
             if(t->alignment<i->type->alignment || i->field_offset%i->type->alignment)
@@ -874,6 +918,11 @@ static void ir_global_value(ir_context *c,c_type_t *t,node_t *n,uint32_t offset,
     for(ir_reloc *r=*relocations;r;r=r->next)
         if(offset<r->offset+r->size && r->offset<offset+t->size) r->size=0;
     if(ir_kind(n,"initializer_list")) {
+        if(ir_info(n)->selected) {
+            ir_global_value(c,t,ir_info(n)->selected,offset,bytes,relocations,total);
+            return;
+        }
+        if(ir_info(n)->zero_initializer) return;
         for(node_t *item=n->first;item;item=item->next) {
             sem_info_t *i=ir_info(item); node_t *value=ir_initializer_value(item);
             if(i->bit_width) ir_global_bit_field(c,i,value,offset+i->field_offset,bytes,total);
@@ -1007,7 +1056,13 @@ static void ir_collect(ir_context *c,node_t *n) {
                 ir_initializer_contract(c,s->type,child); c->initializers[s->id]=child;
             }
     }
-    if(ir_kind(n,"compound_literal")) ir_initializer_contract(c,ir_info(n)->type,n->first->next);
+    if(ir_kind(n,"compound_literal")) {
+        sem_info_t *i=ir_info(n);
+        if(i) {
+            ir_initializer_contract(c,i->type,n->first->next);
+            if(i->symbol) c->initializers[i->symbol->id]=n->first->next;
+        }
+    }
     for(node_t *child=n->first;child;child=child->next) ir_collect(c,child);
 }
 static node_t *ir_function_declarator(node_t *n) {
@@ -1070,7 +1125,7 @@ static ir_value ir_asm_word(ir_context *c,node_t *n,ir_value value) {
     return ir_cast(c,value,ir_primitive(c,T_UINT));
 }
 static void ir_asm_template(ir_context *c,node_t *n,const ir_buffer *raw,
-                            node_t **operands,unsigned count,int extended) {
+                            node_t **operands,const char *const *immediates,unsigned count,int extended) {
     for(size_t k=0;k<raw->size;++k) {
         const char *at=raw->data+k;
         if(*at=='$' && c->function) ir_text(c,"$$");
@@ -1096,14 +1151,18 @@ static void ir_asm_template(ir_context *c,node_t *n,const ir_buffer *raw,
                 }
             } else ir_error(c,n,"unsupported inline assembly operand modifier");
             if(index>=count) ir_error(c,n,"inline assembly operand is out of range");
-            ir_emit(c,"$%u",index);
+            if(immediates[index]) {
+                for(const char *p=immediates[index];*p;++p)
+                    if(*p=='$') ir_text(c,"$$"); else ir_bytes(c,p,1);
+            } else ir_emit(c,"$%u",index);
         }
     }
 }
 static void ir_assembly(ir_context *c,node_t *n) {
     node_t *text=NULL,*outputs[2]={0},*operands[3]={0};
+    const char *immediates[3]={0};
     unsigned clobbers=0,count=0,output_count=0,read_write=0,early=0;
-    int extended=0;
+    int extended=0,naked=c->function && c->function->naked;
     for(node_t *group=n->first;group;group=group->next) {
         if(ir_kind(group,"asm_qualifier")) {
             if(strcmp(group->text,"goto")==0) ir_error(c,n,"asm goto is outside the C05 contract");
@@ -1122,10 +1181,22 @@ static void ir_assembly(ir_context *c,node_t *n) {
                     if(*kind=='&') { early|=1u<<output_count; ++kind; }
                     outputs[output_count++]=operand->first->next;
                 }
-                if((kind[0]!='r' && kind[0]!='l') || kind[1])
-                    ir_error(c,operand,"only r/l inline assembly register constraints are supported");
                 if(count==sizeof(operands)/sizeof(*operands))
                     ir_error(c,operand,"inline assembly register operand limit exceeded");
+                if(naked) {
+                    if(strcmp(kind,"i") || is_output)
+                        ir_error(c,operand,"naked assembly requires an immediate constraint");
+                    node_t *arg=operand->first->next;
+                    sem_info_t *v=ir_info(arg);
+                    if(v->address && v->symbol && !v->addend &&
+                       (!v->lvalue || v->type->kind==T_ARRAY || v->type->kind==T_FUNCTION)) {
+                        const char *symbol=ir_symbol(c,v->symbol);
+                        immediates[count]=ir_format(c,"%.*s",(int)(strlen(symbol)-3),symbol+2);
+                    } else if(v->constant && !v->lvalue && ir_integer(v->type) && v->type->size<=4)
+                        immediates[count]=ir_format(c,"%" PRIu32,(uint32_t)v->value);
+                    else ir_error(c,arg,"naked asm immediate must be a word constant or a link-time symbol");
+                } else if((kind[0]!='r' && kind[0]!='l') || kind[1])
+                    ir_error(c,operand,"only r/l inline assembly register constraints are supported");
                 for(unsigned j=0;operand->text && j<count;++j)
                     if(operands[j]->text && !strcmp(operands[j]->text,operand->text))
                         ir_error(c,operand,"duplicate inline assembly operand name");
@@ -1136,17 +1207,23 @@ static void ir_assembly(ir_context *c,node_t *n) {
                 node_t *str=operand->first; size_t size=0; unsigned char name[6];
                 for(node_t *segment=str->first;segment;segment=segment->next) {
                     size_t length; unsigned char *bytes=badge_sema_literal(c->sema,segment,&length);
-                    if(length>sizeof(name)-size) ir_error(c,n,"only memory and cc assembly clobbers are supported");
+                    if(length>sizeof(name)-size) ir_error(c,n,"unsupported assembly clobber");
                     memcpy(name+size,bytes,length);
                     size+=length;
                 }
                 if(size==6 && memcmp(name,"memory",6)==0) clobbers|=1u;
                 else if(size==2 && memcmp(name,"cc",2)==0) clobbers|=2u;
-                else ir_error(c,n,"only memory and cc assembly clobbers are supported");
+                else if(size==2 && name[0]=='r' && name[1]>='0' && name[1]<='3')
+                    clobbers|=4u<<(name[1]-'0');
+                else if(naked && ((size==2 && !memcmp(name,"ip",2)) || (size==3 && !memcmp(name,"r12",3))))
+                    clobbers|=4u<<12;
+                else ir_error(c,n,"unsupported assembly clobber");
             }
         } else if(ir_kind(group,"asm_labels") && group->first) ir_error(c,n,"assembly labels unsupported");
     }
     if(text==NULL) ir_error(c,n,"assembly lacks a template");
+    if(count && !naked && (clobbers&~3u))
+        ir_error(c,n,"explicit register clobbers require operand-free assembly");
     if(extended && !c->function) ir_error(c,n,"extended assembly requires a function");
     ir_buffer raw={0},template={0}; ir_buffer *saved=c->buffer; c->buffer=&raw;
     for(node_t *segment=text->first;segment;segment=segment->next) {
@@ -1154,7 +1231,8 @@ static void ir_assembly(ir_context *c,node_t *n) {
         ir_bytes(c,(const char *)bytes,length);
     }
     c->buffer=&template;
-    ir_asm_template(c,n,&raw,operands,count,extended);
+    ir_asm_template(c,n,&raw,operands,immediates,count,extended);
+    if(naked && count) c->naked_literal_pool=1;
     c->buffer=saved;
     const char *places[2]={0},*result=NULL;
     const char *result_type=output_count==2?"{ i32, i32 }":output_count?"i32":"void";
@@ -1166,7 +1244,7 @@ static void ir_assembly(ir_context *c,node_t *n) {
             ir_error(c,outputs[k],"inline assembly register output requires a one-word integer or pointer");
         places[k]=ir_object_place(c,outputs[k],1);
     }
-    for(unsigned k=output_count;k<count;++k) {
+    for(unsigned k=output_count;!naked && k<count;++k) {
         node_t *arg=operands[k]->first->next;
         args[argc++]=ir_asm_word(c,arg,ir_expression(c,arg));
     }
@@ -1182,10 +1260,12 @@ static void ir_assembly(ir_context *c,node_t *n) {
         c->buffer=&constraints;
         for(unsigned k=0;k<output_count;++k)
             ir_emit(c,"%s=%sr",k?",":"",early&(1u<<k)?"&":"");
-        for(unsigned k=output_count;k<count;++k) ir_text(c,constraints.size?",r":"r");
+        for(unsigned k=output_count;!naked && k<count;++k) ir_text(c,constraints.size?",r":"r");
         for(unsigned k=0;k<output_count;++k) if(read_write&(1u<<k)) ir_emit(c,",%u",k);
         if(clobbers&1) ir_text(c,constraints.size?",~{memory}":"~{memory}");
         if(clobbers&2) ir_text(c,constraints.size?",~{cc}":"~{cc}");
+        for(unsigned reg=0;reg<=12;++reg)
+            if(clobbers&(4u<<reg)) ir_emit(c,"%s~{r%u}",constraints.size?",":"",reg);
         c->buffer=saved;
         ir_text(c,", "); ir_string(c,(const unsigned char *)constraints.data,constraints.size);
         ir_text(c,"(");
@@ -1415,8 +1495,10 @@ static void ir_function_header(ir_context *c,symbol_t *s,int defined) {
 static void ir_definition(ir_context *c,symbol_t *s,node_t *n) {
     c->function=s; c->reg=c->temp=c->label=c->depth=c->inline_expansions=0; c->labels=NULL; c->switches=NULL;
     if(s->naked) {
+        c->naked_literal_pool=0;
         ir_function_header(c,s,1); ir_text(c," {\nentry:\n");
         for(node_t *stmt=n->last->first;stmt;stmt=stmt->next) ir_assembly(c,stmt);
+        if(c->naked_literal_pool) ir_text(c,"  call void asm sideeffect \".ltorg\", \"\"()\n");
         ir_text(c,"  unreachable\n}\n");
         c->function=NULL;
         return;
@@ -1476,7 +1558,11 @@ static void ir_process_mode(parser_t *p,node_t *root,int mode) {
             (s->kind==S_STRING || (s->kind==S_OBJECT && s->static_storage && (s->defined || c->referenced[s->id]))) &&
             (!s->owner || s->linkage || !s->owner->is_inline || c->referenced[s->owner->id])) ir_global(c,s);
     for(node_t *n=root->first;n;n=n->next) if(ir_kind(n,"assembly")) ir_assembly(c,n);
+    for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next) if(s->constructor_priority)
+        ir_emit(c,"@\".badge.ctor.%u\" = internal global ptr %s, section \".init_array.%05u\", align 4\n",
+                s->id,ir_symbol(c,s),s->constructor_priority);
     for(symbol_t *s=badge_sema_symbols(c->sema);s;s=s->next) if(s->kind==S_FUNCTION) {
+        if(s->alias_target) { ir_alias(c,s); continue; }
         if(s->always_inline) { if(s->used) ir_error(c,s->definition,"always_inline function cannot be marked used"); continue; }
         if((s->is_inline || !s->definition) && !c->referenced[s->id]) continue;
         if(s->definition) ir_definition(c,s,s->definition);
@@ -1490,7 +1576,8 @@ static void ir_process_mode(parser_t *p,node_t *root,int mode) {
         }
         ir_text(c,"], section \"llvm.metadata\"\n");
     }
-    if(c->uses_ctlz) ir_text(c,"declare i32 @llvm.ctlz.i32(i32, i1 immarg)\n");
+    if(c->uses_ctlz&1) ir_text(c,"declare i32 @llvm.ctlz.i32(i32, i1 immarg)\n");
+    if(c->uses_ctlz&2) ir_text(c,"declare i64 @llvm.ctlz.i64(i64, i1 immarg)\n");
     for(unsigned k=0;k<3;++k) if(c->bswap_intrinsics&(1u<<k)) {
         unsigned width=16u<<k;
         ir_emit(c,"declare i%u @llvm.bswap.i%u(i%u)\n",width,width,width);

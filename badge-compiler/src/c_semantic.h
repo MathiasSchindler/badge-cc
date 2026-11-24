@@ -35,11 +35,14 @@ typedef struct symbol {
     symbol_kind_t kind;
     c_type_t *type;
     int defined,tentative,linkage,static_storage,register_storage,noreturn,used;
-    int is_inline,always_inline,noinline,weak,naked;
+    int is_inline,always_inline,noinline,weak,naked,constant_value;
     node_t *definition;
     node_t **label_targets;
     struct symbol *owner;
+    struct symbol *alias_target;
+    const char *alias_name;
     uint32_t alignment,requested_alignment,storage_size;
+    unsigned constructor_priority;
     const char *section;
     const char *section_name;
     uint64_t value;
@@ -59,7 +62,7 @@ typedef struct sem_info {
     symbol_t *symbol;
     scope_t *parameters;
     uint64_t value;
-    int constant,ice,lvalue,address,unaligned_member,null_pointer_constant,float_literal;
+    int constant,ice,lvalue,address,unaligned_member,null_pointer_constant,float_literal,zero_initializer;
     int64_t addend;
     uint32_t field_offset;
     unsigned bit_width,bit_offset,bit_bytewise;

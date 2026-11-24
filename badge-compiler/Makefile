@@ -148,7 +148,10 @@ test-current-promotion:
 test: test-current-promotion
 
 .PHONY: test-promoted-defaults
-test-promoted-defaults: all build/badge_codegen_test
+build/badge-codegen-memory-budget: src/badge_codegen.c $(CODEGEN_SOURCES) $(CODEGEN_HEADERS) src/host_io.h | build
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) -DCG_ALLOCATION_LIMIT=1048576u $< $(CODEGEN_SOURCES) -o $@
+
+test-promoted-defaults: all build/badge_codegen_test build/badge-codegen-memory-budget
 	./build/badge_codegen_test --api
 	node --test tests/promoted-defaults.test.mjs tests/build_owned_test.mjs
 
@@ -468,7 +471,7 @@ test-metrics: all build/badge-ir-metrics-sanitize build/badge-elf-info-sanitize 
 	./build/badge_elf_info_test
 	node --test tests/benchmark_c06_test.mjs
 
-test: all $(TEST_BINS) build/badge-sha256-sanitize build/profile-codegen build/badge-opt-loop-admission-budget build/badge-opt-cross-budget test-target-cost test-compact test-scheduling test-final-layout test-target-strength test-datasheet-qualification test-pipeline-stages test-application test-backend-attribution test-compare-branch test-scalar-homes test-ssa-expressions test-local-memory test-call-transport test-boundary-evidence test-pipeline-promotion
+test: all $(TEST_BINS) build/badge-sha256-sanitize build/profile-codegen build/badge-opt-loop-admission-budget build/badge-opt-cross-budget build/badge-codegen-memory-budget test-target-cost test-compact test-scheduling test-final-layout test-target-strength test-datasheet-qualification test-pipeline-stages test-application test-backend-attribution test-compare-branch test-scalar-homes test-ssa-expressions test-local-memory test-call-transport test-boundary-evidence test-pipeline-promotion
 	./build/elf2bin_test
 	./build/badge_elf_info_test
 	./build/badge_cpp_test

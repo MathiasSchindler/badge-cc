@@ -949,9 +949,11 @@ The checker implements:
 - Scoped GNU statement expressions with scalar results or no result.
   Control transfers and aggregate results inside them are rejected.
   The AAPCS32 `__builtin_va_list` type has the layout of a one-pointer
-  record. `va_start` (including the C23 form) and `va_end` are supported
-  for handing that list to a base-PCS callee; owned `va_arg` and `va_copy`
-  are not implemented.
+  record. `va_start` (including the C23 form), `va_end` and `va_arg` are
+  supported. For the base PCS, `va_arg` advances the cursor by one word for
+  a promoted word or pointer, and aligns to eight bytes before consuming
+  a double or a 64-bit integer. Aggregate `va_arg` and `va_copy` remain
+  unsupported.
 - Long `else if` chains use a flat representation, without raising the
   depth limit for genuinely nested statements. Argument-free GNU
   `pure`, `const`, `malloc`, and `warn_unused_result` function attributes
@@ -973,22 +975,32 @@ The checker implements:
   C11 anonymous struct/union members with promoted lookup and designated
   initialization. Positional continuation after a promoted designator and
   overriding an already selected anonymous union alternative are diagnosed.
-  Nonvolatile struct bit-fields support `_Bool` and unsigned 8/16/32-bit
-  bases, including unnamed padding and zero-width alignment barriers.
+  Nonvolatile struct bit-fields support `_Bool` and signed/unsigned
+  8/16/32-bit integer bases, including unnamed padding and zero-width
+  alignment barriers. Enums use the owned 32-bit enum ABI, not GCC's
+  optional short-enum layout.
   Packed bit-fields touching at most four bytes and unaligned nonvolatile
   packed integer/pointer members of up to four bytes use byte accesses.
   Taking an unaligned member's address, or performing a volatile unaligned
   access, remains unsupported.
-- Floating literals (including unary signs) can initialize static floating
-  objects. Explicit 32-bit integer casts of link-time symbol addresses can
-  initialize static objects with an ARM address relocation.
+- Static initializers support braced character-array strings, addresses of
+  file-scope compound literals, and floating literals with casts, unary
+  signs, and `+`, `-`, or `*` on floating constants. Explicit 32-bit integer
+  casts of link-time symbol addresses use an ARM address relocation.
 - `__builtin_constant_p` recognizes proven scalar constants without evaluating
   the operand. The target supports `popcount`, `bswap16/32/64`, infinity
   literals and base-PCS float classification. `__builtin_memset`, `memcpy`,
   `memmove`, and `memcmp` use the corresponding C runtime functions.
 - GNU ELF weak declarations and definitions preserve their symbol binding.
-  A `naked` definition accepts only basic assembly and emits no generated
-  prologue or epilogue. Extended asm accepts up to three `r`/`l` operands
+  Same-unit function aliases use the target's Thumb address, not a wrapper.
+  Scalar optimizer admission leaves functions alone when its isolated
+  assembler cannot resolve the module's aliases. Constructors on ordinary
+  `void (void)` definitions emit ELF initializer arrays with priority sorting
+  left to the firmware linker script.
+  A `naked` definition emits no generated prologue or epilogue. It accepts
+  basic assembly or `"i"` inputs containing word constants or link-time
+  symbols without addends. It can flush their literal pool at function end.
+  Other extended asm accepts up to three `r`/`l` operands
   (including up to two outputs), `=`/`+` outputs with optional early clobber,
   numeric and named references, and `cc`/`memory` clobbers. Unmodified
   references to wide integer inputs name the low lane, as on Arm. Memory,
@@ -1030,12 +1042,18 @@ The explicit exclusions are general floating constant evaluation and general bit
 atomics, TLS, complex/imaginary types, VLAs, wide literals and
 multibyte/multicharacter character constants, unsupported bit-field bases,
 general initializer brace elision, other external and block-scope inline forms,
-non-prototype function definitions, GNU void/function-pointer arithmetic,
+old-style definitions with named parameters, GNU function-pointer arithmetic,
 implicit GNU alignment, and unrecognized semantic attributes. Floating types
 and variable arithmetic are supported without floating constant evaluation.
 Unsupported constructs fail explicitly; syntactic C03 support does not imply
 C04 support. Warning parity, uninitialized-value analysis and proof of all
 return paths are not part of this checker.
+
+GNU compatibility includes `typeof` spellings, empty parameter-list
+definitions, byte offsets on `void *`, and returns from statement expressions.
+Preprocessed `#pragma GCC push_options`, `pop_options` and numeric `unroll`
+are accepted as hints only; target and optimization-changing pragmas are
+not accepted by this path.
 
 ### Typed-AST contract
 
@@ -2649,6 +2667,15 @@ scanning whole functions for branch targets. Register allocation stores
 instruction uses sparsely and releases its dense liveness scratch once
 allocation for the function is complete. Existing memory, token and work
 limits remain in force.
+
+The backend packs token spellings, shares scalar types, and uses a chunked
+arena. For modules without lazy named-type dependencies it rewinds the
+arena after each function is emitted. Admission cache entries charge the
+function's peak temporary allocation against the current cap, not its
+already-reclaimed bytes against subsequent functions. The assembler sizes
+its record table from active source lines and releases the previous table
+on growth. These are tracked allocation bounds; the host process RSS also
+includes the optimizer, output buffers, and native allocator overhead.
 Constant lookup uses a per-function hash index. Fresh-name collision checks
 use a lazily built module index that normalizes quoted/unquoted and
 hex-escaped names without changing generated name order.

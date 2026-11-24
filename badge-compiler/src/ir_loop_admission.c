@@ -196,6 +196,13 @@ static int needs_sibling_local(const ir_analysis *a, unsigned function) {
 }
 void ir_function_admission(ir_context *c, ir_module *m, const ir_analysis *a,
                            badge_scalar_selection selection) {
+  int has_alias = 0;
+  for (unsigned g = 0; g < a->global_count; ++g)
+    if (a->globals[g].function != IR_NONE &&
+        a->globals[g].line != a->functions[a->globals[g].function].line) {
+      has_alias = 1;
+      break;
+    }
   uint64_t work = IR_LOOP_ADMISSION_WORK_LIMIT;
   for (unsigned f = 0; f < a->function_count; f++) {
     const ir_function *fn = &a->functions[f];
@@ -208,10 +215,10 @@ void ir_function_admission(ir_context *c, ir_module *m, const ir_analysis *a,
     }
     if (end == m->line_count) ir_error(c, "loop-scalar admission cannot delimit function");
     if (!changed) continue;
-    // The isolated assembler cannot resolve a sibling's assembler-local symbol.
-    if (needs_sibling_local(a, f)) {
+    /* The isolated assembler cannot resolve aliases or assembler-local siblings. */
+    if (has_alias || needs_sibling_local(a, f)) {
       for (unsigned line = begin; line <= end; line++) m->lines[line].replacement = NULL;
-      ir_note(c, "skipped", "isolated_sibling_local_symbol", 1);
+      ir_note(c, "skipped", has_alias ? "isolated_module_has_alias" : "isolated_sibling_local_symbol", 1);
       continue;
     }
     ir_allocation *mark = c->allocations;

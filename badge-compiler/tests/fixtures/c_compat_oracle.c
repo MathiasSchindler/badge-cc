@@ -47,6 +47,23 @@ struct __attribute__((packed)) PackedScalar {
 };
 unsigned packed_scalar(struct PackedScalar *, unsigned);
 void wide_shifts(unsigned long long, unsigned, unsigned long long *);
+extern const char braced_text[];
+extern const int *const literal_values;
+extern float folded_float, quiet_nan;
+struct SignedFields { int a : 5; unsigned b : 4; };
+int signed_fields(struct SignedFields *, int);
+int gnu_scope(int);
+unsigned long long read_args(unsigned, ...);
+int wide_clz(unsigned long long);
+int wide_clz_alias(unsigned long long);
+unsigned naked_address(void);
+extern volatile unsigned initialization_order;
+typedef void (*fixture_constructor)(void);
+extern fixture_constructor __fixture_init_start[], __fixture_init_end[];
+static void __attribute__((constructor(1010))) gcc_constructor(void)
+{
+    initialization_order = initialization_order * 10 + 2;
+}
 
 int optional(void) { return 32; }
 int optional_value = 42;
@@ -117,5 +134,25 @@ int main(void)
             shifts[2] != (unsigned long long)((long long)value >> count))
             return 14;
     }
+    union { float real; unsigned bits; } folded = { .real = folded_float }, nan = { .real = quiet_nan };
+    if (braced_text[7] != 'e' || braced_text[8] != 0 ||
+        literal_values[0] != 17 || literal_values[1] != 42 ||
+        folded.bits != 0x40c80000u || (nan.bits & 0x7fffffffu) <= 0x7f800000u)
+        return 15;
+    struct SignedFields signed_bits = { -7, 12 };
+    if (signed_fields(&signed_bits, 29) != -10 || signed_bits.a != -3 || signed_bits.b != 12)
+        return 16;
+    unsigned tail = 31;
+    if (gnu_scope(0) != 24 || gnu_scope(1) != 7 ||
+        read_args(17, 2u, 0x1234567887654321ULL, &tail) != 0x1234567887654353ULL)
+        return 17;
+    for (fixture_constructor *entry = __fixture_init_start; entry != __fixture_init_end; ++entry)
+        (*entry)();
+    int (*volatile original)(unsigned long long) = wide_clz;
+    int (*volatile alias)(unsigned long long) = wide_clz_alias;
+    if (initialization_order != 12 || wide_clz(1ULL) != 63 ||
+        wide_clz(1ULL << 45) != 18 || wide_clz(1ULL << 63) != 0 ||
+        wide_clz_alias(8) != 60 || original != alias || naked_address() != 0xa535)
+        return 18;
     return weak_probe() == 74 ? 0 : 8;
 }

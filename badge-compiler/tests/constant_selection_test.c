@@ -16,11 +16,7 @@ static char *select(const char *source) {
   cg_reuse_constants(&c, 0);
   cg_reduce_branches(&c, 0);
   cg_share_return_tails(&c, 0);
-  while (c.allocations) {
-    cg_allocation *next = c.allocations->next;
-    free(c.allocations);
-    c.allocations = next;
-  }
+  cg_release_storage(&c);
   return c.out;
 }
 static void expect(const char *source, const char *needle, const char *absent) {

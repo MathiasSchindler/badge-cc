@@ -50,6 +50,29 @@ int exercise(int *p, int a, int b) {
   }
 });
 
+test('default backend fits many functions in a fixed memory budget without changing assembly', t => {
+  const directory = fs.mkdtempSync(path.join(root, 'build/backend-memory-'));
+  t.after(() => fs.rmSync(directory, { recursive: true }));
+  const file = name => path.join(directory, name);
+  const prefix = 'target triple = "thumbv8m.main-unknown-none-eabi"\n';
+  const functions = Array.from({ length: 32 }, (_, f) => {
+    const body = Array.from({ length: 32 }, (_, i) =>
+      `%v${i} = add i32 ${i ? `%v${i - 1}` : '%x'}, ${i + f + 1}\n`).join('');
+    return `define i32 @f${f}(i32 %x) {\nentry:\n${body}ret i32 %v31\n}\n`;
+  }).join('');
+  fs.writeFileSync(file('input.ll'), prefix + ';' + 'x'.repeat(160000) + '\n' + functions);
+  run('badge-codegen', [file('input.ll'), '-o', file('normal.s')]);
+  run('badge-codegen-memory-budget', [file('input.ll'), '-o', file('bounded.s')]);
+  assert.deepEqual(fs.readFileSync(file('bounded.s')), fs.readFileSync(file('normal.s')));
+  fs.writeFileSync(file('input.ll'), prefix + ';' + 'x'.repeat(1048576) + '\n' + functions);
+  const failure = spawnSync(path.join(root, 'build', 'badge-codegen-memory-budget'),
+    [file('input.ll'), '-o', file('bounded.s')], { cwd: root, encoding: 'utf8', timeout: 30000 });
+  assert.ifError(failure.error);
+  assert.equal(failure.status, 1);
+  assert.match(failure.stderr, /backend allocation limit exceeded/);
+  assert.deepEqual(fs.readFileSync(file('bounded.s')), fs.readFileSync(file('normal.s')));
+});
+
 test('target-costed defaults diagnose unsupported forced-inline IR; the previous explicit pipeline remains available', () => {
   const directory = fs.mkdtempSync(path.join(root, 'build/default-contract-'));
   try {

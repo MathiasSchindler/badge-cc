@@ -83,9 +83,9 @@ void cg_saved_register_list(cg_context *c, unsigned mask, int pop) {
 }
 static unsigned mentioned_registers(cg_context *c, const char *line) {
   unsigned mask = 0;
-  for (const char *p = line; *p; p++) {
+  for (const char *p = line; (p = strchr(p, 'r')) != NULL; p++) {
     cg_register_work(c);
-    if (*p != 'r' || (p != line && (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '.')))
+    if (p != line && (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '.'))
       continue;
     const char *q = p + 1;
     unsigned n = 0, digits = 0;
@@ -126,9 +126,8 @@ static void summarize_registers(cg_context *c, cg_function *f, size_t start) {
   };
   unsigned mask = 0;
   int known = 1;
-  char *body = cg_alloc(c, c->size - start + 1);
-  memcpy(body, c->out + start, c->size - start);
-  for (char *p = body, *limit = body + c->size - start; p < limit;) {
+  for (char *p = c->out + start, *limit = c->out + c->size; p < limit;) {
+    cg_register_work(c);
     char *end = strchr(p, '\n');
     if (!end) cg_error(c, "unterminated register summary instruction");
     *end = 0;
@@ -165,6 +164,7 @@ static void summarize_registers(cg_context *c, cg_function *f, size_t start) {
         mask |= mentioned_registers(c, p);
       }
     }
+    *end = '\n';
     p = end + 1;
   }
   f->machine_register_mentions = mask;

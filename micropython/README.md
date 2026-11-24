@@ -134,7 +134,8 @@ Run `node micropython/build.mjs --interpreter` to link both last modules
 into the experimental `badge-interpreter` variant, in addition to the six
 modules in `badge-sequence`. It has 344,368 loaded bytes, 10,184 B above
 `badge-sequence` and 11,692 B above the all-GCC control. GCC still builds
-the other modules, and this variant has not been boot-tested on a badge.
+the other modules. See the [badge results](#eight-module-interpreter-on-the-badge)
+before using this experimental image.
 
 ## Core Python arithmetic
 
@@ -227,6 +228,84 @@ reads back all 16 MiB, and leaves the badge in BOOTSEL. `MPREMOTE_PYTHON`
 can select `python -m mpremote` instead of the `mpremote` executable.
 The images are experimental and should not be used as a daily badge firmware.
 
+### Eight-module interpreter on the badge
+
+Append `--interpreter` to run a stock/mixed/stock comparison using the
+`badge-interpreter` image. The [VM workload](interpreter-smoke.py) checks
+imports, caught exceptions, `finally`, and object retention through garbage
+collection. The REPL also verifies filesystem data written by the preceding
+boot.
+
+All three boots passed on one RP2350 badge. Seven `ticks_us()` samples per
+boot gave VM workload medians of **52.983 / 592.556 / 52.984 ms**:
+the eight-module build took about **11.2×** as long as stock GCC on this
+workload. Sample ranges did not overlap. The original 16 MiB flash was
+restored and independently verified. These measurements do not separate the
+VM and runtime replacements, so they do not assign the slowdown to a
+specific translation unit.
+
+### Isolating the VM and runtime replacements
+
+```sh
+node micropython/build.mjs --interpreter-split
+node micropython/smoke.mjs YOUR_16_HEX_DIGIT_BOOTSEL_SERIAL --interpreter-split
+```
+
+The four images share the `badge-sequence` configuration and six owned
+objects. Only `py/runtime.c` and `py/vm.c` vary. The build checks that each
+replacement is absent from the GCC compile database and present in the
+live link map. The timing runner boots the control, runtime-only, VM-only,
+and combined images in that order and then in reverse. Each boot checks
+the reported clock, verifies filesystem data from the preceding boot,
+and runs the same interpreter workload before finally restoring the
+original flash. Use only a badge you are authorized to reflash.
+
+On one RP2350 at 150 MHz, all eight boots passed. Each value below is
+the mean of the two per-boot medians (seven `ticks_us()` samples per boot).
+The sample ranges did not overlap between images.
+
+| Additional owned code | Loaded flash | VM workload | vs. six-module control |
+| --- | ---: | ---: | ---: |
+| Neither (six-module control) | 334,104 B | 53.954 ms | 1.00× |
+| Runtime only | 340,072 B | 78.953 ms | 1.46× |
+| VM only | 338,304 B | 467.863 ms | 8.67× |
+| VM and runtime | 344,272 B | 592.652 ms | 10.98× |
+
+Replacing the VM accounts for most of the regression. The runtime
+replacement also costs time, and combining them adds about 100 ms beyond
+the sum of their isolated increases. The owned build lowers the computed
+goto to a 256-case switch. The Thumb backend's table selector stops at
+32 cases, so the VM disassembles to a compare chain: the whole dispatcher
+contains 309 static compare sites versus 23 in GCC's. This points to a
+larger jump table as the first optimization to test; the timings do not
+isolate dispatch cost from the rest of the VM.
+
+## Incremental `libm` and LittleFS batch
+
+Run `node micropython/build.mjs --libraries` to build `badge-libm` (owned
+CRC and `sqrtf`) and `badge-libraries` (also replaces the LittleFS v2
+core). The compile database must omit each replaced GCC translation
+unit, and the live link map must name the owned object. Both variants are
+experimental; this does not change the default build.
+
+The [sqrt oracle](sqrt-oracle.c) checks 4,097 exact squares plus IEEE
+boundary cases, including negative zero, a subnormal, and NaN. The
+[LittleFS oracle](littlefs-oracle.c) uses a GCC caller with the stock header
+to exercise format, mount, directory creation, file writes across blocks,
+rename, remount, readback, and deletion. It simulates aligned flash
+transactions and checks that programming never sets programmed bits back to one.
+Both GCC and owned objects pass on Cortex-M33 QEMU. The complete sqrt
+replay reaches about **15% fewer instructions** with the owned object; the
+LittleFS replay reaches about **80% more**. These are replay instruction
+counts, not physical flash or panel timings.
+
+| Same-board firmware | Loaded flash |
+| --- | ---: |
+| Stock GCC | 332,676 B |
+| Owned CRC only | 332,692 B |
+| Owned CRC and `sqrtf` | 333,252 B |
+| Owned CRC, `sqrtf`, and LittleFS core | 357,772 B |
+
 ## Survey every remaining C file
 
 After `node micropython/build.mjs --interpreter`, run:
@@ -235,6 +314,9 @@ After `node micropython/build.mjs --interpreter`, run:
 node micropython/survey-remaining.mjs
 make -C badge-compiler test-c-compat
 ```
+
+For a memory-constrained host, set `JOBS=1` or `JOBS=2` before the survey.
+This limits concurrent compiler processes without changing code generation.
 
 The survey replays every C file in the mixed interpreter's GCC compile
 database, preserving the board defines and SDK headers. GCC preprocesses;
@@ -247,18 +329,52 @@ static relocations, weak symbol overrides, and basic-asm naked functions.
 
 The first compatibility round raised object coverage from 165 to 332 of
 423 C files. The register-operand assembly and scaling changes raise it to
-**381 of 423**, with no previously successful file lost. All 25 files
+381 of 423, with no previously successful file lost. All 25 files
 formerly blocked by register operands now assemble. Fifteen of the 16
 former resource-limit cases now assemble without increasing the limits:
 the IR parser and analysis use less scratch, and the backend indexes
 branches and stores instruction uses sparsely. The remaining large
 `py/compile.c` unit reaches backend costing but still hits its 128 MiB
-allocation limit. The other 41 failures are frontend compatibility gaps.
+allocation limit at that stage. A 256 MiB trial got past that allocation
+gate but hit the backend work limit; the optimizer process peaked at
+approximately 468 MiB RSS.
+
+The next frontend pass raises coverage to **414 of 423**, resolving 33 of
+the 41 frontend failures. It adds scalar `va_arg`, signed bit-fields,
+additional initializers, and real ELF function aliases and constructors,
+along with GNU declarations and builtins used by the SDK. Eight frontend
+failures remain: three files need more GCC ACLE intrinsics, two use
+variable-length array types, two need C/GNU atomic support, and one needs
+immediate operands in a naked assembly definition. Object coverage does not
+prove mixed ABI compatibility; in particular, the owned compiler uses
+32-bit enums rather than GCC's short-enum ABI.
+
+Backend scratch reuse and cheaper register summaries now let `py/compile.c`
+produce an object without increasing either cap, bringing coverage to
+415 of 423. Immediate symbol operands in naked assembly subsequently
+enabled the SDK TLS translation unit, bringing coverage to **416 of 423**.
+The seven remaining failures involve GCC Arm intrinsics, variable-length
+arrays, and C/GNU atomics. Object coverage does not certify the SDK TLS
+implementation on hardware.
+
+In three alternating macOS runs, the median peak RSS of
+the default optimizer fell from 240 to 170 MiB for `emitinlinethumb.c`,
+209 to 123 MiB for `parse.c`, and 238 to 131 MiB for `objtype.c`; optimized
+IR was byte-identical. The now-successful full `compile.c` optimization
+is a different workload from the old failed run: it peaked at 651 MiB
+and took 22.3 seconds on that host.
+
+For a one-off low-memory build, pass
+`--passes=mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division`
+to `badge-opt` for that file. This retains legalization but skips the
+expensive target-costed passes. The optimizer peaked at 199 MiB and the
+object had about 0.14% more executable bytes than the default. This is
+not the default pipeline.
 
 The owned preprocessor supports standard token pasting and 128 include
 directories. The stock RP2 build still uses GCC preprocessing: GCC system
 header directives, compiler feature detection, and some GNU macros are
 not yet supported. Memory/immediate inline-asm constraints, operand modifiers,
-`asm goto`, and broader SDK and C runtime interoperability remain open. The eight-module
-firmware remains experimental and has not been boot-tested on a badge;
-none of this compiles Python scripts with the owned C compiler.
+`asm goto`, and broader SDK and C runtime interoperability remain open.
+The eight-module firmware remains experimental; none of this compiles
+Python scripts with the owned C compiler.

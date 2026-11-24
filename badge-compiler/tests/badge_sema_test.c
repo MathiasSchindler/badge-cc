@@ -179,6 +179,7 @@ int main(void) {
         "struct S{int a;}; int f(void){struct S s={1};return ((struct S){.a=s.a}).a;}",
         "float f(float x){return x+x;}", "static float x=1;", "double x=1.0;",
         "struct __attribute__((packed)) S{unsigned b:2;};",
+        "struct S{signed x:2;};", "int f(){return 0;}",
         "int (*factory(int x))(int){return 0;}"
         , "int x; int *p=0 ? &x : 0;"
         , "enum E{X=0}; _Static_assert(_Generic((enum E)0,unsigned int:1,default:0),\"enum compatible\");"
@@ -266,12 +267,12 @@ int main(void) {
         }
     }
     const char *unsupported[] = {
-        "struct S{signed x:2;};", "_Atomic(int) x;",
+        "_Atomic(int) x;",
         "union U{struct{int x;}; char y;}; union U u={.y=1,.x=2};",
         "int f(void){return 2;} int f(void) __attribute__((naked));",
         "void f(int n){int a[n];}",
         "unsigned x=0; char c=L'x';", "int c='ab';", "void f(void*p){p++;}",
-        "int f(){return 0;}", "extern inline int f(void){return 0;}",
+        "extern inline int f(void){return 0;}",
         "struct S{int a[0]; int y;};",
         "void f(void){register int value __asm__(\"r0\");}",
         "struct Empty{}; struct Empty a[2];"

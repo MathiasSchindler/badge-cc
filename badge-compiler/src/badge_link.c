@@ -646,7 +646,8 @@ static int lk_share_section(linker_t *l,lk_section *s,const bo_section_t *input,
 }
 static void lk_place(linker_t *l,lk_section *s,unsigned select) {
     lk_output *o=&l->outputs[l->active]; const bo_section_t *input=&s->file->object->sections[s->index-1];
-    if(input->type!=BO_PROGBITS && input->type!=BO_NOBITS) lk_error(l,"unsupported allocated section type in %s",input->name);
+    if(input->type!=BO_PROGBITS && input->type!=BO_NOBITS && input->type!=BO_INIT_ARRAY)
+        lk_error(l,"unsupported allocated section type in %s",input->name);
     if(input->type==BO_NOBITS && !o->noload) lk_error(l,"NOBITS input requires NOLOAD output");
     if(lk_share_section(l,s,input,select)) return;
     l->dot=lk_align(l,l->dot,input->alignment); s->offset=lk_bound(l,l->dot-o->address);
