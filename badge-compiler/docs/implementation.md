@@ -2622,7 +2622,7 @@ use a lazily built module index that normalizes quoted/unquoted and
 hex-escaped names without changing generated name order.
 Untouched source spans, globals, attributes and metadata are retained;
 generated definitions use collision-checked names. Optional `--passes=...`
-selects/order/repeats up to 16 passes for isolation. Unknown/empty selections
+selects, orders, or repeats up to 20 passes for isolation. Unknown/empty selections
 diagnose; no switch silently invokes LLVM.
 `--default-passes` prints the exact active comma-separated default order.
 The legacy route remains explicit:

@@ -75,6 +75,7 @@ typedef struct cg_function {
   int machine_registers_known;
   unsigned fixed_arg_words;
   int internal, return_ext, dynamic_stack, variadic;
+  int foldable;
   struct cg_function *next;
 } cg_function;
 typedef struct cg_allocation {
@@ -93,7 +94,6 @@ typedef struct {
   int assembly_home;
   unsigned forbidden, degree;
   unsigned home_color;
-  cg_inst *split_call;
 } cg_register_value;
 typedef enum {
   CG_M_MOVW, CG_M_MOVT, CG_M_MOV, CG_M_ADD, CG_M_SUB,
@@ -208,6 +208,7 @@ cg_inst *cg_selection_extended_load(cg_context *c, cg_inst *instruction);
 int cg_emit_counted_leaf(cg_context *c);
 int cg_emit_prepend_context_wrapper(cg_context *c);
 int cg_emit_wide_fill_leaf(cg_context *c);
+int cg_emit_dynamic_byte_loop(cg_context *c);
 
 static inline int cg_global_residency(const cg_context *c) {
   return c->register_residency == BADGE_RESIDENCY_GLOBAL ||

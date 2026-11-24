@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "badge_object.h"
+#include "host_diagnostics.h"
 #ifndef BADGE_OBJECT_LIBRARY
 #include "host_io.h"
 #endif
@@ -19,7 +20,8 @@ typedef struct {
 } bo_output_section_t;
 
 static int bo_error(const char *message) {
-    fprintf(stderr, "badge-object: %s\n", message);
+    if(badge_diagnostics_enabled())
+        fprintf(stderr, "badge-object: %s\n", message);
     return 0;
 }
 

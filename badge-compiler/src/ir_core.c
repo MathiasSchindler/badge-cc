@@ -393,6 +393,10 @@ void ir_release_to(ir_context *c, ir_allocation *mark) {
   c->memory = mark ? mark->memory : 0;
 }
 void ir_destroy(ir_context *c) {
+#ifdef BADGE_ENABLE_PARALLEL_ADMISSION
+  if (c->destroy_admission_helper)
+    c->destroy_admission_helper(c->admission_helper);
+#endif
   ir_release_to(c, NULL);
   while (c->chunks) {
     ir_chunk *chunk = c->chunks;
@@ -454,8 +458,8 @@ void ir_pipeline(ir_context *c, const char *source, size_t size,
   ir_allocation *mark = c->allocations, *parsed_mark = NULL;
   ir_module parsed = {0};
   unsigned parsed_line = 0;
-  for (unsigned pass = 0; pass < (selection ? 16 : badge_ir_default_pass_count);
-       pass++) {
+  unsigned limit = selection ? IR_PIPELINE_LIMIT : badge_ir_default_pass_count;
+  for (unsigned pass = 0; pass < limit; pass++) {
     const ir_pass *p = NULL;
     if (selection) {
       if (!*next)
@@ -476,7 +480,8 @@ void ir_pipeline(ir_context *c, const char *source, size_t size,
     }
     if (!parsed.source) {
       ir_parse(c, &parsed, c->pipeline_source, size);
-      ir_verify(c, &parsed);
+      if (!p->verifies_input)
+        ir_verify(c, &parsed);
       parsed_mark = c->allocations;
       parsed_line = c->line;
     }

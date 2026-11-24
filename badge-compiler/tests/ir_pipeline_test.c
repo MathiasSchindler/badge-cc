@@ -1,4 +1,5 @@
 #include "ir_pass.h"
+#include "ir_analysis.h"
 #include "target.h"
 #include <assert.h>
 #include <stdio.h>
@@ -38,12 +39,16 @@ static void invalid_output(ir_context *c, ir_module *m) {
     if (!strcmp(ir_text(m, m->lines[k].op), "ret"))
       m->lines[k].replacement = ir_copy(c, "ret i32 %missing\n", 17);
 }
+static void typed(ir_context *c, ir_module *m) {
+  ir_verify(c, m);
+}
 const ir_pass badge_ir_passes[] = {
-    {"optimization", "test", optimization, IR_PASS_OPTIMIZATION},
-    {"legalization", "test", legalization, IR_PASS_LEGALIZATION},
-    {"experimental", "test", experimental, IR_PASS_OPTIMIZATION},
-    {"invalid-output", "test", invalid_output, IR_PASS_OPTIMIZATION}};
-const unsigned badge_ir_pass_count = 4;
+    {"optimization", "test", optimization, IR_PASS_OPTIMIZATION, 0},
+    {"legalization", "test", legalization, IR_PASS_LEGALIZATION, 0},
+    {"experimental", "test", experimental, IR_PASS_OPTIMIZATION, 0},
+    {"invalid-output", "test", invalid_output, IR_PASS_OPTIMIZATION, 0},
+    {"typed", "test", typed, IR_PASS_OPTIMIZATION, 1}};
+const unsigned badge_ir_pass_count = 5;
 const char *const badge_ir_default_pipeline[] = {"optimization",
                                                  "legalization"};
 const unsigned badge_ir_default_pass_count = 2;
@@ -141,13 +146,16 @@ int main(void) {
   assert(!strcmp(c->output, source));
   assert(calls[0] == 1 && calls[1] == 1 && calls[2] == 0 && order == 2);
   assert(c->memory == 64 && persistent[0] == 42);
-  char selected[256] = {0};
-  for (unsigned k = 0; k < 16; k++)
+  char selected[(IR_PIPELINE_LIMIT + 1) * sizeof(",optimization")] = {0};
+  for (unsigned k = 0; k < IR_PIPELINE_LIMIT; k++)
     strcat(selected, k ? ",optimization" : "optimization");
   ir_pipeline(c, source, strlen(source), selected);
-  assert(calls[0] == 17 && c->memory == 64 && !strcmp(c->output, source));
+  assert(calls[0] == IR_PIPELINE_LIMIT + 1 && c->memory == 64 &&
+         !strcmp(c->output, source));
   ir_pipeline(c, source, strlen(source), "experimental");
   assert(calls[2] == 1 && c->memory == 64);
+  ir_pipeline(c, source, strlen(source), "typed");
+  assert(!strcmp(c->output, source) && c->memory == 64);
   assert(ir_find_pass("experimental", 12)->role == IR_PASS_OPTIMIZATION);
   assert(ir_find_pass("legalization", 12)->role == IR_PASS_LEGALIZATION);
   assert(!ir_find_pass("missing", 7));
@@ -188,8 +196,24 @@ int main(void) {
     assert(!"invalid pass output must fail verification");
   }
   ir_destroy(bad);
+  *bad = (ir_context){.file = "invalid-input.ll"};
+  static const char invalid[] = "target triple = " BADGE_IR_TRIPLE
+                                "\ntarget datalayout = " BADGE_IR_LAYOUT
+                                "\ndefine i32 @f() {\nentry:\nret i32 %missing\n}\n";
+  if (!setjmp(bad->failure)) {
+    ir_pipeline(bad, invalid, strlen(invalid), "typed");
+    assert(!"typed pass input must fail verification");
+  }
+  ir_destroy(bad);
+  *bad = (ir_context){.file = "overlong-selection.ll"};
+  strcat(selected, ",optimization");
+  if (!setjmp(bad->failure)) {
+    ir_pipeline(bad, source, strlen(source), selected);
+    assert(!"overlong IR pass selection must be diagnosed");
+  }
+  ir_destroy(bad);
   free(bad);
-  puts("badge-opt: independent registry/default policy, roles, 16-pass scratch "
+  puts("badge-opt: independent registry/default policy, roles, bounded pass scratch "
        "reclamation, aligned zeroed bounded arena, hash collisions, "
        "escaped/unquoted fresh names and target legality PASS");
   return 0;

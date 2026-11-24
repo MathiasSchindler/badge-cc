@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "badge_object.h"
+#include "host_diagnostics.h"
 #ifdef BADGE_ASM_LIBRARY
 #include <errno.h>
 #include <stdio.h>
@@ -140,9 +141,12 @@ typedef struct {
 } assembler_t;
 
 static _Noreturn void as_error(assembler_t *s, const char *format, ...) {
-    fprintf(stderr,"badge-asm: %s:%u: ",s->input,s->line);
-    va_list args; va_start(args,format); vfprintf(stderr,format,args); va_end(args);
-    fputc('\n',stderr); longjmp(s->failure,1);
+    if(badge_diagnostics_enabled()) {
+        fprintf(stderr,"badge-asm: %s:%u: ",s->input,s->line);
+        va_list args; va_start(args,format); vfprintf(stderr,format,args); va_end(args);
+        fputc('\n',stderr);
+    }
+    longjmp(s->failure,1);
 }
 
 static void *as_allocate(assembler_t *s, size_t size) {
@@ -160,7 +164,8 @@ static char *as_copy(assembler_t *s, const char *text) {
 }
 
 static void as_destroy(assembler_t *s) {
-    if(s->reading!=NULL && fclose(s->reading)!=0) fprintf(stderr,"badge-asm: failed to close incbin input\n");
+    if(s->reading!=NULL && fclose(s->reading)!=0 && badge_diagnostics_enabled())
+        fprintf(stderr,"badge-asm: failed to close incbin input\n");
     while(s->memory!=NULL) {
         as_memory_t *m=s->memory; s->memory=m->next; free(m->data); free(m);
     }

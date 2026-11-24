@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const passes = 'mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function,' +
-  'global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions,divrem-pairs';
+  'global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions,divrem-pairs,guard-split';
 function run(name, args) {
   const result = spawnSync(path.join(root, 'build', name), args,
     { cwd: root, encoding: 'utf8', timeout: 30000 });

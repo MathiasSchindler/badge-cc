@@ -2,10 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef BADGE_EXPERIMENT_CALL_SPLIT
-#define BADGE_EXPERIMENT_CALL_SPLIT 0
-#endif
-
 typedef struct cg_successor {
   unsigned block;
   struct cg_successor *next;
@@ -41,7 +37,6 @@ struct cg_global {
   cg_affinity *affinities;
   unsigned registers;
   int wide_r6;
-  cg_asm_live *split_calls, *current_split;
 };
 
 static const unsigned registers[CG_GLOBAL_REGISTER_COUNT] = {8, 10, 11, 4, 5, 3, 6};
@@ -247,12 +242,6 @@ static void constrain(cg_context *c, cg_live_instruction *i,
   if (c->global->registers < 6) mask &= ~(1u << 3);
   if (!mask)
     return;
-  int split = BADGE_EXPERIMENT_CALL_SPLIT &&
-              c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
-              c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT &&
-              c->global->registers == 6 &&
-              i->instruction->scalar_call_arguments_plus_one &&
-              i->instruction->scalar_call_arguments_plus_one <= 4;
   for (unsigned w = 0; w < c->global->words; w++) {
     cg_register_work(c);
     int transient_call_uses = c->scalar_stream_selection &&
@@ -263,13 +252,7 @@ static void constrain(cg_context *c, cg_live_instruction *i,
       cg_register_work(c);
       unsigned bit = (unsigned)__builtin_ctzll(values);
       cg_register_value *v = c->global->values[w * 64 + bit];
-      unsigned blocked = mask;
-      if (split && (live[w] & (UINT64_C(1) << bit)) && v != i->result &&
-          v->uses >= 4 && !v->split_call) {
-        v->split_call = i->instruction;
-        blocked &= ~(1u << 3);
-      }
-      v->forbidden |= blocked;
+      v->forbidden |= mask;
       values &= values - 1;
     }
   }
@@ -796,22 +779,7 @@ void cg_global_prepare(cg_context *c) {
       }
       continue;
     }
-    v->reg = preferred(c, v, occupied | (v->split_call ? 1u << 3 : 0));
-    /* Keep normal allocations unchanged unless the interval would spill. */
-    if (!v->reg && v->split_call && !(occupied & (1u << 3))) {
-      for (cg_asm_live *a = g->split_calls; a; a = a->next) {
-        cg_register_work(c);
-        if (a->instruction == v->split_call)
-          cg_error(c, "overlapping split call live ranges");
-      }
-      v->reg = 3;
-      v->assembly_home = 1;
-      cg_asm_live *record = cg_alloc(c, sizeof(*record));
-      record->instruction = v->split_call;
-      record->values[0] = v;
-      record->next = g->split_calls;
-      g->split_calls = record;
-    }
+    v->reg = preferred(c, v, occupied);
     if (v->reg) {
       allocated++;
       if (v->reg == 10 || v->reg == 11)
@@ -903,16 +871,6 @@ unsigned cg_global_register(cg_context *c, const char *name) {
 void cg_global_instruction(cg_context *c, cg_inst *instruction) {
   struct cg_global *g = c->global;
   g->current_assembly = NULL;
-  g->current_split = NULL;
-  for (cg_asm_live *a = g->split_calls; a; a = a->next) {
-    cg_register_work(c);
-    if (a->instruction == instruction) {
-      g->current_split = a;
-      cg_stack(c, 1, 3, a->values[0]->value->slot);
-      cg_emit(c, "@ call-interval: saved caller-saved value\n");
-      break;
-    }
-  }
   for (cg_asm_live *a = g->assembly; a; a = a->next) {
     cg_register_work(c);
     if (a->instruction != instruction)
@@ -927,9 +885,6 @@ void cg_global_instruction(cg_context *c, cg_inst *instruction) {
   }
 }
 void cg_global_after_instruction(cg_context *c) {
-  cg_asm_live *split = c->global->current_split;
-  if (split)
-    cg_stack(c, 0, 3, split->values[0]->value->slot);
   cg_asm_live *a = c->global->current_assembly;
   if (a)
     for (unsigned r = 0; r < c->global->registers; r++)

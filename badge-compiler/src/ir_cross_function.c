@@ -83,8 +83,7 @@ static int attribute(cross *p, unsigned f, const char *name) {
   }
   return 0;
 }
-static void analyze(cross *p) {
-  ir_analyze(p->c, p->m, &p->a);
+static void index_references(cross *p) {
   p->call_at_token = ir_allocate(p->c, p->m->count * sizeof(*p->call_at_token));
   p->first_reference =
       ir_allocate(p->c, p->a.function_count * sizeof(*p->first_reference));
@@ -125,6 +124,10 @@ static void analyze(cross *p) {
       p->attribute_lines[p->attribute_count++] = l;
   }
   spend(p, p->m->count + p->a.instruction_count + p->m->line_count);
+}
+static void analyze(cross *p) {
+  ir_analyze(p->c, p->m, &p->a);
+  index_references(p);
 }
 static int symbolic_assembly(cross *p) {
   for (unsigned i = 0; i < p->a.instruction_count; i++) {
@@ -1148,11 +1151,9 @@ static char *split_guard(cross *p, unsigned f, const ir_instruction *call,
   unsigned argc = fn->parameter_count, first = fn->first_block;
   const ir_line *head = &p->m->lines[fn->line - 1],
                 *site = &p->m->lines[call->line - 1];
-  if (p->a.types[fn->return_type].kind != IR_VOID || argc > GUARD_ARGS ||
-      fn->block_count < 3 || call->definition != IR_NONE ||
+  if (call->definition != IR_NONE ||
       call->operand_count != argc + 1 ||
       strcmp(ir_text(p->m, site->first), "call") ||
-      strcmp(ir_text(p->m, head->first + 2), "void") ||
       strcmp(ir_text(p->m, site->first + 1), "void") ||
       site->count != 5 + (argc ? 3 * argc - 1 : 0) ||
       !named_function(p, fn) || !named_function(p, caller) ||
@@ -1318,15 +1319,22 @@ static char *split_guard(cross *p, unsigned f, const ir_instruction *call,
 void ir_guard_split(ir_context *c, ir_module *m) {
   cross p = {.c = c, .m = m, .work = IR_CROSS_FUNCTION_WORK_LIMIT,
              .selection = BADGE_DEFAULT_SCALAR_SELECTION};
-  analyze(&p);
-  if (symbolic_assembly(&p))
-    return;
-  unsigned *calls = ir_allocate(c, p.a.instruction_count * sizeof(*calls));
+  ir_analyze(c, m, &p.a);
+  unsigned *calls = NULL;
   for (unsigned f = 0, attempts = 0; f < p.a.function_count && attempts < 2; f++) {
     const ir_function *fn = &p.a.functions[f];
-    unsigned count;
     if (p.a.types[fn->return_type].kind != IR_VOID || fn->block_count < 3 ||
-        !eligible(&p, f, calls, &count) || count != 1)
+        fn->parameter_count > GUARD_ARGS ||
+        strcmp(ir_text(m, m->lines[fn->line - 1].first + 2), "void"))
+      continue;
+    if (!calls) {
+      if (symbolic_assembly(&p))
+        return;
+      index_references(&p);
+      calls = ir_allocate(c, p.a.instruction_count * sizeof(*calls));
+    }
+    unsigned count;
+    if (!eligible(&p, f, calls, &count) || count != 1)
       continue;
     ir_allocation *mark = c->allocations;
     ir_map names = m->names;

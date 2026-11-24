@@ -144,6 +144,14 @@ test('loop guard splitting preserves short-circuit edges, live bounds, and succe
   const a = execute(file, 'control', true, 'thumb-constants');
   const b = execute(file, 'candidate', true, 'thumb-constants');
   assert(b.bytes < a.bytes && b.count < a.count);
+
+  const passes = run(tool('badge-opt'), ['--default-passes']).stdout.trim().split(',');
+  const previous = passes.filter(pass => pass !== 'guard-split').join(',');
+  run(tool('badge-opt-sanitize'), [`--passes=${previous}`, file('input.ll'), '-o', file('previous.ll')]);
+  run(tool('badge-opt-sanitize'), ['--passes=guard-split', file('previous.ll'), '-o', file('explicit.ll')]);
+  run(tool('badge-opt-sanitize'), [file('input.ll'), '-o', file('default.ll')]);
+  assert.notDeepEqual(fs.readFileSync(file('explicit.ll')), fs.readFileSync(file('previous.ll')));
+  assert.deepEqual(fs.readFileSync(file('default.ll')), fs.readFileSync(file('explicit.ll')));
 });
 test('loop guard splitting leaves observable reads and externally callable helpers intact', t => {
   for (const source of [

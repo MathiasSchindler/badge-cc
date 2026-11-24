@@ -128,6 +128,75 @@ void ir_exact_pow2(ir_context *c, ir_module *m) {
 
 static void reduce_unsigned(strength *p, int gated);
 
+void ir_bounded_signed_reciprocal(ir_context *c, ir_module *m) {
+  strength p = {.c = c, .work = IR_TARGET_STRENGTH_WORK_LIMIT};
+  ir_analyze(c, m, &p.a);
+  for (unsigned i = 0; i < p.a.instruction_count; ++i) {
+    spend(&p);
+    const ir_instruction *in = &p.a.instructions[i];
+    if (in->opcode != IR_OP_BINARY || strcmp(in->operation, "sdiv"))
+      continue;
+    uint32_t divisor;
+    if (plain_divrem(&p, i, &divisor) || divisor < 3 || divisor > UINT16_MAX ||
+        !(divisor & (divisor - 1)))
+      continue;
+    const ir_operand *value = &p.a.operands[in->first_operand];
+    unsigned def = p.a.definitions[value->definition].instruction;
+    if (def == IR_NONE)
+      continue;
+    const ir_instruction *extension = &p.a.instructions[def];
+    if (extension->opcode != IR_OP_CAST || extension->operand_count != 1 ||
+        extension->line != extension->end_line || m->lines[extension->line - 1].count != 7)
+      continue;
+    int sign = !strcmp(extension->operation, "sext");
+    if (!sign && strcmp(extension->operation, "zext"))
+      continue;
+    const ir_type *type = &p.a.types[p.a.operands[extension->first_operand].type];
+    if (type->kind != IR_INT || (type->bits != 8 && type->bits != 16))
+      continue;
+    uint64_t max = sign ? UINT64_C(1) << (type->bits - 1) :
+                         (UINT64_C(1) << type->bits) - 1;
+    unsigned shift;
+    uint64_t multiplier;
+    for (shift = 1; shift < 32; ++shift) {
+      uint64_t scale = UINT64_C(1) << shift;
+      multiplier = (scale + divisor - 1) / divisor;
+      if (max * multiplier > UINT32_MAX)
+        break;
+      // Bound the lift of q and the largest possible remainder separately.
+      if ((max / divisor) * (multiplier * divisor - scale) +
+          (divisor - 1) * multiplier < scale)
+        break;
+    }
+    if (shift == 32 || max * multiplier > UINT32_MAX)
+      continue;
+    const char *x = ir_text(m, value->token), *initial = x;
+    const char *result = p.a.definitions[in->definition].name;
+    const char *product = ir_fresh(c, m, '%');
+    const char *prefix = "", *negative = NULL;
+    if (sign) {
+      negative = ir_fresh(c, m, '%');
+      const char *flipped = ir_fresh(c, m, '%'), *magnitude = ir_fresh(c, m, '%');
+      prefix = ir_format(c,
+          "  %s = ashr i32 %s, 31\n  %s = xor i32 %s, %s\n  %s = sub i32 %s, %s\n",
+          negative, x, flipped, x, negative, magnitude, flipped, negative);
+      initial = magnitude;
+    }
+    const char *q = sign ? ir_fresh(c, m, '%') : result;
+    char *head = ir_format(c,
+        "%s  %s = mul i32 %s, %" PRIu64 "\n  %s = lshr i32 %s, %u\n",
+        prefix, product, initial, multiplier, q, product, shift);
+    m->lines[in->line - 1].replacement = head;
+    if (sign) {
+      const char *flipped = ir_fresh(c, m, '%');
+      m->lines[in->line - 1].replacement = ir_format(c,
+          "%s  %s = xor i32 %s, %s\n  %s = sub i32 %s, %s\n",
+          head, flipped, q, negative, result, flipped, negative);
+    }
+    ir_note(c, "transformed", "bounded_constant_signed_division", 1);
+  }
+}
+
 static int plain_signed_pair_operand(strength *p, const ir_instruction *in) {
   const ir_line *line = &p->a.text->lines[in->line - 1];
   return in->opcode == IR_OP_BINARY && in->operand_count == 2 &&

@@ -155,10 +155,10 @@ opt-in deterministic benchmark and physical drawing timings.
 ## Current code-generation defaults
 
 The owned CLI/API defaults are `ssa` and
-`direct/global-compact/thumb-constants/word`. The sixteen-pass optimizer
+`direct/global-compact/thumb-constants/word`. The optimizer
 profile appends `global-memory`, `sret-forward`, `compact-inline`, `low-bits`,
 `linear-bias`, `small-aggregate`, `dead-instructions`, and `divrem-pairs`
-to the preceding eight passes. Query the exact list with
+to the preceding eight passes, then runs `guard-split`. Query the exact list with
 `badge-opt --default-passes`. `divrem-pairs` also replaces profitable
 unsigned power-of-two divisions and remainders with shifts and masks.
 See the [qualification results](docs/current-promotion.md#november-default-update).
@@ -168,6 +168,9 @@ fills, and uses aligned word stores for eligible long halfword RAM fills.
 The [cross-application follow-up](docs/current-promotion.md#cross-application-size-and-code-generation)
 adds bounded fixed-point division narrowing, exact literal pooling, private
 store forwarding and two Thumb argument/buffer transport selections.
+The [next compiler round](docs/current-promotion.md#private-code-sharing-and-compact-guards)
+folds eligible identical functions, selects direct branches and range guards,
+and pools eligible literal suffixes.
 The [short Thumb and tiny-leaf follow-up](docs/current-promotion.md#short-thumb-instruction-and-tiny-leaf-follow-up)
 adds five instruction selections and a bounded exception for inlining
 tiny integer helpers.
@@ -196,8 +199,9 @@ The [ten follow-up experiments](docs/current-promotion.md#ten-follow-up-experime
 qualify repeated-argument specialization and shared return tails, and record
 the remaining runtime, size, and stack trade-offs.
 The [IMU and Maze follow-up](docs/current-promotion.md#imu-labels-and-automatic-maze-guard-splitting)
-caches labels in the IMU firmware and qualifies the explicit `guard-split`
-pass on Maze.
+caches labels in the IMU firmware and first qualifies `guard-split` on Maze.
+The [opt-in review](docs/current-promotion.md#opt-in-review-guard-splitting)
+promotes guard splitting but keeps `sccp` explicit.
 See [host compile-time improvements](docs/current-promotion.md#faster-host-compilation-without-changing-firmware)
 for cheaper optimizer admission with the same final code and stack checks.
 The earlier `thumb-widths`/eight-pass profile remains explicitly selectable.
@@ -746,6 +750,38 @@ The reproducible [host profiler](tools/profile-host.mjs) uses
 profiler executables on identical optimized inputs. Qualified corpus batches
 use 30.46% less C07 CPU and 53.25% less process peak RSS; these are not
 whole-build or badge-runtime speedups.
+
+For an optional profile-guided build of the host optimizer, use a Clang
+installation with `llvm-profdata` and a representative directory of captured
+`.o.owned/frontend.ll` inputs:
+
+```sh
+make -C badge-compiler profile-optimizer CC=clang \
+  PGO_TRAINING_DIR="$PWD/badge-compiler/build/owned/universe26/firmware"
+badge-compiler/build/badge-opt-profiled input.ll -o optimized.ll
+```
+
+This builds a separate `badge-opt-profiled` executable. It neither replaces the
+standard optimizer nor adds LLVM to the firmware toolchain. Retrain after
+changing the compiler sources or switching host Clang versions.
+
+On POSIX hosts, an optional two-thread optimizer overlaps the before/after
+cost checks for a function. It uses the same pass order and makes the same
+admission decisions:
+
+```sh
+make -C badge-compiler build/badge-opt-parallel test-parallel-admission
+BADGE_ADMISSION_JOBS=2 badge-compiler/build/badge-opt-parallel input.ll -o optimized.ll
+```
+
+In an existing owned Make build, set `BADGE_ADMISSION_JOBS=2` and use `-j1`
+to focus two host slots on a single-file rebuild. The `build-owned.sh`
+wrapper can also enforce a fixed total `BADGE_BUILD_JOBS` budget: two-thread
+admission uses `floor(BADGE_BUILD_JOBS / 2)` firmware Make jobs, without
+changing how native tools are built. This is not GNU Make jobserver
+integration. Leave admission serial for clean builds; the
+[measured comparison](docs/current-promotion.md#optional-parallel-cost-trials)
+shows file-level parallelism is faster there.
 
 Stack reports now use iterative component analysis, support deep direct
 chains, and expose known chains separately from unresolved entry/callback

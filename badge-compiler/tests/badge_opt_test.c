@@ -32,7 +32,7 @@ static void default_policy(void) {
                             "loop-scalar", "cross-function", "global-memory",
                             "sret-forward", "compact-inline", "low-bits",
                             "linear-bias", "small-aggregate", "dead-instructions",
-                            "divrem-pairs"};
+                            "divrem-pairs", "guard-split"};
   assert(badge_ir_default_pass_count == sizeof(expected) / sizeof(*expected));
   for (unsigned k = 0; k < badge_ir_default_pass_count; ++k)
     assert(!strcmp(expected[k], badge_ir_default_pipeline[k]));
@@ -68,7 +68,7 @@ static void default_policy(void) {
               "mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-"
               "division,local-memory,loop-scalar,cross-function,global-memory,"
               "sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,"
-              "dead-instructions,divrem-pairs");
+              "dead-instructions,divrem-pairs,guard-split");
   assert(!strcmp(result, c->output));
   ir_pipeline(c, source, strlen(source),
               "mem2reg,instruction-combine,constant-fold,aggregate-memory,wide-"

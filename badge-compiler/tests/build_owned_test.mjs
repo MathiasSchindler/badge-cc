@@ -32,6 +32,7 @@ printf 'manifest\\n'
 function run(f, jobs, args = [], extra = {}) {
   const env = { ...process.env, PATH: `${f.bin}:${process.env.PATH}`, DRIVER_TRACE: f.trace, ...extra };
   delete env.BADGE_BUILD_JOBS;
+  if (extra.BADGE_ADMISSION_JOBS === undefined) delete env.BADGE_ADMISSION_JOBS;
   if (extra.BADGE_CODEGEN_FRAME_ADDRESSING === undefined) delete env.BADGE_CODEGEN_FRAME_ADDRESSING;
   if (extra.BADGE_CODEGEN_REGISTER_RESIDENCY === undefined) delete env.BADGE_CODEGEN_REGISTER_RESIDENCY;
   if (extra.BADGE_CODEGEN_MEMORY_SELECTION === undefined) delete env.BADGE_CODEGEN_MEMORY_SELECTION;
@@ -61,6 +62,24 @@ test('default and explicit bounded jobs reach both Make invocations and provenan
     assert.equal(fs.readFileSync(path.join(owned, 'frontend-expression-lowering.txt'), 'utf8'), 'ssa\n');
     assert.equal(fs.readFileSync(path.join(owned, 'targets.txt'), 'utf8'), 'all\nusb-wifi-udp\n');
     assert.match(fs.readFileSync(path.join(owned, 'SUCCESS'), 'utf8'), /^PASS:/);
+  }
+});
+
+test('parallel admission shares rather than multiplies the firmware job budget', t => {
+  const f = fixture(t), result = run(f,'9',['diagnostics'],{BADGE_ADMISSION_JOBS:'2'});
+  assert.equal(result.status,0,result.stderr);
+  const trace = fs.readFileSync(f.trace,'utf8').trim().split('\n');
+  assert.match(trace[0], /<-j9> <-C> <badge-compiler> <all> <build\/badge-opt-parallel>/);
+  assert.match(trace[2], /<-B> <-j4>/);
+  const owned = path.join(f.compiler,'build/owned');
+  for (const [file, value] of Object.entries({
+    'build-jobs.txt':'9', 'firmware-jobs.txt':'4', 'optimizer-admission-jobs.txt':'2'
+  })) assert.equal(fs.readFileSync(path.join(owned,file),'utf8'), `${value}\n`);
+  for (const [jobs, admission] of [['1','2'],['8',''],['8','3']]) {
+    const bad=fixture(t), failed=run(bad,jobs,[],{BADGE_ADMISSION_JOBS:admission});
+    assert.equal(failed.status,2,failed.stderr);
+    assert.match(failed.stderr,/BADGE_ADMISSION_JOBS/);
+    assert(!fs.existsSync(bad.trace));
   }
 });
 

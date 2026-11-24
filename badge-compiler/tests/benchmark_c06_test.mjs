@@ -80,7 +80,7 @@ test('Compiler and metrics defaults agree with the qualified explicit profile', 
   const file = fixture(t), input = file('input.ll'), ready = file('ready.ll'),
     explicit = file('explicit.ll'), output = file('report.json');
   const passes = 'mem2reg,scalar-cleanup,constant-fold,aggregate-memory,wide-division,local-memory,loop-scalar,cross-function,' +
-    'global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions,divrem-pairs';
+    'global-memory,sret-forward,compact-inline,low-bits,linear-bias,small-aggregate,dead-instructions,divrem-pairs,guard-split';
   assert.equal(run('badge-opt', ['--default-passes']).stdout.trim(), passes);
   fs.writeFileSync(input, target + `define i32 @f(i32 %x) {
 entry:

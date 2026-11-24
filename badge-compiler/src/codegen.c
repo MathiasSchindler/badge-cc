@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "codegen_internal.h"
+#include "host_diagnostics.h"
 #include "target.h"
 #include "thumb_immediate.h"
 #include <ctype.h>
@@ -11,7 +12,8 @@
 #include <string.h>
 
 _Noreturn void cg_error(cg_context *c, const char *message) {
-  fprintf(stderr, "badge-codegen: %s:%u: %s\n", c->file, c->line, message);
+  if (badge_diagnostics_enabled())
+    fprintf(stderr, "badge-codegen: %s:%u: %s\n", c->file, c->line, message);
   longjmp(c->failure, 1);
 }
 void *cg_alloc(cg_context *c, size_t n) {
@@ -2126,6 +2128,95 @@ int cg_emit_prepend_context_wrapper(cg_context *c) {
                  (const char *[]){__VA_ARGS__})
 #define FILL_TOKEN(i, k) (c->tokens[(i)->begin + (k)].text)
 
+#ifndef BADGE_EXPERIMENT_DYNAMIC_BYTE_LOOPS
+#define BADGE_EXPERIMENT_DYNAMIC_BYTE_LOOPS 0
+#endif
+
+int cg_emit_dynamic_byte_loop(cg_context *c) {
+  cg_function *f = c->fn;
+  if (!BADGE_EXPERIMENT_DYNAMIC_BYTE_LOOPS ||
+      c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
+      c->memory_selection != BADGE_MEMORY_WORD || !cg_global_residency(c) ||
+      !f->internal || f->ret->size || (f->argc != 2 && f->argc != 3))
+    return 0;
+  for (unsigned k = 0; k < f->argc; ++k)
+    if (f->byval[k] || f->arg_align[k] >= 8 || f->args[k]->type->bits != 32)
+      return 0;
+  cg_block *pre = f->blocks;
+  while (pre && pre->next && pre->first == pre->last &&
+         FILL_MATCH(pre->last, "br", "label", NULL) &&
+         pre->next->first == pre->next->last &&
+         cg_fill_label(FILL_TOKEN(pre->last, 2), pre->next->name))
+    pre = pre->next;
+  if (!pre || !pre->next || pre->first != pre->last ||
+      !FILL_MATCH(pre->last, "br", "label", NULL))
+    return 0;
+  cg_block *head = pre->next, *body = head->next, *latch = body ? body->next : NULL;
+  cg_block *exit = latch ? latch->next : NULL;
+  if (!exit || exit->next || exit->first != exit->last ||
+      !FILL_MATCH(exit->first, "ret", "void") ||
+      !cg_fill_label(FILL_TOKEN(pre->last, 2), head->name))
+    return 0;
+  cg_inst *phi = head->first, *cmp = phi ? phi->next : NULL, *step = latch->first;
+  const char *count = f->args[f->argc - 1]->name;
+  if (!FILL_MATCH(phi, NULL, "=", "phi", "i32", "[", "0", ",", NULL, "]", ",",
+                  "[", NULL, ",", NULL, "]") ||
+      !cg_fill_label(FILL_TOKEN(phi, 7), pre->name) ||
+      !cg_fill_label(FILL_TOKEN(phi, 13), latch->name) ||
+      !FILL_MATCH(cmp, NULL, "=", "icmp", "ult", "i32", FILL_TOKEN(phi, 0), ",", count) ||
+      cmp->next != head->last ||
+      !FILL_MATCH(head->last, "br", "i1", FILL_TOKEN(cmp, 0), ",", "label", NULL, ",", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(head->last, 5), body->name) ||
+      !cg_fill_label(FILL_TOKEN(head->last, 8), exit->name) ||
+      !FILL_MATCH(step, FILL_TOKEN(phi, 11), "=", "add", "i32", FILL_TOKEN(phi, 0), ",", "1") ||
+      step->next != latch->last || !FILL_MATCH(latch->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(latch->last, 2), head->name))
+    return 0;
+  cg_inst *dest = body->first;
+  if (!FILL_MATCH(dest, NULL, "=", "getelementptr", "i8", ",", "ptr", f->args[0]->name, ",",
+                  "i32", FILL_TOKEN(phi, 0)))
+    return 0;
+  int copy = f->argc == 3;
+  cg_inst *store = dest->next;
+  const char *value = "0";
+  if (copy) {
+    cg_inst *source = store, *load = source ? source->next : NULL;
+    if (!FILL_MATCH(source, NULL, "=", "getelementptr", "i8", ",", "ptr", f->args[1]->name,
+                    ",", "i32", FILL_TOKEN(phi, 0)) ||
+        !FILL_MATCH(load, NULL, "=", "load", "i8", ",", "ptr", FILL_TOKEN(source, 0),
+                    ",", "align", "1"))
+      return 0;
+    value = FILL_TOKEN(load, 0);
+    store = load->next;
+  }
+  if (!FILL_MATCH(store, "store", "i8", value, ",", "ptr", FILL_TOKEN(dest, 0), ",", "align", "1") ||
+      store->next != body->last || !FILL_MATCH(body->last, "br", "label", NULL) ||
+      !cg_fill_label(FILL_TOKEN(body->last, 2), latch->name))
+    return 0;
+  unsigned remaining = copy ? 2 : 1, id = ++c->unique;
+  f->frame = 0;
+  cg_emit(c, "@ dynamic-byte-loop: guarded word and byte paths\n"
+             "cmp.n r%u, #16\nblo.n .Lcg_bytes_tail%u\n"
+             "tst.w r0, #3\nbne.n .Lcg_bytes_tail%u\n", remaining, id, id);
+  if (copy)
+    cg_emit(c, "tst.w r1, #3\nbne.n .Lcg_bytes_tail%u\n"
+               "subs.n r3, r0, r1\ncmp.n r3, r2\nblo.n .Lcg_bytes_tail%u\n", id, id);
+  cg_emit(c, ".Lcg_words%u:\n", id);
+  if (copy)
+    cg_emit(c, "ldr.w r3, [r1], #4\n");
+  else
+    cg_emit(c, "movs.n r3, #0\n");
+  cg_emit(c, "str.w r3, [r0], #4\nsubs.n r%u, #4\ncmp.n r%u, #4\n"
+             "bhs.n .Lcg_words%u\n.Lcg_bytes_tail%u:\ncbz r%u, .Lcg_bytes_end%u\n",
+          remaining, remaining, id, id, remaining, id);
+  if (!copy) cg_emit(c, "movs.n r3, #0\n");
+  cg_emit(c, ".Lcg_bytes%u:\n", id);
+  if (copy) cg_emit(c, "ldrb.w r3, [r1], #1\n");
+  cg_emit(c, "strb.w r3, [r0], #1\nsubs.n r%u, #1\nbne.n .Lcg_bytes%u\n.Lcg_bytes_end%u:\n",
+          remaining, id, id);
+  return 1;
+}
+
 int cg_emit_wide_fill_leaf(cg_context *c) {
   const cg_function *f = c->fn;
   if (c->scalar_selection != BADGE_SELECTION_THUMB_CONSTANTS ||
@@ -3393,12 +3484,12 @@ static int cg_compile(
   if (assembly_size)
     *assembly_size = 0;
   if (!source || !filename || !assembly || !assembly_size) {
-    fputs("badge-codegen: invalid compile arguments\n", stderr);
+    if (badge_diagnostics_enabled()) fputs("badge-codegen: invalid compile arguments\n", stderr);
     return 0;
   }
   if (options.frame_addressing != BADGE_FRAME_MATERIALIZED &&
       options.frame_addressing != BADGE_FRAME_DIRECT) {
-    fputs("badge-codegen: invalid frame addressing selection\n", stderr);
+    if (badge_diagnostics_enabled()) fputs("badge-codegen: invalid frame addressing selection\n", stderr);
     return 0;
   }
   if (options.register_residency != BADGE_RESIDENCY_STACK &&
@@ -3406,7 +3497,7 @@ static int cg_compile(
       options.register_residency != BADGE_RESIDENCY_GLOBAL &&
       options.register_residency != BADGE_RESIDENCY_GLOBAL_FLEX &&
       options.register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT) {
-    fputs("badge-codegen: invalid register residency selection\n", stderr);
+    if (badge_diagnostics_enabled()) fputs("badge-codegen: invalid register residency selection\n", stderr);
     return 0;
   }
   if (selection != BADGE_SELECTION_LEGACY &&
@@ -3425,17 +3516,17 @@ static int cg_compile(
       selection != BADGE_SELECTION_THUMB_OPERANDS &&
       selection != BADGE_SELECTION_THUMB_WIDTHS &&
       selection != BADGE_SELECTION_THUMB_CONSTANTS) {
-    fputs("badge-codegen: invalid scalar selection\n", stderr);
+    if (badge_diagnostics_enabled()) fputs("badge-codegen: invalid scalar selection\n", stderr);
     return 0;
   }
   if (memory_selection != BADGE_MEMORY_BYTE &&
       memory_selection != BADGE_MEMORY_WORD) {
-    fputs("badge-codegen: invalid memory selection\n", stderr);
+    if (badge_diagnostics_enabled()) fputs("badge-codegen: invalid memory selection\n", stderr);
     return 0;
   }
   cg_context *c = calloc(1, sizeof(*c));
   if (!c) {
-    fputs("badge-codegen: out of memory\n", stderr);
+    if (badge_diagnostics_enabled()) fputs("badge-codegen: out of memory\n", stderr);
     return 0;
   }
   c->file = filename;

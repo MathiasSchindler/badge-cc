@@ -6,7 +6,7 @@ The owned compiler now defaults to `ssa` and
 `direct/global-compact/thumb-constants/word`. The IR pipeline adds
 `global-memory`, `sret-forward`, `compact-inline`, `low-bits`, `linear-bias`,
 `small-aggregate`, `dead-instructions`, and `divrem-pairs`, in that order,
-after the prior eight passes. This fills the 16-pass limit; use
+after the prior eight passes in that release; use
 `badge-opt --default-passes` to query the full list. The top-level firmware
 build still defaults to Clang. `loop-bounds`, `loop-cost`, profile-guided
 `hot-inline`, SRAM placement, and GPIOC are not enabled by this update.
@@ -576,7 +576,7 @@ a reusable transform.
 | Repeated text scale | Cloning the IMU helper for scales 1, 2, and 3 reached 64,567,943 instead of 69,841,948 full-screen production instructions, at +248 executable bytes. Default `cross-function` now tries a bounded repeated-literal group and checks its bytes, frames, saves and spills with the current backend as well as the original cost profile. It admitted 31 calls in Diagnostics, but did not admit the IMU specialization. |
 | Hoist formatting | A source-shape prototype prepared text once before the pixel loops. The complete live-screen replay, including preparation and its harness, reached 41,062,609 instead of 70,650,997 instructions; the error-screen and dirty-region digests also matched. The prototype uses 45 extra BSS bytes. No compiler hoist is enabled: the transform needs a proof that display calls and escaped sensor pointers cannot invalidate the snapshot. |
 | Bounded decimal quotient/remainder | `bounded-decimal` applies an exact reciprocal only when an unsigned bound and matching quotient/remainder pair are proved. Boundary and exhaustive 16-bit target checks passed. The final exact IMU object grew eight executable bytes and the live screen reached 72,204,259 instructions instead of 69,841,948, so the pass stays explicit. |
-| Split an interval at a call | The build-time `BADGE_EXPERIMENT_CALL_SPLIT=1` candidate saved 14 bytes in one object, and its exact report fixture reached 218 fewer instructions out of about 1.48 million. It added eight local-frame bytes and did not qualify as a default. |
+| Split an interval at a call | The former build-time candidate saved 14 bytes in one object, and its exact report fixture reached 218 fewer instructions out of about 1.48 million. It added eight local-frame bytes, did not qualify as a default, and was removed in the [opt-in review](#opt-in-review-guard-splitting). |
 | Private record return | A packed register-return prototype for the Maze fire rectangle grew the application object by 212 executable bytes and reached 21,009,892 instead of 20,981,843 instructions. All four digests matched. No compiler ABI change is enabled. |
 | Pointer induction | A source-shape hazard scan reached 95,722 fewer instructions in the four-level replay but nearly doubled that function's stack traffic (105,426 to 198,706 accesses). The explicit `pointer-induction` pass checks final code, frame, saves and spills. It proposed six Maze recurrences but admitted none, and produced no changes across the 129-module replay. |
 | Split collision rejection from the resolver | A source-shape prototype passed all four Maze digests and reached 20,094,649 instead of 20,981,843 instructions, saving 32 executable bytes in its application object. Generic automatic partial inlining is not enabled; the compiler still needs call-site CFG/PHI and memory-effect proofs. |
@@ -629,8 +629,9 @@ from a private helper with one direct register-only call in a loop. It
 repairs successor PHIs, recomputes live argument-only bounds in the
 resolver, and leaves the expensive body out of line. It requires smaller
 final code and no frame or save-area growth. It allows up to four
-additional statically spilled values in the caller only, so it is **not
-part of the default pipeline**. Apply it to saved optimized IR with
+additional statically spilled values in the caller only. It stayed explicit
+at this stage; see the [later qualification](#opt-in-review-guard-splitting).
+Apply it to saved optimized IR with
 `badge-opt --passes=guard-split input.ll -o output.ll`.
 
 Only Maze changed among 129 archived optimized modules. Its production
@@ -750,6 +751,69 @@ Diagnostics. These are host timings, not runtime changes.
 Fresh Maze, IMU, and Diagnostics UF2s were byte-identical. The clean
 parallel build medians were 652 and 621 ms, with overlapping ranges;
 the one-file rebuild also had no resolved change.
+
+The latest host-speed round measures ten candidates on the same six held-out
+frontend IR modules. Timed intervals use the optimizer API with a fresh
+context; both sides receive the same inputs and emit the same fingerprints.
+The benchmark alternates execution order. Figures are median paired changes
+on the local Arm64 macOS host, not expected gains on every host.
+
+| Candidate | Optimizer elapsed-time change |
+| --- | ---: |
+| Host `-O3` instead of `-O2` | -0.6% |
+| Host ThinLTO | -2.6% |
+| Host CPU tuning (`-mcpu=native`) | +0.6% |
+| Host PGO, trained on five different modules | -4.8% |
+| Codegen allocation arena | -1.0% |
+| Assembler allocation arena | +0.7% |
+| Binary search for assembler directives | +0.9% |
+| Reuse isolated admission's module preamble | +0.7% |
+| Size analysis tables by line count | -0.2% |
+| Let typed passes perform their own input verification | -1.7% |
+
+The final change removes only redundant verification. A pass marked as
+verifying its input must run typed analysis before editing IR or returning
+early. Other passes retain the separate verification, and reparsed or final
+changed IR still has the same typed checks. `--verify-only` is unchanged.
+PGO is available through the optional `profile-optimizer` Make target; the
+standard host build does not depend on profile data.
+
+With the actual `badge-opt` CLI, including process startup and file I/O,
+the six-input median moves from 1,146 ms to 1,111 ms with the verification
+change and to 1,064 ms with the optional PGO build. All three tools produce
+byte-identical optimized IR for 147 archived frontend inputs.
+Seven alternating clean `-j5` builds of Tilt Maze, IMU Demo, and Diagnostics
+using the prior tool versus the new profiled tool move from 592 to 564 ms
+median wall time (-4.7%). The profiled tool wins all seven pairs and the
+three UF2s match byte for byte in every pair. No badge run is needed to
+attribute these host improvements.
+
+### Optional parallel cost trials
+
+The POSIX `badge-opt-parallel` binary can run isolated before/after function
+cost checks concurrently. It creates one reusable helper only when a trial
+needs it, keeps codegen and assembler state separate, and waits for both
+results before deciding in normal pass order. It retains the same byte,
+frame, stack-save, spill, and work limits. Failed worker trials cannot be
+admitted, and their diagnostics are emitted in the serial order. The
+ordinary optimizer and whole-module profitability checks remain serial.
+
+On the local Arm64 macOS host, seven alternating paired runs measure:
+
+| Workload | Serial cost checks | Two-thread cost checks |
+| --- | ---: | ---: |
+| Optimizer CLI, six representative inputs | 1,164 ms | 1,118 ms |
+| Single-file Tilt Maze firmware rebuild | 293 ms | 251 ms |
+| Single-file Diagnostics firmware rebuild | 466 ms | 439 ms |
+
+These are host wall times. All 147 archived frontend inputs produce
+byte-identical optimized IR. Every incremental UF2 also matches. At the
+same twelve-slot budget, five clean twelve-image comparisons take 1,039 ms
+with twelve file-level jobs versus 1,319 ms with six file-level jobs and
+two-thread admission. All 120 clean-build UF2s match. The static partition
+therefore remains opt-in and is intended for single-file rebuilds, not for
+accelerating a clean parallel build. The [raw timing report](../../build/parallel-admission/results.json)
+keeps per-run values.
 
 ### Five microbenchmark follow-ups
 
@@ -1220,6 +1284,101 @@ These experiments did not change defaults:
 | Aligned RAM load pairs | The frame classifier's 64-bit-load prototype passed 240 classifications, but did not reach `LDRD` and grew from 260 to 304 code bytes and from 211,795,821 to 279,917,661 QEMU instructions including the caller. |
 | Packed dispatch keys | An experiment-only source copy with nine combined USB request predicates shrank the Wi-Fi Link handler by 26 bytes and passed the USB protocol test. There is no generalized CFG transform. |
 | Cold outlining | Extracting two repeated Diagnostics action sequences passed the app's host test and saved four object text bytes after charging the new helper. No machine outliner was added. |
+
+### Private code sharing and compact guards
+
+The owned defaults retain four changes from this round:
+
+1. The backend marks compiler-generated private functions without explicit
+   sections or inline assembly. The linker can share byte-identical,
+   relocation-free bodies within the same script selection and alignment,
+   with one private entry and at least one live direct call. Address
+   relocations, non-entry targets and public symbols prevent sharing.
+   `--no-function-folding` keeps exact unmerged reference comparisons.
+2. `scalar-cleanup` forwards a comparison through an adjacent branch-only
+   boolean inversion, swapping the edges instead of materializing a boolean.
+   It leaves multiply used values and annotated branch weights alone.
+3. Signed lower and upper guards on the same word can become a single
+   wrapping subtraction and unsigned interval test. Only effect-free
+   short-circuit diamonds with a single boolean join qualify. If the
+   success path computes the same offset for indexing, it reuses that
+   value. The shared glyph-row function shrinks from 292 to 276 bytes;
+   all 256 input byte values and 11 row values match the Clang oracle.
+4. The linker can place a small, single-NUL-terminated mergeable literal
+   within a previously placed longer literal in the same selection.
+   Named objects, untagged sections and literals with embedded NULs
+   are not eligible for suffix sharing.
+
+| Default change | Additional loaded flash saved across the 51-image corpus |
+| --- | ---: |
+| Private code sharing | 2,868 B |
+| Direct inverted branches | 25,872 B |
+| Compact range guards | 392 B |
+| Literal suffix sharing | 36 B |
+
+In total, 25 of 51 verified RP2350 UF2 images shrink by 29,168 loaded bytes,
+and none grows. No executable object or measured function's local-frame
+plus saves allocation grew across 147 objects. See the [combined comparison](../../build/rp2350-next-suffix/comparison.json).
+
+The [single-badge capture](../../build/rp2350-next-hardware/capture/capture.json)
+compares the prior and the new owned defaults. Maze generation took
+22,706 rather than 22,893 median raw ticks (-0.82%); shared diagnostics
+and graphics took 85,846 rather than 86,255 ticks (-0.47%). A reached
+frame took 139,772-139,791 instead of 139,736-139,742 median ticks
+(+0.03%); physics and display-transfer sample ranges overlapped.
+These are deterministic reached workloads, not physical I2C bus timing.
+
+The other six were measured independently and do not change defaults:
+
+| Candidate | Result |
+| --- | --- |
+| `loop-bit-seed` | Explicit CLZ pass. All 65,537 square-root inputs passed, but the function grew from 48 to 94 bytes and replay instruction count rose slightly. |
+| Guarded dynamic word loops | Build-time `BADGE_EXPERIMENT_DYNAMIC_BYTE_LOOPS=1`. All tested copy and zero lengths, alignments, canaries and forward-overlap cases passed. The two helper counts fell by 39% and 57%, but 12 firmware images grew by 172 bytes total. |
+| `bounded-signed-reciprocal` | Explicit pass. All 65,536 halfword inputs passed in the `/3` and `/1000` fixtures. The measured text doubled from 52 to 104 bytes and replay instructions rose from 3.15M to 4.13M; Tilt Breakout, IMU and Diagnostics were unchanged. |
+| Word-at-a-time byte scanner | Standalone IR prototype. All bounded stop positions passed, but it grew from 36 to 130 bytes and reached 4.84M rather than 3.29M instructions. |
+| Compact pointer tables | Diagnostics source-shape prototype passed the host tests; after charging decoding and lost pooling, linked flash rose by four bytes. |
+| Flash clustering | Same-object IMU relink using a trial script. Both images load 12,920 bytes, all six physical timing sample ranges overlap, and there is no automatic layout policy. This is warm benchmark evidence, not a cold-cache qualification. |
+
+## Opt-in review: guard splitting
+
+The owned optimizer now runs `guard-split` after `divrem-pairs`. The pass
+delays building the cross-function reference index until it finds a possible
+guard helper. It still requires strictly smaller final code, no frame or
+save-area growth, and no new spills outside the caller. The previous pipeline
+is selectable by removing the last entry from `badge-opt --default-passes`
+and passing the resulting list to `--passes`.
+
+All 51 RP2350 UF2 payloads verified. Tilt Maze fell from **13,920 to
+13,888 loaded bytes**; the other 50 payload sizes were unchanged. Across 147
+objects no function's measured frame plus saved-register area grew. Maze's
+physics caller has four statically spilled values instead of one, but the
+four-level Cortex-M33 QEMU replay matches its digests and reaches
+**29,649,649 → 28,286,243 instructions** and **5,335,702 → 5,188,837
+stack accesses**. This replay is not a bound on application stack usage.
+
+On one RP2350 badge, four boots in control/candidate/candidate/control order
+matched all Maze and diagnostics results and clocks. Physics/input medians
+fell from 24,921–24,922 to 22,604–22,606 raw timer ticks (**−9.3%**).
+The reached frame fell from 139,793–139,795 to 139,023–139,027
+(**−0.55%**). Those sample ranges did not overlap; the other four phases
+did. The separate compiler timing suite was byte-identical with guard
+splitting alone. On the host, nine alternating runs across six representative
+inputs raised the median aggregate optimizer time from 1,126 to 1,155 ms
+(**+2.6%**); Maze itself took 183 → 209 ms.
+
+The other opt-ins stay explicit:
+
+| Candidate | Reason |
+| --- | --- |
+| `sccp` | Standalone replay saved 604 executable bytes across 28 of 147 objects with no frame growth. Appending it alongside guard splitting saved 720 loaded bytes across the 51-image corpus, but the fixed-seed badge suite took about 0.31% more ticks for strings and 0.73% more for graphics. Those workload objects were identical; other objects changed the linked layout. |
+| `local-cse`, `loop-invariant`, `loop-cost`, `loop-bit-seed`, `bounded-decimal` | Current replays still grow some objects or frames. |
+| `pointer-induction`, `instruction-combine`, `target-strength-reduce` | Saved 4, 16, and 68 executable bytes respectively in isolated replay. The first lacks current IMU timing qualification; the latter two overlap existing defaults, and standalone strength reduction bypasses final allocation admission. |
+| `loop-bounds`, `bounded-signed-reciprocal`, `hot-inline`, `copy-chains`, `scalar-promotion`, `exact-pow2` | No changes in this unprofiled corpus. Standalone passes remain available for other inputs or to isolate transforms; `hot-inline` still requires profiling metadata. |
+| `libc-strcmp`, dynamic byte loops, historical backend profiles, host PGO and parallel admission | Require an explicit library contract, trade flash size or host resources for speed, or replace rather than extend the qualified backend profile. |
+
+Removed the disabled build-time call-interval split experiment: it had shown
+stack growth for a negligible gain, and removing it left all 147 archived
+codegen outputs byte-identical.
 
 ## PO18: historical cached qualification and default promotion
 

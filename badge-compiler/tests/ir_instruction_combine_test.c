@@ -379,6 +379,25 @@ static void boolean_tests(void) {
                  "%a = zext i1 %x to i16\n%b = icmp ne i16 %a, 0\n"
                  "%c = zext i1 %b to i32\n%d = icmp eq i32 %c, 1\n"
                  "ret i1 %d\n}\n", "ret i1 %x", "zext", 2);
+  fixture(TARGET "define i32 @f(i32 %x) {\nentry:\n"
+                        "%a = icmp slt i32 %x, -4\n%b = xor i1 %a, true\n"
+                        "br i1 %b, label %positive, label %negative\n"
+                        "positive:\nret i32 1\nnegative:\nret i32 0\n}\n",
+                 "br i1 %a, label %negative, label %positive", "xor i1", 1);
+  fixture(TARGET "define i32 @f(i32 %x, ptr %p) {\nentry:\n"
+                        "%a = icmp slt i32 %x, -4\n%b = xor i1 %a, true\n"
+                        "br i1 %b, label %positive, label %negative\n"
+                        "positive:\n%c = zext i1 %b to i32\nret i32 %c\nnegative:\nret i32 0\n}\n",
+                 "br i1 %b, label %positive, label %negative", NULL, 0);
+  fixture(TARGET "define i32 @f(i8 %x) {\nentry:\n"
+                        "%low = sext i8 %x to i32\n%a = icmp sge i32 %low, -3\n"
+                        "br i1 %a, label %upper, label %skip\n"
+                        "upper:\n%high = sext i8 %x to i32\n%b = icmp sle i32 %high, 5\nbr label %join\n"
+                        "skip:\nbr label %join\njoin:\n%c = phi i1 [%b,%upper], [false,%skip]\n"
+                        "br i1 %c, label %found, label %missing\n"
+                        "found:\n%again = sext i8 %x to i32\n%index = sub i32 %again, -3\nret i32 %index\n"
+                        "missing:\nret i32 -1\n}\n",
+                 "%c = icmp ule i32 %index, 8", "phi i1", 1);
 }
 int main(void) {
   arithmetic_tests();

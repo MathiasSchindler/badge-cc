@@ -36,6 +36,7 @@ typedef struct {
   ir_map names;
 } ir_module;
 enum { IR_ADMISSION_CACHE_ENTRIES = 64 };
+enum { IR_PIPELINE_LIMIT = 20 };
 typedef struct {
   jmp_buf failure;
   ir_allocation *allocations;
@@ -50,6 +51,11 @@ typedef struct {
   void *admission_cache[IR_ADMISSION_CACHE_ENTRIES];
   size_t admission_cache_bytes;
   struct badge_codegen_admission_cache *admission_functions;
+#ifdef BADGE_ENABLE_PARALLEL_ADMISSION
+  unsigned parallel_admission;
+  void *admission_helper;
+  void (*destroy_admission_helper)(void *);
+#endif
   void (*observe)(void *, unsigned, const char *, const char *, const char *,
                   uint64_t);
   void *observation_context;
@@ -61,6 +67,8 @@ typedef struct {
   const char *name, *description;
   void (*run)(ir_context *, ir_module *);
   ir_pass_role role;
+  // The pass runs the typed verifier before editing IR or returning early.
+  unsigned verifies_input;
 } ir_pass;
 
 extern const ir_pass badge_ir_passes[];

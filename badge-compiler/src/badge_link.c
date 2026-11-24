@@ -25,7 +25,8 @@ typedef struct { int kind,out,keep,provide; const char *name; lk_expr *expr; } l
 typedef struct { const char *path; bo_object_t *object; struct lk_section *sections; uint32_t *globals,*next; } lk_file;
 typedef struct lk_section { lk_file *file; uint32_t index,head,offset;
     unsigned merge_select; struct lk_section *merge_next;
-    int out,live,discard,placed; } lk_section;
+    int out,live,discard,placed,fold_marker,fold_entries,fold_call,fold_blocked; } lk_section;
+typedef struct lk_suffix { lk_section *section; uint32_t start,hash; struct lk_suffix *next; } lk_suffix;
 typedef struct {
     const char *name; lk_file *file; uint32_t symbol,value,size,alignment,visibility,next;
     int binding,type,script,provide,defined,live,out,common,placed;
@@ -40,8 +41,9 @@ typedef struct {
     lk_command commands[LK_COMMANDS]; unsigned command_count;
     lk_global *globals; uint32_t *hash; unsigned global_count;
     lk_section **literal_hash;
+    lk_suffix **suffix_hash; unsigned suffix_entries;
     const char *script,*output,*map,*entry,*cursor,*token; unsigned line;
-    int quoted,gc,active,no_literal_pool; uint64_t dot;
+    int quoted,gc,active,no_literal_pool,no_function_folding; uint64_t dot;
     FILE *reading; unsigned char *temporary;
     unsigned char *image,*map_bytes; size_t image_size,map_size;
 } linker_t;
@@ -555,21 +557,85 @@ static void lk_close_output(linker_t *l) {
     }
     l->active=-1;
 }
-static int lk_share_literal(linker_t *l,lk_section *s,const bo_section_t *input,
-                            unsigned select) {
+static void lk_find_foldable_code(linker_t *l) {
+    if(l->no_function_folding) return;
+    for(unsigned k=0;k<l->file_count;++k) {
+        lk_file *f=&l->files[k]; const bo_object_t *o=f->object;
+        for(size_t j=0;j<o->symbol_count;++j) {
+            const bo_symbol_t *v=&o->symbols[j];
+            if(!v->section || v->section>o->section_count) continue;
+            lk_section *s=&f->sections[v->section];
+            if(!s->live) continue;
+            if(v->binding) s->fold_blocked=1;
+            if(!v->binding && v->type==0 && !v->value && !v->size &&
+               !strncmp(v->name,".badge.fold.",12))
+                s->fold_marker=1;
+            if(v->type==2 && !v->binding && v->value==1 &&
+               v->size==o->sections[s->index-1].size)
+                s->fold_entries++;
+        }
+        for(size_t j=0;j<o->relocation_count;++j) {
+            const bo_relocation_t *r=&o->relocations[j];
+            lk_section *from=&f->sections[r->section];
+            if(!from->live) continue;
+            const bo_symbol_t *v=&o->symbols[r->symbol-1];
+            if(v->binding || !v->section || v->section>o->section_count) continue;
+            lk_section *to=&f->sections[v->section];
+            const bo_section_t *source=&o->sections[r->section-1];
+            const unsigned char *p=source->type==BO_PROGBITS ? source->data+r->offset : NULL;
+            if(to->out==from->out && (source->flags&4) && v->type==2 && v->value==1 &&
+               v->size==o->sections[to->index-1].size && p && lk_u16(p)==0xf7ff &&
+               ((r->type==10 && lk_u16(p+2)==0xfffe) ||
+                (r->type==30 && lk_u16(p+2)==0xbffe)))
+                to->fold_call=1;
+            else
+                to->fold_blocked=1;
+        }
+    }
+}
+static int lk_mergeable_literal(linker_t *l,const bo_section_t *input) {
     static const char prefix[]=".rodata.badge.literal.";
-    if(l->no_literal_pool || input->type!=BO_PROGBITS ||
-       input->flags!=(2|16) || input->alignment!=1 ||
-       !input->size || input->entry_size!=input->size || s->head!=UINT32_MAX ||
-       strncmp(input->name,prefix,sizeof(prefix)-1)!=0 || l->outputs[l->active].noload)
+    return !l->no_literal_pool && input->type==BO_PROGBITS && input->flags==(2|16) &&
+        input->alignment==1 && input->size && input->entry_size==input->size &&
+        !strncmp(input->name,prefix,sizeof(prefix)-1);
+}
+static int lk_string_suffixes(const bo_section_t *input) {
+    return input->size>2 && input->size<=256 && !input->data[input->size-1] &&
+        !memchr(input->data,0,input->size-1);
+}
+static int lk_share_section(linker_t *l,lk_section *s,const bo_section_t *input,
+                            unsigned select) {
+    const lk_output *out=&l->outputs[l->active];
+    if(input->type!=BO_PROGBITS || !input->size || s->head!=UINT32_MAX || out->noload)
         return 0;
+    int literal=lk_mergeable_literal(l,input);
+    int code=!l->no_function_folding && input->flags==(2|4) && !input->entry_size &&
+        s->fold_marker && s->fold_entries==1 && s->fold_call && !s->fold_blocked &&
+        l->regions[out->region].length<0x00fffffcu;
+    if(!literal && !code)
+        return 0;
+    if(literal && l->suffix_hash && lk_string_suffixes(input)) {
+        uint32_t suffix=2166136261u^select;
+        for(uint32_t k=input->size;k>0;--k) suffix=(suffix^input->data[k-1])*16777619u;
+        for(const lk_suffix *p=l->suffix_hash[suffix%LK_HASH];p;p=p->next) {
+            const lk_section *other=p->section;
+            const bo_section_t *candidate=&other->file->object->sections[other->index-1];
+            if(p->hash==suffix && other->merge_select==select &&
+               candidate->size-p->start==input->size &&
+               !memcmp(input->data,candidate->data+p->start,input->size)) {
+                s->offset=other->offset+p->start;
+                return 1;
+            }
+        }
+    }
     if(!l->literal_hash) l->literal_hash=lk_allocate(l,LK_HASH*sizeof(*l->literal_hash));
     uint32_t hash=2166136261u^select;
     for(uint32_t k=0;k<input->size;++k) hash=(hash^input->data[k])*16777619u;
     lk_section **bucket=&l->literal_hash[hash%LK_HASH];
     for(const lk_section *other=*bucket;other;other=other->merge_next) {
         const bo_section_t *candidate=&other->file->object->sections[other->index-1];
-        if(other->merge_select==select && candidate->size==input->size &&
+        if(other->merge_select==select && candidate->flags==input->flags &&
+           candidate->alignment==input->alignment && candidate->size==input->size &&
            !memcmp(input->data,candidate->data,input->size)) {
             s->offset=other->offset;
             return 1;
@@ -582,9 +648,22 @@ static void lk_place(linker_t *l,lk_section *s,unsigned select) {
     lk_output *o=&l->outputs[l->active]; const bo_section_t *input=&s->file->object->sections[s->index-1];
     if(input->type!=BO_PROGBITS && input->type!=BO_NOBITS) lk_error(l,"unsupported allocated section type in %s",input->name);
     if(input->type==BO_NOBITS && !o->noload) lk_error(l,"NOBITS input requires NOLOAD output");
-    if(lk_share_literal(l,s,input,select)) return;
+    if(lk_share_section(l,s,input,select)) return;
     l->dot=lk_align(l,l->dot,input->alignment); s->offset=lk_bound(l,l->dot-o->address);
     l->dot+=input->size; lk_bound(l,l->dot);
+    if(!o->noload && s->head==UINT32_MAX && lk_mergeable_literal(l,input) &&
+       lk_string_suffixes(input)) {
+        if(!l->suffix_hash) l->suffix_hash=lk_allocate(l,LK_HASH*sizeof(*l->suffix_hash));
+        uint32_t hash=2166136261u^select;
+        for(uint32_t k=input->size;k>1 && l->suffix_entries<65536;--k) {
+            hash=(hash^input->data[k-1])*16777619u;
+            if(input->size-k<2) continue;
+            lk_suffix **bucket=&l->suffix_hash[hash%LK_HASH];
+            lk_suffix *p=lk_allocate(l,sizeof(*p));
+            *p=(lk_suffix){s,k-1,hash,*bucket}; *bucket=p;
+            l->suffix_entries++;
+        }
+    }
 }
 static void lk_layout(linker_t *l) {
     for(unsigned k=0;k<l->file_count;++k) {
@@ -869,8 +948,9 @@ int main(int argc,char **argv) {
         } else if(strcmp(p,"--gc-sections")==0) l->gc=1;
         else if(strcmp(p,"--no-gc-sections")==0) l->gc=0;
         else if(strcmp(p,"--no-literal-pool")==0) l->no_literal_pool=1;
+        else if(strcmp(p,"--no-function-folding")==0) l->no_function_folding=1;
         else if(strcmp(p,"--help")==0 && argc==2) {
-            printf("usage: badge-link -T script.ld [--gc-sections|--no-gc-sections] [--no-literal-pool] [-Map output.map] -o output.elf input.o ...\n");
+            printf("usage: badge-link -T script.ld [--gc-sections|--no-gc-sections] [--no-literal-pool] [--no-function-folding] [-Map output.map] -o output.elf input.o ...\n");
             lk_destroy(l); return 0;
         } else if(p[0]=='-') lk_error(l,"unsupported option '%s'",p);
         else {
@@ -892,7 +972,7 @@ int main(int argc,char **argv) {
     char *text=lk_allocate(l,size+1); memcpy(text,script,size+1); free(l->temporary); l->temporary=NULL;
     lk_parse(l,text);
     for(unsigned k=0;k<count;++k) lk_load(l,inputs[k]);
-    lk_select(l); lk_gc(l); lk_layout(l); lk_emit(l);
+    lk_select(l); lk_gc(l); lk_find_foldable_code(l); lk_layout(l); lk_emit(l);
     if(l->map && !host_write_file("badge-link",l->map,l->map_bytes,l->map_size)) { lk_destroy(l); return 1; }
     if(!host_write_file("badge-link",l->output,l->image,l->image_size)) { lk_destroy(l); return 1; }
     printf("%s: %zu bytes, %u objects, %u output sections, entry %s\n",l->output,l->image_size,l->file_count,l->output_count,l->entry);

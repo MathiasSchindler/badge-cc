@@ -1035,6 +1035,95 @@ static void neighboring_addresses(ir_context *c, ir_module *m) {
     ir_release_to(c, mark);
 }
 
+static int seed_even_bit_loop(ir_context *c, ir_analysis *a, unsigned b) {
+  ir_module *m = a->text;
+  const ir_block *h = &a->blocks[b];
+  if (h->rpo == IR_NONE || h->instruction_count != 3 || h->predecessor_count != 2)
+    return 0;
+  const ir_instruction *phi = &a->instructions[h->first_instruction];
+  const ir_instruction *cmp = phi + 1, *br = phi + 2;
+  if (phi->opcode != IR_OP_PHI || a->types[phi->type].bits != 32 ||
+      phi->operand_count != 4 || cmp->opcode != IR_OP_COMPARE || cmp->operand_count != 2 ||
+      br->opcode != IR_OP_BR || br->operand_count != 3 ||
+      cmp->line != cmp->end_line || m->lines[cmp->line - 1].count != 8 ||
+      strcmp(ir_text(m, m->lines[cmp->line - 1].op + 1), "ugt") ||
+      br->line != br->end_line || m->lines[br->line - 1].count != 9)
+    return 0;
+  const ir_operand *range = &a->operands[cmp->first_operand];
+  const ir_operand *branch = &a->operands[br->first_operand];
+  if (range->kind != IR_OPERAND_LOCAL || range->definition != phi->definition ||
+      range[1].kind != IR_OPERAND_LOCAL ||
+      a->definitions[range[1].definition].block == b ||
+      branch->kind != IR_OPERAND_LOCAL || branch->definition != cmp->definition ||
+      a->definitions[cmp->definition].use_count != 1 ||
+      branch[1].block == b || branch[2].block == b || branch[1].block == branch[2].block)
+    return 0;
+  const ir_block *body = &a->blocks[branch[1].block];
+  if (body->instruction_count != 2 || body->predecessor_count != 1 ||
+      a->predecessors[body->first_predecessor] != b ||
+      a->definitions[range[1].definition].block == branch[1].block)
+    return 0;
+  const ir_instruction *step = &a->instructions[body->first_instruction], *back = step + 1;
+  if (step->opcode != IR_OP_BINARY || strcmp(step->operation, "lshr") ||
+      step->operand_count != 2 || step->end_line != step->line ||
+      m->lines[step->line - 1].count != 7 ||
+      back->opcode != IR_OP_BR || back->operand_count != 1 ||
+      a->operands[back->first_operand].block != b ||
+      a->definitions[step->definition].use_count != 1)
+    return 0;
+  const ir_operand *shift = &a->operands[step->first_operand];
+  const ir_operand *start = &a->operands[phi->first_operand], *next = start + 2;
+  if (start[1].block == branch[1].block) {
+    const ir_operand *tmp = start; start = next; next = tmp;
+  }
+  if (phi->line != phi->end_line || m->lines[phi->line - 1].count != 15 ||
+      next[1].block != branch[1].block || next->kind != IR_OPERAND_LOCAL ||
+      next->definition != step->definition || start->kind != IR_OPERAND_LITERAL ||
+      strcmp(ir_text(m, start->token), "1073741824") ||
+      shift->kind != IR_OPERAND_LOCAL || shift->definition != phi->definition ||
+      shift[1].kind != IR_OPERAND_LITERAL || strcmp(ir_text(m, shift[1].token), "2"))
+    return 0;
+  if (m->lines[phi->line - 1].replacement || m->lines[cmp->line - 1].replacement ||
+      m->lines[br->line - 1].replacement || m->lines[body->line - 1].replacement ||
+      m->lines[step->line - 1].replacement || m->lines[back->line - 1].replacement)
+    return 0;
+  const char *input = ir_text(m, range[1].token);
+  const char *clz = ir_fresh(c, m, '%'), *even = ir_fresh(c, m, '%');
+  const char *bit = ir_fresh(c, m, '%'), *nz = ir_fresh(c, m, '%');
+  m->lines[phi->line - 1].replacement = ir_format(c,
+      "  %s = call i32 @llvm.ctlz.i32(i32 %s, i1 false)\n"
+      "  %s = and i32 %s, 30\n  %s = lshr i32 1073741824, %s\n"
+      "  %s = icmp ne i32 %s, 0\n  %s = select i1 %s, i32 %s, i32 0\n",
+      clz, input, even, clz, bit, even, nz, input, a->definitions[phi->definition].name, nz, bit);
+  m->lines[cmp->line - 1].replacement = "";
+  m->lines[br->line - 1].replacement = ir_format(c, "  br label %s\n", ir_text(m, branch[2].token));
+  for (unsigned l = body->line; l <= back->end_line; ++l)
+    m->lines[l - 1].replacement = "";
+  ir_note(c, "candidate", "even_bit_seed_from_clz", 1);
+  return 1;
+}
+
+void ir_loop_bit_seed(ir_context *c, ir_module *m) {
+  if (!strstr(m->source, "1073741824"))
+    return;
+  ir_allocation *mark = c->allocations;
+  ir_analysis a;
+  ir_analyze(c, m, &a);
+  int changed = 0;
+  for (unsigned b = 0; b < a.block_count; ++b)
+    changed |= seed_even_bit_loop(c, &a, b);
+  if (!changed) {
+    ir_release_to(c, mark);
+    return;
+  }
+  int declared = 0;
+  for (unsigned k = 0; k < a.global_count; ++k)
+    declared |= !strcmp(ir_name_key(c, a.globals[k].name), "@llvm.ctlz.i32");
+  if (!declared)
+    m->suffix = "declare i32 @llvm.ctlz.i32(i32, i1 immarg)\n";
+  ir_reparse(c, m, mark);
+}
+
 void ir_loop_scalar(ir_context *c, ir_module *m) {
   ir_span_fusion(c, m);
   run(c, m, 2);

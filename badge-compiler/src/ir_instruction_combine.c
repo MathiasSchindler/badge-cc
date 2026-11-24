@@ -319,8 +319,59 @@ static void run(ir_context *c, ir_module *m, int booleans) {
 }
 void ir_instruction_combine(ir_context *c, ir_module *m) { run(c, m, 0); }
 static void fold_narrow_distances(ir_context *c, ir_module *m);
+static void fold_range_guards(ir_context *c, ir_module *m);
+
+static void fold_inverted_branches(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  ir_analysis a;
+  ir_analyze(c, m, &a);
+  int changed = 0;
+  for (unsigned i = 1; i < a.instruction_count; ++i) {
+    const ir_instruction *branch = &a.instructions[i], *invert = branch - 1;
+    ir_line *br = &m->lines[branch->line - 1], *row = &m->lines[invert->line - 1];
+    if (branch->opcode != IR_OP_BR || branch->operand_count != 3 || br->count != 9 ||
+        branch->line != branch->end_line || invert->block != branch->block ||
+        invert->opcode != IR_OP_BINARY || strcmp(invert->operation, "xor") ||
+        a.types[invert->type].bits != 1 || invert->operand_count != 2 ||
+        invert->line != invert->end_line || row->count != 7 ||
+        a.definitions[invert->definition].use_count != 1)
+      continue;
+    const ir_operand *condition = &a.operands[branch->first_operand];
+    if (condition->kind != IR_OPERAND_LOCAL || condition->definition != invert->definition)
+      continue;
+    const ir_operand *source = &a.operands[invert->first_operand], *one = source + 1;
+    if (source->kind == IR_OPERAND_LITERAL) {
+      one = source;
+      source++;
+    }
+    if (source->kind != IR_OPERAND_LOCAL || one->kind != IR_OPERAND_LITERAL ||
+        (strcmp(ir_text(m, one->token), "true") && strcmp(ir_text(m, one->token), "1")))
+      continue;
+    unsigned def = a.definitions[source->definition].instruction;
+    if (def == IR_NONE || def + 1 != i - 1 || a.instructions[def].opcode != IR_OP_COMPARE ||
+        a.instructions[def].block != branch->block ||
+        a.definitions[source->definition].use_count != 1)
+      continue;
+    const char *yes = ir_text(m, condition[1].token), *no = ir_text(m, condition[2].token);
+    m->tokens[condition->token].replacement = ir_text(m, source->token);
+    m->tokens[condition[1].token].replacement = no;
+    m->tokens[condition[2].token].replacement = yes;
+    row->replacement = "";
+    changed = 1;
+    ir_note(c, "transformed", "inverted_compare_branch", 1);
+  }
+  if (changed)
+    ir_reparse(c, m, mark);
+  else
+    ir_release_to(c, mark);
+}
+
 void ir_scalar_cleanup(ir_context *c, ir_module *m) {
   run(c, m, 1);
+  if (strstr(m->source, "xor i1 "))
+    fold_inverted_branches(c, m);
+  if (strstr(m->source, "icmp sge i32 ") && strstr(m->source, "icmp sle i32 "))
+    fold_range_guards(c, m);
   if (strstr(m->source, "zext i") && strstr(m->source, "icmp u"))
     fold_narrow_distances(c, m);
 }
@@ -479,6 +530,144 @@ static int zero_extended_word(const ir_analysis *a, const ir_operand *o) {
 static int same_local(const ir_operand *a, const ir_operand *b) {
   return a->kind == IR_OPERAND_LOCAL && b->kind == IR_OPERAND_LOCAL &&
          a->definition == b->definition;
+}
+
+static int range_source(const ir_analysis *a, const ir_operand *x, const ir_operand *y) {
+  if (same_local(x, y))
+    return 1;
+  const ir_instruction *l = from_operand(a, x), *r = from_operand(a, y);
+  if (!l || !r || l->opcode != IR_OP_CAST || r->opcode != IR_OP_CAST ||
+      l->operand_count != 1 || r->operand_count != 1 ||
+      (strcmp(l->operation, "zext") && strcmp(l->operation, "sext")) ||
+      strcmp(l->operation, r->operation) || a->text->lines[l->line - 1].count != 7 ||
+      a->text->lines[r->line - 1].count != 7)
+    return 0;
+  return same_local(&a->operands[l->first_operand], &a->operands[r->first_operand]);
+}
+
+static void fold_range_guards(ir_context *c, ir_module *m) {
+  ir_allocation *mark = c->allocations;
+  ir_analysis a;
+  ir_analyze(c, m, &a);
+  int changed = 0;
+  for (unsigned b = 0; b < a.block_count; ++b) {
+    const ir_block *head = &a.blocks[b];
+    if (head->rpo == IR_NONE || head->instruction_count < 2)
+      continue;
+    const ir_instruction *lower = &a.instructions[head->first_instruction + head->instruction_count - 2];
+    const ir_instruction *br = lower + 1;
+    if (lower->opcode != IR_OP_COMPARE || lower->operand_count != 2 ||
+        lower->line != lower->end_line || br->line != br->end_line ||
+        m->lines[lower->line - 1].count != 8 || m->lines[lower->line - 1].replacement ||
+        strcmp(ir_text(m, m->lines[lower->line - 1].op + 1), "sge") ||
+        br->opcode != IR_OP_BR || br->operand_count != 3 ||
+        m->lines[br->line - 1].count != 9 || a.definitions[lower->definition].use_count != 1)
+      continue;
+    const ir_operand *edges = &a.operands[br->first_operand];
+    if (edges->kind != IR_OPERAND_LOCAL || edges->definition != lower->definition ||
+        edges[1].block == b || edges[2].block == b || edges[1].block == edges[2].block)
+      continue;
+    const ir_block *yes = &a.blocks[edges[1].block], *no = &a.blocks[edges[2].block];
+    if (yes->predecessor_count != 1 || no->predecessor_count != 1 ||
+        (yes->instruction_count != 2 && yes->instruction_count != 3) || no->instruction_count != 1)
+      continue;
+    const ir_instruction *upper = &a.instructions[yes->first_instruction + yes->instruction_count - 2];
+    const ir_instruction *jump = upper + 1, *skip = &a.instructions[no->first_instruction];
+    if (upper->opcode != IR_OP_COMPARE || upper->operand_count != 2 ||
+        m->lines[upper->line - 1].count != 8 ||
+        strcmp(ir_text(m, m->lines[upper->line - 1].op + 1), "sle") ||
+        jump->opcode != IR_OP_BR || skip->opcode != IR_OP_BR ||
+        jump->operand_count != 1 || skip->operand_count != 1 ||
+        a.definitions[upper->definition].use_count != 1)
+      continue;
+    if (yes->instruction_count == 3) {
+      const ir_instruction *ext = upper - 1;
+      const ir_operand *test = &a.operands[upper->first_operand];
+      if (ext->opcode != IR_OP_CAST || test->kind != IR_OPERAND_LOCAL ||
+          test->definition != ext->definition || a.definitions[ext->definition].use_count != 1)
+        continue;
+    }
+    const ir_operand *x = &a.operands[lower->first_operand], *y = &a.operands[upper->first_operand];
+    uint64_t lo, hi;
+    if (a.types[x->type].bits != 32 || a.types[y->type].bits != 32 ||
+        !range_source(&a, x, y) || x[1].kind != IR_OPERAND_LITERAL ||
+        y[1].kind != IR_OPERAND_LITERAL || !ir_integer(ir_text(m, x[1].token), &lo) ||
+        !ir_integer(ir_text(m, y[1].token), &hi) ||
+        ((uint32_t)lo ^ 0x80000000u) > ((uint32_t)hi ^ 0x80000000u) ||
+        (uint32_t)hi - (uint32_t)lo > 255)
+      continue;
+    const ir_operand *target = &a.operands[jump->first_operand];
+    if (target->block != a.operands[skip->first_operand].block || target->block == b ||
+        target->block == edges[1].block || target->block == edges[2].block)
+      continue;
+    const ir_block *join = &a.blocks[target->block];
+    if (join->predecessor_count != 2 || join->instruction_count != 2)
+      continue;
+    const ir_instruction *phi = &a.instructions[join->first_instruction];
+    const ir_instruction *test = phi + 1;
+    if (phi->opcode != IR_OP_PHI || phi->operand_count != 4 ||
+        phi->line != phi->end_line || test->line != test->end_line ||
+        m->lines[phi->line - 1].count != 15 || m->lines[phi->line - 1].replacement ||
+        a.definitions[phi->definition].use_count != 1 ||
+        test->opcode != IR_OP_BR || test->operand_count != 3 ||
+        m->lines[test->line - 1].replacement || m->lines[test->line - 1].count != 9)
+      continue;
+    const ir_operand *result = &a.operands[test->first_operand];
+    if (result->kind != IR_OPERAND_LOCAL || result->definition != phi->definition ||
+        result[1].block == b || result[2].block == b ||
+        result[1].block == target->block || result[2].block == target->block ||
+        result[1].block == edges[1].block || result[1].block == edges[2].block ||
+        result[2].block == edges[1].block || result[2].block == edges[2].block ||
+        a.instructions[a.blocks[result[1].block].first_instruction].opcode == IR_OP_PHI ||
+        a.instructions[a.blocks[result[2].block].first_instruction].opcode == IR_OP_PHI)
+      continue;
+    const ir_operand *from = &a.operands[phi->first_operand];
+    if (from[1].block == edges[2].block)
+      from += 2;
+    const ir_operand *other = &a.operands[phi->first_operand + (from == &a.operands[phi->first_operand] ? 2 : 0)];
+    if (from[1].block != edges[1].block || from->kind != IR_OPERAND_LOCAL ||
+        from->definition != upper->definition || other[1].block != edges[2].block ||
+        other->kind != IR_OPERAND_LITERAL || strcmp(ir_text(m, other->token), "false"))
+      continue;
+    const char *delta = NULL;
+    const ir_block *success = &a.blocks[result[1].block];
+    if (success->predecessor_count == 1)
+      for (unsigned n = 0; n < success->instruction_count && n < 3; ++n) {
+        const ir_instruction *index = &a.instructions[success->first_instruction + n];
+        if (!plain_i32_binary(&a, index, "sub"))
+          continue;
+        const ir_operand *args = &a.operands[index->first_operand];
+        uint64_t base;
+        if (range_source(&a, x, args) && args[1].kind == IR_OPERAND_LITERAL &&
+            ir_integer(ir_text(m, args[1].token), &base) && (uint32_t)base == (uint32_t)lo) {
+          delta = a.definitions[index->definition].name;
+          m->lines[index->line - 1].replacement = "";
+          break;
+        }
+      }
+    if (!delta)
+      delta = ir_fresh(c, m, '%');
+    m->lines[lower->line - 1].replacement = ir_format(c,
+        "  %s = sub i32 %s, %s\n  %s = icmp ule i32 %s, %u\n", delta,
+        ir_text(m, x->token), ir_text(m, x[1].token), a.definitions[phi->definition].name,
+        delta, (uint32_t)hi - (uint32_t)lo);
+    const ir_line *tail = &m->lines[test->line - 1];
+    m->lines[br->line - 1].replacement = ir_copy(c, m->source + tail->begin, tail->end - tail->begin);
+    for (unsigned l = yes->line; l <= jump->end_line; ++l)
+      m->lines[l - 1].replacement = "";
+    for (unsigned l = no->line; l <= skip->end_line; ++l)
+      m->lines[l - 1].replacement = "";
+    for (unsigned l = join->line; l <= test->end_line; ++l)
+      m->lines[l - 1].replacement = "";
+    ir_note(c, "transformed", "compact_interval_guard", 1);
+    changed = 1;
+  }
+  if (changed) {
+    ir_reparse(c, m, mark);
+    ir_dead_instructions(c, m);
+    ir_reparse(c, m, mark);
+  } else
+    ir_release_to(c, mark);
 }
 
 static void fold_narrow_distances(ir_context *c, ir_module *m) {

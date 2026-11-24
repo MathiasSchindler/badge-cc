@@ -146,10 +146,12 @@ optional input merging disabled. Our initial linker does not pool/reorder
 mergeable strings: ten images therefore differ from the ordinary optimized
 baseline, deliberately and explicitly recorded. `linker-comparisons.tsv`
 records the required unmerged-reference comparisons. No image is flashed.
-Current owned builds pool identical whole literals explicitly marked by the
-owned frontend and backend. The unmerged reference still uses
-`--no-literal-pool`; arbitrary input sections and named constant objects
-are not pooled by the owned linker.
+Current owned builds pool identical whole literals and eligible proper
+suffixes explicitly marked by the owned frontend and backend. The linker
+also folds eligible compiler-tagged private functions when their addresses
+are not used as data. The unmerged reference still uses `--no-literal-pool`
+and `--no-function-folding`; arbitrary input sections and named constant
+objects are not pooled by the owned linker.
 
 On this route **C08-C12 are project-owned**. C compilation still uses LLVM
 through C07, and this comparison route retains external handwritten `.S`

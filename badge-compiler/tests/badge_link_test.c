@@ -103,7 +103,8 @@ static void mov_address_fixups(void) {
 static void literal_pool(const char *in,const char *other,char *out) {
     unsigned char value[]={1,0,2,0};
     unsigned char distinct[]={1,0,3,0};
-    unsigned char refs[16]={0};
+    unsigned char parent[]="short tail", tail[]="tail";
+    unsigned char refs[24]={0};
     bo_section_t a[]={
         {".text.entry",BO_PROGBITS,6,2,0,0,sizeof(callee_bytes),callee_bytes},
         {".rodata.badge.literal.first",BO_PROGBITS,18,1,0,sizeof(value),sizeof(value),value},
@@ -115,21 +116,27 @@ static void literal_pool(const char *in,const char *other,char *out) {
         {"other",1,1,0,0,0,0},
         {"plain",1,1,0,0,0,0},
         {"unequal",1,1,0,0,0,0},
+        {"parent",1,1,0,0,0,0},
+        {"tail",1,1,0,0,0,0},
     };
-    bo_relocation_t rels[]={{3,0,2,2},{3,4,2,3},{3,8,2,4},{3,12,2,5}};
-    object=(bo_object_t){a,3,as,5,rels,4};
+    bo_relocation_t rels[]={{3,0,2,2},{3,4,2,3},{3,8,2,4},{3,12,2,5},{3,16,2,6},{3,20,2,7}};
+    object=(bo_object_t){a,3,as,7,rels,6};
     write_object(in);
     bo_section_t b[]={
         {".rodata.badge.literal.other",BO_PROGBITS,18,1,0,sizeof(value),sizeof(value),value},
         {".rodata.badge.literal.plain",BO_PROGBITS,2,1,0,0,sizeof(value),value},
         {".rodata.badge.literal.unequal",BO_PROGBITS,18,1,0,sizeof(distinct),sizeof(distinct),distinct},
+        {".rodata.badge.literal.parent",BO_PROGBITS,18,1,0,sizeof(parent),sizeof(parent),parent},
+        {".rodata.badge.literal.tail",BO_PROGBITS,18,1,0,sizeof(tail),sizeof(tail),tail},
     };
     bo_symbol_t bs[]={
         {"other",1,1,0,1,0,sizeof(value)},
         {"plain",1,1,0,2,0,sizeof(value)},
         {"unequal",1,1,0,3,0,sizeof(distinct)},
+        {"parent",1,1,0,4,0,sizeof(parent)},
+        {"tail",1,1,0,5,0,sizeof(tail)},
     };
-    object=(bo_object_t){b,3,bs,3,NULL,0};
+    object=(bo_object_t){b,5,bs,5,NULL,0};
     write_object(other);
     char *keep[]={"badge-link","--no-gc-sections","-T","tests/fixtures/link_oracle_fixture.ld",
                   "-o",out,(char *)in,(char *)other,NULL};
@@ -139,7 +146,8 @@ static void literal_pool(const char *in,const char *other,char *out) {
     uint32_t first=lk_u32(payload), second=lk_u32(payload+4),
              plain=lk_u32(payload+8), unequal=lk_u32(payload+12);
     assert(first==second && plain==first+4 && unequal==plain+4);
-    assert(lk_u32(section(elf,".text")+20)==16);
+    assert(lk_u32(payload+20)==lk_u32(payload+16)+6);
+    assert(lk_u32(section(elf,".text")+20)==28);
     free(elf);
     char *unmerged[]={"badge-link","--no-gc-sections","--no-literal-pool","-T",
                       "tests/fixtures/link_oracle_fixture.ld","-o",out,
@@ -148,7 +156,45 @@ static void literal_pool(const char *in,const char *other,char *out) {
     elf=read_file(out,&size);
     payload=elf+lk_u32(section(elf,".data")+16);
     assert(lk_u32(payload)!=lk_u32(payload+4));
-    assert(lk_u32(section(elf,".text")+20)==20);
+    assert(lk_u32(payload+20)==lk_u32(payload+16)+sizeof(parent));
+    assert(lk_u32(section(elf,".text")+20)==36);
+    free(elf);
+}
+static void fold_private_functions(char *in,char *out) {
+    unsigned char calls[]={0xff,0xf7,0xfe,0xff,0xff,0xf7,0xfe,0xff,
+                           0xff,0xf7,0xfe,0xff,0x70,0x47};
+    unsigned char address[4]={0};
+    bo_section_t s[]={
+        {".text.entry",BO_PROGBITS,6,2,0,0,sizeof(calls),calls},
+        {".text.first",BO_PROGBITS,6,2,0,0,sizeof(callee_bytes),callee_bytes},
+        {".text.second",BO_PROGBITS,6,2,0,0,sizeof(callee_bytes),callee_bytes},
+        {".text.observable",BO_PROGBITS,6,2,0,0,sizeof(callee_bytes),callee_bytes},
+        {".data.address",BO_PROGBITS,3,4,0,0,sizeof(address),address},
+    };
+    bo_symbol_t defs[]={
+        {"entry",1,2,0,1,1,sizeof(calls)},
+        {"first",0,2,0,2,1,sizeof(callee_bytes)},
+        {"second",0,2,0,3,1,sizeof(callee_bytes)},
+        {"observable",0,2,0,4,1,sizeof(callee_bytes)},
+        {".badge.fold.1",0,0,0,2,0,0},
+        {".badge.fold.2",0,0,0,3,0,0},
+        {".badge.fold.3",0,0,0,4,0,0},
+    };
+    bo_relocation_t rels[]={{1,0,10,2},{1,4,10,3},{1,8,10,4},{5,0,2,4}};
+    object=(bo_object_t){s,5,defs,7,rels,4};
+    write_object(in);
+    char *args[]={"badge-link","--no-gc-sections","-T","tests/fixtures/link_oracle_fixture.ld",
+                  "-o",out,in,NULL};
+    assert(badge_link_main(7,args)==0);
+    size_t size; unsigned char *elf=read_file(out,&size);
+    assert(lk_u32(section(elf,".text")+20)==24);
+    assert(lk_u32(elf+lk_u32(section(elf,".data")+16))==0x10000013);
+    free(elf);
+    char *original[]={"badge-link","--no-gc-sections","--no-function-folding","-T",
+                      "tests/fixtures/link_oracle_fixture.ld","-o",out,in,NULL};
+    assert(badge_link_main(8,original)==0);
+    elf=read_file(out,&size);
+    assert(lk_u32(section(elf,".text")+20)==28);
     free(elf);
 }
 int main(void) {
@@ -161,6 +207,7 @@ int main(void) {
     snprintf(script,sizeof(script),"%s/script.ld",dir); snprintf(alias,sizeof(alias),"%s/alias.elf",dir);
     snprintf(other,sizeof(other),"%s/other.o",dir);
     literal_pool(in,other,out);
+    fold_private_functions(in,out);
     char *args[]={"badge-link","-T","tests/fixtures/link_oracle_fixture.ld","-o",out,in,NULL};
     fixture(); write_object(in); assert(badge_link_main(6,args)==0);
     size_t size; unsigned char *elf=read_file(out,&size);

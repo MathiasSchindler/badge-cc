@@ -63,6 +63,8 @@ cg_value *cg_define(cg_context *c, char *name, cg_type *t) {
 static void function_header(cg_context *c, cg_function *f) {
   cg_emit(c, ".balign %u\n@ stack-frame: %u + %u saved-register bytes\n",
           f->alignment, f->frame, c->register_saved_bytes);
+  if (f->foldable)
+    cg_emit(c, ".badge.fold.%u:\n", f->id);
   if (!f->internal) cg_emit(c, ".global %s\n", f->name);
   cg_emit(c, ".type %s, %%function\n.thumb_func\n%s:\n", f->name, f->name);
 }
@@ -1174,11 +1176,17 @@ void cg_generate_function(cg_context *c, cg_function *f) {
     cg_emit(c, ".section \"%s\",\"ax\",%%progbits\n", f->section);
   else
     cg_emit(c, ".section .text.%s,\"ax\",%%progbits\n", f->name);
+  f->foldable = f->internal && !f->section;
+  for (const cg_block *b = f->blocks; b && f->foldable; b = b->next)
+    for (cg_inst *i = b->first; i && f->foldable; i = i->next)
+      if (cg_instruction_assembly(c, i))
+        f->foldable = 0;
   size_t header = c->size;
   function_header(c, f);
   size_t body_start = c->size;
   cg_inst *leaf = scalar_leaf_entry(c);
-  if (!f->dynamic_stack && !f->variadic && (cg_emit_counted_leaf(c) || cg_emit_wide_fill_leaf(c) ||
+  if (!f->dynamic_stack && !f->variadic && (cg_emit_dynamic_byte_loop(c) ||
+      cg_emit_counted_leaf(c) || cg_emit_wide_fill_leaf(c) ||
       cg_emit_prepend_context_wrapper(c) ||
       emit_abs_leaf(c) || emit_clamp_leaf(c) ||
       emit_nibble_lookup_leaf(c, leaf) || emit_wide_sum_leaf(c, leaf))) {

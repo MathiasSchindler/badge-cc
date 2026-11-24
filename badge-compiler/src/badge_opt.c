@@ -41,6 +41,15 @@ int badge_opt_main(int argc, char **argv) {
   c->file = argv[1];
   int result = 1;
   if (!setjmp(c->failure)) {
+    const char *jobs = getenv("BADGE_ADMISSION_JOBS");
+    if (jobs && strcmp(jobs, "1") && strcmp(jobs, "2"))
+      ir_error(c, "BADGE_ADMISSION_JOBS must be 1 or 2");
+#ifdef BADGE_ENABLE_PARALLEL_ADMISSION
+    c->parallel_admission = jobs && !strcmp(jobs, "2");
+#else
+    if (jobs && !strcmp(jobs, "2"))
+      ir_error(c, "BADGE_ADMISSION_JOBS=2 requires badge-opt-parallel");
+#endif
     struct stat a, b;
     if (stat(argv[1], &a) || !S_ISREG(a.st_mode) || a.st_size < 0 ||
         a.st_size > 16 * 1024 * 1024)

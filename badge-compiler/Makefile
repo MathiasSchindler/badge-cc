@@ -8,6 +8,7 @@ LLVM_LLD ?= ld.lld
 LLVM_NM ?= llvm-nm
 LLVM_OBJDUMP ?= llvm-objdump
 LLVM_OPT ?= opt
+LLVM_PROFDATA ?= llvm-profdata
 QEMU_ARM ?= qemu-system-arm
 export BADGE_TEST_MODE ?= oracle
 
@@ -24,6 +25,7 @@ OPT_SOURCES += src/ir_cross_function.c
 OPT_HEADERS += $(COST_HEADERS)
 CODEGEN_SOURCES += $(COST_SOURCES)
 CODEGEN_HEADERS += $(COST_HEADERS)
+CODEGEN_HEADERS += src/host_diagnostics.h
 OPT_SOURCES += src/ir_loop_admission.c src/assembly_cost.c $(filter-out $(COST_SOURCES),$(CODEGEN_SOURCES))
 OPT_HEADERS += src/ir_loop_admission.h src/assembly_cost.h src/badge_asm.c src/badge_thumb.h src/badge_object.c src/badge_object.h $(CODEGEN_HEADERS)
 TEST_BINS := build/elf2bin_test build/badge_elf_info_test build/badge_cpp_test build/badge_parse_test build/badge_sema_test build/badge_ir_test build/badge_opt_test build/ir_pipeline_test build/ir_analysis_test build/ir_dead_instructions_test build/ir_scalar_promotion_test build/ir_mem2reg_test build/ir_sccp_test build/ir_instruction_combine_test build/ir_local_cse_test build/ir_local_cse_collision_test build/badge_codegen_test build/badge_object_test build/badge_asm_test build/badge_link_test
@@ -56,7 +58,8 @@ test-datasheet-qualification: build/compiler_collector_test
 	node --test tests/datasheet_qualification_test.mjs tests/compiler-compare.test.mjs
 all: build/elf2bin build/badge-elf-info build/badge-cpp build/badge-parse build/badge-sema build/badge-ir build/badge-opt build/badge-ir-metrics build/badge-codegen build/badge-object build/badge-asm build/badge-link build/badge-sha256
 
-$(TEST_BINS) build/elf2bin build/badge-cpp build/badge-parse build/badge-sema build/badge-ir build/badge-opt build/badge-ir-metrics build/badge-codegen build/badge-object build/badge-asm build/badge-link: src/host_platform.h
+$(TEST_BINS) build/elf2bin build/badge-cpp build/badge-parse build/badge-sema build/badge-ir build/badge-opt build/badge-opt-parallel build/badge-opt-parallel-sanitize build/badge-ir-metrics build/badge-codegen build/badge-object build/badge-asm build/badge-link: src/host_platform.h
+build/badge-link build/badge_link_test build/badge-asm build/badge-asm-layout-budget build/badge_asm_test build/badge-object build/badge_object_test build/link_oracle: src/host_diagnostics.h
 
 test-pipeline-stages:
 	node --test tests/pipeline-stages.test.mjs
@@ -305,6 +308,28 @@ build/badge-elf-info-sanitize: src/badge_elf_info.c | build
 
 build/badge-opt: src/badge_opt.c $(OPT_SOURCES) $(OPT_HEADERS) src/host_io.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) src/badge_opt.c $(OPT_SOURCES) -o $@
+
+build/badge-opt-parallel: src/badge_opt.c $(OPT_SOURCES) $(OPT_HEADERS) src/host_io.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DBADGE_ENABLE_PARALLEL_ADMISSION -pthread $< $(OPT_SOURCES) -o $@
+
+build/badge-opt-parallel-sanitize: src/badge_opt.c $(OPT_SOURCES) $(OPT_HEADERS) src/host_io.h | build
+	$(CC) $(CPPFLAGS) $(TEST_FLAGS) -DBADGE_ENABLE_PARALLEL_ADMISSION -pthread $< $(OPT_SOURCES) -o $@
+
+.PHONY: test-parallel-admission
+test-parallel-admission: all build/badge-opt-parallel build/badge-opt-parallel-sanitize
+	node --test tests/parallel-admission.test.mjs tests/build_owned_test.mjs
+
+PGO_TRAINING_DIR ?= build/owned/universe26/firmware
+.PHONY: profile-optimizer
+profile-optimizer: build/badge-opt-profile-train
+	bash scripts/train-optimizer.sh "$(PGO_TRAINING_DIR)" "$(LLVM_PROFDATA)"
+	$(MAKE) build/badge-opt-profiled
+
+build/badge-opt-profile-train: src/badge_opt.c $(OPT_SOURCES) $(OPT_HEADERS) src/host_io.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fprofile-instr-generate $< $(OPT_SOURCES) -o $@
+
+build/badge-opt-profiled: src/badge_opt.c $(OPT_SOURCES) $(OPT_HEADERS) src/host_io.h build/optimizer.profdata | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fprofile-instr-use=build/optimizer.profdata $< $(OPT_SOURCES) -o $@
 
 build/badge_opt_test: tests/badge_opt_test.c src/badge_opt.c $(OPT_SOURCES) $(OPT_HEADERS) src/host_io.h tests/test_mode.h | build
 	$(CC) $(CPPFLAGS) $(TEST_FLAGS) -DBADGE_OPT_LIBRARY tests/badge_opt_test.c src/badge_opt.c $(OPT_SOURCES) -o $@

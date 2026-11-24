@@ -42,12 +42,18 @@ owned_codegen_selection() {
 }
 owned_lower_ir() {
     local tools=$1 frontend=$2 optimized=$3 assembly=$4 object=$5 runner=$6
+    local optimizer="$tools/badge-opt"
+    case "${BADGE_ADMISSION_JOBS-1}" in
+        1) ;;
+        2) optimizer="$tools/badge-opt-parallel" ;;
+        *) printf 'owned-pipeline: BADGE_ADMISSION_JOBS must be 1 or 2\n' >&2; return 2 ;;
+    esac
     owned_codegen_selection || return
     local codegen=(${owned_codegen_arguments[@]+"${owned_codegen_arguments[@]}"})
     if [[ ${BADGE_OPT_PASSES+x} ]]; then
-        "$runner" "$tools/badge-opt" "--passes=$BADGE_OPT_PASSES" "$frontend" -o "$optimized" || return
+        "$runner" "$optimizer" "--passes=$BADGE_OPT_PASSES" "$frontend" -o "$optimized" || return
     else
-        "$runner" "$tools/badge-opt" "$frontend" -o "$optimized" || return
+        "$runner" "$optimizer" "$frontend" -o "$optimized" || return
     fi
     "$runner" "$tools/badge-codegen" ${codegen[@]+"${codegen[@]}"} "$optimized" -o "$assembly" || return
     "$runner" "$tools/badge-asm" "$assembly" -o "$object"

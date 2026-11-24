@@ -199,6 +199,69 @@ int main(void) {
     '-kernel', file('out.elf')]);
 });
 
+test('optional CLZ seeds and bounded reciprocals preserve exact integer boundaries', t => {
+  const file = fixture(t);
+  fs.writeFileSync(file('input.ll'), irTarget + `
+define i32 @seed(i32 %x) {
+entry:
+  br label %header
+header:
+  %bit = phi i32 [1073741824, %entry], [%half, %shift]
+  %more = icmp ugt i32 %bit, %x
+  br i1 %more, label %shift, label %exit
+shift:
+  %half = lshr i32 %bit, 2
+  br label %header
+exit:
+  ret i32 %bit
+}
+define i32 @divide(i16 signext %x) {
+entry:
+  %wide = sext i16 %x to i32
+  %out = sdiv i32 %wide, 3
+  ret i32 %out
+}
+define i32 @unbounded(i32 %x) {
+entry:
+  %out = sdiv i32 %x, 3
+  ret i32 %out
+}
+`);
+  invoke(tool('badge-opt-sanitize'),
+    ['--passes=loop-bit-seed,bounded-signed-reciprocal', file('input.ll'), '-o', file('out.ll')]);
+  const text = fs.readFileSync(file('out.ll'), 'utf8');
+  assert.match(text, /call i32 @llvm.ctlz.i32/);
+  assert.doesNotMatch(text, /label %shift/);
+  assert.match(text, /mul i32/);
+  assert.equal(text.match(/sdiv i32/g)?.length, 1);
+  if (!oracle) return;
+  invoke(process.env.LLVM_OPT || 'opt', ['-passes=verify', '-disable-output', file('out.ll')]);
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned seed(unsigned);
+extern int divide(short);
+int main(void) {
+  unsigned x = 0;
+  volatile int divisor = 3;
+  for (int n = -32768; n < 32768; ++n) {
+    if (divide((short)n) != n / divisor) return 1;
+    unsigned want = 1u << 30;
+    while (want > x) want >>= 2;
+    if (seed(x) != want) return 2;
+    x = x * 1664525u + 1013904223u;
+  }
+  return seed(~0u) != 1u << 30;
+}`);
+  invoke(tool('badge-codegen'), [file('out.ll'), '-o', file('out.s')]);
+  invoke(tool('badge-asm'), [file('out.s'), '-o', file('out.o')]);
+  invoke(tool('badge-asm'), [path.join(root, 'tests/fixtures/codegen_start.S'), '-o', file('start.o')]);
+  invoke(clang, [...target, '-ffreestanding', '-Oz', '-c', file('caller.c'), '-o', file('caller.o')]);
+  invoke(lld, ['-T', path.join(root, 'tests/fixtures/codegen_fixture.ld'),
+    file('start.o'), file('caller.o'), file('out.o'), '-o', file('out.elf')]);
+  invoke(process.env.QEMU_ARM || 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('out.elf')]);
+});
+
 test('exact signed power-of-two division follows local and internal-return multiples only', t => {
   const file = fixture(t);
   fs.writeFileSync(file('input.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
