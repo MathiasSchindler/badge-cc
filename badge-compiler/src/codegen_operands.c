@@ -516,10 +516,16 @@ void cg_forward_byte_arguments(cg_context *c, size_t body_start) {
       unsigned base;
       int consumed = 0;
       unsigned source, immediate_value;
-      if (sscanf(p, "%11s r3, r%u, #%u%n", opcode, &source, &immediate_value, &consumed) == 3 &&
+      int shifted = sscanf(p, "%11s r3, r%u, #%u%n", opcode, &source, &immediate_value, &consumed) == 3 &&
           !p[consumed] && source <= 12 &&
           (!strcmp(opcode, "lsr.w") || !strcmp(opcode, "lsl.w") ||
-           !strcmp(opcode, "asr.w") || !strcmp(opcode, "and.w"))) {
+           !strcmp(opcode, "asr.w") || !strcmp(opcode, "and.w"));
+      consumed = 0;
+      int extended = !shifted && sscanf(p, "%11s r3, r%u%n", opcode, &source, &consumed) == 2 &&
+          consumed && !p[consumed] && source <= 12 &&
+          (!strcmp(opcode, "uxtb.n") || !strcmp(opcode, "uxth.n") ||
+           !strcmp(opcode, "uxtb.w") || !strcmp(opcode, "uxth.w"));
+      if (shifted || extended) {
         char *move_end = strchr(next, '\n');
         char *call = move_end ? move_end + 1 : NULL;
         char *call_end = call ? strchr(call, '\n') : NULL;
@@ -528,8 +534,11 @@ void cg_forward_byte_arguments(cg_context *c, size_t body_start) {
             !memcmp(next, "mov r0, r3", (size_t)(move_end - next)) &&
             !strncmp(call, "bl ", 3) &&
             !strncmp(call_end + 1, "@ scalar-call: arguments 1\n", 27)) {
-          cg_emit(c, "%s r0, r%u, #%u\n%.*s\n@ scalar-call-forwarding: saved 2\n",
-                  opcode, source, immediate_value, (int)(call_end - call), call);
+          if (extended)
+            cg_emit(c, "%s r0, r%u\n", opcode, source);
+          else
+            cg_emit(c, "%s r0, r%u, #%u\n", opcode, source, immediate_value);
+          cg_emit(c, "%.*s\n@ scalar-call-forwarding: saved 2\n", (int)(call_end - call), call);
           p = call_end + 1;
           continue;
         }

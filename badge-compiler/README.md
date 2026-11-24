@@ -77,6 +77,12 @@ for supported tool paths and prerequisites. The standalone
 [corpus oracle](tools/oracle.sh) captures production compilation boundaries;
 its limitations are documented in the manual.
 
+`make -C badge-compiler test-backend-refactor` is a separate historical
+byte-identity audit against the archived RS06 backend. Run it on a
+refactoring comparison that is expected to preserve output, not as a
+current code-generation correctness check. The presence of an old local
+archive does not affect `test-owned` or `test-oracle`.
+
 Scripts and tools now use their subdirectory paths; old root-level script
 paths are not compatibility aliases. The root firmware Makefile and test
 drivers use the new locations. Generated build output remains in the same

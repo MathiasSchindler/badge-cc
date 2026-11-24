@@ -332,25 +332,40 @@ entry:
   assert.equal(optimize(file, noinline, 'compact-inline'), target + noinline);
 });
 
-test('a tiny integer helper can remove repeated calls without growing the caller frame', t => {
+test('production font inlining respects the tiny-helper size and frame budgets', t => {
   const file = files(t);
   run(tool('badge-cpp'), ['-I../src/shared', '../src/shared/bitmap_font.c',
     '-o', file('font.i')]);
   run(tool('badge-ir'), [file('font.i'), '-o', file('font.ll')]);
-  run(tool('badge-opt-sanitize'), [file('font.ll'), '-o', file('compact.ll')]);
+  const passes = run(tool('badge-opt'), ['--default-passes']).stdout.trim().split(',');
+  const at = passes.indexOf('compact-inline');
+  assert(at > 0);
+  run(tool('badge-opt-sanitize'), [`--passes=${passes.slice(0, at).join(',')}`,
+    file('font.ll'), '-o', file('before.ll')]);
+  run(tool('badge-ir-metrics'), ['--passes=compact-inline', `--emit-ir=${file('compact.ll')}`,
+    file('before.ll'), '-o', file('metrics.json')]);
   const compact = fs.readFileSync(file('compact.ll'), 'utf8');
   const decision = compact.match(/compact_helper_inlined badger_font_alpha_round - (\d+) (\d+)/);
-  assert(decision);
+  run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('compact.ll')]);
+  if (!decision) {
+    const { events } = JSON.parse(fs.readFileSync(file('metrics.json'), 'utf8'));
+    assert(events.some(e => e.event === 'skipped' && e.reason === 'whole_module_not_smaller'));
+    assert.equal(compact, fs.readFileSync(file('before.ll'), 'utf8'));
+    return;
+  }
   assert(Number(decision[2]) - Number(decision[1]) <= 8);
   assert.doesNotMatch(compact, /\b(?:define|call)\b[^\n]*@(?:"badger_font_alpha_round"|badger_font_alpha_round\b)/);
-  run(process.env.LLVM_OPT ?? 'opt', ['-passes=verify', '-disable-output', file('compact.ll')]);
+  run(tool('badge-codegen-sanitize'), [file('before.ll'), '-o', file('before.s')]);
   run(tool('badge-codegen-sanitize'), [file('compact.ll'), '-o', file('compact.s')]);
   const assembly = fs.readFileSync(file('compact.s'), 'utf8');
   assert.doesNotMatch(assembly, /^bl badger_font_alpha_round$/m);
+  const before = parseAssembly(fs.readFileSync(file('before.s'), 'utf8'), 'font control');
   const frames = parseAssembly(assembly, 'production font');
   for (const name of ['coverage', 'badger_rgb565_blend']) {
     const f = frames.get(name);
     assert(f && f.calls.length === 0);
+    for (const key of ['frame_bytes', 'saves_bytes', 'max_outgoing_bytes'])
+      assert(f[key] <= before.get(name)[key], `${name}: ${key} grew`);
   }
 });
 

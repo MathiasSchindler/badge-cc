@@ -873,6 +873,8 @@ recognition is involved.
 The eight-byte improvement removes two argument copies and selects narrow
 shift/extract instructions. An adjacent pure immediate shift or mask may
 feed `r0` directly only for a marked direct one-argument scalar callback.
+This also applies when instruction selection has already emitted a
+`UXTB` or `UXTH`, so the direct mask lowering does not reintroduce a copy.
 Indirect, opaque and multi-argument calls retain conservative lowering.
 Low-register masks 255/65535 use flag-neutral `UXTB`/`UXTH`; narrow immediate
 shifts require NZCV to be killed before observation. Frame-base register
@@ -1003,8 +1005,11 @@ pipeline/failure-propagation checks and seven evidence/tamper tests pass.
 General leaf variants cover one, two, six, seven and sixty NOPs, inverted
 guards, reversed PHIs and declared memory/flag clobbers. Sixty-one NOPs,
 opaque assembly, live exit values, flagged decrements and real callbacks
-exercise conservative fallbacks. Unsupported operands/clobbers produce
-explicit diagnostics and preserve existing output files.
+exercise conservative fallbacks. Supported `r0` clobbers and register
+inputs also use the general lowering, not the NOP-only leaf optimization.
+Unsupported constraints and out-of-range operand references diagnose
+without overwriting previous output. The assembler still rejects invalid
+instruction operands after valid constraint substitution.
 
 LLVM/owned callers and generated/LLVM callees are exercised in both directions,
 with preserved-register sentinels. Independently encoded assembly agrees.

@@ -274,14 +274,20 @@ ${shifts.map(([op, n], i) => `case ${i}: expected=${op === 'ashr' ?
         }
         assert.match(text, /@ scalar-call-forwarding: saved 2/);
         assert.match(text, /@ scalar-shift: saved 2/);
-        assert.match(text, /@ scalar-extract: saved 2/);
+        for (const [name, opcode] of [['emit_pairs', 'uxtb'], ['emit_halfword', 'uxth']]) {
+          const fill = text.slice(text.indexOf(`\n${name}:\n`), text.indexOf(`\n.size ${name},`));
+          assert.match(fill, new RegExp(`^${opcode}\\.n r0, r[0-7]\\nbl put_scalar$`, 'm'));
+        }
       }
       run(tool('badge-asm'), [file(`${policy}.s`), '-o', file(`${policy}.o`)]);
       run(clang, [...flags, '-c', file(`${policy}.s`), '-o', file(`${policy}-llvm.o`)]);
       const code = name => decodeElf(fs.readFileSync(file(name))).sections.filter(s => s.flags & 4).map(s => s.data);
       assert.deepEqual(code(`${policy}.o`), code(`${policy}-llvm.o`));
-      if (policy === 'thumb-constants')
-        assert.equal(decodeElf(fs.readFileSync(file(`${policy}.o`))).symbols.find(s => s.name === 'emit_pairs').size, 34);
+      if (policy === 'thumb-constants') {
+        const { symbols } = decodeElf(fs.readFileSync(file(`${policy}.o`)));
+        for (const name of ['emit_pairs', 'emit_halfword'])
+          assert.equal(symbols.find(s => s.name === name).size, 34, name);
+      }
     }
     for (const caller of ['llvm', 'owned']) {
       const prefix = `${policy}-${caller}`;

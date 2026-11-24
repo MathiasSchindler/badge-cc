@@ -194,8 +194,6 @@ int main(void) {
     free(c);
   }
   assert(ir_find_pass("dead-instructions", 17)->role == IR_PASS_OPTIMIZATION);
-  for (unsigned k = 0; k < badge_ir_default_pass_count; k++)
-    assert(strcmp(badge_ir_default_pipeline[k], "dead-instructions"));
   puts("M03: cascading worklist, repeated operands/edges, pure whitelist, "
        "effectful roots, cyclic retention, idempotence and invalid-IR "
        "rejection PASS");

@@ -221,8 +221,6 @@ test: test-counted-delay
 test-backend-refactor: all build/profile-codegen build/badge-codegen-attribution
 	node --test tests/backend-refactor.test.mjs
 
-test: test-backend-refactor
-
 build/width_selection_test: tests/width_selection_test.c $(CODEGEN_SOURCES) $(CODEGEN_HEADERS) | build
 	$(CC) $(CPPFLAGS) $(TEST_FLAGS) $< $(CODEGEN_SOURCES) -o $@
 

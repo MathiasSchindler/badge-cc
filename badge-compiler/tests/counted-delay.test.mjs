@@ -16,7 +16,7 @@ function run(command, args) {
   assert.equal(r.status, 0, `${command} ${args.join(' ')}: ${r.stdout}\n${r.stderr}`);
 }
 function loop(name, { nops = 6, eq = false, reversed = false, clobber = '', opaque = false,
-  live = false, flagged = false, extra = false } = {}) {
+  live = false, flagged = false, extra = false, registerInput = false } = {}) {
   return `define ${live ? 'i32' : 'void'} @${name}(i32 %initial) {
 entry:
 br label %start
@@ -29,7 +29,8 @@ header:
 br i1 %test, label %${eq ? 'exit' : 'body'}, label %${eq ? 'body' : 'exit'}
 body:
 ${extra ? 'call void @observer(i32 %count)' : ''}
-call void asm sideeffect "${opaque ? 'nop\\0Adsb sy' : Array(nops).fill('nop').join('\\0A')}", "${clobber}"()
+${registerInput ? 'call void asm sideeffect "cmp $0, #0", "r,~{cc}"(i32 %count)' :
+    `call void asm sideeffect "${opaque ? 'nop\\0Adsb sy' : Array(nops).fill('nop').join('\\0A')}", "${clobber}"()`}
 br label %header
 exit:
 ret ${live ? 'i32 %next' : 'void'}
@@ -81,6 +82,7 @@ test('closed counted assembly leaves retain exact unsigned iteration prefixes, A
     ['pause_max', { nops: 60 }]];
   const rejected = [['pause_long', { nops: 61 }], ['pause_opaque', { opaque: true }],
     ['pause_live', { live: true }], ['pause_flagged', { flagged: true }],
+    ['pause_clobber', { clobber: '~{r0}' }], ['pause_input', { registerInput: true }],
     ['pause_call', { extra: true }]];
   fs.writeFileSync(file('input.ll'),
     'target datalayout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"\n' +
@@ -221,7 +223,7 @@ int main(void) {
     }
   }
   assert(reached['thumb-constants'] < reached['thumb-widths']);
-  for (const replacement of ['"nop", "~{r0}"()', '"nop $0", "r"(i32 %count)']) {
+  for (const replacement of ['"nop", "m"(i32 %count)', '"cmp $1, #0", "r"(i32 %count)']) {
     fs.writeFileSync(file('bad.ll'), fs.readFileSync(file('input.ll'), 'utf8')
       .replace('"nop", ""()', replacement));
     fs.writeFileSync(file('preserved.s'), 'existing-output\n');
@@ -233,5 +235,13 @@ int main(void) {
     assert.match(failure.stderr, /unsupported inline assembly/);
     assert.equal(fs.readFileSync(file('preserved.s'), 'utf8'), 'existing-output\n');
   }
+  fs.writeFileSync(file('bad.ll'), fs.readFileSync(file('input.ll'), 'utf8')
+    .replace('"nop", ""()', '"nop $0", "r"(i32 %count)'));
+  run(tool('badge-codegen-sanitize'), [file('bad.ll'), '-o', file('bad.s')]);
+  const invalid = spawnSync(tool('badge-asm'), [file('bad.s'), '-o', file('bad.o')],
+    { cwd: root, encoding: 'utf8', timeout: 120000 });
+  assert.ifError(invalid.error);
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /invalid operands for 'nop'/);
   console.log(`RS06 reached oracle instructions ${reached['thumb-widths']} -> ${reached['thumb-constants']}`);
 });

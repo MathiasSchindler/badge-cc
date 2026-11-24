@@ -226,7 +226,7 @@ test('both C frontend policies carry memory/cc clobbers into the owned optimizer
   fs.writeFileSync(file('source.c'), 'void bad(void) { __asm__ volatile("nop" ::: "r8"); }\n');
   fs.writeFileSync(file('preserved.ll'), 'preserved');
   const error = run(tool('badge-ir'), [file('source.c'), '-o', file('preserved.ll')], false);
-  assert.match(error.stderr, /only memory and cc assembly clobbers/);
+  assert.match(error.stderr, /unsupported assembly clobber/);
   assert.equal(fs.readFileSync(file('preserved.ll'), 'utf8'), 'preserved');
 });
 
