@@ -199,12 +199,17 @@ void ir_bounded_signed_reciprocal(ir_context *c, ir_module *m) {
 
 static int plain_signed_pair_operand(strength *p, const ir_instruction *in) {
   const ir_line *line = &p->a.text->lines[in->line - 1];
-  return in->opcode == IR_OP_BINARY && in->operand_count == 2 &&
-         p->a.types[in->type].kind == IR_INT && p->a.types[in->type].bits == 32 &&
-         in->end_line == in->line && line->count == 7 &&
-         line->op == line->first + 2 && !line->replacement &&
-         p->a.operands[in->first_operand].kind == IR_OPERAND_LOCAL &&
-         p->a.operands[in->first_operand + 1].kind == IR_OPERAND_LOCAL;
+  if (in->opcode != IR_OP_BINARY || in->operand_count != 2 ||
+      p->a.types[in->type].kind != IR_INT || p->a.types[in->type].bits != 32 ||
+      in->end_line != in->line || line->count != 7 ||
+      line->op != line->first + 2 || line->replacement)
+    return 0;
+  const ir_operand *divisor = &p->a.operands[in->first_operand + 1];
+  uint64_t value;
+  return p->a.operands[in->first_operand].kind == IR_OPERAND_LOCAL &&
+         (divisor->kind == IR_OPERAND_LOCAL ||
+          (divisor->kind == IR_OPERAND_LITERAL &&
+           ir_integer(ir_text(p->a.text, divisor->token), &value) && (uint32_t)value));
 }
 
 static ir_line *duplicate_extension(strength *p, const ir_operand *first,
@@ -238,6 +243,12 @@ static void pair_signed_divrem(strength *p, unsigned i) {
     return;
   int remainder_first = !strcmp(first->operation, "srem");
   const ir_operand *x = &p->a.operands[first->first_operand], *y = x + 1;
+  if (y->kind == IR_OPERAND_LITERAL) {
+    // Keep literal-pair reuse local instead of extending an incoming value's live range.
+    unsigned def = p->a.definitions[x->definition].instruction;
+    if (remainder_first || def == IR_NONE || p->a.instructions[def].block != first->block)
+      return;
+  }
   for (unsigned j = i + 1; j <= i + LOOKAHEAD && j < p->a.instruction_count; ++j) {
     spend(p);
     const ir_instruction *second = &p->a.instructions[j];
@@ -246,7 +257,9 @@ static void pair_signed_divrem(strength *p, unsigned i) {
     if (plain_signed_pair_operand(p, second) &&
         !strcmp(second->operation, remainder_first ? "sdiv" : "srem")) {
       const ir_operand *other = &p->a.operands[second->first_operand];
-      if (y->definition != other[1].definition)
+      if (y->kind != other[1].kind ||
+          (y->kind == IR_OPERAND_LOCAL ? y->definition != other[1].definition :
+           strcmp(ir_text(m, y->token), ir_text(m, other[1].token))))
         break;
       ir_line *duplicate = NULL;
       if (x->definition != other->definition) {
@@ -258,6 +271,16 @@ static void pair_signed_divrem(strength *p, unsigned i) {
       const char *a = p->a.definitions[first->definition].name;
       const char *b = p->a.definitions[second->definition].name;
       const char *dividend = ir_text(m, x->token), *divisor = ir_text(m, y->token);
+      if (y->kind == IR_OPERAND_LITERAL) {
+        if (duplicate)
+          break;
+        const char *product = ir_fresh(p->c, m, '%');
+        m->lines[second->line - 1].replacement = ir_format(
+            p->c, "  %s = mul i32 %s, %s\n  %s = sub i32 %s, %s\n",
+            product, a, divisor, b, dividend, product);
+        ir_note(p->c, "candidate", "reuse_signed_constant_quotient", 1);
+        break;
+      }
       m->lines[first->line - 1].replacement = ir_format(
           p->c, "  %s = sdiv i32 %s, %s\n  %s = srem i32 %s, %s\n",
           remainder_first ? b : a, dividend, divisor, remainder_first ? a : b,

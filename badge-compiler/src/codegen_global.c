@@ -68,7 +68,7 @@ static unsigned block_index(cg_context *c, const char *token) {
   if (!block) cg_error(c, "register allocation branch target does not exist");
   return block->live_index;
 }
-enum { LOOP_BLOCK_LIMIT = 256, LOOP_DEPTH_LIMIT = 2 };
+enum { LOOP_BLOCK_LIMIT = 1024, LOOP_DEPTH_LIMIT = 2 };
 
 static void reachable(cg_context *c, unsigned skip, unsigned char *seen) {
   if (skip == 0)
@@ -92,6 +92,20 @@ static void weight_loops(cg_context *c) {
       c->register_residency != BADGE_RESIDENCY_GLOBAL_COMPACT ||
       c->scalar_stream_selection || !g->blocks || g->blocks > LOOP_BLOCK_LIMIT)
     return;
+  if (g->blocks > CG_LOOP_ALLOCATION_BLOCK_LIMIT) {
+    int wide_switch = 0;
+    for (unsigned n = 0; n < g->blocks; n++) {
+      cg_register_work(c);
+      cg_inst *last = g->block[n].block->last;
+      if (last && last->end - last->begin > 32 * 5 + 6 &&
+          !strcmp(c->tokens[last->begin].text, "switch")) {
+        wide_switch = 1;
+        break;
+      }
+    }
+    if (!wide_switch)
+      return;
+  }
   cg_successor *incoming[LOOP_BLOCK_LIMIT] = {0};
   unsigned char live[LOOP_BLOCK_LIMIT] = {0};
   reachable(c, g->blocks, live);
@@ -645,17 +659,22 @@ void cg_global_prepare(cg_context *c) {
           uses(c, value, value + 1, NULL, b, 0, b->loop_depth);
         unsigned base = i->indexed_address->begin + 6;
         uses(c, base, base + 1, NULL, b, 0, b->loop_depth);
+        unsigned index_bonus = i->indexed_scale &&
+            !strcmp(c->tokens[op].text, "store") && !strcmp(c->tokens[op + 1].text, "ptr") ? 8 : 0;
         uses(c, i->indexed_source, i->indexed_source + 1,
-             NULL, b, 0, b->loop_depth);
+             NULL, b, index_bonus, b->loop_depth);
       } else if (i->shifted_producer) {
         uses(c, i->shifted_source, i->shifted_source + 1,
              NULL, b, 0, b->loop_depth);
         uses(c, i->shifted_other, i->shifted_other + 1,
              NULL, b, 0, b->loop_depth);
-      } else if (i->forwarded_call_argument) {
-        unsigned argument = i->forwarded_call_argument;
-        uses(c, op + 1, argument, NULL, b, 0, b->loop_depth);
-        uses(c, argument + 1, i->end, NULL, b, 0, b->loop_depth);
+      } else if (i->forwarded_call_argument || i->deferred_call_argument) {
+        for (unsigned k = op + 1; k < i->end; k++) {
+          if (k == i->forwarded_call_argument)
+            continue;
+          unsigned token = k == i->deferred_call_argument ? i->deferred_call_address : k;
+          uses(c, token, token + 1, NULL, b, 0, b->loop_depth);
+        }
       } else if (!i->folded_operand)
         uses(c, op + 1, i->end, NULL, b, 0, b->loop_depth);
       li->use_count = g->use_count - li->first_use;

@@ -767,7 +767,9 @@ static unsigned indexed_access(cg_context *c, cg_inst *i, const char *address,
     return 0;
   const char *type = c->tokens[at].text;
   unsigned bytes = !strcmp(type, "i8") ? 1 : !strcmp(type, "i16") ? 2 :
-                   !strcmp(type, "i32") ? 4 : 0;
+                   (!strcmp(type, "i32") ||
+                    (store && c->fn->block_count > CG_LOOP_ALLOCATION_BLOCK_LIMIT &&
+                     !strcmp(type, "ptr"))) ? 4 : 0;
   unsigned ptr = at + (store ? 4 : 3);
   if (!bytes || ptr >= i->end || strcmp(c->tokens[ptr - 2].text, ",") ||
       strcmp(c->tokens[ptr - 1].text, "ptr") ||
@@ -888,6 +890,53 @@ static int plan_shifted_word_xor(cg_context *c, cg_inst *i) {
   return 0;
 }
 
+static int ordinary_word_load(cg_context *c, cg_inst *i) {
+  unsigned at = i->begin;
+  uint32_t align;
+  return i->result && i->end - at == 10 &&
+         !strcmp(c->tokens[at + 2].text, "load") &&
+         (!strcmp(c->tokens[at + 3].text, "ptr") || !strcmp(c->tokens[at + 3].text, "i32")) &&
+         !strcmp(c->tokens[at + 5].text, "ptr") && c->tokens[at + 6].text[0] == '%' &&
+         !strcmp(c->tokens[at + 8].text, "align") &&
+         number(c->tokens[at + 9].text, &align) && align >= 4;
+}
+
+static void plan_deferred_call_load(cg_context *c, cg_inst *load) {
+  if (load->folded_operand || load->indexed_source || load->immediate_address ||
+      !ordinary_word_load(c, load) || !single_use(c, load))
+    return;
+  unsigned distance = 0;
+  for (cg_inst *use = load->next; use && distance < 8; use = use->next, distance++) {
+    cg_register_work(c);
+    unsigned at = use->begin + (use->result ? 2 : 0);
+    const char *op = c->tokens[at].text;
+    if (!strcmp(op, "call")) {
+      (void)cg_instruction_scratch(c, use);
+      unsigned first = use->direct_first_scalar_argument;
+      if (!first || use->deferred_call_argument)
+        return;
+      unsigned arg = first + 3;
+      if (arg < use->end && !strcmp(c->tokens[arg].text, load->result->name)) {
+        load->folded_operand = 1;
+        use->deferred_call_argument = arg;
+        use->deferred_call_address = load->begin + 6;
+      }
+      return;
+    }
+    if (!use->result)
+      return;
+    if (!strcmp(op, "load")) {
+      unsigned type = at + 1;
+      if (strcmp(c->tokens[type].text, "ptr") && strcmp(c->tokens[type].text, "i32") &&
+          strcmp(c->tokens[type].text, "i16") && strcmp(c->tokens[type].text, "i8"))
+        return;
+    } else if (strcmp(op, "getelementptr") && strcmp(op, "zext") && strcmp(op, "sext") &&
+               strcmp(op, "trunc") && strcmp(op, "add") && strcmp(op, "sub") &&
+               strcmp(op, "and") && strcmp(op, "or") && strcmp(op, "xor"))
+      return;
+  }
+}
+
 void cg_plan_operands(cg_context *c) {
   for (cg_block *b = c->fn->blocks; b; b = b->next)
     for (cg_inst *i = b->first; i; i = i->next)
@@ -936,6 +985,12 @@ void cg_plan_operands(cg_context *c) {
         break;
       }
     }
+  if (c->fn->block_count > CG_LOOP_ALLOCATION_BLOCK_LIMIT)
+    for (cg_block *b = c->fn->blocks; b; b = b->next)
+      for (cg_inst *i = b->first; i; i = i->next) {
+        cg_register_work(c);
+        plan_deferred_call_load(c, i);
+      }
 }
 
 static void forward_adjacent_address(cg_context *c, cg_inst *i, cg_inst *next) {

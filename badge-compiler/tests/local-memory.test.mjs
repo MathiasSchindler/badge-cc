@@ -351,6 +351,54 @@ entry:
       '-kernel', f('output.elf')]);
   }
 });
+test('indexed load reuse also forwards an identical extension across a guard', t => {
+  const f = files(t);
+  const guard = (name, cast = 'zext') => `
+define i32 @${name}(i32 %i, i32 %base) {
+entry:
+  %address = getelementptr i8, ptr @bytes, i32 %i
+  %first = load i8, ptr %address, align 1
+  %wide = zext i8 %first to i32
+  %hit = icmp eq i32 %wide, %base
+  br i1 %hit, label %equal, label %next
+equal:
+  ret i32 99
+next:
+  %repeat_address = getelementptr i8, ptr @bytes, i32 %i
+  %repeat = load i8, ptr %repeat_address, align 1
+  %extended = ${cast} i8 %repeat to i32
+  %result = sub i32 %base, %extended
+  ret i32 %result
+}`;
+  const text = lower(f, `@bytes = internal constant [3 x i8] [i8 255, i8 1, i8 7], align 1
+${guard('reuse')}
+${guard('different', 'sext')}
+define i32 @main() {
+entry:
+  %a = call i32 @reuse(i32 0, i32 10)
+  %b = call i32 @reuse(i32 1, i32 1)
+  %c = call i32 @different(i32 0, i32 10)
+  %x = add i32 %a, %b
+  %y = add i32 %x, %c
+  %status = add i32 %y, 135
+  ret i32 %status
+}`, 'global-memory');
+  const body = name => text.match(new RegExp(`define i32 @${name}[^]*?\\n}`))[0];
+  assert.doesNotMatch(body('reuse'), /%repeat\\w* =|%extended =/);
+  assert.match(body('reuse'), /sub i32 %base, %wide/);
+  assert.match(body('different'), /%extended = sext i8 %first to i32/);
+  if (oracle) {
+    run(tool('badge-codegen'), [f('badge-opt.ll'), '-o', f('output.s')]);
+    run(tool('badge-asm'), [f('output.s'), '-o', f('output.o')]);
+    run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', f('start.o')]);
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/tilt_maze_fixture.ld',
+      f('start.o'), f('output.o'), '-o', f('output.elf')]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', f('output.elf')]);
+  }
+});
+
 test('aliasing writes, calls, volatile, metadata, wide accesses and long/cross-block uses stay conservative', t => {
   const f = files(t);
   for (const barrier of ['store i8 7, ptr %q, align 1', 'call void @touch(ptr %p)',

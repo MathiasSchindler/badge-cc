@@ -35,6 +35,7 @@ typedef struct cg_inst {
   unsigned scalar_call_arguments_plus_one;
   unsigned direct_first_scalar_argument;
   unsigned forwarded_call_argument;
+  unsigned deferred_call_argument, deferred_call_address;
   int feeds_call_argument;
   unsigned forwarded_store_register_plus_one;
   int forwarded_return;
@@ -170,6 +171,7 @@ typedef struct {
 } cg_context;
 
 #define CG_GLOBAL_REGISTER_COUNT 7
+#define CG_LOOP_ALLOCATION_BLOCK_LIMIT 256
 #define CG_SCRATCH_R4 (1u << 4)
 #define CG_SCRATCH_R5 (1u << 5)
 

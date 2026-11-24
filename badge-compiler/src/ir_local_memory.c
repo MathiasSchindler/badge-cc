@@ -264,6 +264,39 @@ static unsigned preceding_value(memory *p, unsigned load, int *store_forwarded) 
   }
   return IR_NONE;
 }
+static int plain_extension(memory *p, const ir_instruction *in) {
+  const ir_line *row = &p->a.text->lines[in->line - 1];
+  return in->opcode == IR_OP_CAST && in->operand_count == 1 &&
+         in->end_line == in->line && row->count == 7 &&
+         row->op == row->first + 2 &&
+         (!strcmp(in->operation, "zext") || !strcmp(in->operation, "sext"));
+}
+static void forward_load_extension(memory *p, unsigned load, unsigned previous) {
+  const ir_analysis *a = &p->a;
+  const ir_instruction *in = &a->instructions[load];
+  const ir_definition *loaded = &a->definitions[in->definition];
+  const ir_definition *old = &a->definitions[previous];
+  if (loaded->use_count != 1 || old->block == in->block)
+    return;
+  const ir_instruction *extension = &a->instructions[a->operands[loaded->first_use].instruction];
+  if (!plain_extension(p, extension))
+    return;
+  unsigned remaining = GLOBAL_WINDOW;
+  for (unsigned k = old->first_use; k != IR_NONE && remaining--; k = a->operands[k].next_use) {
+    spend(p);
+    unsigned user = a->operands[k].instruction;
+    const ir_instruction *earlier = &a->instructions[user];
+    if (user >= load || earlier->block != old->block ||
+        !plain_extension(p, earlier) || strcmp(earlier->operation, extension->operation) ||
+        !ir_type_equal(a, earlier->type, extension->type))
+      continue;
+    unsigned from = earlier->definition;
+    p->values[extension->definition] = p->values[from] ? p->values[from] : a->definitions[from].name;
+    a->text->lines[extension->line - 1].replacement = "";
+    ir_note(p->c, "candidate", "load_extension_forwarded", 1);
+    return;
+  }
+}
 static void run_global_chains(ir_context *c, ir_module *m) {
   ir_allocation *mark = c->allocations;
   memory p = {.c = c, .work = IR_LOCAL_MEMORY_WORK_LIMIT, .global_only = 1};
@@ -282,6 +315,8 @@ static void run_global_chains(ir_context *c, ir_module *m) {
     p.values[in->definition] = p.values[previous] ? p.values[previous] : p.a.definitions[previous].name;
     m->lines[in->line - 1].replacement = "";
     drop_dead_address(&p, &p.a.operands[in->first_operand]);
+    if (!stored)
+      forward_load_extension(&p, i, previous);
     ir_note(c, "candidate", stored ? "private_store_forwarded" :
                                      "load_across_single_predecessor", 1);
     changed++;

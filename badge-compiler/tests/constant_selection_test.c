@@ -4,10 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-static char *select(const char *source) {
-  cg_function fn = {.id = 1};
+static char *select_with_blocks(const char *source, unsigned blocks) {
+  cg_function fn = {.id = 1, .block_count = blocks};
   cg_context c = {.scalar_selection = BADGE_SELECTION_THUMB_CONSTANTS,
                   .frame_addressing = BADGE_FRAME_DIRECT,
+                  .register_residency = BADGE_RESIDENCY_GLOBAL_COMPACT,
                   .fn = &fn, .file = "constant-selection"};
   assert(!setjmp(c.failure));
   cg_emit(&c, "%s", source);
@@ -19,11 +20,35 @@ static char *select(const char *source) {
   cg_release_storage(&c);
   return c.out;
 }
+static char *select(const char *source) {
+  return select_with_blocks(source, 1);
+}
 static void expect(const char *source, const char *needle, const char *absent) {
   char *out = select(source);
   assert(strstr(out, needle));
   if (absent) assert(!strstr(out, absent));
   free(out);
+}
+static void spill_forwarding(void) {
+  const char *source = "str.n r0, [r7, #12]\nldr.n r0, [r7, #12]\n"
+                       "str.w r8, [r7, #160]\nldr.n r4, [r7, #8]\nldr.w r8, [r7, #160]\n";
+  char *out = select_with_blocks(source, CG_LOOP_ALLOCATION_BLOCK_LIMIT);
+  assert(strstr(out, "ldr.n r0, [r7, #12]") && strstr(out, "ldr.w r8, [r7, #160]"));
+  free(out);
+  out = select_with_blocks(source, CG_LOOP_ALLOCATION_BLOCK_LIMIT + 1);
+  assert(strstr(out, "str.n r0, [r7, #12]") && strstr(out, "ldr.n r4, [r7, #8]"));
+  assert(!strstr(out, "ldr.n r0, [r7, #12]") && !strstr(out, "ldr.w r8, [r7, #160]"));
+  free(out);
+  const char *barriers[] = {"ldr.n r0, [r7, #8]", "strb.n r1, [r7, #13]",
+                            ".Lcg_join:", "@ constant-assembly-lines: 1"};
+  for (unsigned n = 0; n < sizeof(barriers) / sizeof(*barriers); n++) {
+    char text[160];
+    snprintf(text, sizeof(text), "str.n r0, [r7, #12]\n%s\nldr.n r0, [r7, #12]\n",
+             barriers[n]);
+    out = select_with_blocks(text, CG_LOOP_ALLOCATION_BLOCK_LIMIT + 1);
+    assert(strstr(out, "ldr.n r0, [r7, #12]") && !strstr(out, "spill-reload"));
+    free(out);
+  }
 }
 static void stack_adjustments(void) {
   const unsigned frames[] = {508, 512, 4092, 4096};
@@ -52,6 +77,7 @@ static void capture_flags(unsigned reg, unsigned id, unsigned phase) {
 }
 int main(int argc, char **argv) {
   int runtime = argc == 2 && !strcmp(argv[1], "--runtime");
+  spill_forwarding();
   expect("movw r0, #55\nb .Lcg_return1\n.Lcg_last:\nmovw r0, #55\n",
          "b.n .Lcg_shared_return", "b .Lcg_return1");
   expect("movw r0, #55\nb .Lcg_return1\n.Lcg_last:\nmovw r0, #56\n",
@@ -237,6 +263,14 @@ int main(int argc, char **argv) {
     puts("mov r6, sp");
     stack_adjustments();
     puts("cmp r6, sp\nbne constant_failed");
+    char *spill = select_with_blocks("str.w r8, [r7, #12]\nldr.n r4, [r7, #8]\n"
+                                     "ldr.w r8, [r7, #12]\n",
+                                     CG_LOOP_ALLOCATION_BLOCK_LIMIT + 1);
+    printf("sub.n sp, sp, #16\nmov r7, sp\nmovw r8, #500\nmovw r1, #239\n"
+           "str.n r1, [r7, #8]\n%sldr.n r2, [r7, #12]\nadd.n sp, sp, #16\n"
+           "cmp r8, #500\nbne.w constant_failed\ncmp r2, #500\nbne.w constant_failed\n"
+           "cmp r4, #239\nbne.w constant_failed\n", spill);
+    free(spill);
     char *stack = select("str.w r8, [sp]\nstr.n r1, [sp, #4]\n"
                          "ldr.n r2, [sp]\nldr.w r8, [sp, #4]\n");
     printf("sub.n sp, sp, #8\nmovw r8, #500\nmovw r1, #239\n%s"

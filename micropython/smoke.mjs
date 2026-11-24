@@ -11,7 +11,11 @@ const root = path.dirname(here);
 const build = path.join(here, 'build');
 const serial = process.argv[2]?.toUpperCase();
 const interpreterSplit = process.argv[3] === '--interpreter-split';
-const interpreter = interpreterSplit || process.argv[3] === '--interpreter';
+const interpreterPair = process.argv[3] === '--interpreter-pair';
+const interpreterMatrix = process.argv[3] === '--interpreter-matrix';
+const archivedRoles = interpreterMatrix ? ['baseline', 'first', 'second', 'both'] :
+    interpreterPair ? ['baseline', 'candidate'] : null;
+const interpreter = interpreterSplit || archivedRoles !== null || process.argv[3] === '--interpreter';
 const vm = interpreter || process.argv[3] === '--vm';
 const core = vm || process.argv[3] === '--core';
 const picotool = process.env.PICOTOOL ?? path.join(root, 'build/picotool-usb/picotool');
@@ -112,19 +116,29 @@ print("MP_CRC_OK " + ${JSON.stringify(phase)})
 `;
 
 function measurePlan(variant) {
-    if (!interpreterSplit) return [['stock', 'stock'], ['mixed', variant], ['stock-readback', 'stock']];
-    const roles = ['sequenceVm', 'runtimeOnly', 'vmOnly', 'interpreter'];
+    if (!interpreterSplit && !archivedRoles)
+        return [['stock', 'stock'], ['mixed', variant], ['stock-readback', 'stock']];
+    const roles = archivedRoles ?? ['sequenceVm', 'runtimeOnly', 'vmOnly', 'interpreter'];
     return [...roles, ...[...roles].reverse()].map((role, i) => [`${i + 1}-${role}`, role]);
 }
 
 try {
     assert.match(serial ?? '', /^[0-9A-F]{16}$/, 'Pass the explicitly selected BOOTSEL serial');
-    assert(process.argv.length === 3 || (core && process.argv.length === 4),
-        'Expected a serial and optional --core, --vm, --interpreter, or --interpreter-split');
+    assert(archivedRoles ? process.argv.length === 4 + archivedRoles.length :
+        process.argv.length === 3 || (core && process.argv.length === 4),
+        'Expected a serial and optional --core, --vm, --interpreter, --interpreter-split, ' +
+        '--interpreter-pair BASELINE_DIR CANDIDATE_DIR, or --interpreter-matrix BASELINE_DIR FIRST_DIR SECOND_DIR BOTH_DIR');
     usbPorts();
     const comparison = JSON.parse(fs.readFileSync(path.join(build, 'comparison.json'), 'utf8'));
+    if (archivedRoles) {
+        for (const [i, role] of archivedRoles.entries()) {
+            const directory = path.resolve(process.argv[i + 4]);
+            comparison[role] = { directory, bytes: fs.statSync(path.join(directory, 'firmware.bin')).size };
+        }
+    }
     capture = fs.mkdtempSync(path.join(build, 'smoke-'));
-    const variant = interpreterSplit ? 'interpreter-split' : interpreter ? 'interpreter' : vm ? 'vm' : core ? 'core' : 'mixed';
+    const variant = interpreterMatrix ? 'interpreter-matrix' : interpreterPair ? 'interpreter-pair' : interpreterSplit ? 'interpreter-split' :
+        interpreter ? 'interpreter' : vm ? 'vm' : core ? 'core' : 'mixed';
     const plan = measurePlan(variant);
     const images = {};
     for (const role of new Set(plan.map(([, role]) => role))) {
@@ -132,6 +146,9 @@ try {
         const uf2 = path.join(comparison[role].directory, 'firmware.uf2');
         images[role] = { uf2, bytes: comparison[role].bytes, sha256: sha(uf2) };
     }
+    if (archivedRoles)
+        assert.equal(new Set(Object.values(images).map(image => image.sha256)).size, archivedRoles.length,
+            'Archived comparisons require distinct UF2s');
     const report = { revision: comparison.revision, variant: variant === 'mixed' ? 'crc' : variant,
         images, order: plan.map(([, role]) => role), backups: [], restoration: [], errors: [], runs: [] };
     const save = () => fs.writeFileSync(path.join(capture, 'capture.json'), JSON.stringify(report, null, 2) + '\n');

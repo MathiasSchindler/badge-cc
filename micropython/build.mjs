@@ -66,10 +66,12 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     if (core) args.push(`-DBADGE_SMALLINT_OBJECT=${ownedSmallint}`);
     if (vm) args.push(`-DBADGE_RADIX_OBJECT=${ownedRadix}`, `-DBADGE_UNICODE_OBJECT=${ownedUnicode}`,
         `-DBADGE_TIMEUTILS_OBJECT=${ownedTimeutils}`, `-DBADGE_SEQUENCE_OBJECT=${sequenceObject ?? ''}`);
-    const replacements = [...interpreter, ...libraries];
+    const replacements = new Map([...interpreter, ...libraries].map(mod => [mod.option, mod.object]));
     if (mixed) {
-        for (const mod of [...interpreterModules, ...libraryModules])
-            args.push(`-D${mod.option}=${replacements.includes(mod) ? path.join(build, mod.object) : ''}`);
+        for (const mod of [...interpreterModules, ...libraryModules]) {
+            const object = replacements.get(mod.option);
+            args.push(`-D${mod.option}=${object ? path.join(build, object) : ''}`);
+        }
     }
     run('cmake', args, {
         cwd: port, timeout: 240000, log: `${name}-configure`,
@@ -92,10 +94,11 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     assert(map.includes(vm ? ownedTimeutils : '/shared/timeutils/timeutils.c.o'));
     assert(map.includes(sequenceObject ?? '/py/sequence.c.o'));
     for (const mod of [...interpreterModules, ...libraryModules]) {
+        const replacement = replacements.get(mod.option);
         assert.equal(commands.filter(row => row.file === path.join(upstream, mod.source)).length,
-            replacements.includes(mod) ? 0 : 1);
-        if (replacements.includes(mod)) {
-            const object = path.join(build, mod.object);
+            replacement ? 0 : 1);
+        if (replacement) {
+            const object = path.join(build, replacement);
             assert(map.includes(object));
             assert(linkedSections.some((line, i) => line.trim().split(/\s+/)[0] === `.text.${mod.symbol}` &&
                 (line.includes(object) || linkedSections[i + 1]?.includes(object))),
@@ -115,6 +118,13 @@ function firmware(name, board, mixed = false, core = false, vm = false, sequence
     const uf2 = fs.statSync(path.join(directory, 'firmware.uf2')).size;
     console.log(`${name}: ${bytes} loaded bytes; ${crc} bytes in lfs2_crc`);
     return { directory, bytes, uf2, crc };
+}
+
+function vmSymbol(image) {
+    const symbols = run('llvm-nm', ['--defined-only', '--print-size', path.join(image.directory, 'firmware.elf')], { capture: true });
+    const match = symbols.match(/^([\da-f]+) ([\da-f]+) T mp_execute_bytecode$/m);
+    assert(match, `Missing linked VM in ${image.directory}`);
+    return { address: Number.parseInt(match[1], 16), size: Number.parseInt(match[2], 16) };
 }
 
 function checkLibraries(stockDirectory, start) {
@@ -390,8 +400,8 @@ function crcOracle(controlDirectory) {
 try {
     const options = new Set(process.argv.slice(2));
     assert(options.size === process.argv.length - 2 &&
-        [...options].every(arg => ['--sequence-before', '--interpreter', '--interpreter-split', '--libraries'].includes(arg)),
-        'usage: node micropython/build.mjs [--sequence-before] [--interpreter|--interpreter-split] [--libraries]');
+        [...options].every(arg => ['--sequence-before', '--interpreter', '--interpreter-split', '--vm-placement-pair', '--libraries'].includes(arg)),
+        'usage: node micropython/build.mjs [--sequence-before] [--interpreter|--interpreter-split|--vm-placement-pair] [--libraries]');
     fs.mkdirSync(build, { recursive: true });
     if (!fs.existsSync(upstream))
         run('git', ['clone', '--depth', '1', '--branch', 'v1.29.0', 'https://github.com/micropython/micropython.git', upstream]);
@@ -424,17 +434,34 @@ try {
         assert(sequenceVm.bytes < sequenceBeforeVm.bytes);
         console.log('Sequence fold loaded flash savings:', sequenceBeforeVm.bytes - sequenceVm.bytes);
     }
-    let interpreter, vmOnly, runtimeOnly;
-    if (options.has('--interpreter') || options.has('--interpreter-split')) {
+    let vmPlacement, interpreter, vmOnly, runtimeOnly;
+    if (options.has('--interpreter') || options.has('--interpreter-split') || options.has('--vm-placement-pair')) {
         const map = fs.readFileSync(path.join(stock.directory, 'firmware.elf.map'), 'utf8');
         assert.match(map, /libg\.a\(libc_a-strcmp\.o\)/);
         for (const mod of interpreterModules)
             compileStockModule(stock.directory, path.join(upstream, mod.source), path.join(build, mod.object), ['--libc-strcmp']);
         interpreter = firmware('badge-interpreter', 'BADGE_RP2350', true, true, true, ownedSequence, interpreterModules);
-        if (options.has('--interpreter-split')) {
-            const [runtime, vmCore] = interpreterModules;
+        const [runtime, vmCore] = interpreterModules;
+        if (options.has('--interpreter-split'))
             runtimeOnly = firmware('badge-runtime-only', 'BADGE_RP2350', true, true, true, ownedSequence, [runtime]);
+        if (options.has('--interpreter-split') || options.has('--vm-placement-pair'))
             vmOnly = firmware('badge-vm-only', 'BADGE_RP2350', true, true, true, ownedSequence, [vmCore]);
+        if (options.has('--vm-placement-pair')) {
+            // The upstream linker script excludes *py/vm.c.o .text* from XIP flash.
+            const ramVm = { ...vmCore, object: 'owned-ram/py/vm.c.o' };
+            const ramObject = path.join(build, ramVm.object);
+            fs.mkdirSync(path.dirname(ramObject), { recursive: true });
+            fs.copyFileSync(path.join(build, vmCore.object), ramObject);
+            const ram = firmware('badge-vm-ram', 'BADGE_RP2350', true, true, true, ownedSequence, [ramVm]);
+            const symbols = { gcc: vmSymbol(sequenceVm), flash: vmSymbol(vmOnly), ram: vmSymbol(ram) };
+            const { gcc, flash } = symbols;
+            const isSram = address => address >= 0x20000000 && address < 0x20082000;
+            assert(isSram(gcc.address) && isSram(symbols.ram.address), 'Expected stock and owned RAM VM placement');
+            assert(flash.address >= 0x10000000 && flash.address < 0x11000000, 'Expected owned XIP control');
+            assert.equal(symbols.ram.size, flash.size, 'VM symbol changed size between placement variants');
+            vmPlacement = { flash: vmOnly, ram, symbols };
+            console.log('VM placements:', Object.fromEntries(Object.entries(symbols)
+                .map(([k, v]) => [k, `0x${v.address.toString(16)} (${v.size} bytes)`])));
         }
     }
     let libraries;
@@ -451,7 +478,7 @@ try {
     fs.writeFileSync(path.join(build, 'comparison.json'),
         JSON.stringify({ revision, pico2, stock, mixed, core, vm, sequenceVm, sequenceBeforeVm, interpreter, runtimeOnly, vmOnly,
             smallInteger, radixParser, calendar, sequenceIndex,
-            libraries, sameTokens, oracleCases: 1028 }, null, 2) + '\n');
+            vmPlacement, libraries, sameTokens, oracleCases: 1028 }, null, 2) + '\n');
 } catch (error) {
     console.error(`MicroPython build: ${error.message}`);
     process.exitCode = 1;

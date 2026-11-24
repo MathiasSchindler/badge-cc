@@ -986,6 +986,16 @@ int cg_phi_constant(const char *token) {
     if (*token < '0' || *token > '9') return 0;
   return 1;
 }
+static int cg_phi_same_token(cg_context *c, cg_type *type, const char *a, const char *b) {
+  if (!strcmp(a, b)) return 1;
+  if ((*a == '%' || *a == '@') && *a == *b)
+    return !strcmp(cg_name(c, a), cg_name(c, b));
+  if (!type->bits || !cg_phi_constant(a) || !cg_phi_constant(b))
+    return 0;
+  uint64_t x = !strcmp(a, "true") ? 1 : !strcmp(a, "false") || !strcmp(a, "null") ? 0 : cg_number(c, a);
+  uint64_t y = !strcmp(b, "true") ? 1 : !strcmp(b, "false") || !strcmp(b, "null") ? 0 : cg_number(c, b);
+  return type->bits == 64 ? x == y : ((x ^ y) & ((UINT64_C(1) << type->bits) - 1)) == 0;
+}
 unsigned cg_phi_buffer_size(cg_context *c, cg_inst *i) {
   unsigned bytes = cg_round(i->result->type->size, 4);
   if (!cg_home_selection(c) || !cg_global_register(c, i->result->name))
@@ -1079,12 +1089,29 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
   unsigned scratch = c->phi_space;
   cg_phi_register_copy copies[CG_GLOBAL_REGISTER_COUNT] = {{0}};
   unsigned copy_count = 0;
+  cg_inst *unbuffered = NULL, *copied_directly = NULL;
+  if (c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS &&
+      c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT &&
+      c->frame_addressing == BADGE_FRAME_DIRECT && c->fn->frame <= 4096 &&
+      c->fn->block_count > CG_LOOP_ALLOCATION_BLOCK_LIMIT) {
+    for (cg_inst *phi = b->first; phi && phi->result &&
+         !strcmp(c->tokens[phi->begin + 2].text, "phi"); phi = phi->next) {
+      if (!cg_phi_buffer_size(c, phi))
+        continue;
+      unsigned bits = phi->result->type->bits;
+      if (unbuffered || !bits || bits > 32) {
+        unbuffered = NULL;
+        break;
+      }
+      unbuffered = phi;
+    }
+  }
   for (cg_inst *i = b->first; i; i = i->next) {
     if (!i->result || strcmp(c->tokens[i->begin + 2].text, "phi"))
       continue;
     c->pos = i->begin + 3;
     cg_type *t = cg_type_parse(c, 0);
-    int found = 0;
+    unsigned incoming = i->end, incoming_length = 0;
     while (c->pos < i->end) {
       cg_expect(c, "[");
       unsigned value = c->pos;
@@ -1102,25 +1129,50 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
       cg_expect(c, "]");
       unsigned next = c->pos;
       if (!strcmp(label, from->name)) {
+        unsigned length = operand_end - value;
+        if (incoming != i->end) {
+          if (length != incoming_length)
+            cg_error(c, "parallel PHI edges have different values");
+          for (unsigned k = 0; k < length; k++) {
+            const char *a = c->tokens[incoming + k].text, *b = c->tokens[value + k].text;
+            if (length == 1 ? !cg_phi_same_token(c, t, a, b) : strcmp(a, b) != 0)
+              cg_error(c, "parallel PHI edges have different values");
+          }
+          if (!cg_accept(c, ",")) break;
+          continue;
+        }
+        incoming = value;
+        incoming_length = length;
         unsigned destination = cg_global_register(c, i->result->name);
         unsigned source = destination && operand_end == value + 1
                               ? cg_global_register(c, c->tokens[value].text)
                               : 0;
         int constant = cg_home_selection(c) && destination &&
             operand_end == value + 1 && cg_phi_constant(c->tokens[value].text);
+        int direct = i == unbuffered && length == 1 && !source && !constant;
+        if (direct && !destination) {
+          c->pos = value;
+          cg_value_read(c, t, 0, 0);
+          cg_save(c, i->result, 0, 0);
+          copied_directly = i;
+          cg_emit(c, "@ phi-transport: one scalar without scratch\n");
+          c->pos = next;
+          if (!cg_accept(c, ",")) break;
+          continue;
+        }
         if (destination) {
           if (copy_count == CG_GLOBAL_REGISTER_COUNT)
             cg_error(c, "too many allocated PHIs on an edge");
           copies[copy_count++] =
               (cg_phi_register_copy){.destination = destination, .source = source,
-                .scratch = scratch, .constant = value, .type = constant ? t : NULL};
+                .scratch = scratch, .constant = value, .type = constant || direct ? t : NULL};
           c->avoided_stores++;
           if (source) {
             c->phi_register_copies++;
             c->avoided_loads++;
           }
         }
-        if (!source && !constant) {
+        if (!source && !constant && !direct) {
           for (unsigned w = 0; w < cg_round(t->size, 4) / 4; w++) {
             c->pos = value;
             cg_value_read(c, t, 0, w);
@@ -1129,13 +1181,12 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
             cg_stack(c, 1, 0, scratch + w * 4);
           }
         }
-        found = 1;
       }
       c->pos = next;
       if (!cg_accept(c, ","))
         break;
     }
-    if (!found)
+    if (incoming == i->end)
       cg_error(c, "phi lacks incoming predecessor");
     scratch += cg_phi_buffer_size(c, i);
   }
@@ -1143,7 +1194,7 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
   for (cg_inst *i = b->first; i; i = i->next) {
     if (!i->result || strcmp(c->tokens[i->begin + 2].text, "phi"))
       continue;
-    if (cg_global_register(c, i->result->name)) {
+    if (i == copied_directly || cg_global_register(c, i->result->name)) {
       scratch += cg_phi_buffer_size(c, i);
       continue;
     }
@@ -1160,16 +1211,57 @@ static void cg_edge(cg_context *c, cg_block *from, const char *target,
     cg_emit(c, "b%s .Lcg_%u_%s\n", cg_branch_width(c), c->fn->id, target);
 }
 
+static int cg_switch_index_bounded(cg_context *c, const char *name,
+                                   uint32_t limit, unsigned depth, unsigned *work) {
+  if (!*work || !depth)
+    return 0;
+  --*work;
+  if (*name != '%')
+    return cg_phi_constant(name) && isdigit((unsigned char)*name) &&
+           cg_number(c, name) <= limit;
+  cg_register_value *entry = cg_register_lookup(c, name);
+  if (!entry->value)
+    return 0;
+  unsigned bits = entry->value->type->bits;
+  if ((bits && bits < 32 && (UINT32_C(1) << bits) - 1 <= limit) ||
+      ~entry->known_zero <= limit)
+    return 1;
+  for (cg_inst *i = entry->definition ? entry->definition->first : NULL; i; i = i->next) {
+    cg_register_work(c);
+    if (i->result != entry->value)
+      continue;
+    unsigned at = i->begin + 2;
+    const char *op = c->tokens[at].text;
+    if (!strcmp(op, "zext") && i->end - at == 5 && c->tokens[at + 2].text[0] == '%')
+      return cg_switch_index_bounded(c, c->tokens[at + 2].text, limit, depth - 1, work);
+    if (strcmp(op, "phi"))
+      return 0;
+    unsigned k = at + 2;
+    while (k + 4 < i->end && !strcmp(c->tokens[k].text, "[") &&
+           !strcmp(c->tokens[k + 2].text, ",") && !strcmp(c->tokens[k + 4].text, "]")) {
+      if (!cg_switch_index_bounded(c, c->tokens[k + 1].text, limit, depth - 1, work))
+        return 0;
+      k += 5;
+      if (k == i->end)
+        return 1;
+      if (strcmp(c->tokens[k++].text, ","))
+        return 0;
+    }
+    return 0;
+  }
+  return 0;
+}
+
 static int cg_dense_switch(cg_context *c, cg_block *from, cg_inst *i,
                            cg_type *type, unsigned condition,
-                           const char *fallback) {
-  enum { LIMIT = 32 };
+                           const char *index, const char *fallback) {
+  enum { BYTE_LIMIT = 32, HALFWORD_LIMIT = 256 };
   unsigned start = c->pos, count = 0, low = UINT32_MAX, high = 0;
-  unsigned keys[LIMIT], slots[LIMIT] = {0}, choices[LIMIT];
-  const char *destinations[LIMIT + 1] = {cg_name(c, fallback)};
+  unsigned keys[HALFWORD_LIMIT], slots[HALFWORD_LIMIT] = {0}, choices[HALFWORD_LIMIT];
+  const char *destinations[HALFWORD_LIMIT + 1] = {cg_name(c, fallback)};
   unsigned ndest = 1;
   while (!cg_is(c, "]")) {
-    if (count == LIMIT || c->pos + 4 >= i->end)
+    if (count == HALFWORD_LIMIT || c->pos + 4 >= i->end)
       goto fallback_path;
     cg_type *key_type = cg_type_parse(c, 0);
     const char *token = cg_take(c);
@@ -1192,11 +1284,19 @@ static int cg_dense_switch(cg_context *c, cg_block *from, cg_inst *i,
     low = key < low ? key : low;
     high = key > high ? key : high;
   }
-  if (count < 6 || high - low >= LIMIT || low > 4095)
+  int halfword = count > BYTE_LIMIT;
+  if (count < 6 || high - low >= (halfword ? HALFWORD_LIMIT : BYTE_LIMIT) || low > 4095)
     goto fallback_path;
-  unsigned span = high - low + 1, padded = cg_round(span, 2);
+  unsigned span = high - low + 1;
+  unsigned entries = halfword ? span : cg_round(span, 2);
+  unsigned table_bytes = entries * (halfword ? 2 : 1);
+  unsigned work = 512;
+  int unchecked = halfword && !low &&
+      ((type->bits < 32 && (UINT32_C(1) << type->bits) - 1 <= high) ||
+       (cg_global_residency(c) && cg_switch_index_bounded(c, index, high, 8, &work)));
+  unsigned check_bytes = unchecked ? 6 : halfword ? 12 : 10;
   /* The compare chain can already fold to a CMP/Bcc per case. */
-  if ((low ? 4u : condition >= 8 ? 2u : 0u) + 10 + padded + 4 * ndest > 4 * count - 2)
+  if ((low ? 4u : condition >= 8 ? 2u : 0u) + check_bytes + table_bytes + 4 * ndest > 4 * count - 2)
     goto fallback_path;
   for (unsigned n = 0; n < count; n++)
     slots[keys[n] - low] = choices[n];
@@ -1205,17 +1305,21 @@ static int cg_dense_switch(cg_context *c, cg_block *from, cg_inst *i,
     cg_emit(c, "subw r0, r%u, #%u\n", condition, low);
     condition = 0;
   }
-  cg_emit(c, "cmp.%c r%u, #%u\nbhi.n .Lcg_table%u_v0\n"
-             ".p2align 2\ntbb [pc, r%u]\n.Lcg_table%u_base:\n",
-          condition < 8 ? 'n' : 'w', condition, span - 1, id, condition, id);
-  for (unsigned n = 0; n < padded; n++)
-    cg_emit(c, ".byte (.Lcg_table%u_v%u-.Lcg_table%u_base)/2\n", id, slots[n], id);
+  if (!unchecked)
+    cg_emit(c, "cmp.%c r%u, #%u\nbhi.%c .Lcg_table%u_v0\n",
+            condition < 8 ? 'n' : 'w', condition, span - 1, halfword ? 'w' : 'n', id);
+  cg_emit(c, ".p2align 2\n%s [pc, r%u%s]\n.Lcg_table%u_base:\n",
+          halfword ? "tbh" : "tbb", condition, halfword ? ", lsl #1" : "", id);
+  for (unsigned n = 0; n < entries; n++)
+    cg_emit(c, ".%s (.Lcg_table%u_v%u-.Lcg_table%u_base)/2\n",
+            halfword ? "short" : "byte", id, slots[n], id);
+  const char *branch = halfword ? "b.w" : "b";
   for (unsigned n = 0; n < ndest; n++) {
     cg_emit(c, ".Lcg_table%u_v%u:\n", id, n);
     if (cg_target_has_phi(c, destinations[n]))
-      cg_emit(c, "b .Lcg_table%u_e%u\n", id, n);
+      cg_emit(c, "%s .Lcg_table%u_e%u\n", branch, id, n);
     else
-      cg_emit(c, "b .Lcg_%u_%s\n", c->fn->id, destinations[n]);
+      cg_emit(c, "%s .Lcg_%u_%s\n", branch, c->fn->id, destinations[n]);
   }
   for (unsigned n = 0; n < ndest; n++)
     if (cg_target_has_phi(c, destinations[n])) {
@@ -1893,6 +1997,16 @@ static void cg_call(cg_context *c, cg_inst *i) {
             cg_emit(c, "ldrb.w r6, [r4, #%u]\norr.w r%u, r%u, r6, lsl #%u\n",
                     w * 4 + b, r, r, b * 8);
         }
+      } else if (i->deferred_call_argument == args[k].start) {
+        if (w || position >= 4 || args[k].sign || args[k].type->size != 4)
+          cg_error(c, "invalid deferred scalar call load");
+        c->pos = i->deferred_call_address;
+        unsigned base = cg_global_register(c, c->tokens[c->pos].text);
+        if (!base) {
+          cg_value_read(c, args[k].type, r, 0);
+          base = r;
+        }
+        cg_emit(c, "ldr.%c r%u, [r%u]\n@ call-argument: deferred word load\n", base < 8 ? 'n' : 'w', r, base);
       } else if (!direct) {
         cg_value_read(c, args[k].type, r, w);
         if (args[k].sign && !w)
@@ -2731,7 +2845,8 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     if (t->size > 4)
       cg_error(c, "64-bit switch unsupported");
     int compact = c->scalar_selection == BADGE_SELECTION_THUMB_CONSTANTS;
-    unsigned condition = compact ? cg_global_register(c, c->tokens[c->pos].text) : 0;
+    const char *index = c->tokens[c->pos].text;
+    unsigned condition = compact ? cg_global_register(c, index) : 0;
     if (condition)
       cg_take(c);
     else {
@@ -2742,7 +2857,7 @@ void cg_instruction(cg_context *c, cg_block *block, cg_inst *i) {
     cg_expect(c, "label");
     char *fallback = cg_take(c);
     cg_expect(c, "[");
-    if (compact && t->bits && cg_dense_switch(c, block, i, t, condition, fallback))
+    if (compact && t->bits && cg_dense_switch(c, block, i, t, condition, index, fallback))
       return;
     while (!cg_accept(c, "]")) {
       (void)cg_type_parse(c, 0);

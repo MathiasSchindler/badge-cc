@@ -1697,6 +1697,216 @@ int main(void) {
   }
 });
 
+test('256-slot Thumb halfword switch preserves indexed dispatch, holes, and PHI edges', t => {
+  const file = files(t);
+  const low = 127;
+  const cases = Array.from({ length: 256 }, (_, k) => k).filter(k => k === 255 || k % 5 !== 4);
+  const label = k => k % 12;
+  const blocks = Array.from({ length: 12 }, (_, n) =>
+    `case${n}:\n  %v${n} = phi i32 ${cases.filter(k => label(k) === n)
+      .map((_, i) => `[ ${n === 0 ? (i % 2 ? '4294967295' : '-1') : '%y'}, %entry ]`).join(', ')}\n` +
+    `  %r${n} = add i32 %v${n}, ${n + 3}\n  ret i32 %r${n}\n`);
+  const sparse = Array.from({ length: 40 }, (_, n) => `  i32 ${n * 7}, label %match\n`).join('');
+  const distinct = Array.from({ length: 33 }, (_, n) => n);
+  fs.writeFileSync(file('switch.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+define i32 @table(i32 %x, i32 %y) {
+entry:
+  switch i32 %x, label %missing [
+${cases.map(k => `    i32 ${low + k}, label %case${label(k)}`).join('\n')}
+  ]
+${blocks.join('')}
+missing:
+  %fallback = phi i32 [ %y, %entry ]
+  %result = sub i32 %fallback, 9
+  ret i32 %result
+}
+define i32 @sparse(i32 %x) {
+entry:
+  switch i32 %x, label %other [
+${sparse}  ]
+match:
+  ret i32 1
+other:
+  ret i32 0
+}
+define i32 @too_many_targets(i32 %x) {
+entry:
+  switch i32 %x, label %otherwise [
+${distinct.map(n => `    i32 ${n}, label %distinct${n}`).join('\n')}
+  ]
+${distinct.map(n => `distinct${n}:\n  ret i32 ${n + 1}\n`).join('')}
+otherwise:
+  ret i32 0
+}`);
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned table(unsigned, unsigned);
+extern int sparse(unsigned);
+int main(void) {
+  for (unsigned i = 0; i < 400; i++) {
+    unsigned n = i < 384 ? i : ~i, x = 0xfffffffau + i;
+    unsigned k = n - ${low};
+    unsigned expected = k < 256 && (k == 255 || k % 5 != 4) ? (k % 12 ? x + k % 12 + 3 : 2) : x - 9;
+    if (table(n, x) != expected || sparse(n) != (n <= 273 && n % 7 == 0)) return 1;
+  }
+  return 0;
+}`);
+  run(tool('badge-codegen-sanitize'), [file('switch.ll'), '-o', file('table.s')]);
+  const assembly = fs.readFileSync(file('table.s'), 'utf8');
+  assert.equal((assembly.match(/^tbh \[pc, r\d+, lsl #1\]$/gm) ?? []).length, 1);
+  assert.equal((assembly.match(/^\.short \(\.Lcg_table/gm) ?? []).length, 256);
+  assert.match(assembly, /^bhi\.w \.Lcg_table\d+_v0$/m);
+  assert.doesNotMatch(assembly.slice(assembly.indexOf('\nsparse:')), /^tb[bh] /m);
+  const clang = process.env.LLVM_CLANG ?? 'clang';
+  const targetFlags = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+  run(tool('badge-asm'), [file('table.s'), '-o', file('table.o')]);
+  run(clang, [...targetFlags, '-c', file('table.s'), '-o', file('llvm.o')]);
+  run(clang, [...targetFlags, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  for (const role of ['table', 'llvm']) {
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file('caller.o'), file(`${role}.o`), '-o', file(`${role}.elf`)]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file(`${role}.elf`)]);
+  }
+});
+
+test('large CFGs forward call loads, pointer stores, and one buffered PHI without changing values', t => {
+  const file = files(t);
+  const padding = Array.from({ length: 257 }, (_, i) =>
+    `pad${i}:\n  %padvalue${i} = load volatile i32, ptr %p, align 4\n` +
+    `  br label %${i === 256 ? 'dispatch' : `pad${i + 1}`}`).join('\n');
+  const table = Array.from({ length: 40 }, (_, i) =>
+    `    i32 ${i}, label %${i === 39 ? 'latch' : 'work'}`).join('\n');
+  fs.writeFileSync(file('large.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
+declare i32 @check(i32, i32)
+@edge_left = internal global i32 1, align 4
+@edge_right = internal global i32 2, align 4
+define i32 @large(ptr %p, ptr %out, i32 %slot) {
+entry:
+  br label %pad0
+${padding}
+dispatch:
+  %selector = phi i32 [%slot, %pad256], [0, %latch]
+  switch i32 %selector, label %work [
+${table}
+  ]
+latch:
+  %latchvalue = load volatile i32, ptr %p, align 4
+  br label %dispatch
+work:
+  %old = load i32, ptr %p, align 4
+  store i32 99, ptr %p, align 4
+  %a = call i32 @check(i32 3, i32 %old)
+  %new = load i32, ptr %p, align 4
+  %adj = add i32 %a, 2
+  %b = call i32 @check(i32 %adj, i32 %new)
+  %scaled = mul i32 %slot, 4
+  %address = getelementptr i8, ptr %out, i32 %scaled
+  store ptr %p, ptr %address, align 4
+  %choose = icmp eq i32 %slot, 2
+  br i1 %choose, label %left, label %right
+left:
+  br label %join
+right:
+  br label %join
+join:
+  %edge = phi ptr [@edge_left, %left], [@edge_right, %right]
+  %increment = load i32, ptr %edge, align 4
+  %result = add i32 %b, %increment
+  ret i32 %result
+}`);
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned large(unsigned *, unsigned **, unsigned);
+unsigned check(unsigned a, unsigned b) { return 7*a + b; }
+int main(void) {
+  unsigned value = 5, *slots[4] = {0};
+  if (large(&value, slots, 2) != 296 || value != 99 || slots[2] != &value) return 1;
+  value = 5;
+  if (large(&value, slots, 3) != 297 || value != 99 || slots[3] != &value) return 1;
+  return slots[0] || slots[1];
+}`);
+  run(tool('badge-codegen-sanitize'), [file('large.ll'), '-o', file('large.s')]);
+  const assembly = fs.readFileSync(file('large.s'), 'utf8');
+  assert.equal((assembly.match(/@ call-argument: deferred word load/g) ?? []).length, 1);
+  assert.match(assembly, /^@ loop-allocation: weighted headers 1$/m);
+  assert.match(assembly, /^str\.w r\d+, \[r\d+, r\d+, lsl #2\]$/m);
+  run(tool('badge-asm'), [file('large.s'), '-o', file('large.o')]);
+  run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+  run(process.env.LLVM_CLANG ?? 'clang',
+    ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb', '-O2', '-ffreestanding',
+      '-c', file('caller.c'), '-o', file('caller.o')]);
+  run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+    file('start.o'), file('caller.o'), file('large.o'), '-o', file('large.elf')]);
+  run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+    '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+    '-kernel', file('large.elf')]);
+});
+
+test('halfword switch guard needs every PHI input to prove the table range', t => {
+  const file = files(t);
+  const cases = Array.from({ length: 256 }, (_, k) => `  i32 ${k}, label %${k & 1 ? 'odd' : 'even'}`).join('\n');
+  const ir = (name, other) => `define i32 @${name}(i32 %x, i32 %y, i1 %select) {
+entry:
+  br i1 %select, label %left, label %right
+left:
+  %a = trunc i32 %x to i8
+  %b = zext i8 %a to i32
+  br label %dispatch
+right:
+  %c = and i32 %y, 255
+  br label %dispatch
+dispatch:
+  %value = phi i32 [%b, %left], [${other}, %right]
+  switch i32 %value, label %outside [
+${cases}
+  ]
+odd:
+  ret i32 1
+even:
+  ret i32 2
+outside:
+  ret i32 3
+}`;
+  fs.writeFileSync(file('bound.ll'), 'target triple = "thumbv8m.main-unknown-none-eabi"\n' +
+    ir('bounded', '%c') + '\n' + ir('partly_bounded', '%y'));
+  fs.writeFileSync(file('caller.c'), `
+extern unsigned bounded(unsigned, unsigned, _Bool);
+extern unsigned partly_bounded(unsigned, unsigned, _Bool);
+int main(void) {
+  for (unsigned i = 0; i < 256; i++) {
+    unsigned expected = (i & 1) ? 1 : 2;
+    if (bounded(i + 256, i + 256, 1) != expected ||
+        bounded(i + 256, i + 256, 0) != expected ||
+        partly_bounded(i + 256, i, 0) != expected ||
+        partly_bounded(i, i + 256, 0) != 3) return 1;
+  }
+  return partly_bounded(3, -1u, 1) != 1 || partly_bounded(3, -1u, 0) != 3;
+}`);
+  run(tool('badge-codegen-sanitize'), [file('bound.ll'), '-o', file('bound.s')]);
+  const assembly = fs.readFileSync(file('bound.s'), 'utf8');
+  const [unbounded, bounded] = [assembly.indexOf('\npartly_bounded:'), assembly.indexOf('\nbounded:')];
+  assert(unbounded > bounded && bounded >= 0);
+  assert.doesNotMatch(assembly.slice(bounded, unbounded), /^bhi\.w \.Lcg_table/m);
+  assert.match(assembly.slice(unbounded), /^bhi\.w \.Lcg_table/m);
+  for (const role of ['owned', 'llvm']) {
+    const clang = process.env.LLVM_CLANG ?? 'clang';
+    const arm = ['--target=arm-none-eabi', '-mcpu=cortex-m33', '-mthumb'];
+    if (role === 'owned') {
+      run(tool('badge-asm'), [file('bound.s'), '-o', file('owned.o')]);
+      run(tool('badge-asm'), ['tests/fixtures/codegen_start.S', '-o', file('start.o')]);
+      run(clang, [...arm, '-O2', '-ffreestanding', '-c', file('caller.c'), '-o', file('caller.o')]);
+    } else {
+      run(clang, [...arm, '-c', file('bound.s'), '-o', file('llvm.o')]);
+    }
+    run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
+      file('start.o'), file('caller.o'), file(`${role}.o`), '-o', file(`${role}.elf`)]);
+    run(process.env.QEMU_ARM ?? 'qemu-system-arm', ['-M', 'mps2-an505', '-nographic',
+      '-monitor', 'none', '-serial', 'none', '-semihosting-config', 'enable=on,target=native',
+      '-kernel', file(`${role}.elf`)]);
+  }
+});
+
 test('compact switches preserve PHI edges and fold indexed narrow loads only when aligned', t => {
   const file = files(t);
   fs.writeFileSync(file('dispatch.ll'), `target triple = "thumbv8m.main-unknown-none-eabi"
@@ -1939,19 +2149,45 @@ yes:
 no:
   ret i32 0
 }
+define i32 @nested(i32 %x, i1 %enabled) {
+entry:
+  br i1 %enabled, label %try, label %disabled
+try:
+  %first = icmp eq i32 %x, 29
+  br i1 %first, label %constant, label %other
+constant:
+  br label %inner
+other:
+  %second = icmp eq i32 %x, 40
+  br label %inner
+inner:
+  %either = phi i1 [true, %constant], [%second, %other]
+  br label %outer
+disabled:
+  br label %outer
+outer:
+  %accepted = phi i1 [%either, %inner], [false, %disabled]
+  br i1 %accepted, label %success, label %reject
+success:
+  ret i32 19
+reject:
+  ret i32 3
+}
 `);
   fs.writeFileSync(file('oracle.c'), `
 static volatile unsigned calls;
 void effect(void) { calls++; }
 extern unsigned forward(unsigned), multiuse(unsigned), sideeffect(unsigned), destination_phi(unsigned);
 extern unsigned wrapper(unsigned), loop(unsigned), constant_false(void);
+extern unsigned nested(unsigned, _Bool);
 int main(void) {
   unsigned i;
   for (i = 0; i < 100; i++) {
     unsigned expected = i == 29 || i == 40;
     if (forward(i) != expected || multiuse(i) != expected ||
         sideeffect(i) != expected || destination_phi(i) != expected ||
-        wrapper(i) != (i != 0) || loop(i) != 0 || constant_false() != 0) return 1;
+        wrapper(i) != (i != 0) || loop(i) != 0 || constant_false() != 0 ||
+        nested(i, 0) != 3 || nested(i, 1) != (expected ? 19 : 3)) return 1;
   }
   return calls != 100;
 }`);
@@ -1967,6 +2203,8 @@ int main(void) {
       for (const n of [2, 3, 4]) assert(assembly.includes(`.Lcg_${n}_join:`));
       assert.equal(assembly.includes('.Lcg_5_bridge:'), policy === 'thumb-widths');
       assert(assembly.includes('.Lcg_6_back:'));
+      assert.equal(assembly.includes('.Lcg_8_inner:'), policy === 'thumb-widths');
+      assert.equal(assembly.includes('.Lcg_8_outer:'), policy === 'thumb-widths');
       run(tool('badge-asm'), [file('output.s'), '-o', file('output.o')]);
       run(process.env.LLVM_LLD ?? 'ld.lld', ['-T', 'tests/fixtures/codegen_fixture.ld',
         file('start.o'), file('oracle.o'), file('output.o'), '-o', file('output.elf')]);

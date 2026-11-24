@@ -835,6 +835,33 @@ static const char *spill_notes(const char *p) {
   return p;
 }
 
+static const char *fold_large_spill_reload(cg_context *c, const char *p,
+                                          const char *end) {
+  scalar_transfer store;
+  if (c->frame_addressing != BADGE_FRAME_DIRECT ||
+      strncmp(p, "str.", 4) || !parse_transfer(p, end, &store) ||
+      store.base != 7 || store.index >= 0 || store.offset % 4 || store.reg == 7)
+    return NULL;
+  const char *line = spill_notes(end + 1);
+  for (unsigned n = 0; n < 2; n++) {
+    const char *finish = strchr(line, '\n');
+    scalar_transfer load;
+    if (!finish || !parse_transfer(line, finish, &load) ||
+        load.op[0] != 'l' || load.bytes != 4 || load.base != 7 ||
+        load.index >= 0 || load.reg == 7)
+      break;
+    if (load.reg == store.reg) {
+      if (load.offset != store.offset)
+        break;
+      cg_append(c, p, (size_t)(line - p));
+      cg_emit(c, "@ spill-reload: value already in the destination register\n");
+      return finish + 1;
+    }
+    line = spill_notes(finish + 1);
+  }
+  return NULL;
+}
+
 static const char *fold_spill_reload(cg_context *c, const char *p, const char *end) {
   scalar_transfer store;
   if (strncmp(p, "str.", 4) || !parse_transfer(p, end, &store) ||
@@ -953,6 +980,8 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
   memcpy(body, c->out + body_start, length);
   c->size = body_start;
   unsigned assembly_lines = 0;
+  int large_cfg = c->register_residency == BADGE_RESIDENCY_GLOBAL_COMPACT &&
+                  c->fn->block_count > CG_LOOP_ALLOCATION_BLOCK_LIMIT;
   for (const char *p = body; p < body + length;) {
     cg_register_work(c);
     const char *end = strchr(p, '\n');
@@ -964,7 +993,9 @@ void cg_fold_memory_addresses(cg_context *c, size_t body_start) {
     else if (!strncmp(p, "@ constant-assembly-lines:", 26))
       sscanf(p, "@ constant-assembly-lines: %u", &assembly_lines);
     else {
-      const char *after = fold_spill_reload(c, p, end);
+      const char *after = large_cfg ? fold_large_spill_reload(c, p, end) : NULL;
+      if (!after)
+        after = fold_spill_reload(c, p, end);
       if (!after)
         after = fold_word_argument(c, p, end);
       if (!after)

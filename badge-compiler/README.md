@@ -161,6 +161,10 @@ profile appends `global-memory`, `sret-forward`, `compact-inline`, `low-bits`,
 to the preceding eight passes, then runs `guard-split`. Query the exact list with
 `badge-opt --default-passes`. `divrem-pairs` also replaces profitable
 unsigned power-of-two divisions and remainders with shifts and masks.
+It can reuse a nearby signed constant quotient for a remainder of the
+same block-local dividend when final code size, frame, and spills do not grow.
+`global-memory` can also reuse an identical sign or zero extension when it
+forwards a load across a guard, under the same allocation and size checks.
 See the [qualification results](docs/current-promotion.md#november-default-update).
 The [Maze follow-up](docs/current-promotion.md#maze-generation-and-ram-fills)
 shares signed quotients and remainders, removes fully overwritten private
@@ -471,6 +475,8 @@ RS01 introduced `--scalar-selection=thumb-constants` /
 reuse around fenced opaque assembly, proven dead-temporary copy folding,
 shifted power-of-two multiply/adds, direct i32 compare operands, branch-only
 boolean PHI forwarding, trampoline removal and AAPCS-safe small arguments.
+Boolean forwarding revisits predecessors newly exposed by folding an outer
+join, so nested short-circuit tests do not depend on block order.
 Bounded NZCV liveness through unconditional edges, equivalent narrow
 arithmetic and range-proved conditional-branch reduction extend the candidate.
 Shifted address temporaries fold into indexed word memory accesses only when

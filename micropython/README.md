@@ -273,12 +273,305 @@ The sample ranges did not overlap between images.
 
 Replacing the VM accounts for most of the regression. The runtime
 replacement also costs time, and combining them adds about 100 ms beyond
-the sum of their isolated increases. The owned build lowers the computed
-goto to a 256-case switch. The Thumb backend's table selector stops at
-32 cases, so the VM disassembles to a compare chain: the whole dispatcher
-contains 309 static compare sites versus 23 in GCC's. This points to a
-larger jump table as the first optimization to test; the timings do not
-isolate dispatch cost from the rest of the VM.
+the sum of their isolated increases. At the time of this measurement, the
+owned build lowered the computed goto to a 256-case switch, but its Thumb
+table selector stopped at 32 cases. The resulting dispatcher contained
+309 static compare sites versus 23 in GCC's.
+
+### Halfword jump-table dispatch
+
+The owned Thumb backend now selects `TBH` for profitable switches with
+33–256 cases spanning at most 256 unsigned values. An unsigned bounds
+check handles out-of-range values; unassigned entries go to the default
+edge, and repeated destinations share PHI transport. The existing small
+`TBB` path is unchanged, and sparse or expensive tables still use a chain.
+On the same optimized VM IR, `mp_execute_bytecode` shrank from 9,722 B to
+9,024 B. The VM-only firmware shrank from 338,304 to 337,600 loaded bytes,
+and static compare sites fell from 309 to 54. The combined VM and runtime
+image also shrank by 704 loaded bytes but was not timed in this comparison.
+
+On one RP2350 badge at 150 MHz, the VM-only A/B/B/A comparison gave
+the following results. Each time is the mean of two boot medians, with
+seven samples per boot.
+
+| Workload | Compare chain | Halfword table | Time reduction |
+| --- | ---: | ---: | ---: |
+| Interpreter | 467.85 ms | 86.45 ms | 81.5% |
+| Small integer | 498.18 ms | 95.82 ms | 80.8% |
+| Radix sort | 320.38 ms | 90.43 ms | 71.8% |
+| Calendar | 107.87 ms | 45.78 ms | 57.6% |
+
+The interpreter samples ranged from 467.54 to 468.01 ms before and
+86.17 to 86.61 ms after. That is a 5.41× speedup, though the new VM still
+took 1.60× as long as the GCC-built VM in the earlier six-module control
+(53.954 ms). All four boots passed the REPL, cross-boot filesystem, and
+workload checks. A full 16 MiB readback matched the original flash.
+In the separate non-MicroPython corpus, all 51 UF2 payload sizes and
+frame budgets were unchanged, and all 147 archived assembly outputs
+matched the final backend replay.
+
+To retest on an authorized badge with archived and rebuilt VM-only images:
+
+```sh
+node micropython/smoke.mjs YOUR_16_HEX_DIGIT_BOOTSEL_SERIAL --interpreter-pair BASELINE_DIR CANDIDATE_DIR
+```
+
+Both directories must contain the same board's `firmware.bin` and
+`firmware.uf2`. The runner boots baseline/candidate/candidate/baseline,
+checks clock and cross-boot filesystem data, and verifies a full restore.
+
+### Spill reload forwarding
+
+The owned Thumb backend can omit a redundant word reload when the same
+register still holds the value it just stored to that frame slot. The store
+stays in place. The selector can look past one other frame load that
+does not overwrite either the saved value or the frame pointer; it does not
+cross calls, labels, writes, or inline assembly.
+
+The broader rule is limited to functions above the 256-block cutoff for
+loop-aware register allocation. Applying it to smaller functions changed
+optimizer cost decisions and grew three IMU demo frames, so those functions
+retain their previous selection rules. Increasing the allocator's block
+cutoff alone removed some stack accesses but grew the VM function.
+
+On identical optimized VM IR, direct stack load/store sites in
+`mp_execute_bytecode` fell from 375 to 357 and executable size fell from 9,024
+to 8,980 B. Its 160 B frame and 32 B register-save area were unchanged. The
+rebuilt VM-only image dropped from 337,600 to 337,560 loaded bytes. The 51
+non-MicroPython UF2 payload sizes, 147 executable-object sizes, and 1,454
+matched frame budgets were unchanged.
+
+A separate A/B/B/A run at 150 MHz compared the previous jump-table image
+with the rebuilt VM-only image. Each time is the mean of two boot medians,
+with seven samples per boot.
+
+| Workload | Previous image | Rebuilt image | Time change |
+| --- | ---: | ---: | ---: |
+| Interpreter | 86.454 ms | 84.259 ms | −2.54% |
+| Small integer | 95.811 ms | 76.754 ms | −19.89% |
+| Radix sort | 90.424 ms | 89.398 ms | −1.13% |
+| Calendar | 45.783 ms | 46.671 ms | +1.94% |
+
+These are whole-image results: the production rebuild also changed whether
+`mp_obj_is_small_int` was inlined, so the timing differences cannot be
+attributed solely to reload forwarding. The interpreter still took 1.56×
+as long as the GCC-built VM in the earlier six-module control. All four
+boots passed the REPL, cross-boot filesystem, and workload checks; the
+original 16 MiB flash was independently verified after restoration.
+
+### Executed VM stack accesses
+
+Run `node micropython/vm-profile.mjs` after the pinned MicroPython checkout
+has been set up by the normal build. This also needs GNU ARM Embedded, QEMU
+with plugin support, matching `qemu-plugin.h`, and `pkg-config` for GLib.
+If the header is outside the C compiler's include path, set
+`QEMU_PLUGIN_INCLUDE` to its directory (for example
+`QEMU_PLUGIN_INCLUDE="$(brew --prefix qemu)/include"` on Homebrew).
+
+The replay runs on QEMU's Cortex-M33 MPS2-AN505, **not an RP2350 emulator**.
+It uses the same GCC-built runtime and Python workload for both VM objects,
+with computed-goto dispatch, the soft-float ABI, and matching application enum
+widths. It checks exceptions, retained objects, GC, and the 589824 checksum.
+The tool requires two identical replays per build and writes per-PC counts
+and disassembly to `build/vm-profile/comparison.json` under this directory.
+
+| `mp_execute_bytecode` only | GCC `-Oz` | Owned defaults |
+| --- | ---: | ---: |
+| Executed instructions | 2,780,874 | 4,970,155 |
+| Stack-range reads | 106,699 | 293,747 |
+| Stack-range writes | 31,904 | 168,737 |
+| Direct SP-relative reads + writes | 138,365 | 399,053 |
+
+These are instruction executions and memory transactions, not cycles.
+The stack range includes spills, register saves, PHI scratch, and accesses
+through pointers to stack-resident values. Instructions in callees are
+excluded. In the owned build, a store/reload for the second
+`mp_binary_op` argument executed 50,448 times. Another 17,164 pairs came
+from a spilled address in the indexed local-slot store. Together they
+accounted for about 29% of its stack traffic. Those are higher-value
+targets than further removing cold, adjacent reloads.
+
+### Five VM hot-path changes
+
+The owned backend applies these changes in the cumulative replay below.
+Call-load deferral is limited to the second word argument of a simple
+direct call, at most eight IR instructions away, with no intervening
+memory write, volatile load, or call. Indexed pointer stores reuse the
+scaled-address selector and give the index extra allocation priority.
+The halfword jump table drops its guard only when the index is proved
+in range, including every incoming value of a PHI. An edge can bypass
+scratch for its sole buffered scalar PHI while the remaining register
+copies still use the parallel-copy scheduler. The loop analysis keeps
+its regular 256-block limit; functions with a large switch are eligible
+up to 1,024 blocks.
+
+| Cumulative Cortex-M33 replay | Instructions | Stack transactions |
+| --- | ---: | ---: |
+| Previous reload-forwarding baseline | 4,970,155 | 462,484 |
+| 1. Defer call-argument loads | 4,869,250 | 361,588 |
+| 2. Fold indexed pointer stores | 4,970,741 | 327,260 |
+| 3. Remove proved redundant jump-table guards | 4,595,079 | 327,260 |
+| 4. Bypass PHI scratch | 4,556,835 | 276,268 |
+| 5. Weight loops in large switch-driven functions | 4,555,792 | 273,408 |
+
+The baseline and step 1 used the default pipeline. Steps 2–5 replayed the
+same archived baseline optimized IR using `vm-profile.mjs --fixed-ir FILE`.
+Step 2 removed the hot address spill but increased total instructions in
+that cumulative comparison. The final replay executed 8.3% fewer
+instructions and 40.9% fewer stack transactions than the baseline, but
+still executed 1.64× as many instructions as GCC `-Oz`. All 51
+non-MicroPython payload sizes, 147 executable-object sizes, and 1,454
+matched frame budgets were unchanged.
+
+A separate A/B/B/A badge run compared production VM-only builds at
+150 MHz (mean of two boot medians, seven samples per boot). The new
+image used 337,408 loaded bytes, down from 337,560.
+
+| Workload | Previous image | All five changes | Time change |
+| --- | ---: | ---: | ---: |
+| Interpreter | 84.320 ms | 76.464 ms | −9.32% |
+| Small integer | 76.754 ms | 71.431 ms | −6.93% |
+| Radix sort | 89.402 ms | 92.895 ms | +3.91% |
+| Calendar | 46.709 ms | 49.883 ms | +6.80% |
+
+The badge timings measure the bundle, not the individual optimizations.
+All four boots passed the REPL, filesystem, and workload checks, and
+the original 16 MiB flash was independently verified after restoration.
+The interpreter still took 1.42× as long as the GCC-built VM in the
+earlier six-module control. Radix and calendar are regressions to
+isolate before claiming a general MicroPython speedup.
+
+### Radix parsing and calendar
+
+The radix workload measures `int(text, base)`, not a sorting algorithm.
+The stock RP2350 linker runs the GCC VM from SRAM by matching the path
+suffix `py/vm.c.o`. The mixed build used a different object name, so it
+ran the owned VM from XIP flash. Build a controlled pair with:
+
+```sh
+node micropython/build.mjs --vm-placement-pair
+node micropython/smoke.mjs YOUR_16_HEX_DIGIT_BOOTSEL_SERIAL --interpreter-pair \
+  micropython/build/badge-vm-only micropython/build/badge-vm-ram
+```
+
+The pair links byte-identical copies of the owned VM object under two
+different names. The build checks that GCC's VM and the SRAM candidate
+are in SRAM, the control is in flash, and both owned VM symbols have the
+same size. In an A/B/B/A run at 150 MHz, before the independent compiler
+change below, both copies of the owned dispatcher were 8,816 bytes:
+
+| Workload | XIP flash | SRAM | Time change |
+| --- | ---: | ---: | ---: |
+| Radix parsing | 92.909 ms | 75.289 ms | −18.96% |
+| Calendar | 49.874 ms | 41.496 ms | −16.80% |
+| Interpreter | 76.478 ms | 75.083 ms | −1.82% |
+| Small integer | 71.431 ms | 74.427 ms | +4.19% |
+
+These are means of two boot medians. SRAM placement more than recovered the
+radix and calendar regressions from the five-change bundle. It used 9,520
+more bytes of RAM-backed loaded sections and 328 more loaded flash bytes.
+Its small-integer trade-off is why the SRAM build remains explicit. The
+same placement technique can apply to other hot objects, but the savings
+are workload-dependent. All four boots passed; the original flash was
+restored and independently verified byte for byte.
+
+The independent compiler change extends `divrem-pairs`: a nearby signed
+remainder can reuse an existing quotient of the same block-local value
+by the same nonzero constant. The backend can emit a multiply-subtract
+instead of dividing again. The existing final code-size, frame, and spill
+checks still apply. In the 2,048-case Cortex-M33 calendar oracle,
+`timeutils_mktime_1970` went from 332 to 312 executable bytes and from
+174,080 to 163,840 executed instructions (−5.88%). This is not an
+on-badge timing. All 51 other firmware payload sizes, 147 object-code
+sizes, and 1,454 matched frame budgets were unchanged.
+
+The native radix prefix parser is still a compiler opportunity: on the
+12,288-case oracle it executed 253,420 instructions versus GCC's 171,440.
+Its short-circuit conditions lower to several boolean PHI joins.
+Trying the existing SCCP, local CSE, and reciprocal passes did not
+improve it.
+
+### Nested short-circuit branches
+
+The Thumb backend now revisits a predecessor when forwarding an outer
+boolean PHI makes the predecessor's own boolean PHI branch-only. This
+removes the intervening boolean value and its test without speculating
+loads or changing PHI transport at the branch destinations.
+
+On identical parser IR, `mp_parse_num_base` shrank from 220 to 170
+executable bytes. The exhaustive 12,288-case parser oracle executed
+253,120 instructions instead of 253,420 (−0.12%). A separate 6,000-call
+replay using the twelve valid inputs from the badge workload executed
+156,500 instructions instead of 172,000 (−9.01%). GCC's native helper
+executed 105,500 instructions in that same replay. These are QEMU counts
+for the prefix helper, not full-workload or physical badge timings.
+
+The subsequent 150 MHz badge A/B/B/A run compared the previous SRAM image
+with the rebuild containing both the quotient-reuse and nested-join
+changes. Radix parsing went from 75.310 to 67.194 ms (−10.78%), calendar
+from 41.540 to 43.093 ms (+3.74%), and interpreter from 75.093 to 75.413 ms
+(+0.43%). Small integers stayed at 74.43 ms. Times are means of two boot
+medians with seven samples per boot. The new firmware was 64 loaded bytes
+smaller. This comparison does not isolate either compiler change.
+
+Of the 51 non-MicroPython payloads, 13 shrank by 3,680 loaded bytes in
+total, including 72 bytes in Maze. None grew, and none of the 1,454
+matched frame budgets increased.
+
+### Calendar regression isolation
+
+The eight-boot SRAM matrix re-linked the same firmware, swapping only
+the radix and calendar objects. Its unchanged and both-changed UF2s
+were byte-identical to the previous paired run.
+
+| Native object changes | Calendar | Radix parsing |
+| --- | ---: | ---: |
+| Neither | 41.524 ms | 75.321 ms |
+| Calendar quotient reuse only | 41.404 ms | 75.357 ms |
+| Radix boolean folding only | 43.198 ms | 71.833 ms |
+| Both | 43.108 ms | 67.201 ms |
+
+The slowdown followed the radix object, not the calendar arithmetic.
+The smaller radix object moved the calendar conversion from flash address
+`0x10039490` to `0x10039460` even with the calendar object unchanged.
+The matrix isolates the link-layout effect but does not measure XIP cache
+events or identify a specific cache mechanism.
+
+The default `global-memory` pass now reuses a matching sign or zero
+extension when forwarding a redundant indexed load from an eligible
+predecessor. Existing memory barriers and final code-size, frame, and
+spill checks still apply. In the 2,048-case Cortex-M33 calendar oracle,
+`timeutils_seconds_since_1970_to_struct_time` shrank from 292 to 288
+executable bytes and executed 236,241 instructions instead of 258,963
+(−8.77%). Diagnostics and Maze payloads shrank by eight and four bytes
+respectively; none of the other 49 payloads or 1,454 matched stack
+budgets grew.
+
+The second badge matrix tested the compiler change separately from a
+48-byte pad before the calendar object, with the smaller radix object
+held fixed. The pad restored the calendar helper's earlier flash address.
+
+| Calendar treatment | Loaded bytes | Calendar | Radix parsing |
+| --- | ---: | ---: | ---: |
+| Neither (current baseline) | 337,672 | 43.078 ms | 67.202 ms |
+| Load and extension reuse | 337,664 | 42.722 ms | 67.149 ms |
+| Restore old address only | 337,720 | 41.396 ms | 75.913 ms |
+| Reuse and restore old address | 337,712 | 41.062 ms | 71.874 ms |
+
+Load reuse saved 0.83% on the full calendar workload without the pad.
+Radix was essentially unchanged, small integers took 0.13% less time,
+and the interpreter took 0.56% longer. The padding probe recovered the
+calendar regression but forfeited radix performance, so it is not part
+of the compiler or default firmware build. A small code-size change
+elsewhere can shift calendar timings in either direction.
+
+To compare four archived firmware directories in mirrored order, use
+the same preservation runner:
+
+```sh
+node micropython/smoke.mjs YOUR_16_HEX_DIGIT_BOOTSEL_SERIAL --interpreter-matrix \
+  BASELINE_DIR FIRST_CHANGE_DIR SECOND_CHANGE_DIR BOTH_CHANGES_DIR
+```
 
 ## Incremental `libm` and LittleFS batch
 

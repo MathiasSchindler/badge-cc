@@ -108,6 +108,24 @@ entry:
   %q = sdiv i32 %x, %y
   ret i32 %q
 }
+define i32 @literal_pair(i32 %n) {
+entry:
+  %x = xor i32 %n, 1
+  %q = sdiv i32 %x, 60
+  %shifted = xor i32 %q, 7
+  %r = srem i32 %x, 60
+  %out = xor i32 %shifted, %r
+  ret i32 %out
+}
+define i32 @literal_near_miss(i32 %n) {
+entry:
+  %x = xor i32 %n, 1
+  %q = sdiv i32 %x, 60
+  %shifted = xor i32 %q, 7
+  %r = srem i32 %x, 61
+  %out = xor i32 %shifted, %r
+  ret i32 %out
+}
 `);
   invoke(tool('badge-opt-sanitize'), ['--passes=divrem-pairs', file('input.ll'), '-o', file('out.ll')]);
   const optimized = fs.readFileSync(file('out.ll'), 'utf8');
@@ -115,6 +133,10 @@ entry:
   assert.doesNotMatch(optimized, /%xx/);
   assert.match(optimized, /%r = srem i32 %x, %y\n  %q = sdiv i32 %x, %z/);
   assert.match(optimized, /store volatile i32 %r, ptr %p, align 4\n  %q = sdiv/);
+  const literal = optimized.split('define i32 @literal_pair')[1].split('}')[0];
+  assert.match(literal, /mul i32 %q, 60\n\s*%r = sub i32 %x,/);
+  assert.doesNotMatch(literal, /srem/);
+  assert.match(optimized, /%r = srem i32 %x, 61/);
   invoke(tool('badge-codegen'), [file('out.ll'), '-o', file('out.s')]);
   const assembly = fs.readFileSync(file('out.s'), 'utf8').split('\npair:\n')[1].split('.size pair,')[0];
   assert.equal(assembly.match(/^sdiv /gm)?.length, 1);
@@ -122,6 +144,7 @@ entry:
   if (!oracle) return;
   fs.writeFileSync(file('caller.c'), `
 extern int pair(short, int);
+extern int literal_pair(int), literal_near_miss(int);
 int main(void) {
   static const short dividends[] = {-32768, -199, -1, 0, 1, 199, 32767};
   static const int divisors[] = {-2147483647 - 1, -17, -1, 1, 5, 37, 2147483647};
@@ -130,6 +153,14 @@ int main(void) {
       volatile int x = dividends[i], y = divisors[j];
       if (pair(x, y) != ((x / y) ^ (x % y))) return 1;
     }
+  static const int inputs[] = {-2147483647 - 1, -121, -61, -60, -59, -1,
+                               0, 1, 59, 60, 61, 121, 2147483647};
+  volatile int d = 60, other = 61;
+  for (unsigned i = 0; i < sizeof(inputs) / sizeof(*inputs); ++i) {
+    volatile int x = inputs[i];
+    if (literal_pair(x ^ 1) != (((x / d) ^ 7) ^ (x % d))) return 2;
+    if (literal_near_miss(x ^ 1) != (((x / d) ^ 7) ^ (x % other))) return 3;
+  }
   return 0;
 }
 `);
